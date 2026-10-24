@@ -1,4 +1,4 @@
-//! STD-005: number-to-string coercion is reference Lua 5.2's `%.14g`.
+//! Number-to-string coercion is reference Lua 5.2's `%.14g`.
 //! Expected spellings were captured from `lua5.2` (except NaN, which dellingr
 //! prints unsigned on every host where x86-64 C Lua prints `-nan` for `0/0`).
 

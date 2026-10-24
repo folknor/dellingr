@@ -6,11 +6,10 @@
 //! - `golden`: every kernel against `tests/fixtures/crmath_golden.txt`, under
 //!   each FMA path this host can run. The expected bits there were certified
 //!   by the oracle below; the same file must pass on every target, which is
-//!   the cross-platform replay contract in executable form. The module's
-//!   `#[ignore]`d tests regenerate the golden file, sweep CORE-MATH's
-//!   worst-case files from a local checkout, and check random inputs against
-//!   the oracle. A name filter that matches the module path (`golden`) runs
-//!   the regenerator too, which rewrites the fixture.
+//!   the cross-platform replay contract in executable form. Checkout checks
+//!   and long oracle sweeps require the explicit `crmath-sweeps` feature.
+//!   Regeneration lives in the `regenerate_crmath_golden` example, outside
+//!   the test harness, and requires an output path.
 //! - `oracle`: an interval Ziv procedure over `libbeef` in directed rounding,
 //!   and the reader for CORE-MATH's worst-case files.
 
@@ -19,6 +18,9 @@ use std::cell::Cell;
 mod fma;
 mod golden;
 mod oracle;
+mod rng;
+
+pub(crate) use rng::TestRng;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum ForcedFma {
@@ -72,40 +74,6 @@ pub(crate) fn fma_modes() -> Vec<ForcedFma> {
         modes.push(ForcedFma::Hardware);
     }
     modes
-}
-
-/// SplitMix64, for reproducible test inputs.
-pub(crate) struct TestRng(u64);
-
-impl TestRng {
-    pub(crate) fn new(seed: u64) -> Self {
-        Self(seed)
-    }
-
-    pub(crate) fn next_u64(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-        z ^ (z >> 31)
-    }
-
-    /// A finite binary64 value whose bit pattern is uniform over finite
-    /// values, so every binade is equally likely.
-    pub(crate) fn finite(&mut self) -> f64 {
-        loop {
-            let x = f64::from_bits(self.next_u64());
-            if x.is_finite() {
-                return x;
-            }
-        }
-    }
-
-    /// A value in [lo, hi) with uniformly random bits in that range.
-    pub(crate) fn in_range(&mut self, lo: f64, hi: f64) -> f64 {
-        let u = (self.next_u64() >> 11) as f64 * (1.0 / 9_007_199_254_740_992.0);
-        lo + (hi - lo) * u
-    }
 }
 
 /// Bitwise equality, except that every NaN equals every NaN: NaN sign and

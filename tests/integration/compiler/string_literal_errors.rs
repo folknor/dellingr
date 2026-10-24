@@ -1,10 +1,10 @@
 //! Public compilation regressions for malformed and unsupported string syntax.
 
+use dellingr::Program;
 use dellingr::error::{ErrorKind, SyntaxError};
-use dellingr::{Program, State};
 
 #[test]
-fn malformed_escapes_return_syntax_errors_through_state_loading() {
+fn malformed_escapes_are_syntax_errors() {
     for (source, expected) in [
         (r#"return "\256""#, "decimal"),
         (r#"return "\999""#, "decimal"),
@@ -13,9 +13,7 @@ fn malformed_escapes_return_syntax_errors_through_state_loading() {
         (r#"return "\x4G""#, "hexadecimal"),
         (r#"return "\q""#, "invalid"),
     ] {
-        let err = dellingr::Program::compile(source, None)
-            .and_then(|program| State::new().load(&program))
-            .expect_err("malformed escape must not compile");
+        let err = Program::compile(source, None).expect_err("malformed escape must not compile");
         assert!(
             matches!(
                 (err.kind(), expected),

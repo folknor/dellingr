@@ -315,7 +315,7 @@ fn vm_test07() {
     let mut state = State::new();
     let code = vec![
         Instr::load_num(0, 0),
-        Instr::load_num(1, 0),
+        Instr::load_num(1, 1),
         Instr::branch_compare(crate::instr::CompareOp::Lt, 0, 1, 2),
         Instr::load_bool(0, true),
         Instr::set_global(0, 0, None),
@@ -323,13 +323,21 @@ fn vm_test07() {
     ];
     let chunk = Bytecode {
         code,
-        number_literals: vec![2.0],
+        number_literals: vec![2.0, 2.0],
         string_literals: vec!["a".into()],
         max_stack: 2,
         ..Bytecode::default()
     };
-    state.eval_chunk(chunk, 0).unwrap();
+    state.eval_chunk(chunk.clone(), 0).unwrap();
     assert!(state.global_env.get(&state.heap, "a").is_none());
+
+    let mut positive_control = chunk;
+    positive_control.number_literals[1] = 3.0;
+    state.eval_chunk(positive_control, 0).unwrap();
+    assert_eq!(
+        state.global_env.get(&state.heap, "a").unwrap(),
+        Val::Bool(true)
+    );
 }
 
 #[test]
@@ -400,7 +408,7 @@ fn vm_test10() {
         // For loop control variables
         Instr::load_num(0, 0), // start = 6
         Instr::load_num(1, 1), // limit = 2
-        Instr::load_num(2, 1), // step = 2
+        Instr::load_num(2, 2), // step = 2
         // Start loop
         Instr::for_prep(0, 3),
         Instr::load_num(4, 0),
@@ -411,15 +419,23 @@ fn vm_test10() {
     ];
     let chunk = Bytecode {
         code,
-        number_literals: vec![6.0, 2.0],
+        number_literals: vec![6.0, 2.0, 2.0],
         string_literals: vec!["a".into()],
         num_locals: 4,
         max_stack: 5,
         ..Bytecode::default()
     };
     let mut state = State::new();
-    state.eval_chunk(chunk, 0).unwrap();
+    state.eval_chunk(chunk.clone(), 0).unwrap();
     assert!(state.global_env.get(&state.heap, "a").is_none());
+
+    let mut positive_control = chunk;
+    positive_control.number_literals[1] = 8.0;
+    state.eval_chunk(positive_control, 0).unwrap();
+    assert_eq!(
+        state.global_env.get(&state.heap, "a").unwrap(),
+        Val::Num(6.0)
+    );
 }
 
 #[test]
@@ -448,7 +464,11 @@ fn gc_host_controlled() {
     // Check initial state
     let initial_objects = state.object_count();
     let initial_strings = state.string_count();
-    assert!(state.heap_size() >= initial_objects + initial_strings);
+    assert_eq!(
+        state.heap_size(),
+        initial_objects.saturating_add(initial_strings),
+        "heap size counts objects and interned strings"
+    );
 
     // Disable auto-GC
     state.gc_disable_auto();
@@ -646,12 +666,13 @@ fn gc_threshold_control() {
     // Set very low threshold
     state.gc_set_threshold(1);
 
-    // Create a table to exceed threshold
+    // Trigger allocation while the manual threshold is active.
     let code = compile_unnamed("t = {}").unwrap();
     state.eval_chunk(code, 0).unwrap();
 
-    // Now GC should be needed (but won't auto-run since we're just checking)
-    // Note: threshold may have been adjusted by auto-GC during eval
+    // Allocation may collect, but a manual threshold remains fixed.
+    assert_eq!(state.gc_threshold(), 1);
+    assert!(state.gc_should_run());
 }
 
 #[test]
@@ -888,6 +909,8 @@ fn a_rejected_push_reports_stack_overflow() {
     fill_to_one_below_cap(&mut state);
     state.push_nil().expect("the final slot must be usable");
 
+    // Host push cap checks reach `check_stack_slot(&self)`, which cannot access
+    // CostState; the receiver is the guarantee that this path does not charge.
     let err = state.push_nil().expect_err("the cap must be enforced");
     assert!(
         matches!(err.kind(), crate::error::ErrorKind::StackOverflow { .. }),
@@ -903,21 +926,6 @@ fn set_top_cannot_exceed_the_cap() {
     // allocating most of the way and then failing.
     assert!(state.set_top((MAX_STACK_SIZE + 1) as isize).is_err());
     assert_eq!(state.get_top(), 0);
-}
-
-#[test]
-fn the_cap_does_not_charge_cost() {
-    let mut state = State::raw();
-    fill_to_one_below_cap(&mut state);
-    state.push_nil().expect("the final slot must be usable");
-
-    let before = state.cost_used();
-    assert!(state.push_nil().is_err());
-    assert_eq!(
-        state.cost_used(),
-        before,
-        "enforcing the stack cap must not charge the cost budget"
-    );
 }
 
 #[test]

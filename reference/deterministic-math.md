@@ -105,15 +105,19 @@ NaN's bits), and the VM never lets a script observe them.
   instead of guessing if its explicit Ziv loop exceeds its precision cap: 512
   bits for pi-dependent functions and 4096 bits for the others. This cap does
   not constrain precision escalation internal to a `libbeef` primitive.
-  Ignored tests in `crmath::tests::golden` regenerate the golden file and sweep
-  all of CORE-MATH's worst-case files (several million inputs) from a checkout
-  under `research/core-math`; run them in release
-  (`brokkr test sweep_ --release`). The checkout must be upstream commit
+  The `regenerate_crmath_golden` example certifies the golden inputs and
+  writes changed bytes to an explicit output path:
+  `brokkr run --release regenerate_crmath_golden -- tests/fixtures/crmath_golden.txt`.
+  Long oracle sweeps and checkout-dependent checks in `crmath::tests::golden`
+  require the explicit `crmath-sweeps` feature. Run them in release with
+  `brokkr test crmath::tests::golden --release --features crmath-sweeps`.
+  The worst-case sweeps read the checkout under `research/core-math`.
+  The checkout must be upstream commit
   `0ce0cbc15935e24c656280e5a46c34e89f301b7a`, the one the port was taken at
   (`CORE_MATH_COMMIT` in `src/crmath/tests/golden.rs`, which the golden
   file's header also names). The reader pins each function's parsed input
   count and a digest of those inputs, so the sweeps, the regeneration and
-  the cheap ignored `core_math_corpus_matches_pin` fail on a missing,
+  the cheaper `core_math_corpus_matches_pin` fail on a missing,
   damaged or different corpus instead of testing other inputs; nothing
   else about the checkout is verified. The worst-case files are read to the
   values CORE-MATH's own checkers get from `%la`: a trailing annotation after

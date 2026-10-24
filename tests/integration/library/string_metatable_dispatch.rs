@@ -2,7 +2,7 @@
 //! `get_table` on a string receiver, `__tostring` and `__call` on strings, and
 //! the size preflight on lossy host string conversion.
 
-use dellingr::error::ErrorKind;
+use dellingr::error::{ErrorKind, TypeError};
 use dellingr::limits::MAX_STRING_BYTES;
 use dellingr::{ArgCount, LuaType, RetCount, State};
 
@@ -214,7 +214,13 @@ fn string_call_without_metamethod_is_an_error() {
     let err = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .unwrap_err();
-    assert!(err.to_string().contains("string"), "{err}");
+    assert!(
+        matches!(
+            err.kind(),
+            ErrorKind::TypeError(TypeError::FunctionCall(LuaType::String))
+        ),
+        "unexpected string call error: {err}"
+    );
 }
 
 #[test]

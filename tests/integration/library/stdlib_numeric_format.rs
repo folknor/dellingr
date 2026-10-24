@@ -1,5 +1,5 @@
-//! STD-004 (NaN sign through `string.format`), STD-007 (`%q` on integral
-//! numbers) and STD-009 (`tonumber(s, base)` whitespace).
+//! Numeric formatting cases cover NaN sign through `string.format`, `%q` on
+//! integral numbers, and `tonumber(s, base)` whitespace.
 
 use crate::support;
 

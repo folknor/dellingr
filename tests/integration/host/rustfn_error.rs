@@ -12,7 +12,7 @@ fn boom_fn(_state: &mut State) -> dellingr::Result<u8> {
 #[test]
 fn host_direct_rustfn_error_notifies_on_error_once() {
     // A Rust function that fails when the host calls it directly (no Lua frame)
-    // must still notify on_error, consistently with the Lua-reached case (L6).
+    // must still notify on_error, consistently with the Lua-reached case.
     let (mut state, recorder) = Recorder::state();
     state.push_rust_fn(boom_fn).unwrap();
     state
@@ -24,7 +24,7 @@ fn host_direct_rustfn_error_notifies_on_error_once() {
 #[test]
 fn lua_reached_rustfn_error_notifies_on_error_once() {
     // The same failure reached through Lua must fire on_error exactly once, not
-    // twice (the Lua frame notifies; State::call must not also notify) (L6).
+    // twice: the Lua frame notifies, and State::call must not also notify.
     let (mut state, recorder) = Recorder::state();
     state.push_rust_fn(boom_fn).unwrap();
     state.set_global("boom").unwrap();

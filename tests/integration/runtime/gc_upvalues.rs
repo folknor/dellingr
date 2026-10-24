@@ -161,7 +161,7 @@ fn executing_returned_closure_roots_closed_upvalues_during_auto_gc() {
 }
 
 #[test]
-fn temporary_callable_table_survives_gc_during_call_metamethod_lookup() {
+fn temporary_callable_table_survives_gc_during_metamethod_handler() {
     let mut state = State::new();
     install_force_next_gc(&mut state);
 
@@ -171,6 +171,7 @@ fn temporary_callable_table_survives_gc_during_call_metamethod_lookup() {
         local function make_callable()
             local callable = setmetatable({ value = 73 }, {
                 __call = function(self)
+                    local trigger_gc = {}
                     return self.value
                 end
             })
@@ -333,33 +334,36 @@ fn unreferenced_closure_is_collected() {
     let mut state = State::new();
     state.gc_disable_auto();
 
-    let size_before = state.heap_size();
-
-    // Create and immediately discard a closure with captured table
-    support::run(
-        &mut state,
-        r#"
+    let source = r#"
         local function make_and_discard()
             local big_table = {a=1, b=2, c=3, d=4}
             local fn = function() return big_table end
             -- fn goes out of scope here, not stored anywhere
         end
         make_and_discard()
-    "#,
-    );
+    "#;
 
-    let size_after_create = state.heap_size();
+    // Establish the baseline after a collection has already reclaimed the
+    // chunk closure from this script.
+    support::run(&mut state, source);
+    state.gc_collect();
+    let baseline = state.object_count();
+
+    // The script creates GC-managed objects, all of which should be reclaimed.
+    support::run(&mut state, source);
+    let before_gc = state.object_count();
     assert!(
-        size_after_create > size_before,
-        "Heap should grow after creating objects"
+        before_gc > baseline,
+        "objects should be created by the script"
     );
-
     state.gc_collect();
 
-    let size_after_gc = state.heap_size();
-    assert!(
-        size_after_gc < size_after_create,
-        "GC should collect unreferenced closure and table. Before GC: {size_after_create}, After: {size_after_gc}"
+    let after_gc = state.object_count();
+    assert_eq!(
+        before_gc - after_gc,
+        before_gc - baseline,
+        "GC should reclaim the exact object-count increase \
+         (baseline={baseline}, before GC={before_gc}, after GC={after_gc})"
     );
 }
 

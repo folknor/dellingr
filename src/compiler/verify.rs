@@ -884,7 +884,10 @@ fn open_window_fits(consumer: Instr, producer: Instr) -> bool {
 
 #[cfg(test)]
 mod tree_tests {
-    use super::{Bytecode, UpvalueDesc, validate_bytecode, validate_child, validate_depth};
+    use super::{
+        Bytecode, CacheFamily, UpvalueDesc, ValidationReason, validate_bytecode, validate_child,
+        validate_depth,
+    };
     use crate::instr::{ArgCount, Instr, RetCount};
 
     #[test]
@@ -920,9 +923,16 @@ mod tree_tests {
         }
     }
 
+    fn assert_rejects(bc: &Bytecode, reason: ValidationReason) {
+        let error = validate_bytecode(bc).expect_err("malformed bytecode must be rejected");
+        assert_eq!(
+            error.reason, reason,
+            "unexpected validation reason: {error}"
+        );
+    }
+
     #[test]
     fn malformed_sizes_report_the_actual_defect() {
-        use super::ValidationReason;
         use crate::instr::OPEN_COUNT;
 
         let reserved = chunk(vec![Instr::ret(0, RetCount::Fixed(0))], OPEN_COUNT);
@@ -964,9 +974,9 @@ mod tree_tests {
         let ok = chunk(vec![Instr::mov(1, 0), Instr::ret(0, RetCount::Fixed(2))], 2);
         assert!(validate_bytecode(&ok).is_ok());
         let beyond = chunk(vec![Instr::mov(2, 0), Instr::ret(0, RetCount::Fixed(0))], 2);
-        assert!(validate_bytecode(&beyond).is_err());
+        assert_rejects(&beyond, ValidationReason::RegisterOutOfRange);
         let wide_return = chunk(vec![Instr::ret(1, RetCount::Fixed(2))], 2);
-        assert!(validate_bytecode(&wide_return).is_err());
+        assert_rejects(&wide_return, ValidationReason::RegisterOutOfRange);
     }
 
     #[test]
@@ -978,23 +988,23 @@ mod tree_tests {
 
         // A producer followed by anything else leaves the top open.
         let unconsumed = chunk(vec![call_all, Instr::mov(0, 0), ret_all], 4);
-        assert!(validate_bytecode(&unconsumed).is_err());
+        assert_rejects(&unconsumed, ValidationReason::OpenResultsNotConsumed);
 
         // A consumer without its producer reads an undefined top.
         let orphan = chunk(vec![Instr::mov(0, 0), ret_all], 4);
-        assert!(validate_bytecode(&orphan).is_err());
+        assert_rejects(&orphan, ValidationReason::OpenResultsWithoutProducer);
 
         // A jump into the consumer bypasses the producer.
         let entered = chunk(vec![Instr::jump(1), call_all, ret_all], 4);
-        assert!(validate_bytecode(&entered).is_err());
+        assert_rejects(&entered, ValidationReason::OpenResultsNotConsumed);
 
         // The consumer's range must start at or below the producer's values.
         let above = chunk(vec![call_all, Instr::ret(2, RetCount::All)], 4);
-        assert!(validate_bytecode(&above).is_err());
+        assert_rejects(&above, ValidationReason::OpenResultsNotConsumed);
     }
 
-    /// Each cache family filled past capacity: 255 cached sites, then an
-    /// uncached one. The runtime sizes each cache vector from the declared
+    /// Each cache family has `MAX_CACHE_SLOTS` cached sites, then an uncached
+    /// one. The runtime sizes each cache vector from the declared
     /// count and looks slots up by decoded index, so admission must keep every
     /// cached slot below that count and the count within `MAX_CACHE_SLOTS`.
     #[test]
@@ -1008,26 +1018,34 @@ mod tree_tests {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        let families: [(String, u8, Count); 5] = [
+        let families: [(String, u8, Count, ValidationReason); 5] = [
             (
                 sites(&|i| format!("if get_{i} then end")),
                 Instr::OP_GET_GLOBAL,
                 |bc| &mut bc.global_cache_slots,
+                ValidationReason::GlobalCacheSlotOrder,
             ),
             (
                 sites(&|i| format!("set_{i} = 1")),
                 Instr::OP_SET_GLOBAL,
                 |bc| &mut bc.global_cache_slots,
+                ValidationReason::GlobalCacheSlotOrder,
             ),
             (
                 format!("local t = {{}}\n{}", sites(&|_| "if t.x then end".into())),
                 Instr::OP_GET_FIELD,
                 |bc| &mut bc.field_cache_slots,
+                ValidationReason::CacheSlotOrder {
+                    family: CacheFamily::Field,
+                },
             ),
             (
                 format!("local t = {{}}\n{}", sites(&|_| "t.x = 1".into())),
                 Instr::OP_SET_FIELD,
                 |bc| &mut bc.set_field_cache_slots,
+                ValidationReason::CacheSlotOrder {
+                    family: CacheFamily::SetField,
+                },
             ),
             (
                 format!(
@@ -1036,10 +1054,13 @@ mod tree_tests {
                 ),
                 Instr::OP_TFOR_CALL,
                 |bc| &mut bc.tfor_cursor_slots,
+                ValidationReason::CacheSlotOrder {
+                    family: CacheFamily::TforCursor,
+                },
             ),
         ];
 
-        for (source, opcode, count_of) in families {
+        for (source, opcode, count_of, alias_reason) in families {
             let mut bc = crate::compiler::compile(&source, None).expect("capacity source compiles");
             validate_bytecode(&bc).expect("compiler output at capacity verifies");
             assert_eq!(usize::from(*count_of(&mut bc)), MAX_CACHE_SLOTS);
@@ -1053,18 +1074,17 @@ mod tree_tests {
             let overflow = sites[MAX_CACHE_SLOTS];
             assert_eq!(bc.code[overflow].cache_slot(), None);
 
-            // Caching the overflow site as a repeat of the last slot is
-            // rejected: it would alias slot 254 rather than fit a 256th.
+            // Reusing the last cached site's slot violates sequential ownership.
             let mut aliased = bc.clone();
             aliased.code[overflow] = aliased.code[overflow].with_cache_slot(Some(254));
-            assert!(validate_bytecode(&aliased).is_err(), "opcode {opcode}");
+            assert_rejects(&aliased, alias_reason);
 
             // A declared count that disagrees with the operands is rejected,
             // in either direction.
             for declared in [MAX_CACHE_SLOTS as u8 - 1, 0] {
                 let mut miscounted = bc.clone();
                 *count_of(&mut miscounted) = declared;
-                assert!(validate_bytecode(&miscounted).is_err(), "opcode {opcode}");
+                assert_rejects(&miscounted, ValidationReason::CacheSlotCountMismatch);
             }
         }
     }
@@ -1079,16 +1099,21 @@ mod tree_tests {
             .filter(|pc| bc.code[*pc].opcode() == Instr::OP_GET_FIELD)
             .collect();
         assert_eq!(fields.len(), 2);
+        // Leave the compiled count unchanged so slot reuse is the only defect.
         bc.code[fields[1]] = bc.code[fields[1]].with_cache_slot(Some(0));
-        bc.field_cache_slots = 1;
-        assert!(validate_bytecode(&bc).is_err());
+        assert_rejects(
+            &bc,
+            ValidationReason::CacheSlotOrder {
+                family: CacheFamily::Field,
+            },
+        );
     }
 
     /// The typed operands render the sentences the verifier carried as
     /// strings before they were typed.
     #[test]
     fn typed_operands_keep_their_sentences() {
-        use super::{BytecodeOperand, BytecodePool, CacheFamily, ValidationReason};
+        use super::{BytecodeOperand, BytecodePool};
         for (reason, text) in [
             (
                 ValidationReason::IndexOutOfRange {

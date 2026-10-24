@@ -122,45 +122,6 @@ Enforceable: a textlint rule over `tests/**` and `src/**` test code flagging
 63/64/65, 254/255/256 and 65534/65535 inside `.repeat(`, `repeat_n(`, `0..N` and
 `1..=N` would catch most with few false positives; a heuristic, not a proof.
 
-## VA-004 - Assertions that accept any error
-
-Reported by: native-stack-errors, compiler-cost, library.
-
-Each passes on any error, including one from a typo in the test script:
-
-- `metamethod_errors.rs::function_type_errors_name_functions` checks
-  `error.to_string().contains("function")`, and `Display` includes the
-  traceback, whose frames can say "in function"; check `error.kind()`'s text.
-- `host_error_reporting.rs::host_call_through_chain_into_failing_lua_function_notifies_once`
-  discards the error (`let _error`).
-- `compare_branches_keep_comparison_semantics` (parser tests) checks
-  `state.call(..).is_err()` for `1 < 'x'`.
-- `gsub_function_error_is_propagated` and
-  `gsub_table_metamethod_error_is_propagated` assert only `is_err()`; match
-  `ScriptError` with payload `"boom"` / `"metamethod error"`.
-- `string_call_without_metamethod_is_an_error` asserts only that the message
-  contains `"string"`.
-- `find_subslice_matches_the_naive_scan_at_every_budget`: the arm
-  `(Err(_), Err(_)) => {}` does not check both are `BudgetExceeded`.
-- `stdlib_integer_arguments_reject_fractional_numbers_consistently` matches a
-  message substring but never the argument number or function name.
-- The verifier negatives in `src/compiler/verify.rs` `tree_tests`
-  (`registers_must_lie_inside_the_frame`, all four negatives of
-  `open_results_need_an_adjacent_consumer_no_jump_enters`, the aliased and
-  miscounted variants of `cache_families_cap_below_the_encodable_limit`,
-  `a_cache_slot_owns_one_site`) use `assert!(validate_bytecode(&x).is_err())`. A
-  malformed chunk can be rejected for another defect. `a_cache_slot_owns_one_site`
-  changes the second site's slot to 0 and the declared count to 1, so the
-  rejection may be the count/order rule, not ownership.
-  `malformed_sizes_report_the_actual_defect` shows the right shape
-  (`expect_err(..).reason == ...`).
-
-Fix: pin the kind, variant or payload in each; an `assert_rejects(&bc,
-ValidationReason::X)` helper for the verifier.
-
-Enforceable: partly; a textlint rule over `verify.rs` test code banning
-`validate_bytecode(` followed by `.is_err()`.
-
 ## VA-006 - Tests filed under the wrong subject, or named by sequence number
 
 Reported by: native-stack-errors, runtime, compiler-cost, library.
@@ -294,57 +255,6 @@ defines where).
 
 Enforceable: yes, the assertion is the enforcement.
 
-## VA-011 - `a_failed_lookup_returns_every_unit_it_took` never checks the lookups failed
-
-Reported by: native-stack-errors.
-
-`runtime::index_depth_routes`. `try_index` returns whether `get_table` failed, but
-the probe `(function() try_index(r) try_index(r) return field_site(two) end)()`
-discards both results. If the lookup through `function_behind_table` (two units at
-depth `MAX - 1`) started succeeding, or failed before taking any unit, the test
-would still pass. The sibling `a_failed_store_returns_every_unit_it_took` in
-`newindex_depth_routes.rs` checks (`if not (a and b) then error('the store
-succeeded') end`). The same test then calls `call_near_cap` twice with `let _ =`,
-"whatever the outcome", so that half proves only that nothing broke afterwards.
-
-Fix: mirror the newindex check.
-
-Enforceable: only by the assertion itself.
-
-## VA-012 - Metamethod tests whose assertions any outcome satisfies
-
-Reported by: native-stack-errors.
-
-- `metamethod_errors.rs::newindex_function_handler`: `expect_ok` only. The handler
-  doubles the value and the test reads nothing back (an unused `local log = {}`
-  sits in it), so a store that bypassed `__newindex` and wrote raw would pass.
-- `metamethod_errors.rs::set_field_cache_value_update_takes_fast_path` names a fast
-  path it cannot observe; it asserts only that 100 increments give 100.
-
-Fix: read the stored value back; rename the fast-path test to what it checks
-(observing the path needs the diagnostics deferred in notes/todo.md "Observable
-GC and cache diagnostics").
-
-Enforceable: no.
-
-## VA-013 - `error_boundary_transcript` is evidence nothing compares
-
-Reported by: native-stack-errors.
-
-`error_boundary.rs::error_boundary_transcript` is `#[ignore]`d, cfg'd to debug and
-no features, and writes a transcript for "before/after comparison" to a fixed path,
-which the next run overwrites. The comparison is manual and the A side is lost when
-the B side runs. (Its location and its running under focused `brokkr test` are
-filed in verif-corpus.md and bugs.md.)
-
-Fix: commit the transcript as a golden fixture in `tests/fixtures/`, assert
-equality in the ordinary sweep, and give it a regenerate path like
-`regenerate_save_golden`. It is deterministic by construction (costs, typed errors,
-rendered values) and replay-relevant: a change to error text, cost or survivors
-would then fail a test rather than depend on someone remembering to diff.
-
-Enforceable: yes, as a golden.
-
 ## VA-014 - The poisoning contract is a hand list
 
 Reported by: native-stack-errors.
@@ -401,124 +311,6 @@ Enforceable: no.
 
 # Runtime
 
-## VA-017 - `reassigning_a_rust_function_key_does_not_append_a_duplicate` cannot fail
-
-Reported by: runtime.
-
-`rustfn_identity.rs`. The test counts `pairs` entries where `key == print and
-value == "second"`. A stale duplicate would carry `"first"` and be filtered out, so
-the count is 1 whether or not the duplicate exists. The unit test
-`rust_fn_key_reassignment_updates_in_place` in `src/vm/table.rs` says exactly this
-in its own comment and does the storage-level check instead.
-`rust_functions_work_as_inline_and_promoted_table_keys` in the same file has the
-same blindness (it reads `t[print]`, which finds whichever entry the lookup hits
-first).
-
-Fix: count every entry whose key is `print` regardless of value (a duplicate key
-shows up twice in `pairs`, observable from Lua), or delete the integration test.
-
-Enforceable: no.
-
-## VA-018 - GC tests that pass for the wrong reason
-
-Reported by: runtime.
-
-- `gc_upvalues.rs::unreferenced_closure_is_collected` asserts `heap_size()` after
-  `gc_collect()` is smaller than before. The chunk's own closure becomes garbage
-  when the chunk returns, so the first collection frees at least that even if
-  `big_table` and `fn` leaked. Measure against a baseline taken after a collection
-  that already reclaimed the chunk closure (the `anchor.rs::anchor_fresh_table`
-  pattern) and assert the exact delta.
-- The "strictly less than" shape in `anchor.rs`
-  (`dropped_anchor_is_collected_at_the_next_collection`,
-  `anchor_dropped_on_another_thread_is_released`,
-  `release_then_gc_collects_anchored_object`) is sound only because
-  `anchor_fresh_table` pre-collects; asserting `before - 1` makes it explicit.
-- `gc_upvalues.rs::temporary_callable_table_survives_gc_during_call_metamethod_lookup`
-  probably never collects: `force_next_gc()` sets a manual threshold of 1, so the
-  *next allocation* collects, but after it the script runs `return callable`, the
-  `__call` resolution and `return self.value`, none of which allocates (metamethod
-  names are interned at construction, the handler closure exists, frames are
-  pooled), and `maybe_collect` runs only from `State::allocator()`. Confirm by
-  reverting the root it was written for; then make the handler allocate before it
-  reads `self` (`local _ = {}`), as
-  `executing_returned_closure_roots_closed_upvalues_during_auto_gc` does with
-  `trigger_gc = {}`.
-
-Enforceable: no.
-
-## VA-019 - Anchor slot recycling is not observed by the integration test
-
-Reported by: runtime.
-
-`anchor.rs::dropped_anchor_slot_is_recycled_without_collecting` says each drop is
-reclaimed by the next anchor creation; its assertion is `anchor_count() == 0`.
-`anchor_count` counts a drop at once ("A drop counts at once, before the State
-reclaims the slot"), so the assertion holds whether or not slots are recycled.
-Recycling is tested by the unit test `vm/anchor.rs::insert_recycles_dropped_slots`
-(`registry.slots.len()`).
-
-Fix: delete it, or move the assertion it wants into the unit test.
-
-Enforceable: no.
-
-## VA-020 - `the_cap_does_not_charge_cost` tests a path that structurally cannot charge
-
-Reported by: runtime.
-
-`src/vm/tests.rs`. `push_nil` goes through `check_stack_slot(&self)`, which takes
-`&self` and has no access to the cost meter, so `cost_used() == before` cannot
-fail. The AGENTS.md claim ("enforcing it charges no cost") matters on paths that
-*can* charge: frame admission from `OP_CALL`, open-results windows, library
-preflights inside dispatch, where a refused check sits next to batched opcode cost.
-
-Fix: drive the cap from Lua (a call whose admission is refused) and compare
-`cost_used` to the same script cut off just before the call; or delete the test
-and rely on the `&self` signature, which is the real enforcement, with a comment
-saying so.
-
-Enforceable: the `&self` receiver on every stack check is a type-level guarantee
-for the host push family; keeping all `check_stack_*` `&self` is review-only
-unless they move into a type that holds no `CostState`.
-
-## VA-021 - GC control tests with a tautology and a dead half
-
-Reported by: runtime.
-
-- `src/vm/tests.rs::gc_host_controlled` opens with
-  `assert!(state.heap_size() >= initial_objects + initial_strings)`; `heap_size()`
-  is `GcHeap::allocation_count()`, defined as
-  `objects.len().saturating_add(strings.len())`. Both sides come from the same two
-  fields. The rest of the test is real. Delete the line or assert `==` and call it
-  a definition check.
-- `gc_threshold_control` ends after `gc_set_threshold(1)` and an allocating script
-  in two comments ("Now GC should be needed ... threshold may have been adjusted")
-  and no assertion. A manual threshold is preserved across collections
-  (`GcThreshold::manual`, checked by `gc_policy.rs`), so the hedge is stale; assert
-  `gc_threshold() == 1` or cut the half.
-
-Enforceable: no.
-
-## VA-022 - `gc_policy.rs` never exercises `minimum_threshold`
-
-Reported by: runtime.
-
-Both policy tests compute `survivors * growth_factor` and compare with
-`.max(minimum_threshold)`. A `State::with_gc_policy` State has run `open_libs`, so
-`survivors` is in the hundreds and the product dwarfs the minimum (7 and 11). If
-production ignored `minimum_threshold`, both pass. The minimum is part of the
-documented contract (`docs/limits.md` "Garbage collection policy") and of replay
-timing. Also, `custom_gc_policy_is_used_before_and_after_state_construction` names
-"before construction" (`docs/limits.md`: "The initial threshold is in force while
-`open_libs` initializes the standard library") but only reads the threshold after
-construction; whether `open_libs` ran under it is not observable without a
-collection counter (deferred in notes/todo.md).
-
-Fix: a case on `State::raw()` (or with a minimum larger than `survivors * growth`)
-where the minimum wins.
-
-Enforceable: no.
-
 ## VA-023 - Path-parity tests do not prove the two paths differ
 
 Reported by: runtime.
@@ -570,29 +362,6 @@ through the `cfg(test)` `GlobalEnv::len`.
 
 Enforceable: partly; a convention check could require a test whose body has no
 `assert`/`expect_err`/`should_panic` to carry `cfg(debug_assertions)`.
-
-## VA-026 - Smaller runtime assertion gaps
-
-Reported by: runtime.
-
-- `vm_test07` and `vm_test10` assert only `global_env.get("a").is_none()`; if
-  `set_global` broke or the chunk returned early they pass. Add a positive control.
-- `table_resolution.rs::budget_exhaustion_mid_move_keeps_the_paid_prefix`: the doc
-  says the move "copies exactly the elements it paid for, one unit each"; the
-  assertions are `0 < copied < 100` and `copied <= used`. Compute the exact prefix
-  from the budget and the call's known cost and assert equality.
-- `src/vm/table.rs::Model::array_key` calls production `array_index`, so the model
-  and the table agree on key classification by construction. Not a hole while
-  `key_rule_tests::numeric_key_boundaries` pins `array_index` separately; if that
-  is relaxed, the model test silently stops covering classification.
-- `frame.rs::documented_opcode_charges_match_static_units` ends with
-  `documented_rows == classes.len() + 1` with no comment on the extra row; a
-  failure will be hard to read.
-- `fcomm2`/`fleet:group()` mentions in `src/vm/tests.rs` and `gc_upvalues.rs`
-  describe a host this repository cannot see; the tests are fine, the comments are
-  claims nobody can check.
-
-Enforceable: no.
 
 ## VA-029 - The cache-collection test's family list is still hand-maintained
 
@@ -673,46 +442,6 @@ Enforceable: the weak-table half structurally.
 
 # Compiler and cost
 
-## VA-033 - Leftover load halves and a snapshot block with nothing between its two saves
-
-Reported by: compiler-cost.
-
-- `compiler_limits.rs` (`expect_syntax_error`,
-  `set_field_sites_past_the_cache_capacity_use_the_uncached_path`) and
-  `string_literal_errors.rs` (`malformed_escapes_return_syntax_errors_through_state_loading`)
-  chain `.and_then(|program| State::new().load(&program))` after a compile they
-  expect to fail, or compile the same source twice
-  (`dellingr::Program::compile(...).and_then(load)` and `Program::compile(...)`
-  "should accept ..."), which is the same function. It reads like residue of the
-  migration from a `load_string`-style API; the name
-  "...through_state_loading" claims a path never reached because the compile fails
-  first. Collapse to one call per case and rename.
-- `name_limits.rs::source_names_accept_the_limit_and_reject_one_more_byte`, under
-  `cfg(feature = "snapshot")`, takes `before = state.save_state()` and immediately
-  asserts `state.save_state() == before` ("rejected load leaves state savable"). The
-  rejected operation (the oversized-name `Program::compile`) happened earlier and
-  has no State to disturb. The file's doc ("rejected ... without disturbing the
-  State") promises a property the test cannot violate. Drop the block and the
-  claim.
-
-Enforceable: a textlint rule over `tests/**` banning `State::new().load(` (a load
-into a State nobody keeps) catches the first shape.
-
-## VA-034 - `table_concat_cost_is_identical_with_or_without_a_budget` discards both outcomes
-
-Reported by: compiler-cost.
-
-`string_charges.rs`. Each run is `match call { Ok(_) | Err(_) => {} }` and only the
-two `cost_used` values are compared. "Some cases in this list fail on an invalid
-element on purpose", but nothing checks which case fails or where; if the first
-case started failing at its first instruction in both modes, both report the same
-cost and the test passes.
-
-Fix: assert the outcome per case (Ok for the first, `ArgError`/`TypeError` for the
-second) and pin its cost.
-
-Enforceable: a textlint pattern banning `Ok(_) | Err(_) => {}` in tests.
-
 ## VA-035 - `runtime_cache_population_and_hits_charge_nothing` runs cold against cold
 
 Reported by: compiler-cost.
@@ -730,29 +459,14 @@ verif-goldens.md.
 
 Enforceable: no.
 
-## VA-036 - Single assertions weaker than their names
+## VA-036 - `decimal_and_hex_literals_use_the_shared_numeral_parser` is a wiring test
 
 Reported by: compiler-cost.
 
-- `zero_static_cost_generic_for_is_not_labeled_free` (`src/lib.rs`) asserts
-  `!rendered.contains("(free)")`; no code path emits "(free)" any more. A
-  tripwire, not coverage.
-- `gmatch_full_scan_is_linear_in_its_subject` (`string_charges.rs`) accepts
-  `long <= 3 * short` for a doubling; a quadratic term small next to the fixed
-  per-iteration charges passes. Pin the exact `cost(256) - cost(128)`.
-- `decimal_and_hex_literals_use_the_shared_numeral_parser` compares the parser's
-  pooled literal with `crate::numeral::parse_lua_numeral`, the function the lexer
-  calls: a wiring test, not numeral coverage.
-- `static_analysis_counts_each_instruction_once` (`src/lib.rs`) asserts
-  `instructions == 10` for a loop: a codegen golden inside a cost test that any
-  codegen improvement breaks while the cost property is unchanged. Move it or
-  assert only the cost fields.
-- `compiler_limits.rs::long_jumps_compile_and_run`: "Far past the 16-bit jump range
-  of the stack VM, inside the 24-bit one." The stack VM is gone; 40,000-instruction
-  jumps are near no boundary of the 24-bit encoding, and
-  `jump_patching_rejects_offsets_past_the_encoding` (`codegen.rs`) covers the real
-  boundary. It costs three 40k-line compiles per sweep; delete or reword as a smoke
-  test.
+The test (`src/compiler/parser/tests.rs`) compares the parser's pooled literal
+with `crate::numeral::parse_lua_numeral`, the function the lexer calls: a wiring
+test, not numeral coverage. Rename it to say it checks wiring, or give it
+independent expected values.
 
 Enforceable: no.
 

@@ -7,33 +7,41 @@ use crate::support;
 /// per-element charge produces - rather than failing before any copy.
 #[test]
 fn budget_exhaustion_mid_move_keeps_the_paid_prefix() {
-    let mut state = State::new();
-    support::run(
-        &mut state,
-        "src = {} for i = 1, 100 do src[i] = i end dst = {}",
-    );
+    const ELEMENTS: usize = 100;
+    const BUDGET: i64 = 50;
+    // The loaded expression uses only free bytecode opcodes before table.move.
+    const CALL_SETUP_COST: u64 = 0;
 
-    support::load(&mut state, "table.move(src, 1, 100, 1, dst)");
-    state.set_cost_budget(50);
+    let mut state = State::new();
+    let setup = format!("src = {{}} for i = 1, {ELEMENTS} do src[i] = i end dst = {{}}");
+    support::run(&mut state, setup.as_bytes());
+
+    let call = format!("table.move(src, 1, {ELEMENTS}, 1, dst)");
+    support::load(&mut state, call.as_bytes());
+    state.set_cost_budget(BUDGET);
     let error = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
-        .expect_err("a 100-element move cannot fit a 50-unit budget");
+        .expect_err("the move cannot fit the configured budget");
     assert!(
         error.to_string().contains("budget"),
         "expected a budget error, got: {error}"
     );
     let used = state.cost_used();
+    let budget_units = u64::try_from(BUDGET).expect("the test budget is positive");
+    let expected_prefix =
+        usize::try_from(budget_units - CALL_SETUP_COST).expect("the paid prefix fits usize");
+    assert!(expected_prefix < ELEMENTS, "the budget must stop mid-move");
 
     state.set_cost_budget(i64::MAX);
     state.get_global("dst").expect("dst is a global");
     let copied = state.raw_len(-1).expect("dst is a table");
-    assert!(
-        copied > 0 && copied < 100,
-        "expected a partial copy, got {copied} elements"
+    assert_eq!(
+        used, budget_units,
+        "the call must consume the available budget before the move fails"
     );
-    assert!(
-        u64::try_from(copied).expect("small count") <= used,
-        "each copied element was charged"
+    assert_eq!(
+        copied, expected_prefix,
+        "the destination must contain exactly the copies paid for"
     );
 }
 

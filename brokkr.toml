@@ -23,10 +23,12 @@ features = ["snapshot"]
 
 # Compile and lint instrumentation and refusal hooks in one extra dev shape.
 # Run only refusal tests: the ordinary sweeps already cover the corpus, and
-# instrumentation is not a production native-stack configuration.
+# instrumentation is not a production native-stack configuration. The shape
+# also enables `crmath-sweeps` so the gated math sweeps compile and lint here;
+# the `only` filter keeps them from running.
 [[check]]
 name = "instrumentation-faults"
-features = ["hotpath", "hotpath-alloc", "fault-injection", "snapshot"]
+features = ["hotpath", "hotpath-alloc", "fault-injection", "snapshot", "crmath-sweeps"]
 tests = ["integration"]
 lib_tests = true
 only = [
@@ -62,9 +64,6 @@ default_package = "dellingr"
 # Without a per-sweep profile, this selects the dev profile by default for
 # focused tests; explicit profile flags take precedence.
 debug = true
-
-[gremlins]
-exclude = ["tests/integration/library/string_bytes.rs"]
 
 # Benchmarking harness: `brokkr dellingr --lua <name> --bench|--hotpath|--alloc`.
 # brokkr builds the cargo example target below (plain for --bench, with the
@@ -258,6 +257,18 @@ name = "global-table-not-proxy"
 pattern = '\b_G(?: +keeps +its)? +proxy\b'
 paths = ["src/**/*.rs", "tests/**/*.rs"]
 message = "_G is the global table, not a proxy"
+
+[[textlint]]
+name = "no-stale-tracker-ids"
+pattern = '\b(?:STD|VM)-\d{3}\b|\bC\d{2}\b:|\(L\d+\)'
+paths = ["src/**/*.rs", "tests/**/*.rs"]
+message = "comments must carry their own context instead of citing transient tracker IDs"
+
+[[textlint]]
+name = "no-raw-cargo-in-scripts"
+pattern = '\bcargo\s+'
+paths = ["scripts/**", "research/*.sh"]
+message = "build and test through brokkr instead of invoking cargo directly"
 
 # Native-stack guard (reference/native-calls.md). Every direct call to a
 # function that can reach a call back into Lua carries a

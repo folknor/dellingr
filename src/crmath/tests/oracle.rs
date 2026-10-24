@@ -14,7 +14,7 @@
 //! primitives and its exact arithmetic. Its `pow` is deliberately avoided: a
 //! shortcut for power-of-two bases truncates the exponent (4^0.25 gives 1).
 
-use super::super as crm;
+use crate::crmath as crm;
 use libbeef::{BigFloat, BigFormat, ExpBits, Precision, Rounding};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -272,7 +272,7 @@ fn pow_special(x: f64, y: f64) -> Option<f64> {
     None
 }
 
-fn format(precision: u64, rounding: Rounding) -> BigFormat {
+fn big_format(precision: u64, rounding: Rounding) -> BigFormat {
     BigFormat {
         precision: Precision::Bits(precision),
         rounding,
@@ -351,7 +351,7 @@ fn pi_dependent_oracles_refuse_unsafe_precision() {
 fn enclose(f: Func, x: f64, y: f64, p: u64) -> (BigFloat, BigFloat) {
     let bx = BigFloat::from_f64(x);
     let direct = |g: &dyn Fn(&BigFloat, BigFormat) -> BigFloat| {
-        (g(&bx, format(p, DOWN)), g(&bx, format(p, UP)))
+        (g(&bx, big_format(p, DOWN)), g(&bx, big_format(p, UP)))
     };
     match f {
         Func::Sin | Func::Cos | Func::Tan if x.abs() > 1e3 => trig_reduced(f, x, p),
@@ -366,17 +366,17 @@ fn enclose(f: Func, x: f64, y: f64, p: u64) -> (BigFloat, BigFloat) {
         Func::Atan2 => {
             let bxx = BigFloat::from_f64(y);
             (
-                bx.atan2(&bxx, format(p, DOWN)),
-                bx.atan2(&bxx, format(p, UP)),
+                bx.atan2(&bxx, big_format(p, DOWN)),
+                bx.atan2(&bxx, big_format(p, UP)),
             )
         }
         Func::Log10 => {
             // log10(x) = log(x) / log(10) with log(10) > 0.
-            let l_lo = bx.log(format(p, DOWN));
-            let l_hi = bx.log(format(p, UP));
+            let l_lo = bx.log(big_format(p, DOWN));
+            let l_hi = bx.log(big_format(p, UP));
             let ten = BigFloat::from_i64(10);
-            let t_lo = ten.log(format(p, DOWN));
-            let t_hi = ten.log(format(p, UP));
+            let t_lo = ten.log(big_format(p, DOWN));
+            let t_hi = ten.log(big_format(p, UP));
             let lo_den = if l_lo.sign().is_negative() {
                 &t_lo
             } else {
@@ -388,20 +388,20 @@ fn enclose(f: Func, x: f64, y: f64, p: u64) -> (BigFloat, BigFloat) {
                 &t_lo
             };
             (
-                l_lo.div(lo_den, format(p, DOWN)),
-                l_hi.div(hi_den, format(p, UP)),
+                l_lo.div(lo_den, big_format(p, DOWN)),
+                l_hi.div(hi_den, big_format(p, UP)),
             )
         }
         Func::Pow => {
             // |x|^y = exp(y * log|x|); exp is increasing.
             let ax = BigFloat::from_f64(x.abs());
-            let l_lo = ax.log(format(p, DOWN));
-            let l_hi = ax.log(format(p, UP));
+            let l_lo = ax.log(big_format(p, DOWN));
+            let l_hi = ax.log(big_format(p, UP));
             let by = BigFloat::from_f64(y);
             let (z_lo, z_hi) = if y >= 0.0 {
-                (by.mul(&l_lo, format(p, DOWN)), by.mul(&l_hi, format(p, UP)))
+                (by.mul(&l_lo, big_format(p, DOWN)), by.mul(&l_hi, big_format(p, UP)))
             } else {
-                (by.mul(&l_hi, format(p, DOWN)), by.mul(&l_lo, format(p, UP)))
+                (by.mul(&l_hi, big_format(p, DOWN)), by.mul(&l_lo, big_format(p, UP)))
             };
             // As for exp: far outside +-1e4 the bound is an overflow or an
             // underflow, beyond the big-float exponent range.
@@ -412,7 +412,7 @@ fn enclose(f: Func, x: f64, y: f64, p: u64) -> (BigFloat, BigFloat) {
                 } else if z.cmp_num(&limit.neg()) == Some(std::cmp::Ordering::Less) {
                     BigFloat::from_f64(0.0)
                 } else {
-                    z.exp(format(p, rounding))
+                    z.exp(big_format(p, rounding))
                 }
             };
             let lo = exp_bound(&z_lo, DOWN);
@@ -450,21 +450,21 @@ fn trig_reduced(f: Func, x: f64, p: u64) -> (BigFloat, BigFloat) {
     let two_pi_lo = unit(-1);
     let two_pi_hi = unit(2);
     let k = ax
-        .div(&two_pi_hi, format(precision, DOWN))
+        .div(&two_pi_hi, big_format(precision, DOWN))
         .rint(Rounding::TowardZero);
     let r_lo = ax.sub(
-        &k.mul(&two_pi_hi, format(precision, UP)),
-        format(precision, DOWN),
+        &k.mul(&two_pi_hi, big_format(precision, UP)),
+        big_format(precision, DOWN),
     );
     let r_hi = ax.sub(
-        &k.mul(&two_pi_lo, format(precision, DOWN)),
-        format(precision, UP),
+        &k.mul(&two_pi_lo, big_format(precision, DOWN)),
+        big_format(precision, UP),
     );
-    let width = r_hi.sub(&r_lo, format(p, UP));
+    let width = r_hi.sub(&r_lo, big_format(p, UP));
     let widen = |g: &dyn Fn(&BigFloat, BigFormat) -> BigFloat| {
         (
-            g(&r_lo, format(p, DOWN)).sub(&width, format(p, DOWN)),
-            g(&r_lo, format(p, UP)).add(&width, format(p, UP)),
+            g(&r_lo, big_format(p, DOWN)).sub(&width, big_format(p, DOWN)),
+            g(&r_lo, big_format(p, UP)).add(&width, big_format(p, UP)),
         )
     };
     let (s_lo, s_hi) = widen(&|a, fm| a.sin(fm));
@@ -492,10 +492,10 @@ fn trig_reduced(f: Func, x: f64, p: u64) -> (BigFloat, BigFloat) {
             }
             let candidates = |rounding| {
                 [
-                    s_lo.div(&c_lo, format(p, rounding)),
-                    s_lo.div(&c_hi, format(p, rounding)),
-                    s_hi.div(&c_lo, format(p, rounding)),
-                    s_hi.div(&c_hi, format(p, rounding)),
+                    s_lo.div(&c_lo, big_format(p, rounding)),
+                    s_lo.div(&c_hi, big_format(p, rounding)),
+                    s_hi.div(&c_lo, big_format(p, rounding)),
+                    s_hi.div(&c_hi, big_format(p, rounding)),
                 ]
             };
             let pick = |values: [BigFloat; 4], want_max: bool| {

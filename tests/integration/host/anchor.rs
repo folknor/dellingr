@@ -64,25 +64,29 @@ fn dropped_anchor_is_collected_at_the_next_collection() {
 
     drop(a);
     state.gc_collect();
-    assert!(
-        state.object_count() < before,
-        "expected GC to collect the dropped anchor's table"
+    assert_eq!(
+        state.object_count(),
+        before - 1,
+        "GC should collect exactly the dropped anchor's table"
     );
 }
 
 #[test]
-fn dropped_anchor_slot_is_recycled_without_collecting() {
+fn repeated_dropped_anchors_leave_no_live_handles() {
     let mut state = State::new();
     state.gc_disable_auto();
     for i in 0..1000 {
         state.push_number(f64::from(i)).unwrap();
         let a = state.anchor().unwrap();
+        assert_eq!(state.anchor_count(), 1);
         state.push_anchor(&a).unwrap();
         assert_eq!(state.to_number(-1).unwrap(), f64::from(i));
         state.pop(1).unwrap();
+        drop(a);
+        assert_eq!(state.anchor_count(), 0);
     }
-    // Each handle dropped at the end of its iteration; the next anchor
-    // creation reclaimed it, so only the last one's slot may be pending.
+    // The public count observes live handles, not registry slots. Slot reuse
+    // is covered by Registry's unit test.
     assert_eq!(state.anchor_count(), 0);
 }
 
@@ -136,7 +140,7 @@ fn anchor_dropped_on_another_thread_is_released() {
         .expect("drop thread does not panic");
     assert_eq!(state.anchor_count(), 0);
     state.gc_collect();
-    assert!(state.object_count() < before);
+    assert_eq!(state.object_count(), before - 1);
 }
 
 #[test]
@@ -314,9 +318,10 @@ fn release_then_gc_collects_anchored_object() {
     assert!(state.release_anchor(a));
     state.gc_collect();
     let after = state.object_count();
-    assert!(
-        after < before,
-        "expected GC to collect the released table (before={before}, after={after})"
+    assert_eq!(
+        after,
+        before - 1,
+        "GC should collect exactly the released table"
     );
 }
 

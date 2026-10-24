@@ -712,6 +712,7 @@ mod tests {
             .lines()
             .filter(|line| line.starts_with("| `"))
             .count();
+        // The extra row is the Markdown table header, not an opcode class.
         assert_eq!(documented_rows, classes.len() + 1);
         assert_eq!(Instr::set_list(0, None, 0).static_units(), 0);
     }

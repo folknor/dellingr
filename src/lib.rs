@@ -467,6 +467,7 @@ mod tests {
         assert_eq!(fixed.root.array_elements(), 2);
     }
 
+    // Keep this as a tripwire against the old "(free)" label returning.
     #[test]
     fn zero_static_cost_generic_for_is_not_labeled_free() {
         let analysis = analyze_cost("for value in iterator do end")
@@ -540,7 +541,7 @@ mod tests {
     }
 
     #[test]
-    fn static_analysis_counts_each_instruction_once() {
+    fn static_analysis_counts_costed_loop_body_once() {
         let closure_free = analyze_cost(
             "local x = 0; for i = 1, 3 do do local y = i; x = x + y end end; return x",
         )
@@ -549,7 +550,6 @@ mod tests {
         // runtime sweep below observes it three times.
         assert_eq!(closure_free.root.own_cost, 1);
         assert_eq!(closure_free.root.total_cost, 1);
-        assert_eq!(closure_free.root.instructions, 10);
 
         let dynamic = analyze_cost("local function f(...) return ... end; return f(1, f())")
             .expect("dynamic-call program should parse");

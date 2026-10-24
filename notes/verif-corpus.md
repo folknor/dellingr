@@ -59,18 +59,6 @@ Enforceable: yes. Add to `bench_scripts.rs` (or a new examples-footer test) a
 rule that an examples/ `_bench` file's success line is not a string literal (it
 must concatenate a value), mirroring the bench/ footer contract.
 
-## VC-002 - `_bench` detection is a line-start regex
-
-Reported by: corpus-harness.
-
-`run_examples.rs` detects `_bench` files by `function _bench(` or `local
-function _bench(` at line start. A `_bench = function()` spelling escapes the
-success-line rule; `local function _bench` passes the rule while the harness
-(which needs a global) rejects the file.
-
-Enforceable: yes, by asking the compiled chunk (or the harness's own check) for
-a global `_bench` instead of a regex.
-
 ## VC-003 - What `run_examples` accepts as a pass, and the DIFF/SKIP-DIFF files nothing else checks
 
 Reported by: check-machinery, corpus-harness, library.
@@ -144,27 +132,6 @@ DIFF marker" when dellingr matches either. SKIP-DIFF stays for files that
 cannot run under the references.
 
 Enforceable: yes, that is the check itself.
-
-## VC-005 - `bench/` scripts are compiled, never run
-
-Reported by: check-machinery, corpus-harness.
-
-`bench_scripts_parse_and_follow_the_standalone_footer_contract` compiles and
-`load`s each `bench/*.lua` but never calls into it; `run_examples`,
-`diff_test` and `bench.sh` deliberately do not see `bench/`. A verdict file
-that raises at runtime (a misspelled global, a bad helper name in `_bench`, a
-wrong `K` type, a helper that drifted from its `examples/` twin outside the
-fingerprinted scopes) passes the gate and is found only when someone runs
-`brokkr dellingr --lua <W> --bench`, possibly weeks later on someone else's
-change. The paired examples/ kernel covers the kernel body, not the wrapper.
-Also, `bench_scripts.rs` compiles bench files with an `@`-prefixed chunk name
-while the harness uses the bare path, so the test does not load the file the
-way the harness does.
-
-Fix: call each file's `kernel()` once (or `_bench` with the repeat count
-patched to 1) on a budget-limited State; load with the harness's chunk name.
-
-Enforceable: yes, as a test.
 
 ## VC-007 - The fingerprint cannot see a kernel's scale, and the composite's "same proportions" claim is false
 
@@ -510,3 +477,24 @@ header the source.
 Enforceable: the header rule yes (a test requiring every `hotpath_file` to open
 with `-- Probe:` or `-- Workload:` and printing the list); the prose cannot be,
 so stop enumerating.
+
+## VC-024 - `regenerate_error_boundary` includes a test-suite module by path
+
+Reported by: the resolution loop's reconciler.
+
+`examples/regenerate_error_boundary.rs` includes
+`tests/integration/support/recorder.rs` and
+`tests/integration/failures/error_boundary.rs` by `#[path]`, so the tool and
+the test share one corpus and transcript renderer and cannot drift. AGENTS.md
+and `tests/integration/support/mod.rs` reserve that role for `tests/common/`,
+whose files are kept self-contained because another target includes them.
+`recorder.rs` is self-contained and could move; `error_boundary.rs` is a suite
+module, so including it couples the example to the suite's imports.
+
+Fix: move the corpus, the runner and the transcript renderer into a
+`tests/common/error_boundary_corpus.rs` shared by the suite and the example,
+the way `tests/common/save_golden_program.rs` is shared, and move
+`recorder.rs` to `tests/common/` if the example still needs it.
+
+Enforceable: a convention check that every `#[path]` include from `examples/`
+or another target points into `tests/common/`.

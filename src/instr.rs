@@ -1180,23 +1180,37 @@ mod tests {
         ArgCount, ArithOp, ArithOperands, Builtin, CompareOp, Instr, OPEN_COUNT, RetCount,
     };
 
-    // This fixture is deliberately independent of the declaration tables.
-    // Snapshot version changes must review this entire encoding contract,
-    // including holes, builtin slots and cache operands, rather than blessing
-    // reordered data.
+    // The hand-maintained fixture records the opcode rows' replay-visible
+    // number, operand layout and cost class, plus builtin slots and persisted
+    // cache and jump encodings. It is deliberately independent of the
+    // declaration tables: a snapshot-format or cost-model change must review
+    // this whole contract, holes included, rather than bless regenerated rows.
     #[test]
     fn persisted_encodings_match_fixture() {
         use std::fmt::Write;
 
         let golden = include_str!("../tests/fixtures/opcode_encoding.txt");
-        let (version, expected) = golden.split_once('\n').expect("fixture has a version line");
+        let (version, remainder) = golden.split_once('\n').expect("fixture has a format line");
         assert_eq!(
             version,
             format!("format={}", super::snapshot_format::FORMAT_VERSION)
         );
+        let (cost_model, expected) = remainder
+            .split_once('\n')
+            .expect("fixture has a cost model version line");
+        assert_eq!(
+            cost_model,
+            format!("cost_model={}", crate::COST_MODEL_VERSION)
+        );
         let mut actual = String::new();
         for (opcode, name) in Instr::OPCODE_NAMES {
-            writeln!(actual, "{name}={opcode}").expect("writing into String cannot fail");
+            writeln!(
+                actual,
+                "{name}={opcode} {:?} {:?}",
+                Instr::layout(*opcode).expect("opcode names list only known opcodes"),
+                Instr::cost_class(*opcode)
+            )
+            .expect("writing into String cannot fail");
         }
         for (builtin, name) in Builtin::ALL {
             writeln!(actual, "builtin:{name}={}", builtin.to_u8())
@@ -1232,7 +1246,7 @@ mod tests {
         .expect("writing into String cannot fail");
         assert_eq!(
             actual, expected,
-            "snapshot opcode or builtin encoding changed"
+            "snapshot opcode, cost-model, or builtin encoding changed"
         );
 
         #[cfg(feature = "snapshot")]

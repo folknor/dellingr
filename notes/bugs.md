@@ -64,56 +64,6 @@ textlint rule banning `feature = "hotpath-alloc"` inside `cfg(` anywhere except
 the allocator installs (`src/main.rs`, `examples/hotpath.rs`) keeps it so. One
 constant instead of two removes the drift.
 
-## BUG-004 - A focused `brokkr test` runs ignored tests that rewrite a tracked fixture or write into `.scratch/`
-
-Reported by: check-machinery, corpus-harness, compiler-cost, library.
-
-`brokkr test` always passes `--include-ignored` and matches by substring.
-Two ignored tests have side effects that the `#[ignore]` was the only guard
-against:
-
-- `src/crmath/tests/golden.rs::regenerate_crmath_golden` is
-  `#[ignore = "rewrites tests/fixtures/crmath_golden.txt"]` and calls
-  `std::fs::write` on the tracked fixture it is meant to verify. Any focused
-  run whose name matches it rewrites the fixture: `brokkr test golden` (a
-  natural way to run `cost_golden`, `save_golden`,
-  `golden_results_on_every_fma_path` and `stdlib_cost_golden` together),
-  `regenerate`, `crmath`. `research/core-math` is present on plantasjen, so
-  the rewrite really happens there. The bytes are identical (regeneration is
-  deterministic), but the new mtime makes cargo rebuild the lib test target
-  through `include_str!`. The module doc admits the problem.
-- The same substrings pull in the long ignored crmath sweeps: `brokkr test
-  crmath` runs the regenerator, all 11 worst-case sweeps and
-  `random_against_oracle` (several million inputs, documented "run in
-  release") in the dev profile by default, which hits the 20s per-test cap and
-  stops the run. `brokkr test sweep`, `pin`, `tables` and `oracle` each pull in
-  some of the long-running or Python-spawning ignored tests.
-- `failures::error_boundary::error_boundary_transcript` (integration crate) is
-  `#[ignore = "on-demand transcript ..."]` and writes
-  `.scratch/error-boundary/transcript.txt` through
-  `scratch::write_boundary_transcript`. The documented focused command
-  `brokkr test error_boundary` (dev profile, the repository default) matches
-  and runs it, so it writes into the source tree as a side effect. AGENTS.md's
-  `--release` form avoids it only because the test is compiled out without
-  `debug_assertions`. With the suites merged into one crate, a subject filter
-  (`brokkr test failures::`) reaches it too.
-
-The save golden already uses the safe pattern: a `regenerate_save_golden`
-example.
-
-Fix: move regeneration and on-demand writers out of the test harness. Because
-the crmath oracle is crate-internal test code, that means a `crmath-regen`
-cargo feature that compiles the regenerator only when requested, or a
-regenerator that writes `crmath_golden.txt.new` and never rewrites the fixture
-in place. Give the long sweeps a feature or `cfg` instead of `#[ignore]`, and
-names that share no substrings with the fast tests. Make the transcript a
-`brokkr run` tool that takes an output path (see also the transcript entries
-in verif-corpus.md and verif-assertions.md).
-
-Enforceable: a test that is not compiled cannot be name-matched. A textlint
-rule with `test_code = "only"` banning `fs::write`/`File::create` into the
-manifest dir in test code would have caught it.
-
 ## BUG-007 - Save bytes differ between dev and release builds of one version, while the docs and the golden say otherwise
 
 Reported by: corpus-harness, snapshot, compiler-cost.
@@ -162,20 +112,3 @@ failure message either way.
 
 Enforceable: once profile-independent, add `save_golden` to a release
 `[[check]]`. The registry-handle rewrite makes the hazard unrepresentable.
-
-## BUG-009 - `notes_drop.py` swallows a following top-level `# ` heading
-
-Reported by: the resolution loop (found while draining these documents).
-
-`scripts/notes_sections.py::section_heading_flags` flags only `## ` lines as
-headings, so `notes_drop.py` ends a dropped section at the next `## ` heading.
-A section that is the last one before a top-level `# ` group heading (the
-documents group entries under `# Runtime`, `# Snapshot` and the like) is
-dropped together with that `# ` heading and the group's preamble, if any.
-`notes_move.py` shares the boundary rule, so a moved section carries the
-heading with it.
-
-Fix: end a section at any heading of level two or higher (`# ` or `## `)
-outside a fence; add the case to `scripts/test_notes_sections.py`.
-
-Enforceable: yes, by that test.

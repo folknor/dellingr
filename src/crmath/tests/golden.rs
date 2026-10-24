@@ -2,16 +2,21 @@
 //! and the correctly rounded result for every kernel, certified by the
 //! oracle. Every host must reproduce every line under every FMA path.
 
-use super::oracle::{Func, certify, parse_wc_token};
-use super::{TestRng, fma_modes, same, with_forced_fma};
+#[cfg(any(not(test), feature = "crmath-sweeps"))]
+use super::TestRng;
+use super::oracle::Func;
+#[cfg(any(not(test), feature = "crmath-sweeps"))]
+use super::oracle::{certify, parse_wc_token};
+#[cfg(test)]
+use super::{fma_modes, same, with_forced_fma};
+#[cfg(not(test))]
 use crate::crmath::hf;
+#[cfg(not(test))]
 use std::fmt::Write as _;
 
+#[cfg(test)]
 const GOLDEN: &str = include_str!("../../../tests/fixtures/crmath_golden.txt");
-const GOLDEN_PATH: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/tests/fixtures/crmath_golden.txt"
-);
+#[cfg(any(not(test), feature = "crmath-sweeps"))]
 const CORE_MATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/research/core-math/src/binary64"
@@ -61,6 +66,7 @@ const CORPUS_PINS: [(Func, usize, u64); 11] = [
 
 /// FNV-1a (64-bit) over each input's `x` then `y` bit pattern, little-endian,
 /// in file order; a unary function's `y` is the reader's `0.0`.
+#[cfg(any(not(test), feature = "crmath-sweeps"))]
 fn corpus_digest(inputs: &[(f64, f64)]) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for &(x, y) in inputs {
@@ -77,6 +83,7 @@ fn corpus_digest(inputs: &[(f64, f64)]) -> u64 {
     hash
 }
 
+#[cfg(test)]
 const GOLDEN_COUNTS: [(Func, usize); 11] = [
     (Func::Sin, 1_144),
     (Func::Cos, 1_144),
@@ -92,12 +99,14 @@ const GOLDEN_COUNTS: [(Func, usize); 11] = [
 ];
 
 #[allow(clippy::print_stderr)] // Test coverage depends on this host's CPU.
+#[cfg(test)]
 fn report_fma_modes(modes: &[super::ForcedFma]) {
     eprintln!(
         "crmath golden FMA backends: {modes:?} (hardware absent means software-only coverage)"
     );
 }
 
+#[cfg(test)]
 fn parse_bits(token: &str) -> f64 {
     if token == "nan" {
         return f64::NAN;
@@ -166,6 +175,7 @@ fn golden_results_on_every_fma_path() {
 
 /// Inputs worth pinning for every function: signed zeros, infinities, NaN,
 /// subnormal and overflow boundaries, and exact-result points.
+#[cfg(not(test))]
 fn special_inputs() -> Vec<f64> {
     vec![
         0.0,
@@ -214,6 +224,7 @@ fn special_inputs() -> Vec<f64> {
     ]
 }
 
+#[cfg(not(test))]
 fn binary_special_inputs() -> Vec<f64> {
     vec![
         0.0,
@@ -241,6 +252,7 @@ fn binary_special_inputs() -> Vec<f64> {
 }
 
 /// A plausible-use range per function, for random inputs.
+#[cfg(any(not(test), feature = "crmath-sweeps"))]
 fn typical_range(f: Func) -> (f64, f64, f64, f64) {
     match f {
         Func::Sin | Func::Cos | Func::Tan => (-20.0, 20.0, 0.0, 0.0),
@@ -255,6 +267,7 @@ fn typical_range(f: Func) -> (f64, f64, f64, f64) {
 /// Worst-case inputs from the CORE-MATH checkout, checked against
 /// [`CORPUS_PINS`]. Panics if the file cannot be read or does not hold the
 /// pinned corpus.
+#[cfg(any(not(test), feature = "crmath-sweeps"))]
 fn worst_cases(f: Func) -> Vec<(f64, f64)> {
     let inputs = read_worst_cases(f);
     if let Some(mismatch) = corpus_mismatch(f, &inputs) {
@@ -263,6 +276,7 @@ fn worst_cases(f: Func) -> Vec<(f64, f64)> {
     inputs
 }
 
+#[cfg(any(not(test), feature = "crmath-sweeps"))]
 fn read_worst_cases(f: Func) -> Vec<(f64, f64)> {
     let path = format!("{CORE_MATH}/{0}/{0}.wc", f.name());
     let text = std::fs::read_to_string(&path).unwrap_or_else(|error| {
@@ -275,6 +289,7 @@ fn read_worst_cases(f: Func) -> Vec<(f64, f64)> {
 }
 
 /// `f`'s pinned input count and digest.
+#[cfg(any(not(test), feature = "crmath-sweeps"))]
 fn corpus_pin(f: Func) -> (usize, u64) {
     let &(_, count, digest) = CORPUS_PINS
         .iter()
@@ -284,6 +299,7 @@ fn corpus_pin(f: Func) -> (usize, u64) {
 }
 
 /// Why `inputs` is not `f`'s pinned corpus, if it is not.
+#[cfg(any(not(test), feature = "crmath-sweeps"))]
 fn corpus_mismatch(f: Func, inputs: &[(f64, f64)]) -> Option<String> {
     let (count, digest) = corpus_pin(f);
     let actual = (inputs.len(), corpus_digest(inputs));
@@ -299,6 +315,7 @@ fn corpus_mismatch(f: Func, inputs: &[(f64, f64)]) -> Option<String> {
     })
 }
 
+#[cfg(any(not(test), feature = "crmath-sweeps"))]
 fn parse_worst_cases(f: Func, path: &str, text: &str) -> Vec<(f64, f64)> {
     let mut out = Vec::new();
     for (index, line) in text.lines().enumerate() {
@@ -324,6 +341,7 @@ fn parse_worst_cases(f: Func, path: &str, text: &str) -> Vec<(f64, f64)> {
 
 /// Certify every input and fail with every discrepancy (port against
 /// oracle, and between FMA paths).
+#[cfg(all(test, feature = "crmath-sweeps"))]
 fn check_inputs(f: Func, inputs: &[(f64, f64)]) -> Vec<String> {
     // Keep the process hook intact: caught oracle panics still need diagnostics,
     // and silencing them globally would also hide unrelated test failures.
@@ -407,7 +425,7 @@ fn pinned_regression_inputs_survive_golden_regeneration() {
 /// The local CORE-MATH checkout holds the pinned worst-case corpus for every
 /// function. Cheap next to the sweeps: it only reads and parses the files.
 #[test]
-#[ignore = "needs a CORE-MATH checkout under research/"]
+#[cfg(feature = "crmath-sweeps")]
 fn core_math_corpus_matches_pin() {
     let mismatches: Vec<String> = Func::ALL
         .into_iter()
@@ -419,7 +437,7 @@ fn core_math_corpus_matches_pin() {
 /// Regeneration must reproduce every checked-in table byte-for-byte at the
 /// pinned upstream commit, without invoking a Rust build or formatter.
 #[test]
-#[ignore = "needs Python and a CORE-MATH checkout under research/"]
+#[cfg(feature = "crmath-sweeps")]
 fn core_math_tables_match_pin() {
     let output = std::process::Command::new("python3")
         .arg(concat!(
@@ -437,6 +455,7 @@ fn core_math_tables_match_pin() {
     );
 }
 
+#[cfg(all(test, feature = "crmath-sweeps"))]
 fn sweep(f: Func) {
     let inputs = worst_cases(f);
     let problems = check_inputs(f, &inputs);
@@ -451,6 +470,7 @@ fn sweep(f: Func) {
     );
 }
 
+#[cfg(all(test, feature = "crmath-sweeps"))]
 macro_rules! sweeps {
     ($($name:ident => $func:expr,)*) => {
         $(
@@ -458,7 +478,6 @@ macro_rules! sweeps {
             /// oracle. Needs `research/core-math` at [`CORE_MATH_COMMIT`];
             /// run in release.
             #[test]
-            #[ignore = "long-running; needs a CORE-MATH checkout under research/"]
             fn $name() {
                 sweep($func);
             }
@@ -466,6 +485,7 @@ macro_rules! sweeps {
     };
 }
 
+#[cfg(all(test, feature = "crmath-sweeps"))]
 sweeps! {
     sweep_sin => Func::Sin,
     sweep_cos => Func::Cos,
@@ -482,7 +502,7 @@ sweeps! {
 
 /// Random inputs against the oracle, beyond what the golden file pins.
 #[test]
-#[ignore = "long-running; run in release"]
+#[cfg(feature = "crmath-sweeps")]
 fn random_against_oracle() {
     let mut rng = TestRng::new(0xdead_beef);
     for f in Func::ALL {
@@ -498,11 +518,9 @@ fn random_against_oracle() {
     }
 }
 
-/// Rewrites the golden file. Run after a deliberate change to the inputs:
-/// `brokkr test regenerate_crmath_golden --release`.
-#[test]
-#[ignore = "rewrites tests/fixtures/crmath_golden.txt"]
-fn regenerate_crmath_golden() {
+/// Build golden bytes for the explicit example tool, never a test entry point.
+#[cfg(not(test))]
+pub(crate) fn regenerate_crmath_golden() -> String {
     // Read and check every corpus before certifying anything.
     let corpora = Func::ALL.map(worst_cases);
     let mut out = String::new();
@@ -510,7 +528,7 @@ fn regenerate_crmath_golden() {
         "# Correctly rounded results of the deterministic math kernels (src/crmath).\n\
          # Format: function x-bits [y-bits] result-bits, hex IEEE 754 binary64; nan is any NaN.\n\
          # Certified by the interval oracle in src/crmath/tests/oracle.rs. Regenerate with\n\
-         # `brokkr test regenerate_crmath_golden --release` (worst cases need research/core-math).\n",
+         # `brokkr run --release regenerate_crmath_golden -- OUTPUT` (needs research/core-math).\n",
     );
     writeln!(
         out,
@@ -557,5 +575,5 @@ fn regenerate_crmath_golden() {
             .expect("writing to a String cannot fail");
         }
     }
-    std::fs::write(GOLDEN_PATH, out).expect("tests/fixtures is writable");
+    out
 }

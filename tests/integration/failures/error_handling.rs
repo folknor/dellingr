@@ -929,8 +929,8 @@ fn table_sort_inconsistent_comparator_terminates_deterministically() {
 #[test]
 fn table_sort_charges_before_mutating() {
     // At an exhausted budget the sort must be blocked BEFORE it mutates the
-    // table or runs the comparator (L18). table_sort charges its cost up front,
-    // so with budget 0 it errors instead of sorting.
+    // table or runs the comparator. table_sort charges its cost up front, so
+    // with budget 0 it errors instead of sorting.
     let mut state = State::new();
     support::eval(&mut state, "return {3, 1, 2}", 1);
 

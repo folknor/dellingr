@@ -2,8 +2,14 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use dellingr::{Program, ScopeCost, State};
+use dellingr::{ArgCount, LuaType, Program, RetCount, ScopeCost, State};
 use xxhash_rust::xxh3::xxh3_128;
+
+use crate::support;
+
+const BENCH_SETUP_COST_BUDGET: i64 = 2_000_000;
+const BENCH_KERNEL_COST_BUDGET: i64 = 40_000_000;
+const BENCH_SCRIPT_WORKERS: usize = 8;
 
 // The generated parse probe has no separate verdict-side benchmark file.
 const SAME_FILE_WORKLOAD_ALLOWLIST: &[(&str, &str)] =
@@ -128,6 +134,150 @@ fn workload_string(registration: &toml::Value, key: &str, workload: &str) -> Str
     value.to_owned()
 }
 
+fn runtime_source(
+    source: &str,
+    expected_loop: &str,
+    expected_print: &str,
+) -> Result<String, String> {
+    let lines = source.lines().collect::<Vec<_>>();
+    let footer_lines = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| !line.trim().is_empty())
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if footer_lines.len() < 2 {
+        return Err("standalone footer is missing".to_owned());
+    }
+
+    let loop_index = footer_lines[footer_lines.len() - 2];
+    let print_index = footer_lines[footer_lines.len() - 1];
+    if lines[loop_index].trim() != expected_loop || lines[print_index].trim() != expected_print {
+        return Err("standalone footer changed before runtime validation".to_owned());
+    }
+
+    Ok(lines
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != loop_index && *index != print_index)
+        .map(|(_, line)| *line)
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+fn one_kernel_source(source: &str) -> Result<(String, bool), String> {
+    let mut lines = Vec::new();
+    let mut patched_repeat = false;
+
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        let Some(after_name) = trimmed.strip_prefix("local K") else {
+            lines.push(line.to_owned());
+            continue;
+        };
+        let Some(repeats) = after_name.trim_start().strip_prefix('=') else {
+            lines.push(line.to_owned());
+            continue;
+        };
+        if patched_repeat {
+            return Err("more than one local K declaration".to_owned());
+        }
+        let repeats = repeats.trim_start();
+        let digits = repeats
+            .bytes()
+            .take_while(u8::is_ascii_digit)
+            .count();
+        if digits == 0 {
+            return Err("local K must have an integer value".to_owned());
+        }
+        let suffix = &repeats[digits..];
+        if !suffix.trim().is_empty() && !suffix.trim_start().starts_with("--") {
+            return Err("local K must use a single integer literal".to_owned());
+        }
+
+        let indentation = &line[..line.len() - trimmed.len()];
+        lines.push(format!("{indentation}local K = 1{suffix}"));
+        patched_repeat = true;
+    }
+
+    Ok((lines.join("\n"), patched_repeat))
+}
+
+fn run_bench_once(script_path: &Path, source: &str, bench_function: &str) -> Result<(), String> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let relative_path = script_path.strip_prefix(root).map_err(|error| {
+        format!(
+            "{} is outside the repository: {error}",
+            script_path.display()
+        )
+    })?;
+    let display_path = relative_path.to_string_lossy().replace('\\', "/");
+    let display_stem = relative_path
+        .with_extension("")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let expected_loop = format!("for i = 1, 30 do {bench_function}() end");
+    let expected_print = format!("print(\"{display_stem}: true\")");
+    let source = runtime_source(source, &expected_loop, &expected_print)
+        .map_err(|error| format!("{display_path}: {error}"))?;
+    let (mut source, patched_repeat) =
+        one_kernel_source(&source).map_err(|error| format!("{display_path}: {error}"))?;
+    let local_kernel = source
+        .lines()
+        .any(|line| line.trim() == "local function kernel()");
+    let kernel_probe = "__dellingr_bench_kernel_probe";
+    let function_to_call = if !patched_repeat && local_kernel {
+        source.push_str(&format!(
+            "\nfunction {kernel_probe}() return kernel() end\n"
+        ));
+        kernel_probe
+    } else {
+        bench_function
+    };
+    let program = Program::compile(&source, Some(display_path.as_bytes()))
+        .map_err(|error| format!("{display_path} does not parse: {error}"))?;
+
+    let mut state = State::new();
+    state.set_cost_budget(BENCH_SETUP_COST_BUDGET);
+    state
+        .load(&program)
+        .map_err(|error| format!("{display_path} does not load: {error}"))?;
+    state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .map_err(|error| format!("{display_path} setup failed: {error}"))?;
+    state
+        .get_global(bench_function)
+        .map_err(|error| format!("{display_path} cannot read {bench_function}: {error}"))?;
+    let actual_type = state.typ(-1);
+    if actual_type != LuaType::Function {
+        return Err(format!(
+            "{display_path} did not install a global {bench_function} function (got {actual_type})"
+        ));
+    }
+    state
+        .pop(1)
+        .map_err(|error| format!("{display_path} cannot clear the checked function: {error}"))?;
+    state
+        .get_global(function_to_call)
+        .map_err(|error| format!("{display_path} cannot read {function_to_call}: {error}"))?;
+    if state.typ(-1) != LuaType::Function {
+        return Err(format!(
+            "{display_path} did not install a callable {function_to_call}"
+        ));
+    }
+
+    state.set_cost_budget(BENCH_KERNEL_COST_BUDGET);
+    state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .map_err(|error| format!("{display_path} {function_to_call} failed: {error}"))
+}
+
+fn run_bench_scripts(scripts: &[(PathBuf, String)], bench_function: &str) -> Vec<String> {
+    support::parallel_failures(scripts, BENCH_SCRIPT_WORKERS, |(path, source)| {
+        run_bench_once(path, source, bench_function).err()
+    })
+}
+
 fn scope<'a>(analysis: &'a dellingr::CostAnalysis, name: &str) -> &'a ScopeCost {
     analysis
         .root
@@ -231,6 +381,7 @@ fn bench_scripts_parse_and_follow_the_standalone_footer_contract() {
 
     let bench_function = hotpath_bench_function();
     let expected_loop = format!("for i = 1, 30 do {bench_function}() end");
+    let mut scripts_to_execute = Vec::with_capacity(scripts.len());
 
     for script_path in scripts {
         let relative_path = script_path.strip_prefix(&root).unwrap_or_else(|error| {
@@ -239,7 +390,6 @@ fn bench_scripts_parse_and_follow_the_standalone_footer_contract() {
                 script_path.display()
             )
         });
-        let display_path = relative_path.to_string_lossy().replace('\\', "/");
         let source = fs::read_to_string(&script_path)
             .unwrap_or_else(|error| panic!("cannot read {}: {error}", script_path.display()));
 
@@ -302,14 +452,15 @@ fn bench_scripts_parse_and_follow_the_standalone_footer_contract() {
             script_path.display()
         );
 
-        let mut state = State::new();
-        let name = format!("@{display_path}");
-        if let Err(error) = Program::compile(&source, Some(name.as_bytes()))
-            .and_then(|program| state.load(&program))
-        {
-            panic!("{} does not parse: {error}", script_path.display());
-        }
+        scripts_to_execute.push((script_path, source));
     }
+
+    let failures = run_bench_scripts(&scripts_to_execute, bench_function);
+    assert!(
+        failures.is_empty(),
+        "bench scripts failed runtime validation:\n{}",
+        failures.join("\n")
+    );
 }
 
 #[test]

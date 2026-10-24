@@ -5,6 +5,11 @@ use std::path::PathBuf;
 
 #[path = "../tests/common/save_golden_program.rs"]
 mod save_golden_program;
+// This tool's destination is the shared fixture path, so the explicit
+// destination parser the other regeneration tools use goes unused here.
+#[allow(dead_code)]
+#[path = "tools/output.rs"]
+mod output;
 
 fn main() {
     let bytes = save_golden_program::golden_bytes();
@@ -20,17 +25,5 @@ fn main() {
         })
         .map(PathBuf::from)
         .expect("the current directory should be inside the dellingr repository");
-    let fixture = root.join(save_golden_program::GOLDEN_FIXTURE);
-    let current = match std::fs::read(&fixture) {
-        Ok(current) => Some(current),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => panic!("golden fixture should be readable: {error}"),
-    };
-
-    if current.as_deref() == Some(bytes.as_slice()) {
-        println!("unchanged {}", fixture.display());
-    } else {
-        std::fs::write(&fixture, bytes).expect("golden fixture should be writable");
-        println!("wrote {}", fixture.display());
-    }
+    output::write_changed(&root.join(save_golden_program::GOLDEN_FIXTURE), &bytes);
 }

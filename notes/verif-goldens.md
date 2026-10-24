@@ -109,22 +109,6 @@ released list enforce it. The release process appends to the list.
 Enforceable: yes, as a test; editing a pinned hash stays possible but becomes a
 deliberate, visible act.
 
-## VD-003 - The opcode-encoding fixture omits the replay-visible columns
-
-Reported by: compiler-cost.
-
-`tests/fixtures/opcode_encoding.txt` pins opcode numbers, builtin slots, cache
-operand encodings and jump encodings against the snapshot `format=`. It does not
-pin each opcode's `Layout` (which fixes the reserved bits the verifier rejects,
-so it is snapshot-visible) or its `OpcodeCost` class (cost-model-visible).
-Reordering layouts or reclassifying costs does not touch the fixture.
-
-Fix: write `OP_ADD_RR=24 Abc Arithmetic` per line and add a `cost_model=<N>`
-line, so a cost-class change fails this fixture and names the version that has
-to move.
-
-Enforceable: the existing test holds it.
-
 ## VD-004 - `COST_MODEL_VERSION` discipline covers 18 sources, and does not force a bump
 
 Reported by: compiler-cost.

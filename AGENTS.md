@@ -193,10 +193,10 @@ boundary and operand contract. Handler writes survive an error.
 ## Tests
 
 - There are two test targets. `tests/integration/` (`main.rs`) is one crate holding every suite that can share a process, as modules grouped by subject: `cli`, `compiler`, `corpus`, `cost`, `failures`, `host`, `library`, `runtime`, and `snapshot`, which compiles only under the `snapshot` feature. A focused run names a subject or a file by module path (`brokkr test snapshot::`, `brokkr test gc_upvalues::`); the filter is a substring, so no module may end with a subject's name (the library's unit tests still match by subject: `compiler::` also runs the compiler's unit tests). Its `support` module holds the CLI binary path, CLI spawning, scratch files, the shared compile-load-call helpers (`support::run`, `eval`, `run_error`, `eval_number`, `cost_of`, ...) and `Recorder`, a `HostCallbacks` that records prints and error notifications. `tests/native_stack.rs` is the other target, kept apart because the release sweeps build it alone and an overflow at the envelope's edge aborts its process. `tests/common/` holds only files another target also includes by path. `corpus::test_conventions` keeps that shape: no other top-level target, every source reached by `mod` declarations from `main.rs` (a `cfg` only on its allowlist), no dead-code allowances or file-level `cfg`s, and a `// process-global:` comment on every `static`, panic-hook, environment or working-directory use; `scripts/test_tree_anchor.py`, a `brokkr check` script check, confirms from outside the crate that those tests still compile and run. The suites share one process, so a new one must not leave state another test can observe.
-- `tests/integration/corpus/run_examples.rs` - runs every regular Lua file under `examples/` with the binary cargo built for the test run (`support` owns the binary path and `tests/common/examples.rs` the shared, manifest-rooted example list; no test may reference `target/` or spawn cargo), in parallel worker threads. The shared list skips symlinks and orders relative paths by encoded bytes to match `find -type f` and `LC_ALL=C sort`. That includes the stress examples and the generated `parse/large_source.lua`. Each example runs under `scripts/test_limited.sh` (so its memory cap applies) with a fixed 60-second timeout. The runner uses at most eight workers, bounded by available parallelism and the number of examples. It fails on timeout, nonzero exit, unexpected stderr, if any stdout line ends with `: false`, or if a file defining `_bench()` prints no line ending in `: true`. Examples that print test results follow the convention `print("test name: " .. tostring(condition))`. Adding an example that prints a line ending in `: false` will fail this test.
+- `tests/integration/corpus/run_examples.rs` - runs every regular Lua file under `examples/` with the binary cargo built for the test run (`support` owns the binary path and `tests/common/examples.rs` the shared, manifest-rooted example list; no test may reference `target/` or spawn cargo), in parallel worker threads. The shared list skips symlinks and orders relative paths by encoded bytes to match `find -type f` and `LC_ALL=C sort`. That includes the stress examples and the generated `parse/large_source.lua`. Each example runs under `scripts/test_limited.sh` (so its memory cap applies) with a fixed 60-second timeout. The runner uses at most eight workers, bounded by available parallelism and the number of examples. It fails on timeout, nonzero exit, unexpected stderr, if any stdout line ends with `: false`, or if a file whose main chunk assigns a global `_bench` (read from its compiled bytecode, so a `local function _bench` does not count) prints no line ending in `: true`. Examples that print test results follow the convention `print("test name: " .. tostring(condition))`. Adding an example that prints a line ending in `: false` will fail this test.
 - `tests/native_stack.rs` backs docs/limits.md's "Envelope": each path in `reference/native-calls.toml` recursed to `MAX_NATIVE_CALL_DEPTH` under every metamethod chain kind and deepest-point leaf, on `tests/common/stack.rs`'s profile-dependent thread size. `brokkr.toml` runs it in dev (the default and snapshot sweeps) and release (`release-native-stack` and `release-native-stack-snapshot`). A new call path into Lua needs a scenario there; reference/native-calls.md has the steps.
 - `tests/integration/corpus/diff_test.rs` is the differential gate: it uses the same shared example list, and checks that its ordered paths match `scripts/diff_test.sh --list-examples`. It drives the shell gate over the whole corpus in partitions that run concurrently inside one test, once per `[[check]]` feature shape in `brokkr.toml` (there is no separate brokkr script check for it), and also checks malformed timeout rejection and nonempty marker reasons. The corpus partitions are compiled out under the `hotpath` feature. `scripts/diff_gate.sh` is an optional debug-build wrapper around `diff_test.sh` for direct runs; nothing in `brokkr check` invokes it. Mark intentional divergences with a `-- DIFF: <reason>` comment; dellingr must still succeed, but the references are skipped. A file carrying a `-- SKIP-DIFF: <reason>` line is not run by the differential gate. Reference Lua is required for unmarked examples; the test leaves that check, and its error message, to `diff_test.sh`.
-- `tests/integration/corpus/bench_scripts.rs` checks every `xxh128` and `hotpath_xxh128` pin in `brokkr.toml` against the registered file bytes, the bench/ footer contract, and that each `brokkr.toml` workload's `file` and `hotpath_file` give their `kernel` and shared helper functions matching `analyze_cost` fingerprints, which guards the same-kernel pairing described under Hotpath benchmarks.
+- `tests/integration/corpus/bench_scripts.rs` checks every `xxh128` and `hotpath_xxh128` pin in `brokkr.toml` against the registered file bytes, the bench/ footer contract, that each bench/ file runs (its setup without the footer, then `_bench` with `local K` patched to 1, or its local `kernel()` once when it has no `K`, or else one full `_bench` call, each phase under a cost budget, loaded under the harness's bare-path chunk name), and that each `brokkr.toml` workload's `file` and `hotpath_file` give their `kernel` and shared helper functions matching `analyze_cost` fingerprints, which guards the same-kernel pairing described under Hotpath benchmarks.
 - Unit tests live alongside their modules (e.g. `src/vm/object.rs` has GC tests).
 - To intentionally refresh `tests/fixtures/save_golden_current.bin` after a
   serializer format change, run
@@ -212,14 +212,38 @@ corpus execution, including event identity, surviving operands, notification
 count, State reuse and snapshot quiescence. Recovery execution is covered
 separately by focused caught-and-continue tests. The curated
 `instrumentation-faults` `[[check]]` shape in `brokkr.toml` enables it together
-with `snapshot`, `hotpath` and `hotpath-alloc`: it compiles and lints every
-target under those features and runs only the refusal sweep, the gmatch
-recovery test and the library's fault-injection unit tests.
+with `snapshot`, `hotpath`, `hotpath-alloc` and `crmath-sweeps`: it compiles
+and lints every target under those features and runs only the refusal sweep,
+the gmatch recovery test and the library's fault-injection unit tests.
 
 The budget and natural-failure sweeps also run in ordinary check shapes.
 `brokkr test error_boundary --release` exercises them without debug checks;
 `brokkr test native_bytes_per_level` (also with `--release`) prints the
 on-demand recurring-stack probe in default and snapshot configurations.
+
+The error-boundary transcript is compared with
+`tests/fixtures/error_boundary_transcript.txt` in the ordinary sweep. After
+reviewing an intentional change, regenerate it with
+`brokkr run --debug regenerate_error_boundary -- tests/fixtures/error_boundary_transcript.txt`.
+The tool requires an output path, so separate paths can also retain A/B evidence.
+No test writes this fixture.
+
+Math fixture regeneration is also an explicit tool:
+`brokkr run --release regenerate_crmath_golden -- tests/fixtures/crmath_golden.txt`.
+It requires the pinned `research/core-math` checkout and an output path. The
+non-default `crmath-sweeps` feature opts into the long oracle sweeps and the
+checkout-dependent corpus and table checks; it gates only the library's own
+test code, so it changes nothing for a consumer. The default and snapshot
+check shapes omit it, and the curated `instrumentation-faults` shape enables
+it only to compile and lint that code, filtering the tests out. Run those
+checks deliberately with
+`brokkr test crmath::tests::golden --release --features crmath-sweeps`.
+
+Every `regenerate_*` example (these two and `regenerate_save_golden`) writes
+through the shared `examples/tools/output.rs`, which leaves an unchanged file
+untouched and reports `wrote` or `unchanged`. The Python generators
+(`examples/parse/generate.py`, `scripts/crmath_tables.py` and the notes
+helpers) share the same policy through `scripts/write_if_changed.py`.
 
 ## Hotpath benchmarks
 
@@ -295,7 +319,7 @@ stays consistent.
 scripts and same hyperfine pass, but against [lua-rs](https://github.com/ianm199/lua-rs)
 (the only comparable pure-Rust Lua VM) anchored to C Lua 5.4 and the
 LuaJIT floor. It expects a `lua-rs` release binary built from a clone in
-`research/lua-rs/` (build command in the script header); `research/` is
+`research/lua-rs/` (the script header names the binary path it reads); `research/` is
 an area for local upstream checkouts, which remain ignored. The comparison
 script lives at `research/bench_luars.sh`. The README's `lua-rs` column comes
 from this script - its footnote pins the captured date and upstream commit, so

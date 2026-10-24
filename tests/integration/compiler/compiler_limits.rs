@@ -12,9 +12,7 @@ fn fixed_args(count: usize) -> String {
 }
 
 fn expect_syntax_error(code: &str, expected: fn(&SyntaxError) -> bool) {
-    let err = dellingr::Program::compile(code, None)
-        .and_then(|program| State::new().load(&program))
-        .expect_err("source should not compile");
+    let err = Program::compile(code, None).expect_err("source should not compile");
     match err.kind() {
         ErrorKind::SyntaxError(kind) if expected(kind) => {}
         _ => panic!("unexpected error: {err}"),
@@ -125,8 +123,9 @@ fn parameter_limit_includes_method_self() {
 }
 
 #[test]
-fn long_jumps_compile_and_run() {
-    // Far past the 16-bit jump range of the stack VM, inside the 24-bit one.
+fn long_control_flow_runs_as_a_smoke_test() {
+    // Exercise large conditional and loop branch spans. The codegen unit test
+    // covers the representable jump boundary.
     let body = "x = 1\n".repeat(40_000);
     for source in [
         format!("if false then\n{body}end return 7"),
@@ -143,11 +142,11 @@ fn long_jumps_compile_and_run() {
 fn set_field_sites_past_the_cache_capacity_use_the_uncached_path() {
     let assignments = "t.x = nil\n".repeat(255);
     let source = format!("local t = {{}}\n{assignments}");
-    dellingr::Program::compile(&source, None)
-        .and_then(|program| State::new().load(&program))
-        .expect("255 field assignment sites should compile");
-    Program::compile(&source, None)
-        .expect("Program::compile should accept 255 field assignment sites");
+    let program =
+        Program::compile(&source, None).expect("255 field assignment sites should compile");
+    State::new()
+        .load(&program)
+        .expect("compiled field assignments should load");
 
     let uncached = "t.x = 1\n".repeat(256);
     let source = format!("local t = {{}}\n{uncached}return t.x");
@@ -157,8 +156,6 @@ fn set_field_sites_past_the_cache_capacity_use_the_uncached_path() {
         state.to_number(-1).expect("field value should be numeric"),
         1.0
     );
-    Program::compile(&source, None)
-        .expect("Program::compile should accept uncached set-field sites");
 }
 
 #[test]

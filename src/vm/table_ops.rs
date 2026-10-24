@@ -630,8 +630,8 @@ impl State {
     /// Charges `max(n, 1)` itself, before the comparator runs or the table is
     /// mutated, and returns `n`; callers must not charge again.
     ///
-    /// Crate-internal (VM-007): the comparator slot is `table.sort`'s argument
-    /// layout, a stdlib calling convention a host has no reason to mirror.
+    /// The comparator slot follows `table.sort`'s argument layout, a stdlib
+    /// calling convention a host has no reason to mirror.
     /// Hosts sort by calling `table.sort` through the stack.
     pub(crate) fn table_sort(&mut self, table_idx: isize, has_comp: bool) -> Result<usize> {
         let idx = self.convert_idx(table_idx)?;

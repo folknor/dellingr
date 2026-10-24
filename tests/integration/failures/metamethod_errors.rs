@@ -3,8 +3,8 @@
 //! Verifies that invalid metamethod handlers produce errors instead of
 //! silently returning nil or falling back to raw assignment.
 
-use dellingr::State;
-use dellingr::error::ErrorKind;
+use dellingr::error::{ErrorKind, TypeError};
+use dellingr::{LuaType, State};
 
 use crate::support;
 
@@ -230,7 +230,7 @@ fn field_cache_does_not_cache_index_metamethod_result() {
 }
 
 #[test]
-fn set_field_cache_value_update_takes_fast_path() {
+fn repeated_field_updates_store_the_final_value() {
     let val = support::eval_number(
         r#"
         local t = { count = 0 }
@@ -395,17 +395,44 @@ fn index_string_handler_uses_string_library_for_dot_and_bracket_keys() {
 
 #[test]
 fn function_type_errors_name_functions() {
-    for code in [
-        "local f = function() end; return f + 1",
-        "local f = function() end; return f .. 'x'",
-        "local f = function() end; return #f",
-        "local f = function() end; return f < 1",
-        "local f = function() end; return f.x",
-    ] {
+    type KindCheck = fn(&ErrorKind) -> bool;
+    let cases: [(&str, KindCheck); 5] = [
+        ("local f = function() end; return f + 1", |kind| {
+            matches!(
+                kind,
+                ErrorKind::TypeError(TypeError::Arithmetic(LuaType::Function))
+            )
+        }),
+        ("local f = function() end; return f .. 'x'", |kind| {
+            matches!(
+                kind,
+                ErrorKind::TypeError(TypeError::Concat(LuaType::Function))
+            )
+        }),
+        ("local f = function() end; return #f", |kind| {
+            matches!(
+                kind,
+                ErrorKind::TypeError(TypeError::Length(LuaType::Function))
+            )
+        }),
+        ("local f = function() end; return f < 1", |kind| {
+            matches!(
+                kind,
+                ErrorKind::TypeError(TypeError::Comparison(LuaType::Function, LuaType::Number))
+            )
+        }),
+        ("local f = function() end; return f.x", |kind| {
+            matches!(
+                kind,
+                ErrorKind::TypeError(TypeError::TableIndex(LuaType::Function))
+            )
+        }),
+    ];
+    for (code, has_expected_kind) in cases {
         let error = support::run_error(code);
         assert!(
-            error.to_string().contains("function"),
-            "function error must name function: {error}"
+            has_expected_kind(error.kind()),
+            "unexpected error kind for {code}: {error}"
         );
     }
 }
@@ -441,17 +468,18 @@ fn newindex_table_handler() {
 
 #[test]
 fn newindex_function_handler() {
-    expect_ok(
+    let val = support::eval_number(
         r#"
-        local log = {}
         local t = setmetatable({}, {
             __newindex = function(self, key, value)
                 rawset(self, key, value * 2)
             end
         })
         t.x = 21
+        return t.x
     "#,
     );
+    assert_eq!(val, 42.0);
 }
 
 #[test]

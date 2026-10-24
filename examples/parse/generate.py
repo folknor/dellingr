@@ -29,6 +29,9 @@ import pathlib
 import re
 import sys
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "scripts"))
+from write_if_changed import write_if_changed
+
 FUNCTION_COUNT = 200
 # Top-level functions besides the generated nodes: mix, scale, tag, _bench.
 EXTRA_TOP_LEVEL_FUNCTIONS = 4
@@ -149,8 +152,8 @@ def main():
     if sys.argv[1:]:
         raise SystemExit("usage: python3 examples/parse/generate.py [--check]")
 
-    OUT.write_text(body, encoding="utf-8")
-    print(f"wrote {OUT} ({body.count(chr(10))} lines)")
+    if write_if_changed(OUT, body.encode("utf-8")):
+        print(f"wrote {OUT} ({body.count(chr(10))} lines)")
 
 
 if __name__ == "__main__":

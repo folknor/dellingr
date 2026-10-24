@@ -1,5 +1,5 @@
-//! VM-041 (`print` output cap), STD-014 (`math.random(m, n)` range) and the
-//! STD-015 stdlib divergences: `string.sub` argument order and `table.concat`
+//! Standard-library divergences include the `print` output cap,
+//! `math.random(m, n)` range, `string.sub` argument order, and `table.concat`
 //! element errors and key-range refusal, including both unpack entry points.
 
 use dellingr::error::{Error, ErrorKind};

@@ -31,7 +31,11 @@ fn string_library_coerces_number_subjects_and_patterns() {
 #[test]
 fn gsub_dot_matches_utf8_bytes() {
     let mut state = State::new();
-    support::eval(&mut state, r#"return string.gsub("⚠", ".", "X")"#, 2);
+    support::eval(
+        &mut state,
+        r#"return string.gsub("\226\154\160", ".", "X")"#,
+        2,
+    );
 
     assert_eq!(state.to_bytes(-2).unwrap(), b"XXX");
     assert_eq!(state.to_number(-1).unwrap(), 3.0);
@@ -40,7 +44,11 @@ fn gsub_dot_matches_utf8_bytes() {
 #[test]
 fn gsub_can_remove_multibyte_string_bytewise() {
     let mut state = State::new();
-    support::eval(&mut state, r#"return string.gsub("⚠", ".", "")"#, 2);
+    support::eval(
+        &mut state,
+        r#"return string.gsub("\226\154\160", ".", "")"#,
+        2,
+    );
 
     assert_eq!(state.to_bytes(-2).unwrap(), b"");
     assert_eq!(state.to_number(-1).unwrap(), 3.0);
@@ -50,7 +58,7 @@ fn gsub_can_remove_multibyte_string_bytewise() {
 fn gsub_can_produce_invalid_utf8() {
     let state = run_one(
         r#"
-        return string.gsub("⚠", ".", function()
+        return string.gsub("\226\154\160", ".", function()
             return string.format("%c", 255)
         end)
         "#,
@@ -174,8 +182,8 @@ fn gmatch_closures_keep_independent_state() {
 fn sub_and_reverse_are_bytewise() {
     let state = run_one(
         r#"
-        local first = string.sub("⚠", 1, 1)
-        local reversed = string.reverse("⚠")
+        local first = string.sub("\226\154\160", 1, 1)
+        local reversed = string.reverse("\226\154\160")
         return first .. reversed
         "#,
     );
@@ -191,7 +199,7 @@ fn push_bytes_and_to_bytes_preserve_invalid_utf8() {
         .expect("short test string fits");
 
     assert_eq!(state.to_bytes(-1).unwrap(), &[0xff, b'a']);
-    assert_eq!(state.to_string(-1).unwrap(), "�a");
+    assert_eq!(state.to_string(-1).unwrap(), "\u{fffd}a");
 }
 
 #[test]

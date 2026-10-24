@@ -3,6 +3,7 @@ import re
 
 
 _FENCE_START = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
+_SECTION_HEADING = re.compile(r" {0,3}#{1,2}(?:[ \t]+|$)")
 
 
 def section_heading_flags(lines):
@@ -30,5 +31,5 @@ def section_heading_flags(lines):
                 flags.append(False)
                 continue
 
-        flags.append(markdown_line.startswith("## "))
+        flags.append(_SECTION_HEADING.match(markdown_line) is not None)
     return flags

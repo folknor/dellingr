@@ -1,7 +1,7 @@
 use dellingr::State;
 
 #[test]
-fn custom_gc_policy_is_used_before_and_after_state_construction() {
+fn custom_gc_policy_sets_initial_and_recomputed_thresholds() {
     let initial_threshold = 1_000_000;
     let minimum_threshold = 7;
     let growth_factor = 3;
@@ -18,6 +18,24 @@ fn custom_gc_policy_is_used_before_and_after_state_construction() {
             .saturating_mul(growth_factor)
             .max(minimum_threshold)
     );
+}
+
+#[test]
+fn minimum_threshold_wins_when_growth_would_be_smaller() {
+    let mut state = State::raw();
+    state.gc_collect();
+    let survivors = state.heap_size();
+    let growth_factor = 2;
+    let minimum_threshold = survivors
+        .checked_mul(growth_factor)
+        .and_then(|growth_threshold| growth_threshold.checked_add(1))
+        .expect("raw state heap leaves room for a larger minimum threshold");
+
+    state.gc_set_policy(minimum_threshold, minimum_threshold, growth_factor);
+    state.gc_collect();
+
+    assert_eq!(state.heap_size(), survivors);
+    assert_eq!(state.gc_threshold(), minimum_threshold);
 }
 
 #[test]

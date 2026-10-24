@@ -994,6 +994,19 @@ const CALLBACKS: &[(&str, dellingr::RustFunc)] = &[
     ("check_gc", check_gc),
 ];
 
+/// The documented native-stack envelope is measured only on x86_64 Linux.
+/// Fail before entering a deep stack path on other targets so the envelope
+/// cannot appear to pass where it has not been stated.
+fn require_native_stack_target(test: &str) {
+    if !cfg!(all(target_arch = "x86_64", target_os = "linux")) {
+        panic!(
+            "{test}: native stack envelope is stated only for x86_64 Linux; current target is {}-{}",
+            std::env::consts::ARCH,
+            std::env::consts::OS,
+        );
+    }
+}
+
 fn set_string(state: &mut State, name: &str, value: &str) -> dellingr::Result<()> {
     state.push_string(value)?;
     state.set_global(name)
@@ -1151,6 +1164,7 @@ fn check(scenario: &Scenario, chain: &Chain, leaf: Option<&Leaf>, outcome: &Outc
 
 #[test]
 fn every_limit_at_once_fits_the_limit_test_stack() {
+    require_native_stack_target("every_limit_at_once_fits_the_limit_test_stack");
     stack::on_limit_test_stack("every_limit_at_once", || {
         for scenario in SCENARIOS {
             for chain in CHAINS {
@@ -1168,6 +1182,7 @@ fn every_limit_at_once_fits_the_limit_test_stack() {
 
 #[test]
 fn recursive_index_function_stops_at_the_native_call_limit() {
+    require_native_stack_target("recursive_index_function_stops_at_the_native_call_limit");
     // Every handler is a call made from Rust, and the native limit is the
     // lower one, so it refuses the recursion before the metamethod depth
     // would.
@@ -1235,6 +1250,7 @@ fn deepest_nested_functions_parse_on_the_parse_test_stack() {
 #[test]
 #[ignore = "on-demand native stack measurement"]
 fn native_bytes_per_level() {
+    require_native_stack_target("native_bytes_per_level");
     fn record(state: &mut State) -> dellingr::Result<u8> {
         let local = 0_u8;
         let address = std::ptr::from_ref(&local).addr();
@@ -1288,9 +1304,22 @@ fn native_bytes_per_level() {
             let program = Program::compile(source, None).unwrap();
             state.load(&program).unwrap();
             let result = state.call(ArgCount::Fixed(0), RetCount::Fixed(0));
-            if let Err(error) = result
-                && !scenario.raises
-            {
+            if scenario.raises {
+                match result.as_ref().map_err(dellingr::error::Error::kind) {
+                    Err(ErrorKind::ScriptError {
+                        value:
+                            ErrorValue::Object {
+                                value_type: LuaType::Table,
+                                rendering,
+                            },
+                        ..
+                    }) if rendering == b"r" => {}
+                    other => panic!(
+                        "{}: expected the step's error(obj) rendered as r, got {other:?}",
+                        scenario.name
+                    ),
+                }
+            } else if let Err(error) = result {
                 panic!("{}: {error}", scenario.name);
             }
         }

@@ -1,6 +1,6 @@
 //! Cost-model invariants for data-dependent native library work.
 
-use dellingr::error::{Error, ErrorKind};
+use dellingr::error::{Error, ErrorKind, LibraryError};
 use dellingr::{ArgCount, LuaType, RetCount, State};
 
 use crate::support;
@@ -50,7 +50,7 @@ fn gmatch_full_scan_is_linear_in_its_subject() {
 
     let short = cost(128);
     let long = cost(256);
-    assert!(long <= short.saturating_mul(3), "{short} -> {long}");
+    assert_eq!(long - short, 1152, "{short} -> {long}");
 }
 
 #[test]
@@ -313,25 +313,35 @@ fn refusal_leaves_snapshot_state_quiescent() {
 
 #[test]
 fn table_concat_cost_is_identical_with_or_without_a_budget() {
-    for source in [
-        "return table.concat({'a', 'bb'}, ',')",
-        "return table.concat({'a', false, 'bb'}, ',')",
+    for (source, expected_cost, expect_invalid_value) in [
+        ("return table.concat({'a', 'bb'}, ',')", 10, false),
+        ("return table.concat({'a', false, 'bb'}, ',')", 9, true),
     ] {
-        let mut count_only = State::new();
-        support::load(&mut count_only, source);
-        // Some cases in this list fail on an invalid element on purpose. The
-        // outcome is irrelevant here; only the cost the two modes report is.
-        match count_only.call(ArgCount::Fixed(0), RetCount::Fixed(1)) {
-            Ok(_) | Err(_) => {}
+        for budget in [None, Some(1_000_000)] {
+            let mut state = State::new();
+            if let Some(budget) = budget {
+                state.set_cost_budget(budget);
+            }
+            support::load(&mut state, source);
+            let result = state.call(ArgCount::Fixed(0), RetCount::Fixed(1));
+            if expect_invalid_value {
+                let error = result.expect_err("concat rejects a boolean element");
+                assert!(matches!(
+                    error.kind(),
+                    ErrorKind::LibraryError(LibraryError::InvalidConcatValue {
+                        value_type: LuaType::Boolean,
+                        index: 2,
+                    })
+                ));
+            } else {
+                result.expect("concat accepts string elements");
+                assert_eq!(
+                    state.to_string(-1).expect("concat returns a string"),
+                    "a,bb"
+                );
+            }
+            assert_eq!(state.cost_used(), expected_cost, "{source}");
         }
-
-        let mut finite = State::new();
-        finite.set_cost_budget(1_000_000);
-        support::load(&mut finite, source);
-        match finite.call(ArgCount::Fixed(0), RetCount::Fixed(1)) {
-            Ok(_) | Err(_) => {}
-        }
-        assert_eq!(count_only.cost_used(), finite.cost_used(), "{source}");
     }
 }
 

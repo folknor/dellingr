@@ -274,29 +274,6 @@ walkers exist; the in-process gate rewrite in rewrites.md removes it.
 
 Enforceable: yes.
 
-## VG-010 - Generators and regenerators rewrite identical bytes
-
-Reported by: check-machinery, corpus-harness, library, snapshot.
-
-- `scripts/crmath_tables.py --generate` calls `destination.write_bytes(output)`
-  for every table file unconditionally. A no-op regeneration touches eleven
-  `src/` files, so cargo recompiles the crate and every test binary in every
-  shape.
-- `examples/parse/generate.py` always rewrites `large_source.lua`, churning
-  brokkr's mtime-cached hash.
-- `regenerate_crmath_golden` rewrites its fixture unconditionally (see also
-  bugs.md "A focused brokkr test runs ignored tests that rewrite a tracked
-  fixture").
-- `crmath_tables.py`'s mismatch path calls `destination.read_text()` with no
-  encoding, so it uses the locale default; harmless for ASCII tables,
-  `encoding="utf-8"` would make it explicit.
-
-Fix: write only when the bytes differ, using one shared helper; say so when
-skipping.
-
-Enforceable: partly. A textlint rule over `scripts/**` and `examples/**/*.py`
-can ban `.write_text(`/`.write_bytes(`/`open(..., "w")` outside the helper.
-
 ## VG-011 - The CORE-MATH pin is written in five places, and the generated tables' "do not edit by hand" is unenforced
 
 Reported by: check-machinery, library.
@@ -330,24 +307,6 @@ pointing at the constant instead of repeating the sha. The worst-case corpus
 by count and digest.
 
 Enforceable: yes.
-
-## VG-012 - `[gremlins] exclude` exempts a whole file
-
-Reported by: check-machinery, library.
-
-`brokkr.toml` has `exclude = ["tests/integration/library/string_bytes.rs"]`. The manual says
-"Entries are project-root-relative directories matched by path prefix", so
-whether a file path matches is behaviour the manual does not promise. The
-file's non-ASCII content is six lines: a literal U+26A0 in Lua source and a
-U+FFFD expectation in Rust. The whole-file exemption would hide any real
-gremlin added there later.
-
-Fix: write the Lua as `"\xE2\x9A\xA0"` (or `"\226\154\160"`) and the Rust as
-`"\u{fffd}a"`, then drop the exclusion. `brokkr check --audit` reports an
-exclusion that excuses nothing (not run by the hunter).
-
-Enforceable: yes, by deleting the exemption; a convention check could reject a
-non-empty `[gremlins] exclude`.
 
 ## VG-013 - The published package carries tests that cannot run, and ships files they do not need
 
@@ -387,32 +346,6 @@ Fix: `doctests = true` (dev sweeps only) or a `doc_only` entry, plus a
 `[rustdoc]` table.
 
 Enforceable: yes, in config.
-
-## VG-015 - Durable comments cite tracker IDs whose documents are gone
-
-Reported by: runtime, library, native-stack-errors.
-
-No file in the repository defines these IDs (not `notes/`, `docs/`,
-`reference/` or `CHANGELOG.md`):
-
-- `tests/integration/host/host_table_api_atomicity.rs` module doc: `VM-006`,
-  `VM-007`, `VM-025`; `src/vm/table_ops.rs` and
-  `tests/integration/library/stdlib_divergences.rs` cite
-  others;
-- `stdlib_divergences.rs`: `VM-041`, `STD-014`, `STD-015`;
-  `stdlib_numeric_format.rs`: `STD-004`, `STD-007`, `STD-009`;
-  `number_format_g14.rs`: `STD-005`; `string_format.rs`: `C30`;
-- `error_handling.rs::table_sort_charges_before_mutating` cites "(L18)";
-  `rustfn_error.rs` cites "(L6)" twice.
-
-They pointed at transient documents. AGENTS.md requires a code comment to carry
-its own context. The module docs mostly already state the properties, so the
-ids can simply go.
-
-Fix: replace each id with the property it names.
-
-Enforceable: yes, a `[[textlint]]` banning `\b(STD|VM)-\d{3}\b`,
-`\bC\d{2}\b:` and `\(L\d+\)` in `src/**` and `tests/**`.
 
 ## VG-016 - No `unsafe` policy lint
 
@@ -551,18 +484,3 @@ Fix: reword to "reads no environment variables of its own" and list what is
 resolved through `PATH`.
 
 Enforceable: no.
-
-## VG-024 - Nothing keeps raw `cargo` out of the scripts
-
-Reported by: check-machinery.
-
-The scripts build through `scripts/lib.sh::brokkr_artifact` (`brokkr build`),
-and `research/bench_luars.sh` builds dellingr the same way, because brokkr's
-stray reaper kills cargo processes without a brokkr owner and its rustc guard
-refuses compiles while a hold exists. Nothing stops a new script, or an edit,
-from calling `cargo` again.
-
-Fix: a `[[textlint]]` rule banning `cargo ` invocations in `scripts/**` and
-`research/*.sh`.
-
-Enforceable: yes, by that rule.

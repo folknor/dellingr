@@ -1352,7 +1352,16 @@ mod tests {
                 let slow = naive_find(&mut slow_state, haystack, needle);
                 match (&fast, &slow) {
                     (Ok(a), Ok(b)) => assert_eq!(a, b, "{haystack:?}/{needle:?} @{budget}"),
-                    (Err(_), Err(_)) => {}
+                    (Err(fast_error), Err(slow_error)) => {
+                        assert!(
+                            matches!(fast_error.kind(), ErrorKind::BudgetExceeded { .. }),
+                            "fast scan returned a non-budget error: {fast_error}"
+                        );
+                        assert!(
+                            matches!(slow_error.kind(), ErrorKind::BudgetExceeded { .. }),
+                            "naive scan returned a non-budget error: {slow_error}"
+                        );
+                    }
                     _ => panic!(
                         "budget outcome diverged for {haystack:?}/{needle:?} @{budget}: \
                          fast={fast:?} slow={slow:?}"

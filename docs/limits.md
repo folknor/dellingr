@@ -340,6 +340,8 @@ simultaneously live.
 
 How `tests/native_stack.rs` validates it, on x86-64 Linux:
 
+- The native-stack tests fail before entering a deep stack path on other
+  targets, naming x86-64 Linux as the target for this envelope.
 - The native stack a level costs is the frames on the compiled path that
   made the call, so the unit of coverage is the path, not the call site.
   Every path that can call back into Lua is listed, with its edges, in

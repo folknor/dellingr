@@ -183,7 +183,7 @@ fn byte_strings_remain_byte_exact() {
 
 #[test]
 fn quoted_floats_round_trip_through_the_parser() {
-    // C30: %q emits numbers as hex floats; the lexer accepts that syntax, so
+    // %q emits numbers as hex floats; the lexer accepts that syntax, so
     // dellingr can re-parse its own %q output to the identical value.
     for source in ["1.5", "-0.25", "3.141592653589793", "1e-300", "0.1", "1024"] {
         let quoted = support::eval_bytes(format!(r#"return string.format("%q", {source})"#));

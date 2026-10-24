@@ -7,7 +7,9 @@ use std::process::{Child, ExitStatus, Output, Stdio};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use crate::support::{examples, process};
+use dellingr::Program;
+
+use crate::support::{self, examples, process};
 
 const EXAMPLE_WORKERS: usize = 8;
 const EXAMPLE_TIMEOUT_MS: u64 = 60_000;
@@ -141,6 +143,34 @@ fn run_example(path: &Path, timeout_ms: u64) -> Result<ExampleRun, String> {
     })
 }
 
+fn defines_global_bench(source: &str) -> bool {
+    if !source.contains("_bench") {
+        return false;
+    }
+
+    let Ok(program) = Program::compile(source, None) else {
+        return false;
+    };
+    let listing = program.disassemble().to_string();
+    let root = listing
+        .split_once("\nfunction main/")
+        .map_or(listing.as_str(), |(root, _)| root);
+
+    // Root bytecode writes distinguish a global bench from a local function.
+    root.lines().any(|line| {
+        let Some((instruction, annotation)) = line.split_once("  ; ") else {
+            return false;
+        };
+        let writes_global = instruction
+            .split_whitespace()
+            .any(|part| part == "SET_GLOBAL");
+        let global_name = annotation
+            .split_once(", ")
+            .map_or(annotation, |(name, _)| name);
+        writes_global && global_name == "\"_bench\""
+    })
+}
+
 fn check_example(path: &Path, timeout_ms: u64) -> Option<String> {
     let display = path
         .strip_prefix(Path::new(env!("CARGO_MANIFEST_DIR")))
@@ -153,10 +183,7 @@ fn check_example(path: &Path, timeout_ms: u64) -> Option<String> {
         Ok(source) => source,
         Err(error) => return Some(format!("{display}: could not read source: {error}")),
     };
-    let defines_bench = source.lines().any(|line| {
-        let line = line.trim_start();
-        line.starts_with("function _bench(") || line.starts_with("local function _bench(")
-    });
+    let defines_bench = defines_global_bench(&source);
     let run = match run_example(path, timeout_ms) {
         Ok(run) => run,
         Err(error) => return Some(format!("{display}: {error}")),
@@ -201,12 +228,6 @@ fn check_example(path: &Path, timeout_ms: u64) -> Option<String> {
     }
 }
 
-fn example_worker_count(file_count: usize) -> usize {
-    let available =
-        std::thread::available_parallelism().map_or(EXAMPLE_WORKERS, std::num::NonZeroUsize::get);
-    available.min(EXAMPLE_WORKERS).min(file_count)
-}
-
 fn run_examples_bucket(name: &str) {
     let files = examples::example_corpus();
 
@@ -216,32 +237,9 @@ fn run_examples_bucket(name: &str) {
     );
 
     // Keep stress workload concurrency bounded by available parallelism.
-    let workers = example_worker_count(files.len());
-    let timeout_ms = EXAMPLE_TIMEOUT_MS;
-    let next = std::sync::atomic::AtomicUsize::new(0);
-    let mut failures: Vec<(usize, String)> = std::thread::scope(|scope| {
-        let handles = (0..workers)
-            .map(|_| {
-                scope.spawn(|| {
-                    let mut local = Vec::new();
-                    loop {
-                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let Some(path) = files.get(i) else { break };
-                        if let Some(failure) = check_example(path, timeout_ms) {
-                            local.push((i, failure));
-                        }
-                    }
-                    local
-                })
-            })
-            .collect::<Vec<_>>();
-        handles
-            .into_iter()
-            .flat_map(|handle| handle.join().expect("example worker panicked"))
-            .collect()
+    let failures = support::parallel_failures(&files, EXAMPLE_WORKERS, |path| {
+        check_example(path, EXAMPLE_TIMEOUT_MS)
     });
-    failures.sort_by_key(|(i, _)| *i);
-    let failures: Vec<String> = failures.into_iter().map(|(_, failure)| failure).collect();
 
     if !failures.is_empty() {
         panic!(

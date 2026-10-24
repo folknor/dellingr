@@ -106,24 +106,6 @@ removes a process-global from the envelope argument and the ordering argument.
 Enforceable: the eager init is structural; a unit test can assert
 `GMATCH_WRAPPER` is set after `State::new()`.
 
-## VN-004 - The envelope is stated for x86-64 Linux, and the test runs anywhere
-
-Reported by: check-machinery, native-stack-errors.
-
-`docs/limits.md` says how `tests/native_stack.rs` validates the envelope "on
-x86-64 Linux". The test is not gated by `target_arch` or `target_os`. On another
-host (aarch64, macOS, a 64 KiB-page kernel that rounds thread stacks up) it
-either passes without the doc making any claim, or overflows and aborts the whole
-binary with a message that cannot name the run (VN-008). Thread sizes also
-include whatever static TLS the C library carves out of a thread's allocation,
-which differs between the test binary and an embedder's game thread.
-
-Fix: gate the assertion to the stated target and report "envelope not stated for
-this target" elsewhere (print the arch and fail or skip), or widen the statement
-after measuring.
-
-Enforceable: by `cfg`.
-
 ## VN-005 - `cfg!(debug_assertions)` stands in for the build profile
 
 Reported by: check-machinery, corpus-harness, native-stack-errors, runtime.
@@ -256,20 +238,6 @@ rewrites.md is the alternative the runtime and library hunters prefer; the
 native-stack hunter argues against it.
 
 Enforceable: no; it is a fixture shape.
-
-## VN-010 - The byte probe swallows its own check for the raising scenario
-
-Reported by: native-stack-errors.
-
-`native_stack.rs::native_bytes_per_level`: `finish()` raises `error('uneven
-gaps')` before `report`, and the outer loop ignores any error when
-`scenario.raises`. For `error_tostring`, `finish` runs inside the `__tostring`
-handler, so an uneven gap produces no report row and no failure.
-
-Fix: for raising scenarios, require the error to be the expected `ScriptError`
-with rendering `r` (as `check` does), so the probe's own error fails it.
-
-Enforceable: by that match.
 
 ## VN-012 - Envelope and parse-depth claims checked for fewer shapes than stated
 

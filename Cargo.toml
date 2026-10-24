@@ -31,6 +31,8 @@ hotpath = ["hotpath/hotpath"]
 hotpath-alloc = ["hotpath/hotpath", "hotpath/hotpath-alloc"]
 snapshot = []
 fault-injection = []
+# Explicit opt-in for checkout-dependent and long-running math verification.
+crmath-sweeps = []
 
 [lints.rust]
 future_incompatible = "deny"
@@ -113,3 +115,13 @@ path = "examples/hotpath.rs"
 name = "regenerate_save_golden"
 path = "examples/regenerate_save_golden.rs"
 required-features = ["snapshot"]
+
+[[example]]
+name = "regenerate_crmath_golden"
+path = "examples/regenerate_crmath_golden.rs"
+test = false
+
+[[example]]
+name = "regenerate_error_boundary"
+path = "examples/regenerate_error_boundary.rs"
+test = false

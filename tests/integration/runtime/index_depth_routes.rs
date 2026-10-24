@@ -302,15 +302,22 @@ fn a_failed_lookup_returns_every_unit_it_took() {
     state.set_global("try_index").expect("callback set");
     for receiver in ["bad_chain", "bad", "function_behind_table"] {
         let expr = format!(
-            "(function() try_index({receiver}) try_index({receiver}) return field_site(two) end)()"
+            "(function() local a = try_index({receiver}) local b = try_index({receiver}) \
+             if not (a and b) then error('the lookup succeeded') end return field_site(two) end)()"
         );
         let depth = MAX_METAMETHOD_DEPTH - 1;
         assert_eq!(probe(&mut state, depth, &expr), value("base"), "{receiver}");
     }
-    // The same after lookups that fail at the stack cap: whatever the
-    // outcome there, the units are back afterwards.
-    let _ = call_near_cap(&mut state, "cap_field", "function_behind_table", 0);
-    let _ = call_near_cap(&mut state, "cap_field", "bad_chain", 0);
+    // Stack-cap failures also leave the unit needed by the final lookup.
+    for receiver in ["function_behind_table", "bad_chain"] {
+        assert!(
+            matches!(
+                call_near_cap(&mut state, "cap_field", receiver, 0),
+                Outcome::DepthExceeded | Outcome::TypeError | Outcome::StackOverflow
+            ),
+            "{receiver}: lookup succeeded at the stack cap"
+        );
+    }
     assert_eq!(
         probe(&mut state, MAX_METAMETHOD_DEPTH - 1, "field_site(two)"),
         value("base")

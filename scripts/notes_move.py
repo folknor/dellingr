@@ -5,16 +5,17 @@ Usage: scripts/notes_move.py <dest> <source> [<source> ...]
 
 <dest> holds placeholder lines of the form `<<ID>>`. Each is replaced by the
 section with that ID, cut from whichever source holds it. A section runs from
-its `## ` heading to the next `## ` heading outside a fenced code block, or
-EOF; trailing blank lines and `---` separators stay in the source. Fails before
-writing anything if a placeholder has no section or a wanted ID occurs more
-than once among the sources.
+its `## ` heading to the next level-one or level-two heading outside a fenced
+code block, or EOF; trailing blank lines and `---` separators stay in the
+source. Fails before writing anything if a placeholder has no section or a
+wanted ID occurs more than once among the sources.
 """
 import os
 import re
 import sys
 
 from notes_sections import section_heading_flags
+from write_if_changed import write_if_changed
 
 
 def split_section(lines, start, heading_flags=None):
@@ -32,16 +33,13 @@ def split_section(lines, start, heading_flags=None):
 
 def read_lines(path):
     with open(path, "rb") as f:
-        original = f.read()
-    text = original.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
-    return original, text.split("\n")
+        text = f.read().decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    return text.split("\n")
 
 
-def write_if_changed(path, lines, original):
+def write_lines(path, lines):
     content = ("\n".join(lines).rstrip("\n") + "\n").encode("utf-8")
-    if content != original:
-        with open(path, "wb") as f:
-            f.write(content)
+    write_if_changed(path, content)
 
 
 def main() -> int:
@@ -50,12 +48,11 @@ def main() -> int:
         return 2
 
     dest, sources = sys.argv[1], sys.argv[2:]
-    originals = {}
-    originals[dest], dest_lines = read_lines(dest)
+    dest_lines = read_lines(dest)
     wanted = [m.group(1) for line in dest_lines if (m := re.fullmatch(r"<<([A-Z]+-\d{3})>>", line))]
     texts = {}
     for path in sources:
-        originals[path], texts[path] = read_lines(path)
+        texts[path] = read_lines(path)
 
     for path in sources:
         if os.path.samefile(dest, path):
@@ -97,10 +94,10 @@ def main() -> int:
     for line in dest_lines:
         m = re.fullmatch(r"<<([A-Z]+-\d{3})>>", line)
         out.extend(sections[m.group(1)] if m else [line])
-    write_if_changed(dest, out, originals[dest])
+    write_lines(dest, out)
     for path in texts:
         if path in changed_sources:
-            write_if_changed(path, texts[path], originals[path])
+            write_lines(path, texts[path])
     return 0
 
 

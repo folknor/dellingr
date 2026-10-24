@@ -35,6 +35,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from write_if_changed import write_if_changed
 
 CORE_MATH_COMMIT = "0ce0cbc15935e24c656280e5a46c34e89f301b7a"
 ROOT = Path(__file__).resolve().parent.parent
@@ -312,8 +313,7 @@ def translate(specs):
     if out_path == "-":
         return output
     if out_path:
-        with open(out_path, "w", encoding="utf-8") as handle:
-            handle.write(output)
+        write_if_changed(out_path, output.encode("utf-8"))
     else:
         sys.stdout.write(output)
 
@@ -357,11 +357,11 @@ def main():
     for filename, output in generated.items():
         destination = directory / filename
         if args == ["--generate"]:
-            destination.write_bytes(output)
+            write_if_changed(destination, output)
         elif destination.read_bytes() != output:
             mismatches.append(filename)
             sys.stderr.writelines(difflib.unified_diff(
-                destination.read_text().splitlines(keepends=True),
+                destination.read_text(encoding="utf-8").splitlines(keepends=True),
                 output.decode("utf-8").splitlines(keepends=True),
                 fromfile=filename, tofile="regenerated/" + filename,
             ))

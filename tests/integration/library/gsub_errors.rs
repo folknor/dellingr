@@ -5,7 +5,7 @@
 //! - Errors in table lookups via metamethods are propagated
 //! - nil/false results from functions and tables keep the original match
 
-use dellingr::error::ErrorKind;
+use dellingr::error::{ErrorKind, ErrorValue};
 use dellingr::{ArgCount, RetCount, State};
 
 use crate::support;
@@ -24,9 +24,16 @@ fn gsub_function_error_is_propagated() {
     "#,
     );
     let result = state.call(ArgCount::Fixed(0), RetCount::Fixed(2));
+    let error = result.expect_err("gsub should propagate replacement function errors");
     assert!(
-        result.is_err(),
-        "gsub should propagate replacement function errors"
+        matches!(
+            error.kind(),
+            ErrorKind::ScriptError {
+                value: ErrorValue::String(bytes),
+                ..
+            } if bytes.as_slice() == b"boom"
+        ),
+        "unexpected replacement error: {error}"
     );
 }
 
@@ -72,9 +79,16 @@ fn gsub_table_metamethod_error_is_propagated() {
     "#,
     );
     let result = state.call(ArgCount::Fixed(0), RetCount::Fixed(2));
+    let error = result.expect_err("gsub should propagate table metamethod errors");
     assert!(
-        result.is_err(),
-        "gsub should propagate table metamethod errors"
+        matches!(
+            error.kind(),
+            ErrorKind::ScriptError {
+                value: ErrorValue::String(bytes),
+                ..
+            } if bytes.as_slice() == b"metamethod error"
+        ),
+        "unexpected table replacement error: {error}"
     );
 }
 

@@ -1,6 +1,8 @@
 //! Fail-fast error-boundary corpus, shared by budget and refusal sweeps.
 
-use dellingr::error::{Error, ErrorKind};
+use dellingr::error::Error;
+#[cfg(test)]
+use dellingr::error::ErrorKind;
 use dellingr::{ArgCount, LuaType, RetCount, State};
 
 use crate::support::Recorder;
@@ -104,7 +106,7 @@ fn oversized(state: &mut State) -> dellingr::Result<u8> {
 struct Outcome {
     cost: u64,
     transcript: String,
-    #[cfg(feature = "fault-injection")]
+    #[cfg(all(test, feature = "fault-injection"))]
     events: Vec<(&'static str, usize, bool)>,
     error: Option<Error>,
 }
@@ -248,7 +250,7 @@ fn run(name: &str, source: &str, budget: Option<i64>, fault: Option<Option<u32>>
     Outcome {
         cost,
         transcript,
-        #[cfg(feature = "fault-injection")]
+        #[cfg(all(test, feature = "fault-injection"))]
         events,
         error: result.err(),
     }
@@ -265,18 +267,9 @@ fn error_boundary_budget_sweep() {
     }
 }
 
-#[test]
-#[ignore = "on-demand transcript for before/after comparison"]
-#[cfg(all(
-    debug_assertions,
-    not(any(
-        feature = "snapshot",
-        feature = "fault-injection",
-        feature = "hotpath",
-        feature = "hotpath-alloc"
-    ))
-))]
-fn error_boundary_transcript() {
+// The example tool includes this same corpus and runner, so regeneration cannot
+// silently drift from the test. It takes the destination from its caller.
+pub(crate) fn boundary_transcript() -> String {
     let mut transcript = String::new();
     for (name, source) in CASES {
         let baseline = run(name, source, None, None);
@@ -292,7 +285,21 @@ fn error_boundary_transcript() {
         transcript.push_str(&format!("{name} natural\n"));
         transcript.push_str(&run(name, source, None, None).transcript);
     }
-    crate::support::scratch::write_boundary_transcript(transcript.as_bytes()).unwrap();
+    transcript
+}
+
+#[test]
+fn error_boundary_transcript() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/error_boundary_transcript.txt");
+    let expected = std::fs::read_to_string(fixture).expect(
+        "generate the boundary fixture with brokkr run --debug regenerate_error_boundary -- tests/fixtures/error_boundary_transcript.txt",
+    );
+    assert_eq!(
+        boundary_transcript(),
+        expected,
+        "error-boundary transcript changed"
+    );
 }
 
 #[cfg(feature = "fault-injection")]
@@ -341,10 +348,12 @@ fn fail(_: &mut State) -> dellingr::Result<u8> {
     ))
 }
 
+#[cfg(test)]
 fn empty(_: &mut State) -> dellingr::Result<u8> {
     Ok(0)
 }
 
+#[cfg(test)]
 fn recover(state: &mut State) -> dellingr::Result<u8> {
     let original = state.get_top();
     let arguments = (1..=original)
@@ -467,6 +476,7 @@ fn error_boundary_caught_recovery_preserves_outer_owners() {
     }
 }
 
+#[cfg(test)]
 fn assert_full_chain_reuse(state: &mut State) {
     let source = format!(
         "local t = setmetatable({{}}, {{__call = function() return 9 end}})

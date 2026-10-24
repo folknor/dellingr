@@ -1,18 +1,22 @@
 //! Standard-library argument validation: integer-argument exactness, range
 //! errors on type-correct values, and the literal-pattern fast path.
 
-use dellingr::error::{ErrorKind, ErrorValue, PrefixLocation};
+use dellingr::error::{ArgDetail, ErrorKind, ErrorValue, PrefixLocation};
 use dellingr::{ArgCount, RetCount, State};
 
 use crate::support;
 
-fn argument_message(code: &str) -> String {
+fn argument_kind(code: &str) -> ErrorKind {
     let mut state = State::new();
     support::load(&mut state, code);
     let error = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("regression script must fail");
-    match error.kind() {
+    error.into_kind()
+}
+
+fn argument_message(code: &str) -> String {
+    match argument_kind(code) {
         ErrorKind::ArgError(argument) => argument.to_string(),
         kind => panic!("expected a structured argument error, got {kind:?}"),
     }
@@ -65,29 +69,39 @@ fn error_nil_level_uses_the_default_and_preserves_the_script_message() {
 
 #[test]
 fn stdlib_integer_arguments_reject_fractional_numbers_consistently() {
-    let cases = [
-        r#"return unpack({}, 1.5)"#,
-        r#"return table.insert({}, 1.5, "x")"#,
-        r#"return table.remove({}, 1.5)"#,
-        r#"return table.concat({}, "", 1.5)"#,
-        r#"return table.move({}, 1.5, 1, 1)"#,
-        r#"return string.sub("abc", 1.5)"#,
-        r#"return string.find("abc", "a", 1.5)"#,
-        r#"return string.match("abc", "a", 1.5)"#,
-        r#"return string.gmatch("abc", "a", 1.5)"#,
-        r#"return string.gsub("a", "a", "b", 1.5)"#,
-        r#"return string.format("%d", 1.5)"#,
-        r#"return math.random(1.5)"#,
-        r#"return select(1.5, "a")"#,
-        r#"return tonumber("10", 2.5)"#,
-        r#"error("x", 1.5)"#,
+    let cases: [(&str, &str, isize); 15] = [
+        (r#"return unpack({}, 1.5)"#, "unpack", 2),
+        (r#"return table.insert({}, 1.5, "x")"#, "insert", 2),
+        (r#"return table.remove({}, 1.5)"#, "remove", 2),
+        (r#"return table.concat({}, "", 1.5)"#, "concat", 3),
+        (r#"return table.move({}, 1.5, 1, 1)"#, "move", 2),
+        (r#"return string.sub("abc", 1.5)"#, "sub", 2),
+        (r#"return string.find("abc", "a", 1.5)"#, "find", 3),
+        (r#"return string.match("abc", "a", 1.5)"#, "match", 3),
+        (r#"return string.gmatch("abc", "a", 1.5)"#, "gmatch", 3),
+        (r#"return string.gsub("a", "a", "b", 1.5)"#, "gsub", 4),
+        (r#"return string.format("%d", 1.5)"#, "format", 2),
+        (r#"return math.random(1.5)"#, "random", 1),
+        (r#"return select(1.5, "a")"#, "select", 1),
+        (r#"return tonumber("10", 2.5)"#, "tonumber", 2),
+        (r#"error("x", 1.5)"#, "error", 2),
     ];
 
-    for code in cases {
-        let message = argument_message(code);
-        assert!(
-            message.contains("(number has no integer representation)"),
-            "wrong argument error for {code}: {message}"
+    for (code, function, argument_number) in cases {
+        let kind = argument_kind(code);
+        let ErrorKind::ArgError(argument) = kind else {
+            panic!("expected an argument error for {code}, got {kind:?}");
+        };
+        assert_eq!(
+            argument.detail(),
+            &ArgDetail::NoInteger,
+            "wrong argument error for {code}"
+        );
+        assert_eq!(argument.func_name(), Some(function), "function for {code}");
+        assert_eq!(
+            argument.arg_number(),
+            argument_number,
+            "argument position for {code}"
         );
     }
 }

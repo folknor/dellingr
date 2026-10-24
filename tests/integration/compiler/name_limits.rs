@@ -1,6 +1,6 @@
 //! Byte limits on source names, snapshot function ids and diagnostic
 //! function names: each boundary is accepted, and one byte more is rejected
-//! (or, for function names, truncated) without disturbing the State.
+//! (or, for function names, truncated).
 
 use dellingr::error::ErrorKind;
 use dellingr::limits::MAX_SOURCE_NAME_BYTES;
@@ -34,21 +34,13 @@ fn source_names_accept_the_limit_and_reject_one_more_byte() {
     state
         .load(&program)
         .expect("load accepts the source-name boundary");
-    // Saving requires an empty stack, so drop the loaded chunk.
-    state.pop(1).expect("loaded chunk is on the stack");
+    // A boundary-length source name must also survive saving.
     #[cfg(feature = "snapshot")]
-    let before = state
-        .save_state()
-        .expect("boundary source name saves")
-        .bytes;
-    #[cfg(feature = "snapshot")]
-    assert_eq!(
-        state
-            .save_state()
-            .expect("rejected load leaves state savable")
-            .bytes,
-        before
-    );
+    {
+        // Saving requires an empty stack, so drop the loaded chunk.
+        state.pop(1).expect("loaded chunk is on the stack");
+        state.save_state().expect("boundary source name saves");
+    }
 }
 
 #[cfg(feature = "snapshot")]

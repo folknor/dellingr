@@ -1,6 +1,6 @@
-//! Host table methods validate before they consume operands (VM-006), the
-//! positional helpers reject out-of-range positions (VM-007), and `raw_len`
-//! reports a bad index or a lengthless value instead of returning 0 (VM-025).
+//! Host table methods validate before they consume operands, positional
+//! helpers reject out-of-range positions, and `raw_len` reports a bad index or
+//! a lengthless value instead of returning 0.
 
 use dellingr::error::{ErrorKind, TypeError};
 use dellingr::{LuaType, State};

@@ -4,15 +4,15 @@ use super::DEEP_PARSE_TEST_STACK_BYTES;
 use super::Parser;
 use super::TokenStream;
 use super::parse_unfinalized;
-use crate::State;
 use crate::compiler::UpvalueDesc;
-use crate::error::{ErrorKind, SyntaxError};
+use crate::error::{ErrorKind, SyntaxError, TypeError};
 use crate::instr::{ArgCount, ArithOp, ArithOperands, CompareOp, Instr, RetCount};
 use crate::limits::{
     MAX_ASSIGNMENT_TARGETS, MAX_CHUNK_NESTING, MAX_EXPRESSIONS, MAX_FIXED_ARGS, MAX_FIXED_RESULTS,
     MAX_LITERALS, MAX_LOCALS, MAX_NESTED, MAX_SOURCE_BYTES, MAX_TABLE_BATCH_SIZE,
     MAX_TABLE_TEMPLATE_FIELDS, MAX_TABLE_TEMPLATES, SYNTAX_SUFFIX_COST,
 };
+use crate::{LuaType, State};
 
 fn assert_line_info_matches_code_len(chunk: &Bytecode) {
     assert_eq!(chunk.code.len(), chunk.line_info.len());
@@ -1382,9 +1382,15 @@ fn compare_branches_keep_comparison_semantics() {
     crate::Program::compile("if 1 < 'x' then return 1 end return 0", None)
         .and_then(|program| state.load(&program))
         .expect("type-error fixture compiles");
+    let error = state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(1))
+        .expect_err("number/string comparison must still error in a branch");
     assert!(
-        state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).is_err(),
-        "number/string comparison must still error in a branch"
+        matches!(
+            error.kind(),
+            ErrorKind::TypeError(TypeError::Comparison(LuaType::Number, LuaType::String))
+        ),
+        "unexpected comparison error kind: {error}"
     );
 }
 

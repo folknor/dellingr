@@ -1,6 +1,6 @@
 //! Host error callback behavior at host initiated call boundaries.
 
-use dellingr::error::{Error, ErrorKind, LibraryError};
+use dellingr::error::{Error, ErrorKind, ErrorValue, LibraryError};
 use dellingr::{ArgCount, RetCount, State};
 
 use crate::support::{self, Recorder, stack};
@@ -71,8 +71,18 @@ fn host_call_through_chain_into_failing_lua_function_notifies_once() {
         "#,
     );
 
-    let _error = call_global(&mut state, "callable");
+    let error = call_global(&mut state, "callable");
 
+    assert!(
+        matches!(
+            error.kind(),
+            ErrorKind::ScriptError {
+                value: ErrorValue::String(bytes),
+                ..
+            } if bytes.as_slice() == b"lua failed"
+        ),
+        "expected the Lua error payload to survive the callable chain: {error}"
+    );
     assert_eq!(recorder.error_count(), 1);
 }
 
