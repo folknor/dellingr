@@ -94,15 +94,15 @@ slotmap = "1.1"
 # `hotpath::measure` attribute, and without the `hotpath` cargo feature the
 # macro expands to nothing, so the dependency costs only compile time. Making
 # it optional would need a `cfg_attr` wrapper at every annotation site.
-hotpath = "0.28.6"
+hotpath = "0.29.0"
 
 [dev-dependencies]
-libc = "0.2.190"
+libc = "0.2.191"
 # Correctly rounded arbitrary-precision reference for the src/crmath kernels'
 # test oracle (directed-rounding enclosures). Its own `pow` is not used: a
 # power-of-two-base shortcut truncates the exponent.
 libbeef = "0.1.1"
-toml = "0.8"
+toml = "1.1.8"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [[example]]

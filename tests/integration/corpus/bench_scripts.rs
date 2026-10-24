@@ -80,8 +80,9 @@ struct WorkloadPair {
 fn workload_pairs(root: &Path) -> Vec<WorkloadPair> {
     let source =
         fs::read_to_string(root.join("brokkr.toml")).expect("brokkr.toml should be readable");
+    // A whole document parses as a `Table`; `Value` parses a single TOML value.
     let config = source
-        .parse::<toml::Value>()
+        .parse::<toml::Table>()
         .unwrap_or_else(|error| panic!("brokkr.toml is not valid TOML: {error}"));
     let workloads = config
         .get("dellingr")
