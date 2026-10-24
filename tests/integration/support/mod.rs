@@ -1,8 +1,9 @@
 //! Helpers shared by the suites of this crate.
 //!
 //! The files under `tests/common/` are also compiled by another target (the
-//! native-stack test, the compiler's unit tests, the golden-regeneration
-//! example), so they stay self-contained and are included here by path.
+//! native-stack test, the release libm symbol test, the compiler's unit tests,
+//! the golden-regeneration example), so they stay self-contained and are
+//! included by path, here or by the suite that uses them.
 
 #[path = "../../common/error_boundary_cases.rs"]
 pub(crate) mod error_boundary_cases;
@@ -81,6 +82,10 @@ pub(crate) fn parallel_failures<T: Sync>(
     max_workers: usize,
     check: impl Fn(&T) -> Option<String> + Sync,
 ) -> Vec<String> {
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "The harness sizes workers to the host; results remain in item order."
+    )]
     let available =
         std::thread::available_parallelism().map_or(max_workers, std::num::NonZeroUsize::get);
     let workers = available.min(max_workers).min(items.len());

@@ -7,22 +7,28 @@ name = "no-host-entropy"
 from = "dellingr"
 forbid = ["rand", "rand_core", "getrandom"]
 
-# Direct consumer boundary only. The native rule reads --no-deps metadata;
-# it cannot detect a profiler dependency introduced transitively by hotpath.
-# `CARGO_NET_OFFLINE=true brokkr deps <crate> --json` can inspect transitive
-# normal-edge chains without its audit's network phases. It cannot be a
-# script_check here: deps acquires the lock already held by its check parent.
-# A native transitive rule or an exported graph is needed to gate that graph.
+# Direct consumer dependency allowlist.
 [[dependency_rule]]
 name = "consumer-dependencies"
 from = "dellingr"
 kinds = ["normal", "build"]
 allow = ["indexmap", "foldhash", "hashbrown", "slotmap", "hotpath"]
 
+# The profiler reaches a consumer's graph only through the `hotpath` feature.
+# A non-optional hotpath dependency would link it into every default build.
+[[dependency_rule]]
+name = "hotpath-must-be-optional"
+from = "dellingr"
+forbid = ["hotpath"]
+kinds = ["normal"]
+optional = false
+
 [rustdoc]
 
 [[fixture_lint]]
 name = "determinism-policy"
+# Ordinary brokkr check must also prove that every determinism ban fires.
+when = "always"
 path = "fixtures/lint-policy"
 manifest = "fixtures/lint-policy/expect.toml"
 seed_lock = true
@@ -43,11 +49,8 @@ expect = "ok"
 match = "last-line"
 stream = "stdout"
 
-# The binary half of the libm check is the integration test
-# corpus::libm_symbols, which inspects the dev binary each ordinary sweep
-# builds. scripts/check_libm_symbols.sh checks the release binaries but builds
-# them through `brokkr build`, which refuses to run beneath `brokkr check`, so
-# it is a manual command and not registered here.
+# corpus::libm_symbols checks ordinary sweep binaries; the libm_symbols target
+# also checks each release sweep's own binary through CARGO_BIN_EXE_dellingr.
 [[script_check]]
 name = "platform-libm-symbol-checker-tests"
 command = "python3 -B scripts/test_libm_symbols.py"
@@ -139,20 +142,30 @@ lib_tests = false
 only = ["cost::cost_check_interval::corpus_cost_check_interval_differential"]
 curated = true
 
+# Observe inventory edges in a dedicated debug build. Instrumented frames do
+# not define the shipped native-stack envelope.
+[[check]]
+name = "native-call-coverage"
+features = ["native-call-trace"]
+tests = ["native_stack"]
+lib_tests = false
+only = ["native_call_edge_coverage"]
+curated = true
+
 # The native-stack envelope (docs/limits.md "Envelope") is 4 MiB in dev and
 # 2 MiB in release, and the sweeps above are dev builds, so the release half
-# would otherwise go untested. These run tests/native_stack.rs alone,
-# optimized, in both feature shapes.
+# would otherwise go untested. These run the native-stack probes and linked
+# libm symbol check, optimized, in both feature shapes.
 [[check]]
 name = "release-native-stack"
 profile = "release"
-tests = ["native_stack"]
+tests = ["native_stack", "libm_symbols"]
 
 [[check]]
 name = "release-native-stack-snapshot"
 profile = "release"
 features = ["snapshot"]
-tests = ["native_stack"]
+tests = ["native_stack", "libm_symbols"]
 
 [bin]
 default = "dellingr"
@@ -406,7 +419,8 @@ message = "import filesystem mutation primitives only in the scratch helper"
 name = "test-cli-binary-path-use-support"
 pattern = 'CARGO_BIN_EXE_'
 paths = ["src/**/*.rs", "tests/**/*.rs"]
-exclude = ["tests/integration/support/mod.rs"]
+# The separate release target uses its own sweep's Cargo-built CLI.
+exclude = ["tests/integration/support/mod.rs", "tests/libm_symbols.rs"]
 region = "string"
 test_code = "only"
 must_scan = ["src/compiler/parser/tests.rs", "tests/integration/cli/cli_arguments.rs"]
@@ -446,7 +460,7 @@ message = "keep re-entering methods as direct calls so the native-call inventory
 
 # Native-stack guard (reference/native-calls.md). Every direct call to a
 # function that can reach a call back into Lua carries a
-# `// native-call: <edge-id>` marker naming its edge in
+# `native_call!("<edge-id>", call)` wrapper naming its edge in
 # reference/native-calls.toml. The alternation below is the inventory's
 # function names; scripts/native_calls.py checks it against the inventory and
 # prints the expected value when they drift. The compiler is excluded: it
@@ -459,11 +473,12 @@ paths = ["src/**/*.rs"]
 exclude = ["src/compiler/**"]
 region = "code"
 test_code = "skip"
-allow_marker = "native-call:"
-allow_marker_above = 1
+allow_marker = "native_call!"
+# rustfmt puts an overlong wrapper's call two lines below `native_call!(`.
+allow_marker_above = 2
 except = ['\bfn\s+(?:append_function_replacement|append_gsub_replacement|base_ipairs_iter|base_unpack_values|begin_call|begin_callable_call|call|call_anchor|call_anchor_unguarded|call_from_lua|call_unguarded|error_value|eval_batched|format|format_argument|get_table|get_table_unguarded|gsub_empty_pattern|gsub_lua_pattern|gsub_plain_pattern|index_call|insert_through_metamethods|instr_tfor_call|instr_tfor_call_rust_fn|invoke_rust_fn|len_call|main|move_element|newindex_call|push_gmatch_wrapper|reg_get_field|reg_get_table|reg_len|reg_set_field|reg_set_table|remove_through_metamethods|run|run_frame|run_invocation|sequence_len|set_index|set_table|sort_through_metamethods|table_sort|table_sort_heap|table_sort_less|table_sort_scratch|table_sort_sift_down|table_sort_values|table_unpack_values|to_string_with_meta|tostring_bytes|tostring_bytes_unguarded|tostring_rendering|unpack_values)\b']
 must_scan = ["src/vm/eval.rs", "src/lua_std/table.rs"]
-message = "a call to a function that can call back into Lua needs a `// native-call: <edge-id>` marker on or directly above it, and an edge in reference/native-calls.toml (see reference/native-calls.md)"
+message = "a call to a function that can call back into Lua needs a `native_call!(\"<edge-id>\", call)` wrapper, and an edge in reference/native-calls.toml (see reference/native-calls.md)"
 
 [[script_check]]
 name = "native-call-inventory"

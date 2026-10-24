@@ -76,8 +76,10 @@ pub(crate) fn format(state: &mut State) -> Result<u8> {
         }
         if format_bytes.get(cursor + 1) == Some(&b'%') {
             let (directive, next) = parse_directive(state, &format_bytes, cursor)?;
-            // native-call: format->format_argument:percent
-            let formatted = format_argument(state, 0, &directive)?;
+            let formatted = crate::native_call!(
+                "format->format_argument:percent",
+                format_argument(state, 0, &directive)
+            )?;
             append_output(state, &mut output, &formatted)?;
             cursor = next;
             continue;
@@ -90,8 +92,10 @@ pub(crate) fn format(state: &mut State) -> Result<u8> {
 
         let (directive, next) = parse_directive(state, &format_bytes, cursor)?;
         validate_directive(state, &directive)?;
-        // native-call: format->format_argument:argument
-        let formatted = format_argument(state, argument, &directive)?;
+        let formatted = crate::native_call!(
+            "format->format_argument:argument",
+            format_argument(state, argument, &directive)
+        )?;
         append_output(state, &mut output, &formatted)?;
         cursor = next;
     }
@@ -349,8 +353,10 @@ fn format_argument(state: &mut State, argument: usize, directive: &Directive) ->
             // Charge the full rendering before precision truncation. Appending
             // the formatted bytes is charged separately: the budget counts
             // both string argument bytes consumed and bytes emitted.
-            // native-call: format_argument->tostring_bytes_unguarded
-            let mut bytes = state.tostring_bytes_unguarded(idx)?;
+            let mut bytes = crate::native_call!(
+                "format_argument->tostring_bytes_unguarded",
+                state.tostring_bytes_unguarded(idx)
+            )?;
             state.consume_cost(bytes.len() as u64)?;
             if directive.has_modifiers && bytes.contains(&0) {
                 return Err(format_arg_error(

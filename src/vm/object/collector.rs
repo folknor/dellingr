@@ -103,7 +103,7 @@ impl State {
     /// well as queueing it; a bare worklist push would trace its children but
     /// leave it Unmarked for the sweep to free. Bytecode-cache roots go into
     /// `live_chunks` for `sweep_bytecode_caches`.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(in crate::vm) fn mark_roots(
         &self,
         worklist: &mut Vec<ObjectPtr>,
@@ -150,7 +150,7 @@ impl State {
     /// check: automatic collection from allocation (and so from dispatch)
     /// calls this directly. A poisoned State never reaches it that way,
     /// because its execution is abandoned and every public entry refuses.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn collect_garbage(&mut self) {
         // Anchors the host dropped stop rooting their values here.
         self.registry.drain_released();

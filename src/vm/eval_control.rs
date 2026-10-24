@@ -13,7 +13,7 @@ impl State {
     /// step, then the visible variable. Checks the step, then the limit, then
     /// the start, and moves the dispatch cursor `ip` past the loop when it
     /// does not run.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(super) fn instr_for_prep(
         &mut self,
         slot: usize,
@@ -44,7 +44,7 @@ impl State {
 
     /// Numeric-for step; moves the dispatch cursor `ip` back to the body
     /// while the loop continues.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(super) fn instr_for_loop(
         &mut self,
         slot: usize,
@@ -104,8 +104,10 @@ impl State {
             {
                 return Ok(());
             }
-            // native-call: instr_tfor_call->instr_tfor_call_rust_fn
-            return self.instr_tfor_call_rust_fn(f, base, state, control, num_vars);
+            return crate::native_call!(
+                "instr_tfor_call->instr_tfor_call_rust_fn",
+                self.instr_tfor_call_rust_fn(f, base, state, control, num_vars)
+            );
         }
 
         let call_base = self.stack.len();
@@ -118,8 +120,10 @@ impl State {
         // in storage the call already checked (a Lua callee's own frame, or
         // what a Rust callee pushed), where padding to `num_vars` above the
         // caller's frame could fail the stack cap after a successful call.
-        // native-call: instr_tfor_call->call_unguarded
-        self.call_unguarded(ArgCount::Fixed(2), RetCount::All)?;
+        crate::native_call!(
+            "instr_tfor_call->call_unguarded",
+            self.call_unguarded(ArgCount::Fixed(2), RetCount::All)
+        )?;
         let returned = self.stack.len() - call_base;
         self.take_tfor_results(base, num_vars, call_base, returned);
         Ok(())
@@ -249,9 +253,10 @@ impl State {
         self.check_stack_space(2)?;
         self.push_unchecked(state);
         self.push_unchecked(control);
-
-        // native-call: instr_tfor_call_rust_fn->invoke_rust_fn
-        let num_ret_reported = self.invoke_rust_fn(f, call_base, false)?;
+        let num_ret_reported = crate::native_call!(
+            "instr_tfor_call_rust_fn->invoke_rust_fn",
+            self.invoke_rust_fn(f, call_base, false)
+        )?;
         // The callback's results are at `call_base`, in slots it pushed.
         self.take_tfor_results(base, num_vars, call_base, usize::from(num_ret_reported));
         Ok(())
@@ -259,7 +264,7 @@ impl State {
 
     /// TForLoop: if the first loop variable is nil, move the dispatch cursor
     /// `ip` out of the loop. Otherwise update the control variable.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(super) fn instr_tfor_loop(&mut self, base: usize, ip: &mut usize, offset: i32) {
         let first_var = &self.stack[base + 3];
 

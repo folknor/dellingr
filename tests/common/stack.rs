@@ -8,18 +8,28 @@
 /// for spawned threads, with its release settings. `cfg(debug_assertions)`
 /// tells the two repository profiles apart here; it is not a definition of
 /// "unoptimized". Set explicitly so `RUST_MIN_STACK` cannot loosen it.
-#[cfg(not(any(feature = "hotpath", feature = "fault-injection")))]
+#[cfg(not(any(
+    feature = "hotpath",
+    feature = "fault-injection",
+    feature = "native-call-trace"
+)))]
 pub(crate) const LIMIT_TEST_STACK_BYTES: usize = if cfg!(debug_assertions) {
     4 << 20
 } else {
     2 << 20
 };
 
-/// `#[hotpath::measure]` wraps every annotated function in a timing guard,
-/// which an instrumented build adds to each native level. The stack envelope
-/// in docs/limits.md is stated for uninstrumented builds. Fault injection
-/// also adds bookkeeping to preflights on these frames.
-#[cfg(any(feature = "hotpath", feature = "fault-injection"))]
+/// Under the `hotpath` feature, each `hotpath::measure` site wraps its
+/// function in a timing guard, which an instrumented build adds to each
+/// native level. The stack envelope in docs/limits.md is stated for
+/// uninstrumented builds. Fault injection also adds bookkeeping to
+/// preflights on these frames, and `native-call-trace` a marker guard around
+/// every inventoried call.
+#[cfg(any(
+    feature = "hotpath",
+    feature = "fault-injection",
+    feature = "native-call-trace"
+))]
 pub(crate) const LIMIT_TEST_STACK_BYTES: usize = 8 << 20;
 
 /// Run `f` on a named thread with [`LIMIT_TEST_STACK_BYTES`] of stack. A

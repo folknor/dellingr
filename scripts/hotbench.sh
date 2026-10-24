@@ -65,8 +65,9 @@ SCRIPT_COMMAND="$(shell_quote "$SCRIPT")"
 echo "==== harness output ===="
 # Everything the harness emits: the phase KVs on stderr, and the hotpath
 # crate's own per-function stats table (p50/p95/p99 over every
-# #[hotpath::measure] site) at exit. The per-function table is the reason the
-# annotations exist - do not filter it out.
+# hotpath::measure site, compiled in by the hotpath feature) at exit. The
+# per-function table is the reason the annotations exist - do not filter it
+# out.
 if "$HOTPATH_BIN" "$SCRIPT" 2>&1; then
     :
 else

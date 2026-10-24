@@ -134,7 +134,7 @@ impl State {
     ///
     /// Every unit taken is returned before this returns, except for the
     /// `Call` outcome, whose units the caller returns once the call ends.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     #[inline(never)]
     pub(super) fn resolve_index(
         &mut self,
@@ -366,7 +366,7 @@ impl State {
     /// overwritten or removed there and refills the cache), then
     /// `State::store_new_key`. `Some(units)` is a pushed `__newindex` call
     /// window, as for `State::resolve_newindex`.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     #[inline(never)]
     pub(super) fn store_field(
         &mut self,
@@ -460,7 +460,7 @@ impl State {
     /// three arguments and no results: `Some(units)`, which the caller
     /// returns once the call ends. `None` is a completed store, every unit
     /// already returned, as on error.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     #[inline(never)]
     pub(super) fn resolve_newindex(
         &mut self,

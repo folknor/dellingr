@@ -359,8 +359,10 @@ pub(super) fn unpack_values(state: &mut State) -> Result<u8> {
     // As in 5.4, `__len` runs only when no explicit end is given.
     let j = match opt_integer(state, 3, "unpack")? {
         Some(j) => j,
-        // native-call: unpack_values->sequence_len
-        None => table::sequence_len(state, 1, crate::error::LibraryFunction::Unpack)?,
+        None => crate::native_call!(
+            "unpack_values->sequence_len",
+            table::sequence_len(state, 1, crate::error::LibraryFunction::Unpack)
+        )?,
     };
     if i <= j {
         table::check_sequence_keys(state, i, j, crate::error::LibraryFunction::Unpack)?;
@@ -386,8 +388,10 @@ pub(super) fn unpack_values(state: &mut State) -> Result<u8> {
     // like `select`. Do not add a per-element charge.
     for index in i..=j {
         state.push_number(index as f64)?;
-        // native-call: unpack_values->get_table_unguarded
-        state.get_table_unguarded(1)?;
+        crate::native_call!(
+            "unpack_values->get_table_unguarded",
+            state.get_table_unguarded(1)
+        )?;
     }
     state.remove(1)?;
     // span is nonnegative and below MAX_RESULTS here, so the conversion cannot fail.

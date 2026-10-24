@@ -71,8 +71,10 @@ fn parse_integer_with_base(bytes: &[u8], base: u32) -> Option<f64> {
 // keyed by the Rust function address. Release LTO folds it with
 // `table.unpack`'s identical wrapper, so there both resolve to one id.
 fn base_unpack_values(state: &mut State) -> Result<u8> {
-    // native-call: base_unpack_values->unpack_values
-    super::unpack_values(state)
+    crate::native_call!(
+        "base_unpack_values->unpack_values",
+        super::unpack_values(state)
+    )
 }
 
 pub(crate) fn base_ipairs(state: &mut State) -> Result<u8> {
@@ -97,8 +99,10 @@ pub(crate) fn base_ipairs_iter(state: &mut State) -> Result<u8> {
     let new_index = old_index + 1.0;
     state.pop(1)?; // pop the old number
     state.push_number(new_index)?;
-    // native-call: base_ipairs_iter->get_table_unguarded
-    state.get_table_unguarded(1)?;
+    crate::native_call!(
+        "base_ipairs_iter->get_table_unguarded",
+        state.get_table_unguarded(1)
+    )?;
     // ipairs stops only on nil, not on false
     if state.typ(-1) != LuaType::Nil {
         state.push_number(new_index)?;
@@ -163,8 +167,7 @@ pub(super) const NON_BUILTIN_GLOBALS: &[(&str, crate::RustFunc)] = &[
         // value bypasses `__tostring`; see `State::tostring_rendering` for
         // the opposite rule `tostring` follows.
         let value = if state.get_top() >= 1 {
-            // native-call: lib:error->error_value
-            state.error_value(1)?
+            crate::native_call!("lib:error->error_value", state.error_value(1))?
         } else {
             ErrorValue::Nil
         };
@@ -218,8 +221,10 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
             }
             // The host receives the exact bytes, so the joined message is
             // bounded by the string cap on its raw length.
-            // native-call: lib:print->tostring_bytes_unguarded
-            let part = state.tostring_bytes_unguarded(stack_index)?;
+            let part = crate::native_call!(
+                "lib:print->tostring_bytes_unguarded",
+                state.tostring_bytes_unguarded(stack_index)
+            )?;
             crate::limits::checked_string_growth(message.len(), part.len())?;
             message.extend_from_slice(&part);
         }
@@ -298,8 +303,10 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
     // Converts any value to its string representation.
     add!("tostring", |state| {
         check_any_named(state, 1, "tostring")?;
-        // native-call: lib:tostring->tostring_rendering
-        match state.tostring_rendering(1)? {
+        match crate::native_call!(
+            "lib:tostring->tostring_rendering",
+            state.tostring_rendering(1)
+        )? {
             // Argument 1 is its own rendering: return it without re-interning.
             TostringRendering::Itself => state.set_top(1)?,
             // Byte-exact: a `__tostring` result may hold non-UTF-8 bytes,

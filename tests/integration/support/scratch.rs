@@ -12,6 +12,10 @@ fn scratch_root() -> PathBuf {
     PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "Scratch names include the process id to avoid collisions between test processes."
+)]
 fn next_scratch_path(name: &str) -> PathBuf {
     let unique_id = NEXT_SCRATCH_ID.fetch_add(1, Ordering::Relaxed);
     scratch_root().join(format!(

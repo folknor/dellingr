@@ -152,7 +152,7 @@ fn internal_error(fault: error::CompilerFault) -> error::Error {
 /// The one compile path: Lua source bytes plus an optional, byte-exact chunk
 /// name, to finalized bytecode. The name is bounded before anything else is
 /// examined, so an oversized name wins over a malformed or oversized source.
-#[hotpath::measure]
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub(crate) fn compile(source: impl AsRef<[u8]>, name: Option<&[u8]>) -> Result<Bytecode> {
     if let Some(name) = name
         && name.len() > crate::limits::MAX_SOURCE_NAME_BYTES

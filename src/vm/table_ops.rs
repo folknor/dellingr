@@ -95,13 +95,17 @@ fn table_sort_heap<A: TableSortAccess>(
     comp_idx: Option<usize>,
 ) -> Result<()> {
     for root in (0..n / 2).rev() {
-        // native-call: table_sort_heap->table_sort_sift_down:heapify
-        table_sort_sift_down(state, access, root, n, comp_idx)?;
+        crate::native_call!(
+            "table_sort_heap->table_sort_sift_down:heapify",
+            table_sort_sift_down(state, access, root, n, comp_idx)
+        )?;
     }
     for end in (1..n).rev() {
         table_sort_swap(state, access, 0, end)?;
-        // native-call: table_sort_heap->table_sort_sift_down:sortdown
-        table_sort_sift_down(state, access, 0, end, comp_idx)?;
+        crate::native_call!(
+            "table_sort_heap->table_sort_sift_down:sortdown",
+            table_sort_sift_down(state, access, 0, end, comp_idx)
+        )?;
     }
     for index in 0..n / 2 {
         table_sort_swap(state, access, index, n - 1 - index)?;
@@ -124,16 +128,20 @@ fn table_sort_sift_down<A: TableSortAccess>(
         let mut smallest = root;
         let left_value = access.get(state, left)?;
         let smallest_value = access.get(state, smallest)?;
-        // native-call: table_sort_sift_down->table_sort_less:left
-        if state.table_sort_less(left_value, smallest_value, comp_idx)? {
+        if crate::native_call!(
+            "table_sort_sift_down->table_sort_less:left",
+            state.table_sort_less(left_value, smallest_value, comp_idx)
+        )? {
             smallest = left;
         }
         let right = left + 1;
         if right < end {
             let right_value = access.get(state, right)?;
             let smallest_value = access.get(state, smallest)?;
-            // native-call: table_sort_sift_down->table_sort_less:right
-            if state.table_sort_less(right_value, smallest_value, comp_idx)? {
+            if crate::native_call!(
+                "table_sort_sift_down->table_sort_less:right",
+                state.table_sort_less(right_value, smallest_value, comp_idx)
+            )? {
                 smallest = right;
             }
         }
@@ -169,7 +177,7 @@ impl State {
     }
 
     /// [`State::new_table`] without the poison check, for the dispatch loop.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(super) fn push_new_table(&mut self) -> Result<()> {
         self.check_stack_space(1)?;
         let val = self.alloc_table();
@@ -177,7 +185,7 @@ impl State {
         Ok(())
     }
 
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(crate) fn new_table_with_capacity(&mut self, capacity: usize) -> Result<()> {
         self.check_stack_space(1)?;
         let val = self.alloc_table_with_capacity(capacity);
@@ -263,8 +271,12 @@ impl State {
     /// Guarded like [`State::call`]: refused on a poisoned State, and a
     /// panic out of a metamethod poisons it.
     pub fn get_table(&mut self, i: isize) -> Result<()> {
-        // native-call: get_table->get_table_unguarded
-        self.guarded(|state| state.get_table_unguarded(i))
+        self.guarded(|state| {
+            crate::native_call!(
+                "get_table->get_table_unguarded",
+                state.get_table_unguarded(i)
+            )
+        })
     }
 
     /// [`State::get_table`] without the poison boundary, for the standard
@@ -295,10 +307,12 @@ impl State {
         ) {
             Ok(super::metamethod::IndexOutcome::Value(val)) => Ok(val),
             Ok(super::metamethod::IndexOutcome::Call(units)) => {
-                // native-call: get_table_unguarded->call_unguarded
-                let called = self.call_unguarded(
-                    (ArgCount::Fixed(2), &mut handler_called),
-                    RetCount::Fixed(1),
+                let called = crate::native_call!(
+                    "get_table_unguarded->call_unguarded",
+                    self.call_unguarded(
+                        (ArgCount::Fixed(2), &mut handler_called),
+                        RetCount::Fixed(1),
+                    )
                 );
                 self.in_flight.metamethod_depth -= units;
                 called.map(|()| self.pop_val())
@@ -366,7 +380,7 @@ impl State {
     /// Gets `t[k]` without invoking metamethods.
     /// `t` is at the given index, `k` is at the top of the stack.
     /// Pops the key and pushes the result. On error the stack is unchanged.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn get_table_raw(&mut self, i: isize) -> Result<()> {
         self.check_poisoned()?;
         let idx = self.table_operand_below_top(i, 1)?;
@@ -389,7 +403,7 @@ impl State {
     /// This function pops both the key and the value from the stack. Matches
     /// the reference Lua C API's `lua_rawset`. A bad index, a non-table
     /// target, or a nil/NaN key is rejected before either operand is popped.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn set_table_raw(&mut self, i: isize) -> Result<()> {
         self.check_poisoned()?;
         let idx = self.table_operand_below_top(i, 2)?;
@@ -434,8 +448,10 @@ impl State {
             None
         };
         if let Some(units) = pending {
-            // native-call: set_table->call_unguarded
-            let called = self.call_unguarded(ArgCount::Fixed(3), RetCount::Fixed(0));
+            let called = crate::native_call!(
+                "set_table->call_unguarded",
+                self.call_unguarded(ArgCount::Fixed(3), RetCount::Fixed(0))
+            );
             self.in_flight.metamethod_depth -= units;
             called?;
         }
@@ -448,7 +464,7 @@ impl State {
     /// Pushes the next key and value onto the stack (or just nil if done).
     /// Every failure (bad index, non-table, invalid key, stack overflow) is
     /// detected before the key is popped, so a host loop can retry or resume.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn table_next(&mut self, table_idx: isize) -> Result<bool> {
         self.check_poisoned()?;
         let idx = self.table_operand_below_top(table_idx, 1)?;
@@ -497,7 +513,7 @@ impl State {
     /// Returns the array length of the table at the given index, or 0 for a
     /// non-table value. Returns [`ErrorKind::InvalidStackIndex`] for an
     /// invalid index. Standard library callers validate the argument type.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(crate) fn table_len(&self, idx: isize) -> Result<usize> {
         let i = self.convert_idx(idx)?;
         Ok(self.stack[i]
@@ -522,7 +538,7 @@ impl State {
     /// `State::resolve_index` resolves string indexing through it.
     /// It cannot be replaced: `set_metatable_of` accepts only tables. Every
     /// other type has no metatable and returns nil.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn get_metatable_of(&mut self, idx: isize) -> Result<()> {
         self.check_poisoned()?;
         let i = self.convert_idx(idx)?;
@@ -548,7 +564,7 @@ impl State {
     /// Pops the metatable from the stack. A bad index, a non-table target or
     /// a metatable that is neither a table nor nil is rejected before the
     /// pop, leaving the stack unchanged.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn set_metatable_of(&mut self, table_idx: isize) -> Result<()> {
         self.check_poisoned()?;
         let idx = self.table_operand_below_top(table_idx, 1)?;
@@ -574,7 +590,7 @@ impl State {
     /// non-table or an invalid position leaves the stack and table unchanged.
     /// Growth failure also leaves the value on the stack.
     /// Charges no cost; the Lua `table.insert` wrapper charges a flat 1.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn table_insert_at(&mut self, table_idx: isize, pos: usize) -> Result<()> {
         self.check_poisoned()?;
         // Resolve against the entry stack, including the value to be popped.
@@ -603,7 +619,7 @@ impl State {
     /// reference `table.remove` does. Any other position is an error that
     /// leaves the stack and table unchanged; without this check a stray
     /// position would silently clear an arbitrary key. Charges no cost.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn table_remove_at(&mut self, table_idx: isize, pos: usize) -> Result<()> {
         self.check_poisoned()?;
         let idx = self.table_operand_below_top(table_idx, 0)?;
@@ -688,8 +704,10 @@ impl State {
                 roots.extend_from_slice(&arr);
                 reserve_sort_values(&mut self.in_flight.rooted_values, roots.len())?;
                 self.with_rooted_values(&roots, |state| {
-                    // native-call: table_sort->table_sort_values:comparator
-                    state.table_sort_values(&mut arr, comp_idx)
+                    crate::native_call!(
+                        "table_sort->table_sort_values:comparator",
+                        state.table_sort_values(&mut arr, comp_idx)
+                    )
                 })?;
             }
             // The default comparison only reads numbers and already-interned
@@ -697,8 +715,10 @@ impl State {
             // allocates only the Rust error, not VM objects), and the
             // source table holds every element until writeback. Rooting here
             // would just copy the array twice more for nothing.
-            // native-call: table_sort->table_sort_values:default
-            None => self.table_sort_values(&mut arr, comp_idx)?,
+            None => crate::native_call!(
+                "table_sort->table_sort_values:default",
+                self.table_sort_values(&mut arr, comp_idx)
+            )?,
         }
 
         // Put sorted array back - need to look up the table again since we may have
@@ -721,15 +741,19 @@ impl State {
     ) -> Result<()> {
         let table_idx = self.convert_idx(table_idx)?;
         let comp_idx = has_comp.then(|| self.convert_idx(2)).transpose()?;
-        // native-call: table_sort_scratch->table_sort_heap
-        table_sort_heap(self, &mut ScratchTableSortAccess { table_idx }, n, comp_idx)
+        crate::native_call!(
+            "table_sort_scratch->table_sort_heap",
+            table_sort_heap(self, &mut ScratchTableSortAccess { table_idx }, n, comp_idx)
+        )
     }
 
     fn table_sort_values(&mut self, values: &mut [Val], comp_idx: Option<usize>) -> Result<()> {
         let n = values.len();
         let mut access = VecSortAccess { values };
-        // native-call: table_sort_values->table_sort_heap
-        table_sort_heap(self, &mut access, n, comp_idx)
+        crate::native_call!(
+            "table_sort_values->table_sort_heap",
+            table_sort_heap(self, &mut access, n, comp_idx)
+        )
     }
 
     pub(crate) fn checked_table_sort_len(&self, len: i64) -> Result<usize> {
@@ -754,8 +778,10 @@ impl State {
             self.push_unchecked(self.stack[comp_idx]);
             self.push_unchecked(a);
             self.push_unchecked(b);
-            // native-call: table_sort_less->call_unguarded
-            self.call_unguarded(ArgCount::Fixed(2), RetCount::Fixed(1))?;
+            crate::native_call!(
+                "table_sort_less->call_unguarded",
+                self.call_unguarded(ArgCount::Fixed(2), RetCount::Fixed(1))
+            )?;
             return Ok(self.pop_val().truthy());
         }
 
@@ -794,8 +820,10 @@ impl State {
     /// Guarded like [`State::call`]: refused on a poisoned State, and a
     /// panic out of `__tostring` poisons it.
     pub fn to_string_with_meta(&mut self, idx: isize) -> Result<String> {
-        // native-call: to_string_with_meta->tostring_bytes
-        let raw = self.tostring_bytes(idx)?;
+        let raw = crate::native_call!(
+            "to_string_with_meta->tostring_bytes",
+            self.tostring_bytes(idx)
+        )?;
         Self::lossy_utf8_checked(&raw)
     }
 
@@ -819,15 +847,21 @@ impl State {
     /// Guarded like [`State::call`]: refused on a poisoned State, and a
     /// panic out of `__tostring` poisons it.
     pub fn tostring_bytes(&mut self, idx: isize) -> Result<Vec<u8>> {
-        // native-call: tostring_bytes->tostring_bytes_unguarded
-        self.guarded(|state| state.tostring_bytes_unguarded(idx))
+        self.guarded(|state| {
+            crate::native_call!(
+                "tostring_bytes->tostring_bytes_unguarded",
+                state.tostring_bytes_unguarded(idx)
+            )
+        })
     }
 
     /// [`State::tostring_bytes`] without the poison boundary, for the
     /// standard library.
     pub(crate) fn tostring_bytes_unguarded(&mut self, idx: isize) -> Result<Vec<u8>> {
-        // native-call: tostring_bytes_unguarded->tostring_rendering
-        match self.tostring_rendering(idx)? {
+        match crate::native_call!(
+            "tostring_bytes_unguarded->tostring_rendering",
+            self.tostring_rendering(idx)
+        )? {
             // No handler ran, so `idx` still names the same string.
             TostringRendering::Itself => Ok(self.to_bytes(idx)?.to_vec()),
             TostringRendering::Bytes(bytes) => Ok(bytes),
@@ -858,8 +892,10 @@ impl State {
             self.push_unchecked(tostring_handler);
             self.push_unchecked(val);
             // A failed handler call is reported by the call's own boundary.
-            // native-call: tostring_rendering->call_unguarded
-            self.call_unguarded(ArgCount::Fixed(1), RetCount::Fixed(1))?;
+            crate::native_call!(
+                "tostring_rendering->call_unguarded",
+                self.call_unguarded(ArgCount::Fixed(1), RetCount::Fixed(1))
+            )?;
             let result = self.pop_val();
             if matches!(
                 result.typ(&self.heap),
@@ -899,8 +935,10 @@ impl State {
             Val::RustFn(_) | Val::Obj(_) => {
                 // Read the type before any handler runs.
                 let value_type = val.typ(&self.heap);
-                // native-call: error_value->tostring_bytes_unguarded
-                let rendering = self.tostring_bytes_unguarded(idx)?;
+                let rendering = crate::native_call!(
+                    "error_value->tostring_bytes_unguarded",
+                    self.tostring_bytes_unguarded(idx)
+                )?;
                 ErrorValue::Object {
                     value_type,
                     rendering,
@@ -981,7 +1019,7 @@ impl State {
     /// empty `Table` in its wrapper) as a stack temporary of that frame
     /// before moving it into the slot map. Outlined, that storage is only on
     /// the stack while a table is being allocated.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     #[inline(never)]
     pub(super) fn alloc_table(&mut self) -> Val {
         let obj = self.allocator().alloc_table();

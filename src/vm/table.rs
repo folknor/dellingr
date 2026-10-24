@@ -680,7 +680,7 @@ impl Table {
         );
     }
 
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(super) fn get(&self, key: &Val) -> Val {
         if let Some(slot) = self.array_slot(key) {
             return self.array[slot];
@@ -1231,7 +1231,7 @@ impl Table {
     /// window. The result is a pure function of `vlen` and the live array
     /// values, which snapshots preserve, never of the window's position, and
     /// costs O(1) for a full array and O(log vlen) otherwise.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(super) fn array_len(&self) -> usize {
         if self.base + self.array.len() == self.vlen
             && matches!(self.array.last(), Some(last) if !matches!(last, Val::Nil))
@@ -1252,7 +1252,7 @@ impl Table {
         lo
     }
 
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(super) fn insert(&mut self, key: Val, value: Val) -> std::result::Result<(), TableError> {
         if let Some(position) = self.array_slot(&key) {
             self.write_window(position, value);
@@ -1752,7 +1752,7 @@ impl Table {
     }
 
     /// Promote from inline storage to IndexMap, adding the new key-value pair.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn promote_to_map(&mut self, new_key: TableKey, new_value: Val) {
         debug_assert_eq!(self.dead_count, 0);
         let old_storage = std::mem::take(&mut self.storage);
@@ -1801,7 +1801,7 @@ impl Table {
     }
 
     /// Remove a key and return its value (if any).
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn remove(&mut self, key: &Val) -> Option<Val> {
         if let Some(slot) = self.array_slot(key) {
             let removed = self.array[slot];
@@ -1902,7 +1902,7 @@ impl Table {
     /// is capacity only: the per-key loop below still decides, key by key,
     /// between appending (nil included) and a hash insert, and migration after
     /// each append can extend the array past the reservation.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(super) fn set_list(
         &mut self,
         first: usize,
@@ -1974,7 +1974,7 @@ impl Table {
     /// the border is `vlen` the array grows by one key, nil included, exactly
     /// like an append. No slot moves to another key's index, so the version
     /// is untouched.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(super) fn array_insert(
         &mut self,
         pos: usize,
@@ -2035,7 +2035,7 @@ impl Table {
     /// elements down, with reference Lua's `tremove` semantics: for a
     /// position outside `1..=array_len()` (only 0 for an empty sequence, or
     /// `array_len() + 1`) it returns `t[pos]` and clears it.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(super) fn array_remove(&mut self, pos: usize) -> std::result::Result<Val, TableError> {
         let len = self.array_len();
         if (1..=len).contains(&pos) {
@@ -2078,7 +2078,7 @@ impl Table {
     }
 
     /// Returns the sequence `t[1..=#t]` as a Vec for sorting.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(super) fn get_array(&self) -> std::result::Result<Vec<Val>, TableError> {
         let len = self.array_len();
         // Key `len` (when nonzero) is live, so `1..=len` ends inside the window.
@@ -2094,7 +2094,7 @@ impl Table {
     /// Writes sorted values back to keys `1..=values.len()`. Entries beyond
     /// the original sort range survive even if a comparator added them.
     /// Each write is O(1), so the writeback is linear in the sorted range.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(super) fn set_array(&mut self, values: Vec<Val>) -> std::result::Result<(), TableError> {
         for (i, v) in values.into_iter().enumerate() {
             self.insert(Val::Num((i + 1) as f64), v)?;
@@ -2232,7 +2232,7 @@ impl Table {
     /// Returns the next key-value pair after the given key.
     /// If key is nil, returns the first key-value pair. Distinguishes the end
     /// of iteration from an invalid control key.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(super) fn next(&self, key: &Val) -> TableNext {
         match self.next_with_index(key) {
             TableNextWithIndex::Pair { key, value, .. } => TableNext::Pair(key, value),
@@ -2245,7 +2245,7 @@ impl Table {
 impl Table {
     /// Mark all values contained in this table as reachable.
     /// Called by the GC during the mark phase.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(super) fn mark_values(&self, heap: &GcHeap, worklist: &mut Vec<ObjectPtr>) {
         for value in &self.array[self.lead..] {
             value.mark_reachable(heap, worklist);

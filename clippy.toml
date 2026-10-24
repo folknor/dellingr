@@ -1,10 +1,8 @@
 # Result callbacks can explicitly handle an error (panic, resume_unwind,
 # PoisonError::into_inner); banning unwrap_or_else/map_or/map_or_else by name
 # would reject those handlers too. Review the callback's handling instead.
-# Additional host bans need scoped allows at their legitimate host sites first:
-# current_dir in regenerate_save_golden, process::id in the scratch helper,
-# available_parallelism in test support and math sweeps, and pointer addr in
-# the native-stack probe. Keep those changes with their owners.
+# Pointer method bans cover address extraction through addr/expose_provenance;
+# pointer-to-integer casts still require review because these are method bans.
 disallowed-methods = [
     { path = "std::panic::set_hook", reason = "Process-wide hook replacement can hide concurrent test failures. Use a scoped allow only for a permanent filtering installer." },
     { path = "std::panic::take_hook", reason = "Process-wide hook replacement can hide concurrent test failures. Use a scoped allow only for a permanent filtering installer." },
@@ -18,6 +16,14 @@ disallowed-methods = [
     { path = "std::env::vars", reason = "Reading host environment makes behavior depend on process state." },
     { path = "std::env::vars_os", reason = "Reading host environment makes behavior depend on process state." },
     { path = "std::env::temp_dir", reason = "Host filesystem configuration must not affect deterministic library behavior." },
+    { path = "std::env::current_dir", reason = "Host working directory must not affect deterministic library behavior." },
+    { path = "std::env::home_dir", reason = "Host home directory must not affect deterministic library behavior." },
+    { path = "std::process::id", reason = "Host process identity must not affect deterministic library behavior." },
+    { path = "std::thread::available_parallelism", reason = "Host CPU availability must not affect deterministic library behavior." },
+    { path = "const_ptr::addr", reason = "Pointer addresses depend on host allocation and must not affect deterministic values." },
+    { path = "mut_ptr::addr", reason = "Pointer addresses depend on host allocation and must not affect deterministic values." },
+    { path = "const_ptr::expose_provenance", reason = "Pointer addresses depend on host allocation and must not affect deterministic values." },
+    { path = "mut_ptr::expose_provenance", reason = "Pointer addresses depend on host allocation and must not affect deterministic values." },
     { path = "std::thread::current", reason = "Host thread identity must not affect deterministic library behavior." },
     { path = "std::time::Instant::now", reason = "Host timing must not affect deterministic library behavior." },
     { path = "std::time::SystemTime::now", reason = "Host time must not affect deterministic library behavior." },
@@ -81,7 +87,6 @@ disallowed-methods = [
 
 # Determinism: ban non-deterministic collections. Re-export aliases share a
 # definition, so configure each type once; the fixture proves that definition.
-# Keep allow-invalid until a fixture run proves resolution on the gate toolchain.
 disallowed-types = [
     { path = "std::collections::hash_map::HashMap", reason = "Non-deterministic iteration order. Use IndexMap or BTreeMap instead." },
     { path = "std::collections::hash_set::HashSet", reason = "Non-deterministic iteration order. Use BTreeSet instead." },
@@ -90,9 +95,9 @@ disallowed-types = [
     { path = "std::time::Instant", reason = "Host timing must not affect deterministic library behavior." },
     { path = "std::time::SystemTime", reason = "Host time must not affect deterministic library behavior." },
     { path = "std::collections::hash_map::RandomState", reason = "Randomized hash seeding breaks determinism. Use det_hash::IndexMap or BTreeMap instead." },
-    { path = "foldhash::fast::RandomState", reason = "Randomized hash seeding breaks determinism. Use det_hash::FixedState.", allow-invalid = true },
-    { path = "foldhash::fast::SeedableRandomState", reason = "Randomized hash seeding breaks determinism. Use det_hash::FixedState.", allow-invalid = true },
-    { path = "foldhash::quality::RandomState", reason = "Randomized hash seeding breaks determinism. Use det_hash::FixedState.", allow-invalid = true },
-    { path = "foldhash::quality::SeedableRandomState", reason = "Randomized hash seeding breaks determinism. Use det_hash::FixedState.", allow-invalid = true },
+    { path = "foldhash::fast::RandomState", reason = "Randomized hash seeding breaks determinism. Use det_hash::FixedState." },
+    { path = "foldhash::fast::SeedableRandomState", reason = "Randomized hash seeding breaks determinism. Use det_hash::FixedState." },
+    { path = "foldhash::quality::RandomState", reason = "Randomized hash seeding breaks determinism. Use det_hash::FixedState." },
+    { path = "foldhash::quality::SeedableRandomState", reason = "Randomized hash seeding breaks determinism. Use det_hash::FixedState." },
     { path = "std::hash::DefaultHasher", reason = "The standard hasher is not a stable replay contract. Use a specified deterministic hasher." },
 ]

@@ -443,3 +443,5 @@ Outside the envelope, and the embedder's to provision:
   such as compiling source (`Program::compile`), which needs the
   parser's own stack on top of the nested calls;
 - `hotpath`-instrumented builds, whose timing guards add to every level.
+  Debug-only test instrumentation also changes frame sizes; `src/lib.rs`
+  rejects those features when debug assertions are disabled.

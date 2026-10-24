@@ -364,6 +364,10 @@ fn parse_worst_cases(f: Func, path: &str, text: &str) -> Vec<(f64, f64)> {
 fn check_inputs(f: Func, inputs: &[(f64, f64)]) -> Vec<String> {
     // Keep the process hook intact: caught oracle panics still need diagnostics,
     // and silencing them globally would also hide unrelated test failures.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "Oracle certification sizes host workers without changing the inputs or comparisons."
+    )]
     let threads = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
     let chunk = inputs.len().div_ceil(threads).max(1);
     std::thread::scope(|scope| {

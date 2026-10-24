@@ -31,6 +31,76 @@ class SourceFixture(unittest.TestCase):
 
 
 class NativeCallTests(SourceFixture):
+    def test_observable_wrapper_owns_one_call(self):
+        source = self.source('''impl State {
+ fn outer(&mut self) {
+  crate::native_call!("outer->call_unguarded",
+   self.call_unguarded());
+ }
+}''')
+        _, sites, _ = guard.closure([source])
+        problems = []
+        guard.attach_markers([source], sites, problems)
+        self.assertEqual(problems, [])
+        self.assertEqual(sites[0].ids, ["outer->call_unguarded"])
+
+    def test_observable_wrapper_rejects_bad_id_wrong_call_and_multiple_calls(self):
+        for expression, expected in [
+            ('"broken", self.call_unguarded()', "malformed native-call wrapper"),
+            ('"other->call_unguarded", self.call_unguarded()', "does not match its call"),
+            ('"outer->call_unguarded", (self.call_unguarded(), self.call_unguarded())',
+             "exactly one inventoried call"),
+            ('"outer->call_unguarded", 7', "exactly one inventoried call"),
+        ]:
+            with self.subTest(expression=expression):
+                source = self.source("impl State { fn outer(&mut self) { "
+                                     + "crate::native_call!(" + expression + "); } }")
+                _, sites, _ = guard.closure([source])
+                problems = []
+                guard.attach_markers([source], sites, problems)
+                self.assertTrue(any(expected in problem for problem in problems), problems)
+
+    def test_wrappers_in_literals_comments_and_test_items_are_inactive(self):
+        source = self.source('''impl State {
+ fn outer(&mut self) {
+  let text = r#"native_call!("outer->call_unguarded", self.call_unguarded())"#;
+  // native_call!("outer->call_unguarded", self.call_unguarded())
+ }
+ #[cfg(test)] fn ignored(&mut self) {
+  crate::native_call!("ignored->call_unguarded", self.call_unguarded());
+ }
+}''')
+        _, sites, _ = guard.closure([source])
+        problems = []
+        guard.attach_markers([source], sites, problems)
+        self.assertEqual(problems, [])
+        self.assertEqual(sites, [])
+
+    def test_textlint_requires_the_observable_marker(self):
+        names = {"call_unguarded"}
+        rule = {
+            "name": guard.TEXTLINT_RULE,
+            "pattern": guard.textlint_pattern(names),
+            "except": [r"\bfn\s+(?:call_unguarded)\b"],
+            "allow_marker": "native_call!",
+            "allow_marker_above": 2,
+        }
+        values = {"name": guard.METHOD_VALUE_RULE,
+                  "pattern": guard.method_value_pattern(names)}
+        config = {"textlint": [rule, values]}
+        problems = []
+        guard.check_textlint(names, problems, config)
+        self.assertEqual(problems, [])
+        # A one-line window misses rustfmt's vertical wrapper layout.
+        rule["allow_marker_above"] = 1
+        guard.check_textlint(names, problems, config)
+        self.assertTrue(any("allow_marker_above = 2" in problem for problem in problems))
+        problems.clear()
+        rule["allow_marker_above"] = 2
+        rule["allow_marker"] = "comment"
+        guard.check_textlint(names, problems, config)
+        self.assertTrue(any("allow_marker" in problem for problem in problems))
+
     def test_method_values_are_distinct_from_calls_and_callback_registration(self):
         pattern = re.compile(guard.method_value_pattern({"call_unguarded", "format"}))
         for source in ["let f = State::call_unguarded;",
@@ -54,13 +124,13 @@ class NativeCallTests(SourceFixture):
  let b = "escaped \\" call_unguarded()";
  let c = '\\''; let d = b'x';
  /* outer /* call_unguarded() */ still hidden */
- state.call_unguarded(); // native-call: live->call_unguarded
+ state.call_unguarded(); // ordinary line comment
 }'''
         source = self.source(text)
         self.assertEqual(len(source.code), len(text))
         self.assertEqual(source.code.count("\n"), text.count("\n"))
         self.assertEqual([name for name, *_ in source.calls()], ["call_unguarded"])
-        self.assertIn("native-call:", source.comments[6])
+        self.assertEqual(source.comments[6], "// ordinary line comment")
 
     def test_receivers_nested_functions_and_test_items(self):
         source = self.source('''impl State {
@@ -87,8 +157,8 @@ class NativeCallTests(SourceFixture):
     def test_callback_closure_and_markers(self):
         source = self.source('''fn register() {
  let callbacks = [("entry", |state| {
- // native-call: lib:entry->call_unguarded
- state.call_unguarded();
+ crate::native_call!("lib:entry->call_unguarded",
+  state.call_unguarded());
  })];
 }''', "src/basic.rs")
         _, sites, _ = guard.closure([source])
@@ -96,10 +166,20 @@ class NativeCallTests(SourceFixture):
         guard.attach_markers([source], sites, problems)
         self.assertEqual(problems, [])
         self.assertEqual(sites[0].ids, ["lib:entry->call_unguarded"])
-        source.comments[3] = "// native-call missing-colon"
+
+    def test_legacy_native_call_comment_is_rejected(self):
+        self.source("#[cfg(test)] mod test_only;\n", "src/lib.rs")
+        self.source("// native-call: lib:entry->call_unguarded\n", "src/test_only.rs")
+        with patch.object(guard, "SRC", self.root / "src"):
+            all_sources = guard.source_files()
+            production = guard.production_sources(all_sources)
+        self.assertNotIn("src/test_only.rs", [source.rel for source in production])
         problems = []
-        guard.attach_markers([source], sites, problems)
-        self.assertIn("malformed native-call marker", problems[0])
+        guard.reject_legacy_markers(all_sources, problems)
+        self.assertEqual(problems, [
+            "src/test_only.rs:1: legacy native-call comment is unsupported; "
+            "use a native_call! wrapper"
+        ])
 
     def test_lists_ignore_comments_strings_nested_fields_and_count_native(self):
         source = self.source('''const SCENARIOS: &[Scenario] = &[
@@ -164,6 +244,22 @@ fn live() { state.call_unguarded(); }
             sources = guard.production_sources()
         self.assertEqual([s.rel for s in sources], ["src/lib.rs", "src/production.rs"])
         self.assertIn("hotpath::measure", guard.item_attributes(live.fns[0]))
+        self.assertTrue(guard.has_hotpath_measure(live.fns[0]))
+
+    def test_hotpath_measure_attribute_spellings(self):
+        for attribute in (
+                '#[hotpath::measure]',
+                '#[hotpath::measure(label = "work")]',
+                '#[cfg_attr(feature = "hotpath", hotpath::measure)]',
+                '#[cfg_attr(feature = "hotpath", hotpath::measure(label = "work"))]',
+                '#[cfg_attr(feature = "hotpath",\n hotpath :: measure)]'):
+            with self.subTest(attribute=attribute):
+                source = self.source(attribute + '\nfn live() {}')
+                self.assertTrue(guard.has_hotpath_measure(source.fns[0]))
+        source = self.source('''#[cfg_attr(feature = "hotpath", inline)]
+fn plain() { hotpath::measure(); }
+''')
+        self.assertFalse(guard.has_hotpath_measure(source.fns[0]))
 
 
 def main():

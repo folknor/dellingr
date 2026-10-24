@@ -14,7 +14,7 @@ kept current mechanically:
   reach a call back into Lua, every call site between them (an edge), and
   every scenario of the test with the ordered edges of its path.
 - Every call to an inventoried function in `src/` carries a
-  `// native-call: <edge-id>` comment naming its edge.
+  `native_call!("<edge-id>", call)` wrapper naming its edge.
 - `scripts/native_calls.py` checks the inventory against the source and the
   test and prints `ok` when they agree; `brokkr check` runs it as the
   `native-call-inventory` script check. Fixture tests for the lexical model
@@ -28,10 +28,31 @@ kept current mechanically:
   files and regions as the call rule. This is a tripwire for
   turning a direct method call into an invisible function-pointer call.
 
-Markers are comments. Adding one never changes code: frames that stay live
-across a native re-entry are size-sensitive (AGENTS.md, "Hotpath
+With `native-call-trace` disabled, the marker macro expands to exactly the
+original call expression. It introduces no block, local, closure or guard:
+frames that stay live across a native re-entry are size-sensitive (AGENTS.md, "Hotpath
 benchmarks"), and `brokkr test native_bytes_per_level` in the dev and
 release profiles must report the same numbers before and after.
+
+The debug-only `native-call-trace` feature records each executed marker in a
+thread-local union while an observer is active, and keeps a stack of live
+markers using guards around the call expressions. The guard is established
+before Rust evaluates the wrapped call expression, including its arguments.
+Arguments to a wrapper must not call back into Lua, or a re-entry during
+argument evaluation will be attributed to that edge. The lexical inventory
+check cannot prove this effect property: tracing whether arbitrary Rust
+expressions can reach Lua requires following calls and callbacks, while a
+syntax ban on calls in arguments would also reject harmless helpers. Review
+argument effects when adding a wrapper. No State field or snapshot data is
+added. A release build with the feature is rejected at compile time, as with
+the other test instrumentation features. The curated
+`native-call-coverage` check shape runs only `native_call_edge_coverage`:
+it executes every scenario with all chains and leaves. At each run's first
+scenario descent witness, before further cycles, chains or leaves run, it
+asserts the live marker stack contains the expanded inventory path in order.
+Completed calls cannot satisfy that assertion. Separately, the whole-run
+union must contain every non-excluded edge. Its enlarged test stack
+is for observation, not evidence for the shipped envelope.
 
 ## The inventory
 
@@ -77,21 +98,25 @@ equal the scenario's `native` field in `tests/native_stack.rs`.
   host-api root is a `pub fn` on `State`, a binary root is `src/main.rs`'s
   `main`.
 - No function in that closure, either execution boundary, `run_invocation`
-  or `Frame::run` carries `hotpath::measure`. Its guard would remain live
-  across native re-entry and include the nested script's work in its time.
-- Every call to an inventoried function has exactly one marker, on its line
-  or the line directly above, and the marker's caller and callee are the
-  enclosing function and the called one. Every marker belongs to a call,
-  every edge id marks exactly one call, and every call site of one pair is
-  tagged when there are several.
+  or `Frame::run` carries `hotpath::measure`, bare or under the
+  `cfg_attr(feature = "hotpath", ...)` form measurement sites use. Its guard
+  would remain live across native re-entry and include the nested script's
+  work in its time.
+- Every call to an inventoried function has exactly one `native_call!`
+  wrapper, and the wrapper's caller and callee are the enclosing function and
+  the called one. Every wrapper contains exactly one inventoried call, every
+  edge id marks exactly one call, and every call site of one pair is tagged
+  when there are several. A stray `// native-call:` comment anywhere under
+  `src/`, including test-only source files, is an error.
 - Every edge is covered or excluded, never both; every chain and leaf an
   edge names exists; every scenario path connects and its native count agrees with the test.
 - The scenarios in the inventory are exactly the `SCENARIOS` list of
   `tests/native_stack.rs`, and the chain and leaf names exist in its
   `CHAINS` and `LEAVES` lists.
   Names are read only from direct entry fields in active source text;
-  commented-out entries and nested fields do not supply coverage. This is
-  a lexical check, not proof that the test or every entry executes.
+  commented-out entries and nested fields do not supply coverage. This is a
+  lexical check; the `native-call-coverage` tracing check supplies the
+  execution evidence.
 - The textlint rule's pattern and `except` equal the inventory's names, and
   nothing outside the rule's `exclude` matches the pattern without being a
   call to an inventoried function. `src/compiler/` is excluded because it
@@ -123,8 +148,10 @@ functions are called by, and new code should keep to it:
   may ask for markers on calls that cannot re-enter.
 
 Method chains split over lines keep the name and its `(` on one line, as
-rustfmt writes them, so the marker goes on the line of the name or directly
-above it.
+rustfmt writes them. A wrapper that does not fit on one line is laid out by
+rustfmt as `native_call!(`, the edge id and the call on three lines, so the
+textlint tripwire accepts `native_call!` on the call's line or up to two
+lines above it. The script checks wrapper containment exactly.
 
 Calls through function pointers, closures and trait objects are invisible to
 a lexical model, so each kind has a fixed answer. Rust callbacks are entered
@@ -149,8 +176,10 @@ unmarked call (textlint and script) and, for a new re-entering function,
 that it is not listed. Then:
 
 1. Add the function to `[[function]]` (with its `root` kind and evidence if
-   it is entered from outside), the call site to `[[edge]]`, and the marker
-   to the call.
+   it is entered from outside), the call site to `[[edge]]`, and wrap the
+   call in `crate::native_call!("<edge-id>", call)`. Keep the argument
+   expressions free of calls that can re-enter Lua, since the tracing guard
+   is live while those expressions are evaluated.
 2. If the edge opens a new path, add a `Scenario` to `tests/native_stack.rs`
    that recurses through it (its `native` and `meta` per cycle, a `DESCEND`
    inside the handler the path calls, and Lua checks of any returned value),

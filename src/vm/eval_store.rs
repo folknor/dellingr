@@ -52,7 +52,7 @@ impl State {
     /// library's `sequence_len` call it). Any non-nil handler is called:
     /// callable objects resolve through `__call`, and anything else fails
     /// in call resolution.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     #[inline(never)]
     pub(super) fn resolve_length(&mut self, val: Val, local_cost: &mut u64) -> Result<Option<Val>> {
         if let Some(s) = val.as_string(&self.heap) {

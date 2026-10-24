@@ -16,8 +16,16 @@ All notable changes to dellingr are documented here. The format follows
   empty binaries in the default sweep. `tests/native_stack.rs` stays its own
   target. A shared `support` module replaces the per-file compile-load-call
   helpers and error and print recorders, and a convention test keeps the tree
-  to the two targets, every source reachable from `main.rs`, no dead-code
+  to its named targets, every source reachable from `main.rs`, no dead-code
   allowances, and process-wide state marked.
+- A small `tests/libm_symbols.rs` target checks the fat-LTO release CLI for
+  platform libm transcendental symbols in both release sweeps, replacing the
+  manual `scripts/check_libm_symbols.sh`.
+- Calls that can re-enter Lua are wrapped in a `native_call!` marker macro
+  instead of carrying a marker comment. It expands to the bare call; the
+  debug-only `native-call-trace` cargo feature records each executed edge, and
+  a curated check runs every native-stack scenario under it to confirm the
+  inventory's paths by execution.
 
 ### Changed (breaking)
 
@@ -539,6 +547,15 @@ All notable changes to dellingr are documented here. The format follows
 - The `hotpath-alloc` cargo feature now enables this crate's `hotpath`
   feature, so every instrumentation guard keyed on `hotpath` also applies to
   allocation-tracking builds.
+- The `hotpath` profiler is now an optional dependency, enabled only by this
+  crate's `hotpath` feature, so a default build no longer compiles the
+  profiler or its runtime crates. Recursive parser functions are no longer
+  measured under `hotpath`, so allocation tracking no longer exhausts the
+  profiler's nested guards on deeply nested sources.
+- The crate exports a `#[doc(hidden)]` `native_call!` macro, which wraps each
+  internal call that can re-enter Lua so a debug-only test feature can trace
+  it. Outside that feature it expands to the wrapped call unchanged; it is not
+  part of the supported API.
 - The test-only `fault-injection` cargo feature now fails to compile without
   debug assertions, so a dependency that enables it cannot reach a host's
   release build.

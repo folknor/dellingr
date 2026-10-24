@@ -7,7 +7,7 @@
 //! of the frames on the compiled caller path that made it. Each `Scenario`
 //! below is one such path, named in reference/native-calls.toml with its
 //! ordered edges; `scripts/native_calls.py` keeps that inventory, the
-//! `// native-call:` markers in src/ and these lists in agreement.
+//! `native_call!` wrappers in src/ and these lists in agreement.
 //!
 //! Every scenario recurses through its own path until `MAX_NATIVE_CALL_DEPTH`
 //! is used up (callthrough levels fill any remainder its cycle size leaves),
@@ -895,6 +895,8 @@ fn plan(scenario: &Scenario, chain: &Chain, leaf: Option<&Leaf>) -> Plan {
 #[derive(Default)]
 struct Harness {
     records: Vec<(String, u32)>,
+    #[cfg(feature = "native-call-trace")]
+    path: Option<Vec<&'static str>>,
     /// `gc_threshold()` before arming, right after, and at the check.
     gc: Vec<usize>,
 }
@@ -915,6 +917,15 @@ fn harness(state: &mut State) -> &mut Harness {
 fn mark(state: &mut State) -> dellingr::Result<u8> {
     let token = String::from_utf8_lossy(state.to_bytes(1)?).into_owned();
     let level = state.to_number(2)? as u32;
+    #[cfg(feature = "native-call-trace")]
+    if level == 0
+        && SCENARIOS.iter().any(|scenario| scenario.name == token)
+        && dellingr::is_observing()
+    {
+        harness(state).path.get_or_insert_with(|| {
+            dellingr::active_path().expect("an active observer provides its call path")
+        });
+    }
     harness(state).records.push((token, level));
     Ok(0)
 }
@@ -1119,6 +1130,15 @@ fn check(
     }
     assert_eq!(observed.records, expected, "{label}: witness records");
 
+    #[cfg(feature = "native-call-trace")]
+    if dellingr::is_observing() {
+        let path = observed
+            .path
+            .as_ref()
+            .expect("the first descent must be witnessed");
+        assert_scenario_path(scenario.name, path);
+    }
+
     let kind = result.as_ref().map_err(dellingr::error::Error::kind);
     match outcome {
         Outcome::Completes if scenario.raises => match kind {
@@ -1191,35 +1211,112 @@ fn scenario_envelope(name: &'static str) {
         .find(|scenario| scenario.name == name)
         .expect("each envelope test names an inventoried scenario");
     stack::on_limit_test_stack(name, move || {
-        let program = Program::compile(chunk(scenario), None)
-            .unwrap_or_else(|error| panic!("{name}: the chunk must compile: {error}"));
-        for chain in CHAINS {
-            if chain.held {
-                for leaf in LEAVES {
-                    let rejections: &[&str] = if leaf.name == "pattern_reject" {
-                        &["optional", "greedy", "minimal"]
-                    } else {
-                        &["optional"]
-                    };
-                    for rejection in rejections {
-                        check(
-                            &program,
-                            scenario,
-                            chain,
-                            Some(leaf),
-                            &leaf.outcome,
-                            rejection,
-                        );
-                    }
+        exercise_scenario(scenario);
+    });
+}
+
+fn exercise_scenario(scenario: &Scenario) {
+    let name = scenario.name;
+    let program = Program::compile(chunk(scenario), None)
+        .unwrap_or_else(|error| panic!("{name}: the chunk must compile: {error}"));
+    for chain in CHAINS {
+        if chain.held {
+            for leaf in LEAVES {
+                let rejections: &[&str] = if leaf.name == "pattern_reject" {
+                    &["optional", "greedy", "minimal"]
+                } else {
+                    &["optional"]
+                };
+                for rejection in rejections {
+                    check(
+                        &program,
+                        scenario,
+                        chain,
+                        Some(leaf),
+                        &leaf.outcome,
+                        rejection,
+                    );
                 }
-            } else {
-                check(
-                    &program,
-                    scenario,
-                    chain,
-                    None,
-                    &Outcome::MetaRefused,
-                    "optional",
+            }
+        } else {
+            check(
+                &program,
+                scenario,
+                chain,
+                None,
+                &Outcome::MetaRefused,
+                "optional",
+            );
+        }
+    }
+}
+
+#[cfg(feature = "native-call-trace")]
+fn native_call_inventory() -> &'static toml::Table {
+    // process-global: a read-only parse of a compiled-in file, the same for every test.
+    static INVENTORY: std::sync::OnceLock<toml::Table> = std::sync::OnceLock::new();
+    INVENTORY.get_or_init(|| {
+        // A whole document parses as a `Table`; `Value` parses a single TOML value.
+        include_str!("../reference/native-calls.toml")
+            .parse::<toml::Table>()
+            .expect("the native-call inventory must parse")
+    })
+}
+
+// Check the first descent, before another scenario cycle, chain or leaf can
+// contribute edges. Only wrappers whose calls are still live count, in order.
+#[cfg(feature = "native-call-trace")]
+fn assert_scenario_path(name: &str, path: &[&str]) {
+    let inventory = native_call_inventory();
+    let segments = inventory["segment"].as_table().expect("segments");
+    let declaration = inventory["scenario"]
+        .as_array()
+        .expect("scenarios")
+        .iter()
+        .find(|entry| entry["name"].as_str() == Some(name))
+        .expect("every scenario has an inventory declaration");
+    let mut remaining = path.iter();
+    for item in declaration["path"].as_array().expect("path") {
+        let item = item.as_str().expect("edge or segment name");
+        let expected: Vec<&str> = if let Some(segment) = item.strip_prefix('@') {
+            segments[segment]
+                .as_array()
+                .expect("segment edges")
+                .iter()
+                .map(|edge| edge.as_str().expect("edge id"))
+                .collect()
+        } else {
+            vec![item]
+        };
+        for edge in expected {
+            assert!(
+                remaining.any(|actual| *actual == edge),
+                "{name}: first descent did not traverse {edge} in order: {path:?}"
+            );
+        }
+    }
+}
+
+// This build observes control flow, not the shipped stack envelope. Its
+// instrumentation has its own generous stack and never enters a release lane.
+#[cfg(feature = "native-call-trace")]
+#[test]
+fn native_call_edge_coverage() {
+    stack::on_stack("native_call_edge_coverage", 32 << 20, || {
+        let inventory = native_call_inventory();
+        let mut covered = std::collections::BTreeSet::new();
+        for scenario in SCENARIOS {
+            let (_, edges) = dellingr::with_native_call_trace(|| {
+                exercise_scenario(scenario);
+            });
+            covered.extend(edges);
+        }
+        for edge in inventory["edge"].as_array().expect("edges") {
+            if edge.get("excluded").is_none() {
+                let id = edge["id"].as_str().expect("edge id");
+                assert!(
+                    covered.contains(id),
+                    "no scenario, chain or leaf traversed {id}"
                 );
             }
         }
@@ -1490,6 +1587,10 @@ fn native_bytes_per_level() {
     require_native_stack_target("native_bytes_per_level");
     fn record(state: &mut State) -> dellingr::Result<u8> {
         let local = 0_u8;
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "This on-demand host probe measures native stack addresses, outside deterministic VM execution."
+        )]
         let address = std::ptr::from_ref(&local).addr();
         state.push_number(address as f64)?;
         Ok(1)

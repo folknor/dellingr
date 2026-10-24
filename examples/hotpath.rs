@@ -381,6 +381,7 @@ fn run_warm_block(
 }
 
 fn main() {
+    #[cfg(feature = "hotpath")]
     let _guard = hotpath::HotpathGuardBuilder::new("dellingr::hotpath")
         .percentiles(&[50.0, 95.0, 99.0])
         .functions_limit(0)

@@ -203,11 +203,11 @@ fn tokens(line: &str) -> impl Iterator<Item = &str> {
 // The scratch helper tests its path guard by behavior rather than source text.
 
 /// Cargo makes every `tests/*.rs` and `tests/*/main.rs` its own test binary.
-/// The suites share the integration crate and `native_stack` is the one other
-/// target (see `main.rs`), so anything else at the top level is a binary
-/// nobody chose.
+/// The suites share the integration crate. `native_stack` isolates stack
+/// overflow probes; `libm_symbols` lets release sweeps inspect their own CLI
+/// without compiling the full integration suite. These are named exceptions.
 #[test]
-fn the_test_tree_holds_only_the_two_test_targets() {
+fn the_test_tree_holds_only_the_named_test_targets() {
     let entries: BTreeSet<String> = fs::read_dir(tests_dir())
         .expect("tests/ should be readable")
         .map(|entry| {
@@ -218,10 +218,16 @@ fn the_test_tree_holds_only_the_two_test_targets() {
                 .expect("tests/ entry names are UTF-8")
         })
         .collect();
-    let expected: BTreeSet<String> = ["common", "fixtures", "integration", "native_stack.rs"]
-        .into_iter()
-        .map(String::from)
-        .collect();
+    let expected: BTreeSet<String> = [
+        "common",
+        "fixtures",
+        "integration",
+        "libm_symbols.rs",
+        "native_stack.rs",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
     assert_eq!(
         entries, expected,
         "a new suite is a module of tests/integration, not a new test target"
@@ -567,6 +573,15 @@ fn curated_check_filters_select_existing_feature_gated_tests() {
         tests.extend(source_tests);
     }
 
+    // The native-stack target is a separate crate with its own curated
+    // observation lane. Keep its explicit tests in the filter inventory too.
+    let (_, native_tests) = feature_gated_items(
+        &read(&manifest_dir.join("tests/native_stack.rs")),
+        &[],
+        &BTreeSet::new(),
+        false,
+    );
+
     for check in checks
         .iter()
         .filter(|check| check.get("curated").and_then(toml::Value::as_bool) == Some(true))
@@ -625,6 +640,14 @@ fn curated_check_filters_select_existing_feature_gated_tests() {
                     .iter()
                     .any(|target| target.as_str() == Some("integration"))
             });
+        let includes_native_stack = check
+            .get("tests")
+            .and_then(toml::Value::as_array)
+            .is_some_and(|targets| {
+                targets
+                    .iter()
+                    .any(|target| target.as_str() == Some("native_stack"))
+            });
         let shape_tests = tests
             .iter()
             .filter(|test| {
@@ -634,6 +657,7 @@ fn curated_check_filters_select_existing_feature_gated_tests() {
                     includes_integration
                 }
             })
+            .chain(native_tests.iter().filter(|_| includes_native_stack))
             .collect::<Vec<_>>();
         for filter in &filters {
             assert!(

@@ -132,7 +132,7 @@ impl State {
     ///
     /// Refused inside [`State::with_restricted_env`] with
     /// [`ErrorKind::OpenLibsInRestrictedEnv`] before changing any state.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn open_libs(&mut self) -> Result<()> {
         self.check_poisoned()?;
         if self.in_restricted_env() {

@@ -79,6 +79,25 @@ impl Other { pub fn unrelated(&self) -> Result<()> { Ok(()) } }
 }''')
         self.assertEqual(len(problems), 1)
 
+    def test_observable_string_delegate_still_requires_checked_renderer(self):
+        wrapper = self.source('''impl State {
+ pub fn to_string_with_meta(&mut self, idx: isize) -> Result<String> {
+  let raw = crate::native_call!("to_string_with_meta->tostring_bytes",
+   self.tostring_bytes(idx))?;
+  Self::lossy_utf8_checked(&raw)
+ }
+}''')
+        renderer = self.source('''impl State {
+ pub fn tostring_bytes(&mut self, idx: isize) -> Result<Vec<u8>> {
+  self.check_poisoned()?;
+  render(idx)
+ }
+}''', "src/renderer.rs")
+        self.assertEqual(guard.check_sources([wrapper, renderer]), [])
+        self.assertTrue(guard.check_sources([wrapper]))
+        other = self.source(wrapper.text.replace("native_call!", "arbitrary!"))
+        self.assertTrue(guard.check_sources([other, renderer]))
+
     def test_string_delegation_requires_checked_renderer(self):
         wrapper = self.source('''impl State {
  pub fn to_string_with_meta(&mut self, idx: isize) -> Result<String> {

@@ -21,6 +21,10 @@ fn main() {
     let bytes = save_golden_program::golden_bytes();
     // brokkr --commit builds this example from a worktree but runs it in the
     // caller's checkout, so find the repository from the runtime directory.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "Regeneration locates the caller's checkout, including brokkr worktree runs."
+    )]
     let current_dir =
         std::env::current_dir().expect("the current working directory should be available");
     let root = current_dir

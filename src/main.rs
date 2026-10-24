@@ -365,10 +365,12 @@ fn main() {
         state.set_cost_budget(limit);
     }
 
-    let result = state
-        .load(&program)
-        // native-call: main->call
-        .and_then(|()| state.call(ArgCount::Fixed(0), RetCount::Fixed(0)));
+    let result = state.load(&program).and_then(|()| {
+        dellingr::native_call!(
+            "main->call",
+            state.call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        )
+    });
 
     if !args.quiet {
         write_stderr(&format!("{COST_USED_PREFIX}{}\n", state.cost_used()));

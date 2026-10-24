@@ -74,7 +74,7 @@ enum Variable {
 
 /// Parses Lua source bytes into an unfinalized `Bytecode` tree; the compiler's
 /// `compile` finalizes it.
-#[hotpath::measure]
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub(super) fn parse(source: &[u8], source_name: Option<Arc<[u8]>>) -> Result<Bytecode> {
     if source.len() > MAX_SOURCE_BYTES {
         return Err(Error::without_location(ErrorKind::SourceSizeExceeded {
@@ -449,9 +449,13 @@ impl<'a> Parser<'a> {
     }
 
     // Actual parsing
+    //
+    // Measure the whole parse, not recursive descent helpers: guards on
+    // function, statement, expression or constructor parsing accumulate with
+    // syntax depth and can exhaust hotpath-alloc's nested guard storage.
 
     /// The main entry point for the parser. This parses the entire input.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn parse_all(mut self) -> Result<Bytecode> {
         // The top-level chunk is a vararg function (can receive command-line args)
         let c = self.parse_chunk(&[], true)?;
@@ -467,7 +471,6 @@ impl<'a> Parser<'a> {
     }
 
     /// Parses a function body and generates its code.
-    #[hotpath::measure]
     fn parse_chunk(&mut self, params: &[&'a str], is_vararg: bool) -> Result<Bytecode> {
         let num_params = self.bounded_u8(params.len(), MAX_LOCALS, SyntaxError::TooManyLocals)?;
         // The root is a real frame too; no placeholder chunk participates in
@@ -534,7 +537,6 @@ impl<'a> Parser<'a> {
     /// Parses 0 or more statements, possibly separated by semicolons.
     /// Also returns whether the block's own last statement was a `return`,
     /// excluding returns inside nested statements (including `do` blocks).
-    #[hotpath::measure]
     fn parse_statements(&mut self) -> Result<(Vec<Stmt>, bool)> {
         self.with_syntax_level(1, Self::parse_statements_inner)
     }
@@ -633,7 +635,6 @@ impl<'a> Parser<'a> {
     ///
     /// Lua allows calls with parenthesized arguments, a single table constructor,
     /// or a single literal string: `f(...)`, `f{...}`, and `f"..."`.
-    #[hotpath::measure]
     fn parse_call_args(&mut self) -> Result<Vec<Expr>> {
         let tok = self.input.next()?;
         match tok.typ {
@@ -649,7 +650,6 @@ impl<'a> Parser<'a> {
     }
 
     /// Parses parenthesized function-call args after the opening paren.
-    #[hotpath::measure]
     fn parse_parenthesized_call_args(&mut self) -> Result<Vec<Expr>> {
         let args = if self.input.check_type(TokenKind::RParen)? {
             Vec::new()

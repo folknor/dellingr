@@ -70,7 +70,7 @@ impl<'a> TokenStream<'a> {
     }
 
     /// Returns the next `Token`.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(super) fn next(&mut self) -> Result<Token> {
         let token = match self.lookahead.take() {
             Some(token) => {
@@ -89,7 +89,7 @@ impl<'a> TokenStream<'a> {
     }
 
     /// Returns the next `Token`, without popping it from the stream.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     #[allow(clippy::expect_used)] // The branch above populates this exact option.
     pub(super) fn peek(&mut self) -> Result<&Token> {
         if self.lookahead.is_none() {
@@ -191,7 +191,7 @@ impl<'a> Lexer<'a> {
     }
 
     /// Returns the next `Token`.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(super) fn next_token(&mut self) -> Result<Token> {
         // Loop rather than recurse on comments: a comment skips its body and
         // continues the loop, so a long run of consecutive comments cannot
@@ -739,7 +739,7 @@ impl<'a> Lexer<'a> {
 
     /// Returns the current position of the `Lexer`.
     #[must_use]
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn line_and_col(&self, pos: usize) -> (u32, u32) {
         // A byte at a recorded line start is column 1 of that new line;
         // newline bytes themselves precede the following recorded start.

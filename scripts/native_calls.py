@@ -47,11 +47,7 @@ METHOD_VALUE_RULE = "native-call-method-value"
 # and every Rust callback invocation through the second.
 BOUNDARIES = [("State", "call_unguarded"), ("State", "invoke_rust_fn")]
 
-MARKER = re.compile(r"//\s*native-call:\s*(.*?)\s*$")
-# A comment that opens like a marker but does not parse as one (a missing
-# colon, say). Prose that merely mentions native calls, such as a doc comment
-# naming reference/native-calls.md, is not a marker attempt.
-NEAR_MARKER = re.compile(r"//(?![/!])\s*native[-_]call\b")
+LEGACY_MARKER = re.compile(r"//\s*native-call\s*:")
 EDGE_ID = re.compile(r"^([\w:.]+)->(\w+)(?::([\w-]+))?$")
 
 
@@ -347,8 +343,12 @@ class Source:
         return None
 
 
-def production_sources():
-    sources = [Source(path) for path in sorted(SRC.rglob("*.rs"))]
+def source_files():
+    return [Source(path) for path in sorted(SRC.rglob("*.rs"))]
+
+
+def production_sources(sources=None):
+    sources = source_files() if sources is None else sources
     test_files = set()
     test_dirs = set()
     for source in sources:
@@ -394,6 +394,11 @@ def item_attributes(fn):
         attributes.append(prefix[j:])
         prefix = prefix[:j].rstrip()
     return "\n".join(attributes)
+
+
+def has_hotpath_measure(fn):
+    """Recognize direct attributes and measures nested inside cfg_attr."""
+    return re.search(r"\bhotpath\s*::\s*measure\b", item_attributes(fn)) is not None
 
 
 # ------------------------------------------------------------ call graph
@@ -462,50 +467,51 @@ def definitions(sources):
 # ------------------------------------------------------------- checking
 
 
+def reject_legacy_markers(sources, problems):
+    """Reject the retired comment spelling, including in test-only source."""
+    for source in sources:
+        for line, comment in source.comments.items():
+            if LEGACY_MARKER.match(comment):
+                problems.append(
+                    f"{source.rel}:{line}: legacy native-call comment is unsupported; "
+                    "use a native_call! wrapper")
+
+
 def attach_markers(sources, sites, problems):
-    """Give each site the edge ids its marker names. A marker sits on the
-    line of the call's name or on the line directly above it."""
-    by_line = {}
-    for site in sites:
-        by_line.setdefault((site.src.rel, site.line), []).append(site)
-    for s in sources:
-        for line, comment in s.comments.items():
-            m = MARKER.search(comment)
-            if not m:
-                if NEAR_MARKER.match(comment.strip()):
-                    problems.append(f"{s.rel}:{line}: malformed native-call marker")
+    """Attach ids from wrappers. Every production call needs an observable one."""
+    # A wrapper owns precisely one call expression.
+    # Read literals from the original text, but find wrappers in sanitized code
+    # so strings, comments and inactive test items cannot invent markers.
+    for source in sources:
+        for marker in re.finditer(r"\bnative_call!\s*\(", source.code):
+            if source.in_test(marker.start()):
                 continue
-            ids = [part.strip() for part in m.group(1).split(",") if part.strip()]
-            if not ids:
-                problems.append(f"{s.rel}:{line}: native-call marker names no edge")
+            opening = marker.end() - 1
+            depth = 1
+            closing = opening + 1
+            while closing < len(source.code) and depth:
+                if source.code[closing] == "(":
+                    depth += 1
+                elif source.code[closing] == ")":
+                    depth -= 1
+                closing += 1
+            literal = re.match(r'\s*"([^"\\]*)"\s*,', source.text[opening + 1:closing])
+            where = f"{source.rel}:{source.line_of(marker.start())}"
+            if not literal or not EDGE_ID.fullmatch(literal.group(1)):
+                problems.append(f"{where}: malformed native-call wrapper")
                 continue
-            code_line = s.code_lines[line - 1]
-            trailing = code_line.strip() != ""
-            targets = by_line.get((s.rel, line), []) if trailing else []
-            if not trailing:
-                targets = by_line.get((s.rel, line + 1), [])
-            for edge_id in ids:
-                parsed = EDGE_ID.match(edge_id)
-                if not parsed:
-                    problems.append(f"{s.rel}:{line}: malformed edge id {edge_id!r}")
-                    continue
-                caller, callee, _ = parsed.groups()
-                fits = [t for t in targets
-                        if t.caller.name == caller and t.callee[1] == callee]
-                if not targets:
-                    problems.append(
-                        f"{s.rel}:{line}: marker {edge_id} is not on or directly above "
-                        "a call to an inventoried function")
-                elif not fits:
-                    problems.append(
-                        f"{s.rel}:{line}: marker {edge_id} does not match its call ("
-                        + ", ".join(f"{t.caller.name}->{t.callee[1]}" for t in targets)
-                        + ")")
-                elif len(fits) > 1:
-                    problems.append(
-                        f"{s.rel}:{line}: marker {edge_id} matches several calls on one line")
-                else:
-                    fits[0].ids.append(edge_id)
+            edge_id = literal.group(1)
+            targets = [site for site in sites if site.src is source
+                       and opening < site.offset < closing]
+            if len(targets) != 1:
+                problems.append(f"{where}: native-call wrapper must contain exactly one inventoried call")
+                continue
+            site = targets[0]
+            caller, callee, _ = EDGE_ID.fullmatch(edge_id).groups()
+            if site.caller.name != caller or site.callee[1] != callee:
+                problems.append(f"{where}: marker {edge_id} does not match its call")
+            else:
+                site.ids.append(edge_id)
 
 
 def scan_test_lists(problems, native_counts=None):
@@ -594,10 +600,13 @@ def check_textlint(names, problems, config):
         problems.append(
             f"brokkr.toml: {TEXTLINT_RULE} except does not match the inventory; "
             f"expected except = ['{except_expected[0]}']")
-    if rule.get("allow_marker") != "native-call:" or rule.get("allow_marker_above") != 1:
+    # rustfmt lays out a wrapper that does not fit on one line vertically:
+    # `native_call!(`, then the edge id, then the call, so the call's name sits
+    # two lines below the macro name. The script itself checks containment.
+    if rule.get("allow_marker") != "native_call!" or rule.get("allow_marker_above") != 2:
         problems.append(
-            f"brokkr.toml: {TEXTLINT_RULE} must use allow_marker = \"native-call:\" "
-            "and allow_marker_above = 1, as this script does")
+            f"brokkr.toml: {TEXTLINT_RULE} must use allow_marker = \"native_call!\" "
+            "and allow_marker_above = 2, the window rustfmt's wrapper layout needs")
 
 
 def textlint_pattern(names):
@@ -654,7 +663,8 @@ def check():
     problems = []
     config = tomllib.loads(BROKKR.read_text())
     excludes = textlint_excludes(config)
-    sources = production_sources()
+    all_sources = source_files()
+    sources = production_sources(all_sources)
     defs = definitions(sources)
     reached, sites, toplevel = closure(sources)
     inv = tomllib.loads(INVENTORY.read_text())
@@ -667,7 +677,7 @@ def check():
         ("State", "run_invocation"), ("Frame", "run")}
     for key in sorted(unmeasured, key=lambda key: (key[0] or "", key[1])):
         for fn in defs.get(key, []):
-            if re.search(r"\bhotpath\s*::\s*measure\b", item_attributes(fn)):
+            if has_hotpath_measure(fn):
                 problems.append(f"{fn.src.rel}:{fn.line}: {fn.qual} stays live across "
                                 "native re-entry and must not use hotpath::measure")
 
@@ -708,13 +718,14 @@ def check():
                 f"inventory: {entry['name']} has no callers in src and is not a classified root")
 
     # Markers.
+    reject_legacy_markers(all_sources, problems)
     attach_markers(sources, sites, problems)
     seen = {}
     for site in sites:
         if not site.ids:
             problems.append(
                 f"{site.where}: call {site.caller.name}->{site.callee[1]} has no "
-                "native-call marker")
+                "native_call! edge id")
         if len(site.ids) > 1:
             problems.append(f"{site.where}: several markers for one call: {site.ids}")
         for edge_id in site.ids:
@@ -882,10 +893,14 @@ def textlint_strays(sources, sites, names):
 
 
 def list_sites():
-    sources = production_sources()
+    all_sources = source_files()
+    sources = production_sources(all_sources)
     reached, sites, _ = closure(sources)
     problems = []
+    reject_legacy_markers(all_sources, problems)
     attach_markers(sources, sites, problems)
+    for problem in problems:
+        print(problem)
     for site in sites:
         mark = ", ".join(site.ids) if site.ids else "UNMARKED"
         print(f"{site.where}\t{site.caller.qual}->{site.callee[1]}\t{mark}")

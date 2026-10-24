@@ -86,7 +86,7 @@ impl State {
     /// while the allocator may collect, and the new table goes straight into
     /// its register, as `OP_NEW_TABLE`'s does. Outlined, so the template
     /// table's construction stays out of `Frame::run`.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     #[inline(never)]
     pub(super) fn reg_new_table_template(&mut self, frame: &Frame, dst: usize, template: u16) {
         let template = &frame.bytecode().table_templates[usize::from(template)];
@@ -132,8 +132,10 @@ impl State {
         let cache = frame.runtime.caches.field(cache_slot);
         match self.resolve_index(receiver, IndexStart::Receiver, key, cache, local_cost)? {
             IndexOutcome::Value(val) => self.stack[dst] = val,
-            // native-call: reg_get_field->index_call
-            IndexOutcome::Call(units) => self.index_call(dst, units, call_site)?,
+            IndexOutcome::Call(units) => crate::native_call!(
+                "reg_get_field->index_call",
+                self.index_call(dst, units, call_site)
+            )?,
         }
         Ok(())
     }
@@ -144,8 +146,10 @@ impl State {
     #[inline(never)]
     fn index_call(&mut self, dst: usize, units: u32, call_site: usize) -> Result<()> {
         self.record_call_site(call_site);
-        // native-call: index_call->call_unguarded
-        let result = self.call_unguarded(ArgCount::Fixed(2), RetCount::Fixed(1));
+        let result = crate::native_call!(
+            "index_call->call_unguarded",
+            self.call_unguarded(ArgCount::Fixed(2), RetCount::Fixed(1))
+        );
         self.in_flight.metamethod_depth -= units;
         result?;
         self.pop_into(dst);
@@ -192,8 +196,10 @@ impl State {
         };
         match self.resolve_index(tbl_val, start, key_val, None, local_cost)? {
             IndexOutcome::Value(val) => self.stack[dst] = val,
-            // native-call: reg_get_table->index_call
-            IndexOutcome::Call(units) => self.index_call(dst, units, call_site)?,
+            IndexOutcome::Call(units) => crate::native_call!(
+                "reg_get_table->index_call",
+                self.index_call(dst, units, call_site)
+            )?,
         }
         Ok(())
     }
@@ -224,8 +230,10 @@ impl State {
             return Ok(());
         }
         if let Some(units) = self.store_field(receiver, key, val, cache, local_cost)? {
-            // native-call: reg_set_field->newindex_call
-            self.newindex_call(units, call_site)?;
+            crate::native_call!(
+                "reg_set_field->newindex_call",
+                self.newindex_call(units, call_site)
+            )?;
         }
         Ok(())
     }
@@ -235,8 +243,10 @@ impl State {
     #[inline(never)]
     fn newindex_call(&mut self, units: u32, call_site: usize) -> Result<()> {
         self.record_call_site(call_site);
-        // native-call: newindex_call->call_unguarded
-        let result = self.call_unguarded(ArgCount::Fixed(3), RetCount::Fixed(0));
+        let result = crate::native_call!(
+            "newindex_call->call_unguarded",
+            self.call_unguarded(ArgCount::Fixed(3), RetCount::Fixed(0))
+        );
         self.in_flight.metamethod_depth -= units;
         result
     }
@@ -261,8 +271,10 @@ impl State {
             .as_object_ptr()
             .expect("the direct store accepted only a table");
         if let Some(units) = self.store_absent_key(ptr, key_val, val, local_cost)? {
-            // native-call: reg_set_table->newindex_call
-            self.newindex_call(units, call_site)?;
+            crate::native_call!(
+                "reg_set_table->newindex_call",
+                self.newindex_call(units, call_site)
+            )?;
         }
         Ok(())
     }
@@ -405,8 +417,7 @@ impl State {
         }
         match self.resolve_length(val, local_cost)? {
             Some(len) => self.stack[dst] = len,
-            // native-call: reg_len->len_call
-            None => self.len_call(dst, call_site)?,
+            None => crate::native_call!("reg_len->len_call", self.len_call(dst, call_site))?,
         }
         Ok(())
     }
@@ -416,8 +427,10 @@ impl State {
     #[inline(never)]
     fn len_call(&mut self, dst: usize, call_site: usize) -> Result<()> {
         self.record_call_site(call_site);
-        // native-call: len_call->call_unguarded
-        self.call_unguarded(ArgCount::Fixed(2), RetCount::Fixed(1))?;
+        crate::native_call!(
+            "len_call->call_unguarded",
+            self.call_unguarded(ArgCount::Fixed(2), RetCount::Fixed(1))
+        )?;
         self.pop_into(dst);
         Ok(())
     }
@@ -459,7 +472,7 @@ impl State {
     /// first, the one fallible step, so a refused closure has opened no
     /// upvalue; capturing and allocating cannot fail. Outlined, so the
     /// capture list and runtime handle stay out of `Frame::run`.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     #[inline(never)]
     pub(super) fn reg_closure(&mut self, frame: &Frame, dst: usize, nested: u16) -> Result<()> {
         let bytecode = frame.get_nested_bytecode(nested);

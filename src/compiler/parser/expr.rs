@@ -88,7 +88,6 @@ pub(super) fn variable_read(variable: Variable, line: u32) -> Expr {
 impl Parser<'_> {
     /// Parses a comma-separated list of expressions. Trailing and leading
     /// commas are not allowed.
-    #[hotpath::measure]
     pub(super) fn parse_explist(&mut self) -> Result<Vec<Expr>> {
         // An explist has to have at least one expression.
         let mut exprs = vec![self.parse_expr()?];
@@ -102,7 +101,6 @@ impl Parser<'_> {
     }
 
     /// Parses a single expression.
-    #[hotpath::measure]
     pub(super) fn parse_expr(&mut self) -> Result<Expr> {
         self.with_syntax_level(1, |parser| {
             let line = parser.input.peek()?.line;
@@ -301,7 +299,6 @@ impl Parser<'_> {
     /// Parses a `prefix expression`. Prefix expressions are the expressions
     /// which can appear on the left side of a function call, table index, or
     /// field access.
-    #[hotpath::measure]
     pub(super) fn parse_prefix_exp(&mut self) -> Result<Prefix> {
         let tok = self.input.next()?;
         let base = match tok.typ {
@@ -337,7 +334,6 @@ impl Parser<'_> {
     /// `suffixedexp`. A suffix chain is flat, so its length adds no syntax
     /// depth. Parsing the contents of an index or call charges a level while
     /// those contents are active, in addition to their expression levels.
-    #[hotpath::measure]
     fn parse_prefix_extension(&mut self, prefix: &mut Prefix) -> Result<()> {
         loop {
             // These suffixes retain this loop and the suffix parser while
@@ -429,7 +425,6 @@ impl Parser<'_> {
     /// * A function definition
     /// * One of the keywords `nil`, `false` or `true
     /// * A table constructor
-    #[hotpath::measure]
     fn parse_expr_base(&mut self) -> Result<Expr> {
         let tok = self.input.next()?;
         Ok(match tok.typ {

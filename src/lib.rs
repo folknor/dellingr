@@ -29,15 +29,56 @@
 // banned in clippy.toml, with a scoped allow on `DefaultCallbacks::on_print`.
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
-// Fault injection and disabled inline caches are test instrumentation. Keep
-// them out of release builds, where dependency feature unification would
-// otherwise expose them to hosts.
+// The debug-only features are test instrumentation. Keep them out of release
+// builds, where dependency feature unification would otherwise expose them to
+// hosts.
 #[cfg(all(feature = "fault-injection", not(debug_assertions)))]
 compile_error!("the fault-injection feature requires debug assertions");
 #[cfg(all(feature = "disable-inline-caches", not(debug_assertions)))]
 compile_error!("the disable-inline-caches feature requires debug assertions");
 #[cfg(all(feature = "cost-check-interval", not(debug_assertions)))]
 compile_error!("the cost-check-interval feature requires debug assertions");
+#[cfg(all(feature = "native-call-trace", not(debug_assertions)))]
+compile_error!("the native-call-trace feature requires debug assertions");
+
+// With tracing disabled, preserve the call expression without adding a block,
+// local, closure or guard to any frame that can stay live across re-entry.
+/// Mark a native call edge for coverage tracing.
+///
+/// With `native-call-trace`, the edge becomes live before `$call` is evaluated,
+/// including its argument expressions. Keep arguments free of calls that can
+/// re-enter Lua, or that re-entry will be attributed to this edge. With tracing
+/// disabled, this macro expands to the bare call expression.
+#[cfg(not(feature = "native-call-trace"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! native_call {
+    ($edge:literal, $call:expr $(,)?) => {
+        $call
+    };
+}
+
+/// Mark a native call edge for coverage tracing.
+///
+/// With `native-call-trace`, the edge becomes live before `$call` is evaluated,
+/// including its argument expressions. Keep arguments free of calls that can
+/// re-enter Lua, or that re-entry will be attributed to this edge. With tracing
+/// disabled, this macro expands to the bare call expression.
+#[cfg(feature = "native-call-trace")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! native_call {
+    ($edge:literal, $call:expr $(,)?) => {{
+        let _edge = $crate::native_call_trace::record($edge);
+        $call
+    }};
+}
+
+// Public only because the exported macro reaches `record` through `$crate`;
+// the test entry point is re-exported at the root beside the other hooks.
+#[cfg(feature = "native-call-trace")]
+#[doc(hidden)]
+pub mod native_call_trace;
 
 mod compiler;
 mod cost_meter;
@@ -74,6 +115,9 @@ pub use cost_meter::interval_test::with_cost_check_interval;
 pub use disassemble::Disassembly;
 pub use host::{DefaultCallbacks, HostCallbacks};
 pub use instr::{ArgCount, RetCount};
+#[cfg(feature = "native-call-trace")]
+#[doc(hidden)]
+pub use native_call_trace::{active_path, is_observing, with_native_call_trace};
 pub use vm::Anchor;
 pub use vm::LuaType;
 pub use vm::RustFunc;

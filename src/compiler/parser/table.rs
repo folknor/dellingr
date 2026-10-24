@@ -70,7 +70,6 @@ enum Entry {
 impl Parser<'_> {
     /// Parses a table constructor after its opening brace, which was read on
     /// `open_line`.
-    #[hotpath::measure]
     pub(super) fn parse_table(&mut self, open_line: u32) -> Result<Expr> {
         let mut table = TableExpr {
             alloc: TableAlloc::Plain,
@@ -177,7 +176,6 @@ impl Parser<'_> {
     }
 
     /// Parses a table entry.
-    #[hotpath::measure]
     fn parse_table_entry(&mut self) -> Result<Entry> {
         match self.input.peek_type()? {
             TokenKind::Identifier if self.input.peek2_type()? == TokenKind::Assign => {

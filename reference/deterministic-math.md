@@ -11,8 +11,11 @@ emits, so `scripts/libm_symbols.py` checks the linked binary for platform libm
 transcendental symbols (`fmod`, `sqrt` and the other exact operations are
 allowed). `brokkr check` runs it, through the integration test
 `corpus::libm_symbols`, on the dev-profile CLI binary of the default and
-`snapshot` sweeps only. The fat-LTO release binaries are not gated: run
-`scripts/check_libm_symbols.sh` by hand, outside `brokkr check`, to check them.
+`snapshot` sweeps. The dedicated `libm_symbols` test target also checks the
+fat-LTO release binaries in `release-native-stack` and
+`release-native-stack-snapshot`, using each sweep's `CARGO_BIN_EXE_dellingr`.
+Only code retained in the linked CLI is covered; discarded library code is
+outside this symbol check.
 
 ## Why
 

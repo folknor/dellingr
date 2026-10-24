@@ -23,33 +23,6 @@ them. Each entry names the scopes whose hunters reported it.
 
 ---
 
-## VG-002 - `clippy.toml` bans fail open, and nothing proves any of them fires
-
-Reported by: check-machinery, compiler-cost, library.
-
-A `fixtures/lint-policy/` fixture now proves every method and type ban fires,
-`disallowed_types` is deny, the f32 list is complete, a dependency rule
-replaces the unresolvable `rand` bans, and a libm symbol check reads the
-release binaries. Remaining:
-
-- `allow-invalid = true` stays on the four foldhash `RandomState` entries until
-  the fixture has run and proven they resolve; drop it then.
-- Host state still unbanned: `std::env::current_dir`, `home_dir`,
-  `std::process::id`, `std::thread::available_parallelism` and pointer-address
-  values (`temp_dir` and `std::thread::current` are now banned). Banning
-  them needs scoped allows in `examples/regenerate_save_golden.rs`, the test
-  scratch and support code, the crmath sweeps and the native-stack probe.
-- The libm symbol check is gated only on the dev CLI binaries
-  (`corpus::libm_symbols`); the shipped release binaries need the manual
-  `scripts/check_libm_symbols.sh`, because a script check cannot get built
-  artifacts inside `brokkr check` (brokkr#20). It also sees linked CLI code
-  only, not library code the linker discarded.
-
-Fix: drop foldhash's `allow-invalid` once the fixture proves it; add the
-host-state bans with their scoped allows in one wave.
-
-Enforceable: yes, by the fixture.
-
 ## VG-009 - Source-only checks compile and run as integration tests in every sweep
 
 Reported by: check-machinery.
@@ -67,21 +40,6 @@ rule and the conventions. The corpus-equivalence test exists only because two
 walkers exist; the in-process gate rewrite in rewrites.md removes it.
 
 Enforceable: yes.
-
-## VG-017 - Nothing checks the consumer's dependency graph stays free of the profiler's crates
-
-Reported by: check-machinery.
-
-A `dependency_rule` now allowlists the direct normal and build dependencies.
-What remains is transitive: `hotpath`'s own dependencies (`tiny_http`,
-`quanta`, `time`, `serde_json`, `crossbeam-channel`, `hdrhistogram`) are not
-checked against the consumer's resolved default-feature graph. brokkr's
-`dependency_rule` sees direct edges only, and `brokkr deps` cannot run nested
-inside `brokkr check` (brokkr#21).
-
-Fix: a transitive dependency rule once brokkr offers one.
-
-Enforceable: blocked on brokkr#21.
 
 ## VG-020 - The rules forbid the benchmarking tools the docs prescribe
 

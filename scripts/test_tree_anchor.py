@@ -2,8 +2,8 @@
 """Check, from outside the integration test crate, that its convention tests
 are compiled and run.
 
-`tests/integration/corpus/test_conventions.rs` keeps the test tree to two
-targets and every source reachable from `main.rs`, but a `cfg` on its own
+`tests/integration/corpus/test_conventions.rs` keeps the test tree to its
+named targets and every source reachable from `main.rs`, but a `cfg` on its own
 `mod` line, an inner `cfg`, an `#[ignore]` or a deleted declaration would
 switch it off without any test failing. A `brokkr check` script check runs
 this, so that switch-off fails the gate. Prints `ok`.

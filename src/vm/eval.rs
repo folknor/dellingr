@@ -94,8 +94,12 @@ impl State {
     /// propagates; a callback that catches a panic and returns normally gets
     /// its execution abandoned, and this call returns `StatePoisoned`.
     pub fn call(&mut self, num_args: ArgCount, num_ret_expected: RetCount) -> Result<()> {
-        // native-call: call->call_unguarded
-        self.guarded(|state| state.call_unguarded(num_args, num_ret_expected))
+        self.guarded(|state| {
+            crate::native_call!(
+                "call->call_unguarded",
+                state.call_unguarded(num_args, num_ret_expected)
+            )
+        })
     }
 
     /// The body of [`State::call`] without the poison boundary. Every
@@ -164,16 +168,19 @@ impl State {
             // `Frame::run`'s result, which grows this frame, live across
             // every native re-entry, in release.
             let result = 'call: {
-                let admitted =
-                    // native-call: call_unguarded->begin_call
-                    match self.begin_call(idx, num_args, old_stack_bottom, false, entered) {
-                        Ok(admitted) => admitted,
-                        Err(error) => break 'call Err(error),
-                    };
+                let admitted = match crate::native_call!(
+                    "call_unguarded->begin_call",
+                    self.begin_call(idx, num_args, old_stack_bottom, false, entered)
+                ) {
+                    Ok(admitted) => admitted,
+                    Err(error) => break 'call Err(error),
+                };
                 let num_ret_actual = match admitted {
                     Some(n) => n,
-                    // native-call: call_unguarded->run_invocation
-                    None => match self.run_invocation(old_stack_bottom) {
+                    None => match crate::native_call!(
+                        "call_unguarded->run_invocation",
+                        self.run_invocation(old_stack_bottom)
+                    ) {
                         Ok(n) => n,
                         Err(error) => break 'call Err(error),
                     },
@@ -219,8 +226,10 @@ impl State {
     ) -> Result<bool> {
         let idx = self.call_base(num_args)?;
         let old_stack_bottom = self.in_flight.stack_bottom;
-        // native-call: call_from_lua->begin_call
-        match self.begin_call(idx, num_args, old_stack_bottom, method, ())? {
+        match crate::native_call!(
+            "call_from_lua->begin_call",
+            self.begin_call(idx, num_args, old_stack_bottom, method, ())
+        )? {
             Some(n) => {
                 self.finish_call(num_ret_expected, n)?;
                 Ok(false)
@@ -276,8 +285,11 @@ impl State {
             // without removing the relocation required by the stack cap.
             // Keep the single remove (zero copied values for zero arguments).
             self.stack.remove(idx);
-            // native-call: begin_call->invoke_rust_fn
-            return self.invoke_rust_fn(f, idx, method).map(Some);
+            return crate::native_call!(
+                "begin_call->invoke_rust_fn",
+                self.invoke_rust_fn(f, idx, method)
+            )
+            .map(Some);
         }
         if let Some(bytecode) = self.lua_function_bytecode(func_val) {
             self.admit_lua_call(bytecode, num_args, old_stack_bottom)?;
@@ -287,8 +299,10 @@ impl State {
         // Observed calls are only made for direct Lua or Rust __index
         // functions. Callable-object resolution has no host-read observer.
         debug_assert!(!entered.tracks_entry());
-        // native-call: begin_call->begin_callable_call
-        self.begin_callable_call(idx, num_args, old_stack_bottom, method)
+        crate::native_call!(
+            "begin_call->begin_callable_call",
+            self.begin_callable_call(idx, num_args, old_stack_bottom, method)
+        )
     }
 
     /// `begin_call` for a callee that is not a function: the general
@@ -310,8 +324,11 @@ impl State {
                 // first argument, with the function value gone. Keep this
                 // consistent with the direct-function path's slot contract.
                 self.stack.remove(idx);
-                // native-call: begin_callable_call->invoke_rust_fn
-                break self.invoke_rust_fn(f, idx, method).map(Some);
+                break crate::native_call!(
+                    "begin_callable_call->invoke_rust_fn",
+                    self.invoke_rust_fn(f, idx, method)
+                )
+                .map(Some);
             }
             if let Some(bytecode) = self.lua_function_bytecode(func_val) {
                 // A Lua callee keeps its function slot: the value stays
@@ -547,7 +564,7 @@ impl State {
     /// Outlined: inlined into `OP_CONCAT`'s arm, its rendering and buffer
     /// temporaries grow `Frame::run`, a frame live across every native
     /// re-entry.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     #[inline(never)]
     pub(super) fn concat_values(&mut self, idx: usize, n: usize) -> Result<Val> {
         let operands = idx..idx + n;
@@ -713,7 +730,7 @@ impl State {
     /// Move extra arguments to the shared arena. Admission records the old
     /// length before appending; pop_activation releases exactly that suffix on
     /// return or refusal/unwind. No allocator here triggers VM collection.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     #[inline]
     fn collect_varargs(&mut self, vararg_start: usize) {
         self.in_flight
@@ -769,8 +786,8 @@ impl State {
     pub(super) fn run_invocation(&mut self, old_stack_bottom: usize) -> Result<u8> {
         let mut frames = self.frame_stacks.pop().unwrap_or_default();
         frames.push(self.admitted_frame());
-        // native-call: run_invocation->run
-        let result = match Frame::run(&mut frames, self) {
+        let result = match crate::native_call!("run_invocation->run", Frame::run(&mut frames, self))
+        {
             Ok((first, count)) => {
                 let frame = frames.last().expect("the entry frame returned");
                 match self.collect_returns(frame, first, count) {
@@ -981,7 +998,7 @@ impl State {
         self.push_closure(bytecode, Vec::new())
     }
 
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(super) fn push_closure(
         &mut self,
         bytecode: Arc<Bytecode>,
@@ -1028,7 +1045,7 @@ impl State {
     }
 
     /// Find an existing open upvalue for the given stack index, or create a new one.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(super) fn find_or_create_upvalue(&mut self, stack_idx: usize) -> UpvalueRef {
         // Binary search preserves identity on hits and the exact ascending
         // insertion/descending close order on misses. Vec insertion still
@@ -1055,7 +1072,7 @@ impl State {
     /// Close all open upvalues at or above the given stack level.
     /// This is called when a function returns to capture the values from the stack
     /// before they are popped.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(crate) fn close_upvalues(&mut self, level: usize) {
         // Upvalues are sorted ascending by stack index, so highest indices are at the end.
         // We close highest first (they go out of scope first), popping from end in O(1).

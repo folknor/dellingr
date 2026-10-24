@@ -94,7 +94,7 @@ impl UpvaluePool {
     }
 
     /// Allocate a new upvalue and return its reference.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(super) fn alloc(&mut self, upvalue: Upvalue) -> UpvalueRef {
         if let Some(idx) = self.free.pop() {
             self.slots[idx as usize] = upvalue;
@@ -476,7 +476,7 @@ impl GcHeap {
     }
 
     /// Borrow the object as a Lua closure, if it is one, without cloning it.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(super) fn as_lua_function_ref(&self, ptr: ObjectPtr) -> Option<&Closure> {
         match &self.get(ptr).raw {
             RawObject::LuaFn(closure) => Some(closure),
@@ -529,7 +529,7 @@ impl GcHeap {
     // ========================================================================
 
     /// Allocate a new Lua function.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn alloc_lua_fn_raw(
         &mut self,
         bytecode: Arc<Bytecode>,
@@ -555,7 +555,7 @@ impl GcHeap {
     }
 
     /// Allocate a new table.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn alloc_table_raw(&mut self) -> ObjectPtr {
         let raw = RawObject::Table(Table::default());
         let wrapped = WrappedObject {
@@ -586,7 +586,7 @@ impl GcHeap {
     }
 
     /// Allocate or intern a string.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn alloc_string_raw(&mut self, bytes: &[u8]) -> StringPtr {
         let hash = crate::det_hash::hash_bytes(bytes);
         if let Some(ptr) = self.strings.find_by_hash(bytes, hash) {
@@ -607,7 +607,7 @@ impl GcHeap {
 
     /// Mark an object as reachable. Call this for all root objects.
     /// The worklist traversal follows children, including closure upvalues.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(super) fn mark(&self, ptr: ObjectPtr, worklist: &mut Vec<ObjectPtr>) {
         // Marking accepts strong roots and graph edges only. Weak caches
         // must be filtered by their owners. Table tombstone keys are strong
@@ -665,7 +665,7 @@ impl GcHeap {
     }
 
     /// Mark objects referenced by this object.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn mark_children(
         &self,
         obj: &WrappedObject,
@@ -692,7 +692,7 @@ impl GcHeap {
 
     /// Run the garbage collector sweep phase.
     /// Call this after marking all roots.
-    #[hotpath::measure(label = "object::heap_collect")]
+    #[cfg_attr(feature = "hotpath", hotpath::measure(label = "object::heap_collect"))]
     fn collect(&mut self) {
         // Sweep phase: remove unmarked objects
         self.objects.retain(|_, obj| match obj.color.get() {
@@ -944,7 +944,7 @@ impl StringPool {
     }
 
     /// Find an existing interned string by content and hash.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(super) fn find_by_hash(&self, bytes: &[u8], hash: u64) -> Option<StringPtr> {
         let strings = &self.strings;
         self.index
@@ -957,7 +957,7 @@ impl StringPool {
     }
 
     /// Insert a new string with precomputed hash. Updates the hash index.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(super) fn insert_with_hash(&mut self, bytes: Box<[u8]>, hash: u64) -> StringPtr {
         let entry = StringEntry {
             data: bytes,
@@ -991,7 +991,10 @@ impl StringPool {
     }
 
     /// Collect unreachable strings.
-    #[hotpath::measure(label = "object::string_pool_collect")]
+    #[cfg_attr(
+        feature = "hotpath",
+        hotpath::measure(label = "object::string_pool_collect")
+    )]
     pub(super) fn collect(&mut self) {
         let mut removed: Vec<(StringKey, u64)> = Vec::new();
         self.strings.retain(|key, entry| match entry.color.get() {

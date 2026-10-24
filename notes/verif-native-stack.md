@@ -23,45 +23,6 @@ scopes whose hunters reported it.
 
 ---
 
-## VN-001 - The inventory's edge coverage is declared, not observed
-
-Reported by: check-machinery, native-stack-errors.
-
-`reference/native-calls.toml` gives every scenario an ordered edge path, and
-`native_calls.py` checks that each path is syntactically connected and every
-edge is covered by some path. An edge counts as "covered" when the inventory
-says so; nothing observes that `every_limit_at_once_fits_the_limit_test_stack`
-actually traverses the marked call site. `reference/native-calls.md` presents
-the script as keeping the inventory, markers and test "in agreement"; that
-agreement is between declarations, not executions. Examples where the claim
-rests on prose about the implementation:
-
-- `sort_comparator_right` claims `table_sort_sift_down->table_sort_less:right`
-  because "the heapify pass compares the left child, then the right" for
-  `{3, 1, 2}`; `sort_comparator_sortdown` claims the sort-down edge because the
-  third comparison is "the first of the sort-down pass". A change in heap order
-  keeps both green while those edges go uncovered.
-- `index_method` claims `run_frame->reg_get_field:self` rather than `:field`;
-  nothing distinguishes them at run time.
-- `tfor_ipairs` relies on "ipairs over a table with a metatable leaves the
-  dispatch loop's fast path"; if the fast path learned to read through
-  `__index`, the scenario would stop exercising `base_ipairs_iter`.
-
-The witnesses in `native_stack.rs` prove recursion happened through *some*
-native path at each level, not which.
-
-Fix: make the marker observable. A `native_call!("edge-id")` macro that expands
-to nothing normally and, under a test-only cfg (`--cfg dellingr_edge_trace`, so
-frames in every shipped configuration are unchanged, which is why markers are
-comments today), records the id in a per-State log (native-stack-errors); or a
-`cfg(any(test, feature = "fault-injection"))` counter keyed by edge id
-(check-machinery). `native_stack.rs` under that cfg asserts each scenario's
-recorded edge set contains its toml path, or that every non-excluded edge was hit.
-The marker stays one token per call site, as the script and textlint parse it.
-
-Enforceable: yes; it would make the toml's coverage column true by
-construction.
-
 ## VN-005 - `cfg!(debug_assertions)` stands in for the build profile
 
 Reported by: check-machinery, corpus-harness, native-stack-errors, runtime.

@@ -41,10 +41,16 @@ expect = [{ lint = "clippy::disallowed_methods", path = "std::env::temp_dir" }]
 expect = [{ lint = "clippy::disallowed_methods", path = "std::thread::current" }]
 
 [files."src/method_13.rs"]
-expect = [{ lint = "clippy::disallowed_methods", path = "std::time::Instant::now" }]
+expect = [
+    { lint = "clippy::disallowed_methods", path = "std::time::Instant::now" },
+    { lint = "clippy::disallowed_types", path = "std::time::Instant" },
+]
 
 [files."src/method_14.rs"]
-expect = [{ lint = "clippy::disallowed_methods", path = "std::time::SystemTime::now" }]
+expect = [
+    { lint = "clippy::disallowed_methods", path = "std::time::SystemTime::now" },
+    { lint = "clippy::disallowed_types", path = "std::time::SystemTime" },
+]
 
 [files."src/method_15.rs"]
 expect = [{ lint = "clippy::disallowed_methods", path = "f64::sin" }]
@@ -213,6 +219,30 @@ expect = [{ lint = "clippy::disallowed_methods", path = "std::io::stdout" }]
 
 [files."src/method_70.rs"]
 expect = [{ lint = "clippy::disallowed_methods", path = "std::io::stderr" }]
+
+[files."src/method_71.rs"]
+expect = [{ lint = "clippy::disallowed_methods", path = "std::env::current_dir" }]
+
+[files."src/method_72.rs"]
+expect = [{ lint = "clippy::disallowed_methods", path = "std::env::home_dir" }]
+
+[files."src/method_73.rs"]
+expect = [{ lint = "clippy::disallowed_methods", path = "std::process::id" }]
+
+[files."src/method_74.rs"]
+expect = [{ lint = "clippy::disallowed_methods", path = "std::thread::available_parallelism" }]
+
+[files."src/method_75.rs"]
+expect = [{ lint = "clippy::disallowed_methods", path = "const_ptr::addr" }]
+
+[files."src/method_76.rs"]
+expect = [{ lint = "clippy::disallowed_methods", path = "mut_ptr::addr" }]
+
+[files."src/method_77.rs"]
+expect = [{ lint = "clippy::disallowed_methods", path = "const_ptr::expose_provenance" }]
+
+[files."src/method_78.rs"]
+expect = [{ lint = "clippy::disallowed_methods", path = "mut_ptr::expose_provenance" }]
 
 [files."src/type_0.rs"]
 expect = [{ lint = "clippy::disallowed_types", path = "std::collections::hash_map::HashMap" }]

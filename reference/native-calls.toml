@@ -14,12 +14,12 @@
 #                 host-api  a public State method a host (or a host callback)
 #                           calls
 #                 binary    the CLI's `main`
-# [[edge]]      One call site, named by the `// native-call:` marker on or
-#               directly above it: `caller->callee`, plus `:tag` when one
-#               caller has several call sites of one callee. An edge is
-#               covered by the scenarios whose path runs it, or by the chain
-#               kinds or leaf variants it names, or it is excluded with a
-#               reason. Never both.
+# [[edge]]      One call site, named by its `native_call!` wrapper:
+#               `caller->callee`, plus `:tag` when one caller has several
+#               call sites of one callee. An edge is covered by the
+#               scenarios whose path runs it, or by the chain kinds or leaf
+#               variants it names, or it is excluded with a reason. Never
+#               both.
 # [segment]     Named runs of edges that scenario paths share; `@name` in a
 #               path expands to one.
 # [[scenario]]  One kind of native level in tests/native_stack.rs: its path

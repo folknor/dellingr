@@ -315,8 +315,12 @@ impl State {
     ///
     /// Guarded like [`State::call`]: refused on a poisoned State.
     pub fn call_anchor(&mut self, a: &Anchor, args: ArgCount, rets: RetCount) -> Result<()> {
-        // native-call: call_anchor->call_anchor_unguarded
-        self.guarded(|state| state.call_anchor_unguarded(a, args, rets))
+        self.guarded(|state| {
+            crate::native_call!(
+                "call_anchor->call_anchor_unguarded",
+                state.call_anchor_unguarded(a, args, rets)
+            )
+        })
     }
 
     fn call_anchor_unguarded(&mut self, a: &Anchor, args: ArgCount, rets: RetCount) -> Result<()> {
@@ -358,8 +362,10 @@ impl State {
         let insert_at = self.stack.len() - n_args;
         self.check_stack_space(1)?;
         self.stack.insert(insert_at, val);
-        // native-call: call_anchor_unguarded->call_unguarded
-        self.call_unguarded(args, rets)
+        crate::native_call!(
+            "call_anchor_unguarded->call_unguarded",
+            self.call_unguarded(args, rets)
+        )
     }
 
     /// Release an anchor now, rather than at the State's next collection or

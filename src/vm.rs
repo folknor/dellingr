@@ -852,7 +852,7 @@ impl State {
     /// is dropped only once no surviving closure, activation or pending
     /// closure shell uses its bytecode. Debug builds check the closure half.
     #[inline(never)]
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn drop_dead_cache_entries(&self) {
         for entry in self.bytecode_caches.values() {
             entry.runtime.caches.drop_dead_entries(&self.heap);
@@ -1002,7 +1002,7 @@ impl State {
     }
 
     /// Pushes onto the stack the value of the global `name`.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn get_global(&mut self, name: &str) -> Result<()> {
         self.check_poisoned()?;
         let val = self.global_env.read_name(&self.heap, name);
@@ -1022,7 +1022,7 @@ impl State {
     /// Returns `InvalidStackIndex` and leaves the stack unchanged when the
     /// current frame has no visible value; it never pops a slot owned by a
     /// calling Lua frame.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn set_global(&mut self, name: &str) -> Result<()> {
         self.check_poisoned()?;
         if self.get_top() == 0 {
@@ -1410,7 +1410,7 @@ impl State {
     }
 
     /// Allocates a string on the heap.
-    #[hotpath::measure]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(super) fn alloc_string(&mut self, bytes: impl AsRef<[u8]>) -> Result<Val> {
         check_string_size(bytes.as_ref().len())?;
         let ptr = self.allocator().alloc_string(bytes.as_ref());

@@ -154,8 +154,10 @@ impl Frame {
         // Calls and returns flush before leaving, so a batch never outlives
         // the run of the frame that accrued it.
         let mut pending: u64 = 0;
-        // native-call: run->eval_batched
-        let result = Self::eval_batched(frames, state, &mut pending);
+        let result = crate::native_call!(
+            "run->eval_batched",
+            Self::eval_batched(frames, state, &mut pending)
+        );
         if result.is_err() && pending > 0 {
             // An error leaving the dispatch loop must still charge the work
             // that already executed, or `cost_used` after a failed callback
@@ -194,8 +196,10 @@ impl Frame {
             // locates a fault from it, a returning callee decodes the caller's
             // pending call from it, and `return_to_caller` may pop the frame.
             let mut ip = frame.ip.get();
-            // native-call: eval_batched->run_frame
-            let leave = Self::run_frame(frame, state, local_cost, &mut ip);
+            let leave = crate::native_call!(
+                "eval_batched->run_frame",
+                Self::run_frame(frame, state, local_cost, &mut ip)
+            );
             frame.ip.set(ip);
             match leave? {
                 Leave::Call => frames.extend(std::iter::once_with(|| state.admitted_frame())),
@@ -398,50 +402,60 @@ impl Frame {
                 Instr::OP_GET_FIELD => {
                     fixed_cost!(Instr::OP_GET_FIELD);
                     let receiver = state.stack[base + inst.b() as usize];
-                    // native-call: run_frame->reg_get_field:field
-                    state.reg_get_field(frame, inst, ra, receiver, local_cost, *ip)?;
+                    crate::native_call!(
+                        "run_frame->reg_get_field:field",
+                        state.reg_get_field(frame, inst, ra, receiver, local_cost, *ip)
+                    )?;
                 }
                 Instr::OP_SELF => {
                     fixed_cost!(Instr::OP_SELF);
                     let receiver = state.stack[base + inst.b() as usize];
                     state.stack[ra + 1] = receiver;
-                    // native-call: run_frame->reg_get_field:self
-                    state.reg_get_field(frame, inst, ra, receiver, local_cost, *ip)?;
+                    crate::native_call!(
+                        "run_frame->reg_get_field:self",
+                        state.reg_get_field(frame, inst, ra, receiver, local_cost, *ip)
+                    )?;
                 }
                 Instr::OP_GET_TABLE => {
                     fixed_cost!(Instr::OP_GET_TABLE);
-                    // native-call: run_frame->reg_get_table
-                    state.reg_get_table(
-                        ra,
-                        base + inst.b() as usize,
-                        base + inst.c() as usize,
-                        local_cost,
-                        *ip,
+                    crate::native_call!(
+                        "run_frame->reg_get_table",
+                        state.reg_get_table(
+                            ra,
+                            base + inst.b() as usize,
+                            base + inst.c() as usize,
+                            local_cost,
+                            *ip,
+                        )
                     )?;
                 }
 
                 // Table writes
                 Instr::OP_SET_FIELD => {
                     fixed_cost!(Instr::OP_SET_FIELD);
-                    // native-call: run_frame->reg_set_field
-                    state.reg_set_field(
-                        frame,
-                        inst,
-                        ra,
-                        base + inst.c() as usize,
-                        local_cost,
-                        *ip,
+                    crate::native_call!(
+                        "run_frame->reg_set_field",
+                        state.reg_set_field(
+                            frame,
+                            inst,
+                            ra,
+                            base + inst.c() as usize,
+                            local_cost,
+                            *ip,
+                        )
                     )?;
                 }
                 Instr::OP_SET_TABLE => {
                     fixed_cost!(Instr::OP_SET_TABLE);
-                    // native-call: run_frame->reg_set_table
-                    state.reg_set_table(
-                        ra,
-                        base + inst.b() as usize,
-                        base + inst.c() as usize,
-                        local_cost,
-                        *ip,
+                    crate::native_call!(
+                        "run_frame->reg_set_table",
+                        state.reg_set_table(
+                            ra,
+                            base + inst.b() as usize,
+                            base + inst.c() as usize,
+                            local_cost,
+                            *ip,
+                        )
                     )?;
                 }
                 Instr::OP_INIT_FIELD => {
@@ -561,8 +575,10 @@ impl Frame {
                 }
                 Instr::OP_LEN => {
                     fixed_cost!(Instr::OP_LEN);
-                    // native-call: run_frame->reg_len
-                    state.reg_len(ra, base + inst.b() as usize, local_cost, *ip)?;
+                    crate::native_call!(
+                        "run_frame->reg_len",
+                        state.reg_len(ra, base + inst.b() as usize, local_cost, *ip)
+                    )?;
                 }
 
                 // The bytes `..` emits are deliberately uncharged: the
@@ -640,12 +656,14 @@ impl Frame {
                     // entering the iterator.
                     state.record_call_site(*ip);
                     Self::flush_local_cost(state, local_cost)?;
-                    // native-call: run_frame->instr_tfor_call
-                    state.instr_tfor_call(
-                        ra,
-                        inst.b() as u8,
-                        inst.cache_slot(),
-                        &frame.runtime.caches,
+                    crate::native_call!(
+                        "run_frame->instr_tfor_call",
+                        state.instr_tfor_call(
+                            ra,
+                            inst.b() as u8,
+                            inst.cache_slot(),
+                            &frame.runtime.caches,
+                        )
                     )?;
                 }
                 Instr::OP_TFOR_LOOP => {
@@ -664,8 +682,10 @@ impl Frame {
                     Self::flush_local_cost(state, local_cost)?;
                     let args = state.call_window(ra, inst.call_args())?;
                     let results = inst.call_results();
-                    // native-call: run_frame->call_from_lua
-                    if state.call_from_lua(args, results, inst.call_is_method())? {
+                    if crate::native_call!(
+                        "run_frame->call_from_lua",
+                        state.call_from_lua(args, results, inst.call_is_method())
+                    )? {
                         return Ok(Leave::Call);
                     }
                     if let RetCount::Fixed(_) = results {

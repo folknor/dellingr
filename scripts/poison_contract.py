@@ -35,8 +35,14 @@ SAVE_REFUSAL = re.compile(
     r"if\s+self\s*\.\s*poisoned\s*\{\s*return\s+Err\s*\(\s*"
     r"(?:save_state\s*::\s*)?SaveError\s*::\s*StatePoisoned\s*\)\s*;\s*\}")
 GUARDED = re.compile(r"(?:return\s+)?self\s*\.\s*guarded\s*\(\s*\|state\|")
+STRING_CALL = r"self\s*\.\s*tostring_bytes\s*\(\s*idx\s*\)"
+# The lexer blanks the wrapper's edge-id string. Only this known macro may
+# precede the checked renderer; arbitrary wrappers can run other work first.
 STRING_DELEGATE = re.compile(
-    r"let\s+raw\s*=\s*self\s*\.\s*tostring_bytes\s*\(\s*idx\s*\)\s*\?\s*;")
+    r"let\s+raw\s*=\s*(?:" + STRING_CALL
+    + r"|crate\s*::\s*native_call!\s*\(\s*,\s*" + STRING_CALL
+    + r"\s*,?\s*\))\s*\?\s*;")
+
 RECEIVER = re.compile(r"\(\s*(?:&\s*(?:'\w+\s+)?)?(?:mut\s+)?self\b")
 
 
