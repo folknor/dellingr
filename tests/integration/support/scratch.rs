@@ -116,3 +116,25 @@ fn write_scratch_file(path: &Path, source: &[u8]) -> io::Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn scratch_file_rejects_a_parent_outside_the_root() {
+    let root = fs::canonicalize(scratch_root()).expect("Cargo's scratch root should exist");
+    let outside = root
+        .parent()
+        .expect("Cargo's scratch root has a parent")
+        .join("dellingr-rejected-scratch-file");
+    let error = write_scratch_file(&outside, b"must not be written")
+        .expect_err("a file outside the scratch root must be rejected before opening");
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+}
+
+#[test]
+fn scratch_file_rejects_parent_traversal_outside_the_root() {
+    let outside = scratch_root()
+        .join("..")
+        .join("dellingr-rejected-scratch-file");
+    let error = write_scratch_file(&outside, b"must not be written")
+        .expect_err("parent traversal must be resolved before checking the scratch root");
+    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+}

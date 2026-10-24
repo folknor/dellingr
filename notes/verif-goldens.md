@@ -156,28 +156,6 @@ these covers aarch64 execution without a runner.
 
 Enforceable: yes, as `[[check]]` entries and a `compile_error!`.
 
-## VD-008 - "Caches never change cost or behaviour" is checked on a handful of sources
-
-Reported by: compiler-cost, snapshot.
-
-`docs/determinism.md` "Inline caches": whether an instruction succeeds, what it
-returns and costs, its stack need and metamethod depth "never depend on which
-values the site saw before", and a State resumed from a snapshot "continues
-exactly as the State that saved it would have". The evidence is hand-written
-cases (`bytecode_caches.rs`, `global_write_cache.rs`, `plain_field_miss.rs`;
-gmatch charges in `tests/integration/cost/cost_determinism.rs`; output and bytes in a handful of
-save tests). No test compares `cost_used()` after a continuation through cold
-caches against a continuous run. (The one test that claims warm-across-executions
-runs cold-versus-cold; see verif-assertions.md.)
-
-Fix: a test-infrastructure feature that disables every inline cache (always take
-the miss path), and a differential test running the corpus with and without it,
-requiring identical output, `cost_used` and error. That proves the claim over the
-corpus and would catch cache-key aliasing bugs. The resume half is held by the
-corpus save round trip (VD-009).
-
-Enforceable: yes, by the differential test.
-
 ## VD-012 - The gmatch schema is a persisted format with no golden, and its recognition fails open
 
 Reported by: library, snapshot.
@@ -267,3 +245,19 @@ sorted; add a check that every `pin` row is read by some test.
 
 Enforceable: the pin-consumer check by a test; the fingerprint scope is a
 design choice.
+
+## VD-022 - The inline-cache differential mostly compares budget-bounded prefixes
+
+Reported by: the resolution loop's reviewer.
+
+`src/vm/cache_differential.rs` runs each corpus example with cache hits on and
+off under one small cost budget, so most examples stop at `BudgetExceeded` and
+the comparison covers only their first few thousand charged units. Its comment
+says it compares "completed programs" as well; how many examples actually
+complete is not reported. Differences that only appear after warm-up (the
+cases caches exist for) may never be reached.
+
+Fix: report or assert how many examples complete; raise the budget, or run
+non-stress examples unbounded, as far as the 20-second cap allows.
+
+Enforceable: by an assertion on the completed count.

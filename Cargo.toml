@@ -31,6 +31,8 @@ hotpath = ["hotpath/hotpath"]
 hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
 snapshot = []
 fault-injection = []
+# Debug-only infrastructure for the inline-cache differential.
+disable-inline-caches = []
 # Explicit opt-in for checkout-dependent and long-running math verification.
 crmath-sweeps = []
 

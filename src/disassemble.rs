@@ -17,6 +17,8 @@ use std::fmt;
 use crate::compiler::{Bytecode, UpvalueDesc};
 use crate::instr::{ArgCount, ArithOp, ArithOperands, Instr, RetCount};
 
+pub(crate) const OUT_OF_RANGE_ANNOTATION: &str = "<out of range>";
+
 /// A borrowed, displayable bytecode listing of a [`Program`](crate::Program).
 ///
 /// Returned by [`Program::disassemble`](crate::Program::disassemble). The
@@ -124,7 +126,7 @@ fn write_function(f: &mut fmt::Formatter<'_>, bc: &Bytecode, path: &mut String) 
 fn write_string_ref(f: &mut fmt::Formatter<'_>, bc: &Bytecode, idx: u16) -> fmt::Result {
     match bc.string_literals.get(usize::from(idx)) {
         Some(s) => write_quoted(f, s),
-        None => f.write_str("<out of range>"),
+        None => f.write_str(OUT_OF_RANGE_ANNOTATION),
     }
 }
 
@@ -155,7 +157,7 @@ fn write_annotation(
     let write_number =
         |f: &mut fmt::Formatter<'_>, idx: u16| match bc.number_literals.get(usize::from(idx)) {
             Some(n) => write!(f, "{n:?}"),
-            None => f.write_str("<out of range>"),
+            None => f.write_str(OUT_OF_RANGE_ANNOTATION),
         };
 
     // Literal-pool operands, in the field each opcode keeps them in.
@@ -186,7 +188,7 @@ fn write_annotation(
             if usize::from(inst.b()) < bc.nested.len() {
                 write!(f, "function {path}/{}", inst.b())?;
             } else {
-                f.write_str("function <out of range>")?;
+                write!(f, "function {OUT_OF_RANGE_ANNOTATION}")?;
             }
         }
         _ => match ArithOp::decode(op) {
@@ -256,7 +258,7 @@ fn write_annotation(
             .and_then(|next| next.checked_add_signed(inst.sj() as isize));
         match target {
             Some(target) if target < bc.code.len() => write!(f, "target={target}")?,
-            _ => f.write_str("target=<out of range>")?,
+            _ => write!(f, "target={OUT_OF_RANGE_ANNOTATION}")?,
         }
     }
     Ok(())

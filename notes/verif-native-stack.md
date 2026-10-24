@@ -62,34 +62,6 @@ The marker stays one token per call site, as the script and textlint parse it.
 Enforceable: yes; it would make the toml's coverage column true by
 construction.
 
-## VN-003 - The gmatch wrapper's compile-at-depth peak is measured once, by whichever test runs first
-
-Reported by: native-stack-errors, runtime, compiler-cost.
-
-`docs/limits.md`, Envelope: "`string.gmatch` creating its iterator in the last
-native level (the first call in a process also compiles the fixed wrapper chunk
-there)". `GMATCH_WRAPPER` in `src/lua_std/string.rs` is a process-global
-`OnceLock`. In `every_limit_at_once_fits_the_limit_test_stack` the first gmatch
-call in the process is the `index_field / index / gmatch` run, so the
-compile-at-depth peak is measured for exactly that scenario and chain, not for
-every path as the test's doc and limits.md say each deepest-point item is.
-`index_field` is one of the cheaper cycles (`gsub_pattern_table` is roughly twice
-its bytes per cycle in the recorded tables). Coverage also depends on test order
-and scheduling: if any other test in the binary (or, after a merge, in a shared
-binary) calls `string.gmatch` first, the peak is silently never measured.
-`is_gmatch_wrapper` answers from the process-global (`false` until something
-compiled it), so error attribution through the shim is correct only because the
-shim cannot run before it is compiled.
-
-Fix: compile the wrapper eagerly when the string library opens (or from a
-`LazyLock` forced in `State::new`; the cost is one tiny compile per process,
-already paid on first use) and drop the "first call compiles" clause from the
-envelope; or make the cache per State so every gmatch leaf run pays it. Either
-removes a process-global from the envelope argument and the ordering argument.
-
-Enforceable: the eager init is structural; a unit test can assert
-`GMATCH_WRAPPER` is set after `State::new()`.
-
 ## VN-005 - `cfg!(debug_assertions)` stands in for the build profile
 
 Reported by: check-machinery, corpus-harness, native-stack-errors, runtime.
@@ -166,31 +138,6 @@ guard and one current table; drop the scenario count.
 
 Enforceable: the pin is structural; the rest is editorial.
 
-## VN-008 - `every_limit_at_once_fits_the_limit_test_stack` is one serial test of 990 runs
-
-Reported by: native-stack-errors.
-
-55 scenarios x (2 held chains x 8 leaves + 2 terminal chains) = 990 runs in one
-`#[test]`, on one thread, in each of four sweeps.
-
-- The chunk is recompiled for every run (`check` calls `Program::compile`), and
-  each contains `MAX_CHUNK_NESTING - 1` nested functions plus every chain and
-  leaf. It depends only on the scenario: 55 compiles would do (one, with the step
-  selected by a global like the chain and leaf). 935 of 990 compiles are
-  redundant; not measured, and a dev compile of a 199-deep chunk is not free.
-- The first failing combination panics and hides the rest.
-- A native stack overflow aborts the process, and the abort message names the
-  thread, which is `every_limit_at_once` for all 990 runs: the one failure the
-  test exists to catch is the one it cannot attribute to a scenario, chain or
-  leaf.
-- libtest cannot parallelise it.
-
-Fix: one `#[test]` per scenario (a macro over `SCENARIOS` or a build-time list),
-each on a thread named after its scenario, iterating chains and leaves inside;
-compile once per test.
-
-Enforceable: by structure.
-
 ## VN-009 - At-cap probes refill a million slots per attempt
 
 Reported by: native-stack-errors, runtime, library.
@@ -222,39 +169,6 @@ rewrites.md is the alternative the runtime and library hunters prefer; the
 native-stack hunter argues against it.
 
 Enforceable: no; it is a fixture shape.
-
-## VN-012 - Envelope and parse-depth claims checked for fewer shapes than stated
-
-Reported by: native-stack-errors, compiler-cost.
-
-- `docs/limits.md`, Envelope: "a pattern match one call short of `MAXCCALLS`
-  ..., or its rejection at `MAXCCALLS`". The accept leaf runs all three recursion
-  shapes (optional, greedy through `max_expand`, minimal through `min_expand`);
-  the `pattern_reject` leaf rejects only through the optional shape, whose
-  per-level frame is the smallest (no expansion helper frame). Add greedy and
-  minimal rejection leaves, or say which shape the rejection peak is measured on.
-- `docs/limits.md`: "parsing at the syntax budget fits a 2 MiB thread in both
-  settings." The worst parse shapes are driven by the parser's unit tests, which
-  run only in the dev sweeps. In release the only parse-at-budget test is
-  `native_stack.rs`'s nested-`local function` shape
-  (`deepest_nested_functions_parse_on_the_parse_test_stack`); the call chain,
-  constructor chain, unary, `^`, parenthesis and statement shapes are dev-only.
-  Release frames are usually smaller, but inlining can make one larger. Move the
-  shape list into `tests/native_stack.rs` or a sibling listed in the release
-  shapes.
-- `docs/limits.md`: "`local x = ((...1...))` compiles up to 98 parentheses and
-  `return f(f(...f()...))` up to 49 calls", and the "Units per level" table. The
-  49 is asserted (computed from constants) in `deepest_nested_programs_body`; the
-  98 is asserted nowhere (the nearest test uses 95 "below the limit"), and the
-  per-construct unit table is asserted nowhere. `deepest_accepted_program_until`
-  already finds the exact boundary per shape: a unit test can derive units per
-  level and compare with the table parsed out of `docs/limits.md`, in the style of
-  `documented_opcode_charges_match_static_units`.
-- `deepest_nested_functions_parse_on_the_parse_test_stack` accepts any
-  `SyntaxError` for the first rejected depth; pin the depth variant, or a source
-  change that fails for another reason still passes.
-
-Enforceable: yes, by the added leaves and tests.
 
 ## VN-013 - Tests of iterative algorithms run on the ambient thread stack
 

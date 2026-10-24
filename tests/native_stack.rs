@@ -23,9 +23,12 @@
 //! exactly that sequence and its expected outcome. Steps whose callbacks
 //! return values check them in Lua.
 
-use dellingr::error::{ErrorKind, ErrorValue, LibraryFunction, PatternErrorDetail, TypeError};
+use dellingr::error::{
+    ErrorKind, ErrorValue, LibraryFunction, PatternErrorDetail, SyntaxError, TypeError,
+};
 use dellingr::limits::{
     MAX_CHUNK_NESTING, MAX_METAMETHOD_DEPTH, MAX_NATIVE_CALL_DEPTH, MAX_SYNTAX_DEPTH, MAXCCALLS,
+    SYNTAX_SUFFIX_COST,
 };
 use dellingr::{ArgCount, HostCallbacks, LuaType, Program, RetCount, State};
 
@@ -752,8 +755,8 @@ const LEAVES: &[Leaf] = &[
         outcome: Outcome::Completes,
     },
     Leaf {
-        // One more optional item: the matcher refuses at MAXCCALLS and
-        // builds the error with its frames live.
+        // Each recursive item kind refuses at MAXCCALLS and builds the
+        // error with its frames live. Separate States exercise each kind.
         name: "pattern_reject",
         headroom: 0,
         meta_room: false,
@@ -1047,9 +1050,28 @@ fn run(
     scenario: &Scenario,
     chain: &Chain,
     leaf: Option<&Leaf>,
+    rejection: &str,
 ) -> (dellingr::Result<()>, Harness, Plan) {
     let plan = plan(scenario, chain, leaf);
     let mut state = test_state().expect("test State setup");
+    match rejection {
+        "optional" => {}
+        "greedy" => {
+            let pattern: String = (0..MAXCCALLS)
+                .map(|i| if i % 2 == 0 { "a*" } else { "b*" })
+                .collect();
+            let subject: String = (0..MAXCCALLS)
+                .map(|i| if i % 2 == 0 { 'a' } else { 'b' })
+                .collect();
+            set_string(&mut state, "REJECT_PATTERN", &pattern).expect("pattern input");
+            set_string(&mut state, "REJECT_SUBJECT", &subject).expect("pattern input");
+        }
+        "minimal" => {
+            set_string(&mut state, "REJECT_PATTERN", &"a-".repeat(MAXCCALLS))
+                .expect("pattern input");
+        }
+        other => panic!("unknown rejection shape: {other}"),
+    }
     set_string(&mut state, "CHAIN", chain.name).expect("globals");
     set_string(&mut state, "LEAF", leaf.map_or("none", |leaf| leaf.name)).expect("globals");
     set_number(&mut state, "CYCLES", plan.cycles).expect("globals");
@@ -1071,16 +1093,21 @@ fn run(
     (result, observed, plan)
 }
 
-fn check(scenario: &Scenario, chain: &Chain, leaf: Option<&Leaf>, outcome: &Outcome) {
+fn check(
+    program: &Program,
+    scenario: &Scenario,
+    chain: &Chain,
+    leaf: Option<&Leaf>,
+    outcome: &Outcome,
+    rejection: &str,
+) {
     let label = format!(
-        "{} / {} / {}",
+        "{} / {} / {} / {rejection}",
         scenario.name,
         chain.name,
         leaf.map_or("-", |leaf| leaf.name)
     );
-    let program = Program::compile(chunk(scenario), None)
-        .unwrap_or_else(|error| panic!("{label}: the chunk must compile: {error}"));
-    let (result, observed, plan) = run(&program, scenario, chain, leaf);
+    let (result, observed, plan) = run(program, scenario, chain, leaf, rejection);
 
     let mut expected: Vec<(String, u32)> = (0..plan.cycles)
         .map(|level| (scenario.name.to_owned(), level))
@@ -1157,23 +1184,132 @@ fn check(scenario: &Scenario, chain: &Chain, leaf: Option<&Leaf>, outcome: &Outc
     }
 }
 
-#[test]
-fn every_limit_at_once_fits_the_limit_test_stack() {
-    require_native_stack_target("every_limit_at_once_fits_the_limit_test_stack");
-    stack::on_limit_test_stack("every_limit_at_once", || {
-        for scenario in SCENARIOS {
-            for chain in CHAINS {
-                if chain.held {
-                    for leaf in LEAVES {
-                        check(scenario, chain, Some(leaf), &leaf.outcome);
+fn scenario_envelope(name: &'static str) {
+    require_native_stack_target(name);
+    let scenario = SCENARIOS
+        .iter()
+        .find(|scenario| scenario.name == name)
+        .expect("each envelope test names an inventoried scenario");
+    stack::on_limit_test_stack(name, move || {
+        let program = Program::compile(chunk(scenario), None)
+            .unwrap_or_else(|error| panic!("{name}: the chunk must compile: {error}"));
+        for chain in CHAINS {
+            if chain.held {
+                for leaf in LEAVES {
+                    let rejections: &[&str] = if leaf.name == "pattern_reject" {
+                        &["optional", "greedy", "minimal"]
+                    } else {
+                        &["optional"]
+                    };
+                    for rejection in rejections {
+                        check(
+                            &program,
+                            scenario,
+                            chain,
+                            Some(leaf),
+                            &leaf.outcome,
+                            rejection,
+                        );
                     }
-                } else {
-                    check(scenario, chain, None, &Outcome::MetaRefused);
                 }
+            } else {
+                check(
+                    &program,
+                    scenario,
+                    chain,
+                    None,
+                    &Outcome::MetaRefused,
+                    "optional",
+                );
             }
         }
     });
 }
+
+// Repeating the scenario in module and function names makes the full test
+// path a unique substring even when scenario names are suffixes or prefixes
+// of each other. Keep the inventory scanner's list literal above.
+macro_rules! scenario_tests {
+    ($($name:ident),+ $(,)?) => {
+        $(mod $name {
+            #[test]
+            fn $name() {
+                super::scenario_envelope(stringify!($name));
+            }
+        })+
+
+        #[test]
+        fn scenario_test_registration_is_complete() {
+            let registered = [$(stringify!($name)),+];
+            let inventoried: Vec<_> = SCENARIOS.iter().map(|scenario| scenario.name).collect();
+            assert_eq!(registered.as_slice(), inventoried);
+            let filters = [$(concat!(stringify!($name), "::", stringify!($name))),+];
+            for (i, filter) in filters.iter().enumerate() {
+                for (j, other) in filters.iter().enumerate() {
+                    assert_eq!(other.contains(filter), i == j, "{filter} / {other}");
+                }
+            }
+        }
+    };
+}
+
+scenario_tests!(
+    index_field,
+    index_method,
+    index_key,
+    index_rust,
+    newindex_field,
+    newindex_key,
+    newindex_rust,
+    length,
+    string_index_field,
+    string_index_key,
+    index_string_handler,
+    string_library_index,
+    host_get_table,
+    host_get_table_string,
+    host_call,
+    host_anchor,
+    host_tostring_bytes,
+    host_to_string_with_meta,
+    tostring,
+    print,
+    format,
+    error_tostring,
+    sort_comparator,
+    sort_comparator_right,
+    sort_comparator_sortdown,
+    callable_rust,
+    sort_metamethods_comparator,
+    sort_metamethods_length,
+    sort_metamethods_read,
+    sort_metamethods_write,
+    insert_length,
+    insert_shift_read,
+    insert_shift_write,
+    insert_value,
+    remove_length,
+    remove_read,
+    remove_shift_read,
+    remove_shift_write,
+    remove_clear,
+    concat_length,
+    concat_read,
+    move_read,
+    move_write,
+    unpack_length,
+    unpack_read,
+    gsub_empty_function,
+    gsub_plain_function,
+    gsub_pattern_function,
+    gsub_pattern_captures,
+    gsub_empty_table,
+    gsub_plain_table,
+    gsub_pattern_table,
+    tfor_lua,
+    tfor_ipairs,
+    tfor_host_iterator,
+);
 
 #[test]
 fn recursive_index_function_stops_at_the_native_call_limit() {
@@ -1231,15 +1367,121 @@ fn deepest_nested_functions_parse_on_the_parse_test_stack() {
             panic!("depth {} must be rejected", deepest + 1);
         };
         assert!(
-            matches!(error.kind(), ErrorKind::SyntaxError(_)),
+            matches!(
+                error.kind(),
+                ErrorKind::SyntaxError(SyntaxError::TooManySyntaxLevels)
+            ),
             "depth {}: {error}",
             deepest + 1
         );
     });
 }
 
+fn syntax_boundary(source: impl Fn(usize) -> String, locals_limit: bool) -> usize {
+    for depth in 0..=MAX_SYNTAX_DEPTH as usize + 1 {
+        if let Err(error) = Program::compile(source(depth), None) {
+            assert!(
+                matches!(
+                    (locals_limit, error.kind()),
+                    (true, ErrorKind::SyntaxError(SyntaxError::TooManyLocals))
+                        | (
+                            false,
+                            ErrorKind::SyntaxError(SyntaxError::TooManySyntaxLevels)
+                        )
+                ),
+                "depth {depth}: {error}"
+            );
+            return depth.checked_sub(1).expect("the unnested shape compiles");
+        }
+    }
+    panic!("shape did not reach its expected limit");
+}
+
+/// Keep all parser cycles in this target: release native-stack sweeps do
+/// not run the library's parser tests. Unary padding measures the units a
+/// wrapper consumes independently of the documented units table.
+#[test]
+fn parse_shapes_and_documented_units_fit_the_parse_test_stack() {
+    stack::on_stack("parse_shapes", PARSE_TEST_STACK_BYTES, || {
+        let docs = include_str!("../docs/limits.md");
+        let suffix_units = 2 + SYNTAX_SUFFIX_COST as usize;
+        for (row, units, open, close, statement) in [
+            ("parenthesis,", 2, "(", ")", false),
+            ("table constructor", 2, "{", "}", false),
+            ("call argument or index,", suffix_units, "f(", ")", false),
+            ("call argument or index,", suffix_units, "a[", "]", false),
+            ("unary operator,", 1, "- ", "", false),
+            ("unary operator,", 1, "not ", "", false),
+            ("right operand", 1, "x ^ ", "", false),
+            ("`if` body", 2, "if true then ", " end", true),
+            ("`do`, loop", 1, "do ", " end", true),
+            ("`do`, loop", 1, "while false do ", " end", true),
+            ("`do`, loop", 1, "repeat ", " until true", true),
+            ("`do`, loop", 1, "function f() ", " end", true),
+        ] {
+            let documented = docs
+                .lines()
+                .find(|line| line.trim_start().starts_with(&format!("| {row}")))
+                .expect("each parse shape has a documented units row");
+            let cell = documented.split('|').nth(2).expect("units column").trim();
+            let documented_units = if cell == "2 + `SYNTAX_SUFFIX_COST`" {
+                suffix_units
+            } else {
+                cell.parse::<usize>().expect("numeric units column")
+            };
+            assert_eq!(units, documented_units, "{row}");
+            let source = |depth: usize, padding: usize| {
+                let expression = format!("{}x", "not ".repeat(padding));
+                if statement {
+                    format!(
+                        "{}local x = {expression}{}",
+                        open.repeat(depth),
+                        close.repeat(depth)
+                    )
+                } else {
+                    format!(
+                        "local x = {}{expression}{}",
+                        open.repeat(depth),
+                        close.repeat(depth)
+                    )
+                }
+            };
+            let unwrapped = syntax_boundary(|padding| source(0, padding), false);
+            let wrapped = syntax_boundary(|padding| source(1, padding), false);
+            assert_eq!(unwrapped - wrapped, units, "{open}: measured units");
+            let deepest = syntax_boundary(|depth| source(depth, 0), false);
+            assert_eq!(deepest, unwrapped / units, "{open}: accepted boundary");
+        }
+
+        // Empty innermost calls have different leaf headroom from the
+        // expression-bearing calls used to measure the units above.
+        let calls = syntax_boundary(
+            |depth| format!("return {}{}", "f(".repeat(depth + 1), ")".repeat(depth + 1)),
+            false,
+        ) + 1;
+        assert_eq!(calls, (MAX_SYNTAX_DEPTH as usize - 1) / suffix_units);
+        // Constructors containing calls retain both parser cycles.
+        syntax_boundary(
+            |depth| {
+                let mut expression = String::from("{g()}");
+                for _ in 0..depth {
+                    expression = format!("{{f({expression})}}");
+                }
+                format!("return {expression}")
+            },
+            false,
+        );
+        for open in ["for i = 1, 1 do ", "for key in iterator do "] {
+            syntax_boundary(
+                |depth| format!("{}return 1 {}", open.repeat(depth), "end ".repeat(depth)),
+                true,
+            );
+        }
+    });
+}
+
 /// Recurring native stack only: bytes per cycle of each scenario and per
-/// table step of each held chain. The full-depth test covers the deepest
+/// table step of each held chain. The per-scenario full-depth tests cover the deepest
 /// points (leaf work, chain tops, error construction and unwinding), which
 /// this measurement deliberately excludes.
 #[test]

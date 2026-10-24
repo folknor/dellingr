@@ -1,5 +1,5 @@
-// Integration tests include this file with `#[path]`, and `src/compiler.rs`
-// compiles it into a unit test with `include!`, so it must stay
+// Integration tests include this file with `#[path]`, and `src/lib.rs`
+// compiles it into the unit tests with `include!`, so it must stay
 // self-contained: no inner attributes, no `crate::` or `super::` paths.
 use std::fs;
 use std::path::{Path, PathBuf};

@@ -32,8 +32,10 @@ Violations are reported as errors at load time, never silently truncated.
     | `if` body | 2 |
     | `do`, loop or named `function` body | 1 |
 
-    So `local x = ((...1...))` compiles up to 98 parentheses and
-    `return f(f(...f()...))` up to 49 calls.
+    Exact accepted depths depend on the leaf's headroom as well as these
+    units. The parse-shape boundary test in `tests/native_stack.rs` checks
+    this table against measured parser headroom and checks both the deepest
+    accepted shape and its first rejected depth in dev and release sweeps.
   - `elseif` arms and expression suffixes such as `a.b[c]:m()()` are parsed
     iteratively. Their length consumes nothing; their contents still do.
 - `MAX_CHUNK_NESTING`: function nesting depth, root included. It shares the
@@ -322,11 +324,11 @@ and at the deepest point any one of:
 
 - a pattern match one call short of `MAXCCALLS` through each recursive item
   kind (optional, greedy and minimal repetition), or its rejection at
-  `MAXCCALLS`;
+  `MAXCCALLS` through each of those kinds;
 - a collection with a chunk tree nested to `MAX_CHUNK_NESTING` alive;
-- `string.gmatch` creating its iterator in the last native level (the first
-  call in a process also compiles the fixed wrapper chunk there), or refused
-  past it;
+- `string.gmatch` creating its iterator in the last native level, or refused
+  past it (the fixed wrapper chunk is compiled when the string library
+  opens, not at depth);
 - a `table.sort` default comparison failing inside the heap sort, which
   builds its error with the sort frames live;
 - the refusal of the next call, through the same path as the levels below
@@ -349,7 +351,9 @@ How `tests/native_stack.rs` validates it, on x86-64 Linux:
   guard that keeps that list current. The test runs each path on its own,
   repeated up to the native limit (callthrough levels fill any remainder a
   path's cycle leaves), with every held chain kind and every deepest-point
-  item.
+  item. Each scenario has its own test and named stack thread, and compiles
+  its chunk once for all chain and leaf combinations. A full test path such
+  as `index_field::index_field` selects just that scenario.
 - Mixtures of paths need no runs of their own. A level of path `i` costs
   `c_i` bytes and holds `m_i` metamethod units that a chain step would
   otherwise spend at `s` bytes each, so the stack a mixture uses grows with

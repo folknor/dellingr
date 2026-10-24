@@ -345,7 +345,26 @@ pub(crate) const fn hex_value(byte: u8) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
+    use crate::crmath::{TestRng, parse_hex_float};
+
     use super::parse_lua_numeral;
+
+    fn assert_hex_matches_oracle(input: &str) {
+        let parsed = parse_lua_numeral(input.as_bytes()).expect("the generated hex float is valid");
+        let (negative, body) = match input.strip_prefix('-') {
+            Some(body) => (true, body),
+            None => (false, input),
+        };
+        let oracle = parse_hex_float(body);
+        let oracle = if negative { -oracle } else { oracle };
+        assert_eq!(
+            parsed.to_bits(),
+            oracle.to_bits(),
+            "hex float {input}: parser {parsed:?} ({:016x}), oracle {oracle:?} ({:016x})",
+            parsed.to_bits(),
+            oracle.to_bits()
+        );
+    }
 
     #[test]
     fn parse_hex_extremes() {
@@ -409,6 +428,80 @@ mod tests {
                 Some(expected),
                 "{input}"
             );
+        }
+    }
+
+    #[test]
+    fn parse_hex_matches_exact_oracle_for_seeded_inputs() {
+        for input in [
+            "0x1p-1075",
+            "0x3p-1075",
+            "0x5p-1075",
+            "0x7p-1075",
+            "0x1.fffffffffffffp-1023",
+            "0x1p+1024",
+            "-0x1.0000000000001p-1075",
+        ] {
+            assert_hex_matches_oracle(input);
+        }
+
+        let mut rng = TestRng::new(0x51a7_1eed_91c4_2b63);
+        for sample in 0..1024 {
+            let digit_count = usize::try_from(rng.next_u64() % 32)
+                .expect("a generated digit count fits in usize")
+                + 1;
+            let mut digits = Vec::with_capacity(digit_count);
+            for _ in 0..digit_count {
+                let digit_index = usize::try_from(rng.next_u64() & 0xf)
+                    .expect("a hexadecimal digit index fits in usize");
+                digits.push(b"0123456789abcdef"[digit_index]);
+            }
+            if digits.iter().all(|digit| *digit == b'0') {
+                digits[digit_count - 1] = b'1';
+            }
+
+            let point_range =
+                u64::try_from(digit_count + 1).expect("the generated mantissa length fits in u64");
+            let point = usize::try_from(rng.next_u64() % point_range)
+                .expect("the generated decimal point fits in usize");
+            let exponent = match sample % 4 {
+                0 => {
+                    i64::try_from(rng.next_u64() % 2401)
+                        .expect("the generated exponent offset fits in i64")
+                        - 1200
+                }
+                1 => {
+                    i64::try_from(rng.next_u64() % 33)
+                        .expect("the generated exponent offset fits in i64")
+                        - 1080
+                }
+                2 => {
+                    i64::try_from(rng.next_u64() % 49)
+                        .expect("the generated exponent offset fits in i64")
+                        + 1000
+                }
+                _ => {
+                    i64::try_from(rng.next_u64() % 257)
+                        .expect("the generated exponent offset fits in i64")
+                        - 128
+                }
+            };
+            let long_zero_prefix = if sample % 32 == 0 {
+                "0".repeat(512)
+            } else {
+                String::new()
+            };
+            let mut input = String::with_capacity(long_zero_prefix.len() + digit_count + 24);
+            if sample % 2 == 0 {
+                input.push('-');
+            }
+            input.push_str("0x");
+            input.push_str(&long_zero_prefix);
+            input.push_str(std::str::from_utf8(&digits[..point]).expect("hex digits are ASCII"));
+            input.push('.');
+            input.push_str(std::str::from_utf8(&digits[point..]).expect("hex digits are ASCII"));
+            input.push_str(&format!("p{exponent:+}"));
+            assert_hex_matches_oracle(&input);
         }
     }
 }

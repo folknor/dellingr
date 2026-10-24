@@ -85,7 +85,7 @@ fn break_outside_loop_uses_the_source_line() {
 }
 
 #[test]
-fn decimal_and_hex_literals_use_the_shared_numeral_parser() {
+fn decimal_and_hex_literals_are_wired_to_shared_numeral_parser() {
     for source in ["42", ".5", "1.", "1.e2", "1e-3", "0x1.8p+0"] {
         let expected = crate::numeral::parse_lua_numeral(source.as_bytes())
             .expect("literal fixture must be a valid numeral");

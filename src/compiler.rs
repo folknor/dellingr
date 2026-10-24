@@ -280,15 +280,6 @@ mod runtime_cache_tests {
         }
     }
 
-    /// The integration tests' examples-corpus walker, compiled into this unit
-    /// test so both share one traversal and ordering policy.
-    mod examples_corpus {
-        include!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/common/examples.rs"
-        ));
-    }
-
     fn deepest_accepted_program(source_for_depth: impl Fn(usize) -> String) -> (usize, Bytecode) {
         deepest_accepted_program_until(source_for_depth, |kind| {
             matches!(
@@ -475,8 +466,8 @@ mod runtime_cache_tests {
     }
 
     #[test]
-    fn compiler_examples_pass_bytecode_verification() {
-        let paths = examples_corpus::example_corpus();
+    fn compiler_examples_verify_and_disassemble() {
+        let paths = crate::examples_corpus::example_corpus();
         // Without this the corpus proof passes vacuously if the walk finds
         // nothing, which is exactly the failure mode that would let a verifier
         // that rejects real compiler output reach a release.
@@ -487,10 +478,38 @@ mod runtime_cache_tests {
             paths.len()
         );
         let mut seen = OpenShapes::default();
+        let manifest_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         for path in paths {
-            let source = std::fs::read_to_string(&path).expect("example source must be readable");
-            let bytecode = compile(&source, None).expect("example source must compile");
+            let source = std::fs::read(&path).expect("example source must be readable");
+            let relative_path = path
+                .strip_prefix(manifest_root)
+                .expect("example paths must be rooted at the manifest");
+            let source_name = relative_path.as_os_str().as_encoded_bytes();
+            let bytecode =
+                compile(&source, Some(source_name)).expect("example source must compile");
             assert_verified_tree(&bytecode, &mut seen);
+
+            let text = crate::Disassembly::new(&bytecode).to_string();
+            assert!(
+                text.starts_with("function main "),
+                "{}",
+                relative_path.display()
+            );
+            for line in text.lines() {
+                assert!(
+                    line.is_empty()
+                        || line.starts_with("function main ")
+                        || line.starts_with("function main/")
+                        || line.starts_with("  "),
+                    "{}: malformed listing line {line:?}",
+                    relative_path.display()
+                );
+                assert!(
+                    !line.contains(crate::disassemble::OUT_OF_RANGE_ANNOTATION),
+                    "{}: {line:?}",
+                    relative_path.display()
+                );
+            }
         }
         assert!(
             seen.open_call_args,

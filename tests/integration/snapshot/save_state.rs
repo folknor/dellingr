@@ -187,21 +187,24 @@ fn round_trip_preserves_data_graph_and_env_references() {
 fn tombstones_are_preserved_in_snapshots() {
     // Both inline and map tombstones, including a vacated map position,
     // are saved even though pairs skips them.
-    for (tombstoned, clean, expected_order) in [
+    for (tombstoned, clean, expected_order, dead_b_successor) in [
         (
             "t = {}; t.a = 1; t.b = 2; t.c = 3; t.b = nil",
             "t = {}; t.a = 1; t.c = 3",
             "acb",
+            Some("c"),
         ),
         (
             "t = {}; t.a = 1; t.b = 2; t.c = 3; t.d = 4; t.e = 5; t.f = 6; t.b = nil",
             "t = {}; t.a = 1; t.c = 3; t.d = 4; t.e = 5; t.f = 6",
             "acdefb",
+            Some("c"),
         ),
         (
             "t = {}; t.a = 1; t.b = 2; t.c = 3; t.d = 4; t.e = 5; t.f = 6; t.b = nil; t.b = 2",
             "t = {}; t.a = 1; t.c = 3; t.d = 4; t.e = 5; t.f = 6; t.b = 2",
             "acdefb",
+            None,
         ),
     ] {
         let (mut with_tombstone, _) = new_capture_state();
@@ -212,10 +215,24 @@ fn tombstones_are_preserved_in_snapshots() {
         support::run(&mut without_tombstone, clean);
         let clean_bytes = without_tombstone.save_state().unwrap().bytes;
 
-        assert!(
-            tombstoned_bytes.len() > clean_bytes.len(),
-            "hash history must be saved for: {tombstoned}"
-        );
+        if let Some(successor) = dead_b_successor {
+            let mut restored_tombstone = State::load_state(
+                &tombstoned_bytes,
+                Box::new(DefaultCallbacks),
+                support::no_setup,
+            )
+            .unwrap();
+            support::eval(&mut restored_tombstone, "return next(t, 'b')", 1);
+            assert_eq!(restored_tombstone.to_string(-1).unwrap(), successor);
+            restored_tombstone.pop(1).unwrap();
+
+            let mut restored_clean =
+                State::load_state(&clean_bytes, Box::new(DefaultCallbacks), support::no_setup)
+                    .unwrap();
+            let error = support::try_run(&mut restored_clean, "next(t, 'b')")
+                .expect_err("a save without the dead slot rejects it as a cursor");
+            assert!(error.to_string().contains("invalid key to 'next'"));
+        }
 
         // And the live entries still round-trip with insertion order intact,
         // with a reinserted key landing at the back.
@@ -311,21 +328,53 @@ fn tombstone_is_the_only_root_of_its_collectable_key() {
     assert_eq!(before, loaded.save_state().unwrap().bytes);
 }
 
-#[test]
-fn saves_are_byte_stable() {
+fn byte_stability_state(with_slotmap_history: bool) -> State {
     let (mut state, _) = new_capture_state();
+    state.gc_disable_auto();
+
+    if with_slotmap_history {
+        support::run(
+            &mut state,
+            r#"
+            for i = 1, 1000 do
+                local throwaway_table = {}
+                local throwaway_string = "slot history " .. i
+                local throwaway_closure = function() return throwaway_string end
+            end
+            "#,
+        );
+        state.gc_collect();
+    }
+
     support::run(
         &mut state,
         r#"
         t = { a = 1, b = "x" }
         t.self = t
-        f = string.gsub
+        local captured = "closed upvalue"
+        f = function(value) return captured .. value end
+        g = string.gsub
+        identity_table = {}
+        identity_string = "rendered string"
+        identity_closure = function() return captured end
+        table_id = string.format("%p", identity_table)
+        string_id = string.format("%p", identity_string)
+        closure_id = string.format("%p", identity_closure)
     "#,
     );
+    state.gc_collect();
+    state.set_cost_budget(i64::MAX);
+    state
+}
 
-    let first = state.save_state().unwrap();
-    let second = state.save_state().unwrap();
-    assert_eq!(first.bytes, second.bytes);
+#[test]
+fn saves_are_byte_stable() {
+    let with_slotmap_history = byte_stability_state(true);
+    let direct = byte_stability_state(false);
+    assert_eq!(
+        with_slotmap_history.save_state().unwrap().bytes,
+        direct.save_state().unwrap().bytes
+    );
 }
 
 #[test]
@@ -1586,11 +1635,13 @@ fn corruption_sweep_never_panics() {
     );
     let bytes = state.save_state().unwrap().bytes;
 
-    // Consume the result without inspecting it: we only require that no input
-    // panics or OOMs. A panic during load aborts the test.
+    // Consume the result without inspecting it: this sweep establishes only
+    // that every input below returns (a State or an error) without panicking.
+    // A panic during load fails the test. Allocation is neither bounded nor
+    // measured here.
     fn ignore(_: Result<State, LoadError>) {}
 
-    // Truncating at every prefix length must error, never panic or OOM.
+    // Every proper prefix (each truncation length) loads without a panic.
     for len in 0..bytes.len() {
         ignore(State::load_state(
             &bytes[..len],
@@ -1598,7 +1649,7 @@ fn corruption_sweep_never_panics() {
             support::no_setup,
         ));
     }
-    // A single-byte flip at every offset must load-or-error, never panic.
+    // A single-byte flip at every offset loads or errors without a panic.
     for i in 0..bytes.len() {
         let mut corrupted = bytes.clone();
         corrupted[i] ^= 0xff;

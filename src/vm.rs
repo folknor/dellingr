@@ -2,6 +2,8 @@
 //! components of the VM.
 
 mod anchor;
+#[cfg(all(test, feature = "disable-inline-caches"))]
+mod cache_differential;
 mod caches;
 mod eval;
 mod eval_control;
@@ -1322,9 +1324,11 @@ impl State {
     }
 
     /// Whether a panic has unwound through this State's execution. A
-    /// poisoned State refuses every operation with
-    /// [`ErrorKind::StatePoisoned`]; the only thing left to do with it is
-    /// drop it, which is always safe.
+    /// poisoned State refuses its fallible operations with
+    /// [`ErrorKind::StatePoisoned`] (snapshot saving with its own
+    /// state-poisoned error). Infallible host controls and observations,
+    /// such as the cost budget, user data, counters and this method, remain
+    /// available. Dropping the State is always safe.
     pub fn is_poisoned(&self) -> bool {
         self.poisoned
     }
@@ -1628,12 +1632,17 @@ mod runtime_tests {
 
     /// (runtime identity, family, slot, position within the slot's family).
     type CellKey = (usize, &'static str, usize, usize);
+    type CacheInventory = (
+        Vec<(CellKey, CachedEntry)>,
+        std::collections::BTreeSet<&'static str>,
+    );
 
     /// Every populated cell, keyed by [`CellKey`]. Only method entries have
     /// more than one position. The exhaustive cache bundle destructuring
     /// forces this test oracle to account for each cache family.
-    fn cache_cells(state: &State) -> Vec<(CellKey, CachedEntry)> {
+    fn cache_cells(state: &State) -> CacheInventory {
         let mut cells = Vec::new();
+        let mut families = std::collections::BTreeSet::new();
         for (identity, entry) in &state.bytecode_caches {
             let caches::RuntimeCaches {
                 // Global lookup entries hold indexes into the State's live
@@ -1643,34 +1652,75 @@ mod runtime_tests {
                 set_field_lookup,
                 tfor_cursor,
             } = &entry.runtime.caches;
-            let mut push = |slot: usize, position: usize, cell: Option<CachedEntry>| {
-                if let Some(cell) = cell {
-                    cells.push(((*identity, cell.family(), slot, position), cell));
-                }
-            };
-            for (slot, cell) in field_lookup.iter().enumerate() {
-                push(slot, 0, cell.get_field().map(CachedEntry::Field));
-                for position in 0..caches::METHOD_ENTRIES {
-                    push(
-                        slot,
-                        position,
-                        cell.get_method(position).map(CachedEntry::Method),
-                    );
-                }
-                push(
-                    slot,
-                    0,
-                    cell.get_string_method().map(CachedEntry::StringMethod),
-                );
-            }
-            for (slot, cell) in set_field_lookup.iter().enumerate() {
-                push(slot, 0, cell.get().map(CachedEntry::SetField));
-            }
-            for (slot, cell) in tfor_cursor.iter().enumerate() {
-                push(slot, 0, cell.get().map(CachedEntry::Tfor));
-            }
+            // Register each enumeration even if its slots are all empty.
+            // The exhaustive bundle destructuring above requires new fields
+            // to be assigned an enumeration here.
+            let mut visit =
+                |family: &'static str, entries: Vec<(usize, usize, Option<CachedEntry>)>| {
+                    families.insert(family);
+                    for (slot, position, cell) in entries {
+                        if let Some(cell) = cell {
+                            assert_eq!(family, cell.family());
+                            cells.push(((*identity, cell.family(), slot, position), cell));
+                        }
+                    }
+                };
+            visit(
+                "field",
+                field_lookup
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, cell)| (slot, 0, cell.get_field().map(CachedEntry::Field)))
+                    .collect(),
+            );
+            visit(
+                "method",
+                field_lookup
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(slot, cell)| {
+                        (0..caches::METHOD_ENTRIES).map(move |position| {
+                            (
+                                slot,
+                                position,
+                                cell.get_method(position).map(CachedEntry::Method),
+                            )
+                        })
+                    })
+                    .collect(),
+            );
+            visit(
+                "string-method",
+                field_lookup
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, cell)| {
+                        (
+                            slot,
+                            0,
+                            cell.get_string_method().map(CachedEntry::StringMethod),
+                        )
+                    })
+                    .collect(),
+            );
+            visit(
+                "set-field",
+                set_field_lookup
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, cell)| (slot, 0, cell.get().map(CachedEntry::SetField)))
+                    .collect(),
+            );
+            visit(
+                "tfor cursor",
+                tfor_cursor
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, cell)| (slot, 0, cell.get().map(CachedEntry::Tfor)))
+                    .collect(),
+            );
         }
-        cells
+        (cells, families)
     }
 
     /// Cache handles are weak: a collection that frees a cached object must
@@ -1741,20 +1791,27 @@ mod runtime_tests {
             .call(ArgCount::Fixed(0), RetCount::Fixed(0))
             .expect("cache warmup runs");
 
-        let before = cache_cells(&state);
+        let (before, families) = cache_cells(&state);
         state.gc_collect();
-        let after = cache_cells(&state);
+        let (after, _) = cache_cells(&state);
 
         let live = |val: &Val| state.heap.val_is_live(val);
         // Fixed, not derived from `before`: a family whose warmup stopped
         // populating any cell must fail here rather than drop out unchecked.
-        for family in [
+        let required = [
             "field",
             "set-field",
             "method",
             "string-method",
             "tfor cursor",
-        ] {
+        ];
+        assert_eq!(
+            families,
+            required
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>()
+        );
+        for family in required {
             let cells = before.iter().filter(|((_, f, _, _), _)| *f == family);
             type Cells<'a> = Vec<&'a (CellKey, CachedEntry)>;
             let (dead, alive): (Cells<'_>, Cells<'_>) =

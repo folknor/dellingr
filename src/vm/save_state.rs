@@ -250,6 +250,26 @@ struct SavePayload {
 }
 
 impl SavePayload {
+    /// Minimal fixture payload; production capture fills every field explicitly.
+    #[cfg(test)]
+    fn empty(has_standard_environment: bool) -> Self {
+        Self {
+            has_standard_environment,
+            rng_state: 0,
+            cost: CostState::default(),
+            strings: Vec::new(),
+            bytecode: Vec::new(),
+            upvalues: Vec::new(),
+            objects: Vec::new(),
+            globals: SavedObject::empty_table(),
+            global_pins: Vec::new(),
+            globals_sealed: false,
+            env_deltas: Vec::new(),
+            next_format_pointer_id: 1,
+            format_pointer_ids: Vec::new(),
+        }
+    }
+
     /// Rough encoded size: string content, ~16 bytes per value slot, and each
     /// bytecode arena node's own fields (children are separate nodes, so
     /// nothing is counted twice). Used only to seed the encoder's buffer
@@ -1484,19 +1504,8 @@ impl State {
             });
         }
         let payload = SaveBuilder::new(self).finish()?;
-        let mut encoder = Encoder::with_capacity(payload.encoded_size_estimate());
-        encoder.write_magic_and_versions();
-        // Diagnostic metadata only. The format and cost-model versions in the
-        // magic block are the hard compatibility gates; this human-readable
-        // crate version records which build produced the snapshot for debugging
-        // and is intentionally not compared on load.
-        encoder.write_bytes(
-            env!("CARGO_PKG_VERSION").as_bytes(),
-            SnapshotField::EngineVersion,
-        )?;
-        payload.encode(&mut encoder)?;
         Ok(SaveState {
-            bytes: encoder.finish(),
+            bytes: encode_save(&payload)?,
             diagnostics: SaveDiagnostics {
                 anchor_count: self.anchor_count(),
             },
@@ -1555,6 +1564,19 @@ impl State {
         materialize_payload(&mut state, payload)?;
         Ok(state)
     }
+}
+
+/// The sole save envelope writer, shared by capture and forged test payloads.
+fn encode_save(payload: &SavePayload) -> Result<Vec<u8>, SaveError> {
+    let mut encoder = Encoder::with_capacity(payload.encoded_size_estimate());
+    encoder.write_magic_and_versions();
+    // Diagnostic metadata only; format and cost-model versions gate loading.
+    encoder.write_bytes(
+        env!("CARGO_PKG_VERSION").as_bytes(),
+        SnapshotField::EngineVersion,
+    )?;
+    payload.encode(&mut encoder)?;
+    Ok(encoder.finish())
 }
 
 /// Object -> token map for the save-time environment. Sourced from the
@@ -3471,33 +3493,40 @@ mod tests {
             .collect();
         assert_eq!(chunks.len(), 2);
         chunks.sort_unstable_by_key(|chunk| std::cmp::Reverse(Arc::as_ptr(chunk) as usize));
-        let expected: Vec<_> = chunks
-            .iter()
-            .map(|chunk| {
-                chunk
-                    .string_literals
-                    .iter()
-                    .find(|literal| {
-                        literal.as_slice() == b"identity-a" || literal.as_slice() == b"identity-b"
-                    })
-                    .unwrap()
-                    .clone()
-            })
-            .collect();
-        let mut builder = SaveBuilder::new(&state);
-        // Force arena order opposite to address order on every allocator.
-        for chunk in &chunks {
-            builder.encode_bytecode(chunk).unwrap();
+        // Encode in descending address order, then ascending, so neither an
+        // ascending nor a descending address sort can match both by accident.
+        for pass in 0..2 {
+            if pass == 1 {
+                chunks.reverse();
+            }
+            let expected: Vec<_> = chunks
+                .iter()
+                .map(|chunk| {
+                    chunk
+                        .string_literals
+                        .iter()
+                        .find(|literal| {
+                            literal.as_slice() == b"identity-a"
+                                || literal.as_slice() == b"identity-b"
+                        })
+                        .unwrap()
+                        .clone()
+                })
+                .collect();
+            let mut builder = SaveBuilder::new(&state);
+            for chunk in &chunks {
+                builder.encode_bytecode(chunk).unwrap();
+            }
+            let payload = builder.finish().unwrap();
+            let actual: Vec<_> = payload
+                .strings
+                .into_iter()
+                .filter(|literal| {
+                    literal.as_slice() == b"identity-a" || literal.as_slice() == b"identity-b"
+                })
+                .collect();
+            assert_eq!(actual, expected, "encode pass {pass}");
         }
-        let payload = builder.finish().unwrap();
-        let actual: Vec<_> = payload
-            .strings
-            .into_iter()
-            .filter(|literal| {
-                literal.as_slice() == b"identity-a" || literal.as_slice() == b"identity-b"
-            })
-            .collect();
-        assert_eq!(actual, expected);
     }
 
     #[test]
@@ -3635,12 +3664,8 @@ mod tests {
             )
             .collect();
         let payload = SavePayload {
-            has_standard_environment: false,
-            rng_state: 0,
-            cost: CostState::default(),
             strings,
             bytecode,
-            upvalues: Vec::new(),
             objects,
             globals: SavedObject::Table {
                 array_len: 0,
@@ -3648,33 +3673,16 @@ mod tests {
                 entries,
                 metatable: None,
             },
-            global_pins: Vec::new(),
-            globals_sealed: false,
-            env_deltas: Vec::new(),
-            next_format_pointer_id: 1,
-            format_pointer_ids: Vec::new(),
+            ..SavePayload::empty(false)
         };
-        let mut encoder = Encoder::new();
-        encoder.write_magic_and_versions();
-        // The encoder enforces production field limits, so a fixture that
-        // fails to encode is a broken test, never a decoder rejection.
-        let encoded = encoder
-            .write_bytes(
-                env!("CARGO_PKG_VERSION").as_bytes(),
-                SnapshotField::EngineVersion,
-            )
-            .and_then(|()| payload.encode(&mut encoder));
-        if let Err(error) = encoded {
-            panic!("fixture payload must encode: {error}");
-        }
-        State::load_state(
-            &encoder.finish(),
-            Box::new(crate::DefaultCallbacks),
-            no_setup,
-        )
-        .map_err(|error| match error {
-            LoadError::Snapshot(error) => error,
-            other => panic!("fixture load failed outside the snapshot: {other:?}"),
+        let Ok(bytes) = encode_save(&payload) else {
+            panic!("fixture payload must encode");
+        };
+        State::load_state(&bytes, Box::new(crate::DefaultCallbacks), no_setup).map_err(|error| {
+            match error {
+                LoadError::Snapshot(error) => error,
+                other => panic!("fixture load failed outside the snapshot: {other:?}"),
+            }
         })
     }
 
@@ -4210,32 +4218,10 @@ mod tests {
         let mut bytecode = valid_saved_bytecode();
         bytecode.string_literals.push(MARKER.to_vec());
         let payload = SavePayload {
-            has_standard_environment: false,
-            rng_state: 0,
-            cost: CostState::default(),
-            strings: Vec::new(),
             bytecode: vec![bytecode],
-            upvalues: Vec::new(),
-            objects: Vec::new(),
-            globals: SavedObject::empty_table(),
-            global_pins: Vec::new(),
-            globals_sealed: false,
-            env_deltas: Vec::new(),
-            next_format_pointer_id: 1,
-            format_pointer_ids: Vec::new(),
+            ..SavePayload::empty(false)
         };
-        let mut encoder = Encoder::new();
-        encoder.write_magic_and_versions();
-        encoder
-            .write_bytes(
-                env!("CARGO_PKG_VERSION").as_bytes(),
-                SnapshotField::EngineVersion,
-            )
-            .expect("engine version fits");
-        payload
-            .encode(&mut encoder)
-            .expect("marker payload encodes");
-        let bytes = encoder.finish();
+        let bytes = encode_save(&payload).expect("marker payload encodes");
         let hits: Vec<usize> = bytes
             .windows(MARKER.len())
             .enumerate()
@@ -4681,7 +4667,26 @@ mod tests {
 
     #[test]
     fn saved_main_chunk_keeps_zero_defined_line() {
-        roundtrip!(SavedBytecode, valid_saved_bytecode());
+        fn assert_main_chunk_frame(state: &mut State) {
+            state.get_global("main").unwrap();
+            let err = state
+                .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+                .unwrap_err();
+            let frame = &err.stack_trace()[0];
+            assert_eq!(frame.defined_line, 0);
+            assert_eq!(frame.to_string(), "main:1: in main chunk");
+        }
+
+        let mut state = State::new();
+        let program = crate::Program::compile("error('x')", Some(b"main".as_slice())).unwrap();
+        state.load(&program).unwrap();
+        state.set_global("main").unwrap();
+        assert_main_chunk_frame(&mut state);
+
+        let save = state.save_state().unwrap();
+        let mut loaded =
+            State::load_state(&save.bytes, Box::new(crate::DefaultCallbacks), no_setup).unwrap();
+        assert_main_chunk_frame(&mut loaded);
     }
 
     #[test]

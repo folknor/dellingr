@@ -7,6 +7,25 @@ use crate::compiler::Bytecode;
 use super::lua_val::Val;
 use super::object::{GcHeap, ObjectPtr};
 
+// Under `disable-inline-caches` every cache read misses. Only this crate's unit tests can re-enable hits for the paired execution.
+#[cfg(all(feature = "disable-inline-caches", test))]
+std::thread_local! {
+    pub(super) static ENABLE_HITS: Cell<bool> = const { Cell::new(false) };
+}
+
+#[cfg(feature = "disable-inline-caches")]
+#[inline(always)]
+pub(super) fn hits_disabled() -> bool {
+    #[cfg(test)]
+    {
+        !ENABLE_HITS.get()
+    }
+    #[cfg(not(test))]
+    {
+        true
+    }
+}
+
 /// A lookup in the global table, valid while its shape version is `version`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct GlobalLookupCacheEntry {
@@ -42,6 +61,10 @@ pub(super) struct TforCursorSlot {
 
 impl TforCursorSlot {
     pub(super) fn get(&self) -> Option<TforCursorEntry> {
+        #[cfg(feature = "disable-inline-caches")]
+        if hits_disabled() {
+            return None;
+        }
         self.entry.get()
     }
 
@@ -57,6 +80,10 @@ pub(super) struct GlobalLookupCacheSlot {
 
 impl GlobalLookupCacheSlot {
     pub(super) fn get(&self) -> Option<GlobalLookupCacheEntry> {
+        #[cfg(feature = "disable-inline-caches")]
+        if hits_disabled() {
+            return None;
+        }
         self.entry.get()
     }
 
@@ -129,6 +156,10 @@ pub(super) struct FieldLookupCacheSlot {
 
 impl FieldLookupCacheSlot {
     pub(super) fn get_field(&self) -> Option<FieldLookupCacheEntry> {
+        #[cfg(feature = "disable-inline-caches")]
+        if hits_disabled() {
+            return None;
+        }
         self.field_entry.get()
     }
 
@@ -138,6 +169,10 @@ impl FieldLookupCacheSlot {
 
     /// The method entry at `position` (below [`METHOD_ENTRIES`]).
     pub(super) fn get_method(&self, position: usize) -> Option<MethodLookupCacheEntry> {
+        #[cfg(feature = "disable-inline-caches")]
+        if hits_disabled() {
+            return None;
+        }
         self.method_entries[position].get()
     }
 
@@ -176,6 +211,10 @@ impl FieldLookupCacheSlot {
     }
 
     pub(super) fn get_string_method(&self) -> Option<StringMethodCacheEntry> {
+        #[cfg(feature = "disable-inline-caches")]
+        if hits_disabled() {
+            return None;
+        }
         self.string_method_entry.get()
     }
 
@@ -191,6 +230,10 @@ pub(super) struct SetFieldLookupCacheSlot {
 
 impl SetFieldLookupCacheSlot {
     pub(super) fn get(&self) -> Option<FieldLookupCacheEntry> {
+        #[cfg(feature = "disable-inline-caches")]
+        if hits_disabled() {
+            return None;
+        }
         self.entry.get()
     }
 

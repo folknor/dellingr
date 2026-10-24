@@ -4,7 +4,8 @@
 # Walks examples/**/*.lua, running each script through dellingr and comparing
 # ordinary examples with the fixed reference runtimes. A file passes when
 # its dellingr output matches either reference. Files tagged with -- DIFF:
-# <reason> skip the reference runs after dellingr exits successfully.
+# <reason> are expected to differ from both references; matching either one
+# reports a stale marker after dellingr exits successfully.
 #
 # Accepting either reference is deliberate: dellingr is a Lua 5.2/5.4 hybrid
 # (the README's "Won't implement" list removes most of what separates the two),
@@ -212,10 +213,6 @@ do
         continue
     fi
 
-    if [ "$has_diff" = "1" ]; then
-        continue
-    fi
-
     if [ "$references_checked" -eq 0 ]; then
         for index in "${!REFERENCE_LUAS[@]}"; do
             tool="${REFERENCE_LUAS[$index]}"
@@ -239,6 +236,23 @@ do
     if [ "$lua54_status" -eq 124 ] && [ "$TIMEOUT_MODE" != none ]; then
         failures+=("TIMEOUT: $name (${REFERENCE_LUA_LABELS[1]})")
         report_capture "${REFERENCE_LUA_LABELS[1]}" "$LUA54_OUT"
+        continue
+    fi
+
+    if [ "$has_diff" = "1" ]; then
+        stale_matches=""
+        if diff -q "$OUR_OUT" "$LUA54_OUT" > /dev/null 2>&1; then
+            stale_matches="${REFERENCE_LUA_LABELS[1]}"
+        fi
+        if diff -q "$OUR_OUT" "$LUA52_OUT" > /dev/null 2>&1; then
+            if [ -n "$stale_matches" ]; then
+                stale_matches+=" and "
+            fi
+            stale_matches+="${REFERENCE_LUA_LABELS[0]}"
+        fi
+        if [ -n "$stale_matches" ]; then
+            failures+=("FAIL: $name (stale DIFF marker; matches $stale_matches)")
+        fi
         continue
     fi
 

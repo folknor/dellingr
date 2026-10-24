@@ -20,28 +20,44 @@ const POLL_INTERVAL_MS: u64 = 25;
 
 #[test]
 fn run_feature_test_extended_in_process() {
-    let examples_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
-    let feature_test = examples::example_corpus()
-        .into_iter()
-        .find(|path| {
-            path.strip_prefix(&examples_dir)
-                .is_ok_and(|relative| relative == Path::new("feature_test_extended.lua"))
-        })
-        .expect("feature_test_extended.lua must be present in the example corpus");
+    let feature_test = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("examples")
+        .join("feature_test_extended.lua");
     let source =
         fs::read_to_string(&feature_test).expect("Failed to read feature_test_extended.lua");
-    let mut state = dellingr::State::new();
-    let source_name = feature_test
-        .strip_prefix(Path::new(env!("CARGO_MANIFEST_DIR")))
-        .expect("example corpus paths must be rooted at the crate manifest")
-        .display()
-        .to_string();
-    dellingr::Program::compile(&source, Some(source_name.as_bytes()))
-        .and_then(|program| state.load(&program))
-        .expect("feature_test_extended.lua should load successfully");
-    state
-        .call(dellingr::ArgCount::Fixed(0), dellingr::RetCount::Fixed(0))
-        .expect("feature_test_extended.lua should execute successfully");
+    let (mut state, recorder) = support::Recorder::state();
+    support::run(&mut state, &source);
+
+    let prints = recorder.prints();
+    let failure_lines = prints
+        .iter()
+        .filter(|line| line.starts_with(b"[FAIL]"))
+        .map(|line| String::from_utf8_lossy(line))
+        .collect::<Vec<_>>();
+    assert!(
+        failure_lines.is_empty(),
+        "feature_test_extended.lua reported failures: {failure_lines:?}"
+    );
+
+    let expected_passes = source
+        .lines()
+        .filter(|line| line.trim_start().starts_with("test("))
+        .count();
+    let actual_passes = prints
+        .iter()
+        .filter(|line| line.starts_with(b"[PASS]"))
+        .count();
+    assert!(expected_passes > 0, "the example must contain test cases");
+    assert_eq!(
+        actual_passes, expected_passes,
+        "feature_test_extended.lua must report every test case as passing"
+    );
+    assert!(
+        prints
+            .iter()
+            .any(|line| line.as_slice() == b"\n=== All extended tests passed! ==="),
+        "feature_test_extended.lua must print its completion marker"
+    );
 }
 
 fn read_output<R>(

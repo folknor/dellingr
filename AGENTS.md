@@ -56,10 +56,11 @@ Differential testing against reference Lua:
 ./scripts/test_limited.sh <cmd>  # run <cmd> under a virtual-memory cap (for stress tests)
 ```
 
-`diff_test.sh` exits 1 at the first unmarked example if either reference Lua
-is missing and names the executable. It requires dellingr to exit zero even
-for `-- DIFF: <reason>` files. DIFF files
-skip both reference runs after dellingr succeeds. Both `-- DIFF:` and
+`diff_test.sh` exits 1 at the first example not marked `-- SKIP-DIFF:` if
+either reference Lua is missing and names the executable. It requires dellingr
+to exit zero even for `-- DIFF: <reason>` files. DIFF files still run both
+references after dellingr succeeds, and fail as a stale marker when dellingr's
+output matches either one. Both `-- DIFF:` and
 `-- SKIP-DIFF:` require a nonempty reason. For each failure it also prints
 detail to stderr: the captured output of a process that failed or timed out,
 or unified diffs of dellingr's output against both references.
@@ -91,6 +92,11 @@ enforces; `python3 scripts/native_calls.py sites` lists the call sites.
 model and runs as a separate `brokkr check` script check.
 reference/native-calls.md explains the inventory, the direct-call convention
 the lexical check relies on, and how to add a path.
+`scripts/poison_contract.py`, built on the same lexer, checks that every
+public fallible `State` method refuses a poisoned State before other work and
+that every infallible one is on its reviewed allowlist;
+`scripts/test_poison_contract.py` holds its fixture tests. Both are `brokkr
+check` script checks.
 
 `scripts/notes_drop.py` and `scripts/notes_move.py` are maintainer helpers for
 the `notes/` working documents, run directly when needed; no gate invokes them.
@@ -197,7 +203,7 @@ boundary and operand contract. Handler writes survive an error.
 - There are two test targets. `tests/integration/` (`main.rs`) is one crate holding every suite that can share a process, as modules grouped by subject: `cli`, `compiler`, `corpus`, `cost`, `failures`, `host`, `library`, `runtime`, and `snapshot`, which compiles only under the `snapshot` feature. A focused run names a subject or a file by module path (`brokkr test snapshot::`, `brokkr test gc_upvalues::`); the filter is a substring, so no module may end with a subject's name (the library's unit tests still match by subject: `compiler::` also runs the compiler's unit tests). Its `support` module holds the CLI binary path, CLI spawning, scratch files, the shared compile-load-call helpers (`support::run`, `eval`, `run_error`, `eval_number`, `cost_of`, ...) and `Recorder`, a `HostCallbacks` that records prints and error notifications. `tests/native_stack.rs` is the other target, kept apart because the release sweeps build it alone and an overflow at the envelope's edge aborts its process. `tests/common/` holds only files another target also includes by path. `corpus::test_conventions` keeps that shape: no other top-level target, every source reached by `mod` declarations from `main.rs` (a `cfg` only on its allowlist), no dead-code allowances or file-level `cfg`s, and a `// process-global:` comment on every `static`, panic-hook, environment or working-directory use; `scripts/test_tree_anchor.py`, a `brokkr check` script check, confirms from outside the crate that those tests still compile and run. The suites share one process, so a new one must not leave state another test can observe.
 - `tests/integration/corpus/run_examples.rs` - runs every regular Lua file under `examples/` with the binary cargo built for the test run (`support` owns the binary path and `tests/common/examples.rs` the shared, manifest-rooted example list; no test may reference `target/` or spawn cargo), in parallel worker threads. The shared list skips symlinks and orders relative paths by encoded bytes to match `find -type f` and `LC_ALL=C sort`. That includes the stress examples and the generated `parse/large_source.lua`. Each example runs under `scripts/test_limited.sh` (so its memory cap applies) with a fixed 60-second timeout. The runner uses at most eight workers, bounded by available parallelism and the number of examples. It fails on timeout, nonzero exit, unexpected stderr, if any stdout line ends with `: false`, or if a file whose main chunk assigns a global `_bench` (read from its compiled bytecode, so a `local function _bench` does not count) prints no line ending in `: true`. Examples that print test results follow the convention `print("test name: " .. tostring(condition))`. Adding an example that prints a line ending in `: false` will fail this test.
 - `tests/native_stack.rs` backs docs/limits.md's "Envelope": each path in `reference/native-calls.toml` recursed to `MAX_NATIVE_CALL_DEPTH` under every metamethod chain kind and deepest-point leaf, on `tests/common/stack.rs`'s profile-dependent thread size. `brokkr.toml` runs it in dev (the default and snapshot sweeps) and release (`release-native-stack` and `release-native-stack-snapshot`). A new call path into Lua needs a scenario there; reference/native-calls.md has the steps.
-- `tests/integration/corpus/diff_test.rs` is the differential gate: it uses the same shared example list, and checks that its ordered paths match `scripts/diff_test.sh --list-examples`. It drives the shell gate over the whole corpus in partitions that run concurrently inside one test, once per `[[check]]` feature shape in `brokkr.toml` (there is no separate brokkr script check for it), and also checks malformed timeout rejection and nonempty marker reasons. The corpus partitions are compiled out under the `hotpath` feature, which `hotpath-alloc` also enables. `scripts/diff_gate.sh` is an optional debug-build wrapper around `diff_test.sh` for direct runs; nothing in `brokkr check` invokes it. Mark intentional divergences with a `-- DIFF: <reason>` comment; dellingr must still succeed, but the references are skipped. A file carrying a `-- SKIP-DIFF: <reason>` line is not run by the differential gate. Reference Lua is required for unmarked examples; the test leaves that check, and its error message, to `diff_test.sh`.
+- `tests/integration/corpus/diff_test.rs` is the differential gate: it uses the same shared example list, and checks that its ordered paths match `scripts/diff_test.sh --list-examples`. It drives the shell gate over the whole corpus in partitions that run concurrently inside one test, once per `[[check]]` feature shape in `brokkr.toml` (there is no separate brokkr script check for it), and also checks malformed timeout rejection and nonempty marker reasons. The corpus partitions are compiled out under the `hotpath` feature, which `hotpath-alloc` also enables. `scripts/diff_gate.sh` is an optional debug-build wrapper around `diff_test.sh` for direct runs; nothing in `brokkr check` invokes it. Mark intentional divergences with a `-- DIFF: <reason>` comment; dellingr must still succeed, and its output must differ from both references (a match fails as a stale marker). A file carrying a `-- SKIP-DIFF: <reason>` line is not run by the differential gate. Reference Lua is required for every example not marked SKIP-DIFF; the test leaves that check, and its error message, to `diff_test.sh`.
 - `tests/integration/corpus/bench_scripts.rs` checks every `xxh128` and `hotpath_xxh128` pin in `brokkr.toml` against the registered file bytes, the bench/ footer contract, that each bench/ file runs (its setup without the footer, then `_bench` with `local K` patched to 1, or its local `kernel()` once when it has no `K`, or else one full `_bench` call, each phase under a cost budget, loaded under the harness's bare-path chunk name), and that each `brokkr.toml` workload's `file` and `hotpath_file` give their `kernel` and shared helper functions matching `analyze_cost` fingerprints, which guards the same-kernel pairing described under Hotpath benchmarks.
 - Unit tests live alongside their modules (e.g. `src/vm/object.rs` has GC tests).
 - To intentionally refresh `tests/fixtures/save_golden_current.bin` after a
@@ -220,6 +226,15 @@ and lints every target under those features and runs only the refusal sweep,
 the gmatch recovery test and the library's fault-injection unit tests.
 `corpus::test_conventions` fails if a test compiled only under
 `fault-injection` is not selected by that shape's `only` list.
+
+The non-default `disable-inline-caches` feature is debug-only test
+infrastructure in the same sense (`src/lib.rs` refuses it without debug
+assertions). It makes every inline-cache and builtin-mirror read miss; the
+library's unit-test build alone can turn hits back on per thread, so
+`vm::cache_differential::corpus_inline_cache_differential` runs each example
+with hits on and off in one build and compares prints, cost and errors. The
+curated `inline-cache-differential` shape is the only one that enables it and
+runs only that test: other cache tests would fail with hits off.
 
 The budget and natural-failure sweeps also run in ordinary check shapes.
 `brokkr test error_boundary --release` exercises them without debug checks;

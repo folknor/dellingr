@@ -674,7 +674,7 @@ pub(crate) fn parse_wc_token(token: &str) -> Option<f64> {
 /// A run-time hexadecimal float parser: `0x<hex>[.<hex>]p<decimal>`, rounded
 /// to the nearest binary64, ties to even, as C's `%la` does. Panics on a
 /// malformed literal.
-fn parse_hex_float(body: &str) -> f64 {
+pub(crate) fn parse_hex_float(body: &str) -> f64 {
     let (mantissa, exponent) = body[2..]
         .split_once(['p', 'P'])
         .expect("hex float literals have a binary exponent");

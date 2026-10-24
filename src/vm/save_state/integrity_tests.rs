@@ -1,22 +1,75 @@
 use super::*;
 use std::convert::Infallible;
 
-fn empty_payload() -> SavePayload {
-    SavePayload {
-        has_standard_environment: false,
-        rng_state: 0,
-        cost: CostState::default(),
-        strings: Vec::new(),
-        bytecode: Vec::new(),
-        upvalues: Vec::new(),
-        objects: Vec::new(),
-        globals: SavedObject::empty_table(),
-        global_pins: Vec::new(),
-        globals_sealed: false,
-        env_deltas: Vec::new(),
-        next_format_pointer_id: 1,
-        format_pointer_ids: Vec::new(),
+#[test]
+fn bounded_corruption_sweep_exercises_loaded_data() {
+    const MUTATIONS: usize = 96;
+    let setup = crate::Program::compile(
+        "t = { a = 1, b = 'two', c = { 3, 4, 5 } }; t.self = t",
+        None,
+    )
+    .expect("data corpus compiles");
+    let probe = crate::Program::compile("for k, v in pairs(t) do local copy = t[k] end", None)
+        .expect("table probe compiles");
+    for standard in [false, true] {
+        let mut original = if standard { State::new() } else { State::raw() };
+        original.load(&setup).expect("data chunk loads");
+        original
+            .call(crate::ArgCount::Fixed(0), crate::RetCount::Fixed(0))
+            .expect("data chunk runs");
+        let payload = SaveBuilder::new(&original).finish().expect("data captures");
+        // Arbitrary admitted bytecode can contain free infinite loops. Keep
+        // this executable mutation corpus data-only, so a budget bounds the
+        // probe; bytecode admission has separate verifier rejection tests.
+        assert!(payload.bytecode.is_empty());
+        let bytes = encode_save(&payload).expect("data encodes");
+        let mut seed = 0x5a17_2049_u64;
+        // Include the unchanged seed so the exercise path cannot go untested
+        // merely because every sampled mutation is rejected.
+        for mutation in 0..=MUTATIONS {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let at = (seed as usize) % bytes.len();
+            let mut edited = bytes.clone();
+            match mutation % 4 {
+                _ if mutation == MUTATIONS => {}
+                0 => edited[at] ^= 1 << (mutation % 8),
+                1 => edited[at] ^= 0xff,
+                2 => {
+                    let end = (at + 4).min(edited.len());
+                    edited[at..end].fill(0xff);
+                }
+                _ => edited.truncate(at),
+            }
+            let Ok(mut loaded) =
+                State::load_state(&edited, Box::new(crate::DefaultCallbacks), |_| {
+                    Ok::<(), Infallible>(())
+                })
+            else {
+                continue;
+            };
+            loaded.gc_collect();
+            loaded.save_state().expect("admitted data resaves after GC");
+            // A changed length or tag can reinterpret data as bytecode. Do
+            // not execute that graph even if admission accepts it.
+            let admitted = SaveBuilder::new(&loaded)
+                .finish()
+                .expect("admitted data captures");
+            if standard && admitted.bytecode.is_empty() {
+                loaded.set_cost_budget(1000);
+                loaded
+                    .load(&probe)
+                    .expect("probe loads into admitted state");
+                // Mutations may change a table into another valid value.
+                // Both success and a normal Lua error must leave it saveable.
+                let _result = loaded.call(crate::ArgCount::Fixed(0), crate::RetCount::Fixed(0));
+                loaded.save_state().expect("exercised data resaves");
+            }
+        }
     }
+}
+
+fn empty_payload() -> SavePayload {
+    SavePayload::empty(false)
 }
 
 fn empty_delta(token: &str) -> SavedEnvDelta {
@@ -277,16 +330,7 @@ fn load_into_folding_build(payload: &SavePayload) -> Result<State, LoadError<Sav
 }
 
 fn encode_fixture(payload: &SavePayload) -> Vec<u8> {
-    let mut encoder = Encoder::new();
-    encoder.write_magic_and_versions();
-    encoder
-        .write_bytes(
-            env!("CARGO_PKG_VERSION").as_bytes(),
-            SnapshotField::EngineVersion,
-        )
-        .and_then(|()| payload.encode(&mut encoder))
-        .expect("fixture payload encodes");
-    encoder.finish()
+    encode_save(payload).expect("fixture payload encodes")
 }
 
 #[test]

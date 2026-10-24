@@ -29,10 +29,13 @@
 // banned in clippy.toml, with a scoped allow on `DefaultCallbacks::on_print`.
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
-// Fault injection is test instrumentation. Keep it out of release builds,
-// where dependency feature unification would otherwise expose it to hosts.
+// Fault injection and disabled inline caches are test instrumentation. Keep
+// them out of release builds, where dependency feature unification would
+// otherwise expose them to hosts.
 #[cfg(all(feature = "fault-injection", not(debug_assertions)))]
 compile_error!("the fault-injection feature requires debug assertions");
+#[cfg(all(feature = "disable-inline-caches", not(debug_assertions)))]
+compile_error!("the disable-inline-caches feature requires debug assertions");
 
 mod compiler;
 mod cost_meter;
@@ -48,6 +51,16 @@ mod numeral;
 mod patterns;
 mod vm;
 mod vm_aux;
+
+/// The integration tests' examples-corpus walker, compiled once into the
+/// library's unit tests so they share its traversal and ordering policy.
+#[cfg(test)]
+mod examples_corpus {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/common/examples.rs"
+    ));
+}
 
 /// Error types returned by the VM and parser. Surfaced through [`Result`].
 pub mod error;

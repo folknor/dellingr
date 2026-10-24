@@ -142,7 +142,8 @@ that it is not listed. Then:
 2. If the edge opens a new path, add a `Scenario` to `tests/native_stack.rs`
    that recurses through it (its `native` and `meta` per cycle, a `DESCEND`
    inside the handler the path calls, and Lua checks of any returned value),
-   and a `[[scenario]]` with the same name and its path. If only a chain
+   its name in the `scenario_tests!` list there (one test per scenario), and
+   a `[[scenario]]` with the same name and its path. If only a chain
    kind or a deepest-point item reaches it, name those on the edge instead.
 3. If the call can never reach Lua, or is outside the envelope, mark the
    edge `excluded` with the reason.

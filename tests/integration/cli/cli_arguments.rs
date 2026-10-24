@@ -1,7 +1,7 @@
 use std::ffi::OsString;
-use std::fs::File;
+use std::io::Write;
 use std::path::Path;
-use std::process::Output;
+use std::process::{Output, Stdio};
 
 use crate::support::process::{command, run, run_from};
 use crate::support::scratch::{ScratchDirectory, ScratchScript};
@@ -24,17 +24,25 @@ fn rejects_multiple_script_paths_instead_of_running_the_last() {
     assert!(!String::from_utf8_lossy(&output.stdout).contains("ran"));
 }
 
-/// Runs the CLI in `directory` with `input` as its stdin, fed from a scratch file.
+/// Runs the CLI in `directory` with `input` piped to its stdin.
 fn run_with_stdin(directory: &Path, args: &[&str], input: &[u8]) -> Output {
-    let stdin = ScratchScript::at(directory.join("stdin-input"), input);
-    let output = command()
+    let mut child = command()
         .current_dir(directory)
         .args(args)
-        .stdin(File::open(stdin.path()).expect("stdin input should open"))
-        .output()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .expect("dellingr CLI should run");
-    drop(stdin);
-    output
+    child
+        .stdin
+        .take()
+        .expect("stdin was configured as a pipe")
+        .write_all(input)
+        .expect("stdin input should be written");
+    child
+        .wait_with_output()
+        .expect("dellingr CLI should finish")
 }
 
 #[test]

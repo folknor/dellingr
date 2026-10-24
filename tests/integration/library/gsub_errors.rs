@@ -249,8 +249,9 @@ fn gsub_string_replacement_replaces_all_matches() {
 
 #[test]
 fn gsub_string_replacement_inside_dynamic_argument() {
-    let mut state = State::new();
-    dellingr::Program::compile(
+    let (mut state, recorder) = support::Recorder::state();
+    support::run(
+        &mut state,
         r#"
         local function test(name, condition)
             if condition then
@@ -273,11 +274,15 @@ fn gsub_string_replacement_inside_dynamic_argument() {
             return result == "heLLo" and count == 2
         end)())
     "#,
-        Some(b"dynamic-gsub.lua".as_slice()),
-    )
-    .and_then(|program| state.load(&program))
-    .unwrap();
-    state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
+    );
+    assert_eq!(
+        recorder.prints(),
+        vec![
+            b"[PASS] pattern captures".to_vec(),
+            b"[PASS] pattern gsub count".to_vec(),
+        ],
+        "the dynamic-argument regression must report both checks as passing"
+    );
 }
 
 #[test]

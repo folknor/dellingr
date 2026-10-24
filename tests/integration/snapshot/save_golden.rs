@@ -26,8 +26,6 @@ use save_golden_program::golden_bytes;
 
 use crate::support::{self, save_golden_program};
 
-const FIXTURE_NAMES: &[&str] = &["save_golden_current.bin"];
-
 fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("tests/fixtures/{name}"))
 }
@@ -54,10 +52,12 @@ fn every_save_fixture_is_declared_and_referenced() {
         .collect::<Vec<_>>();
     actual.sort();
 
-    let mut expected = FIXTURE_NAMES
-        .iter()
-        .map(|name| (*name).to_owned())
-        .collect::<Vec<_>>();
+    let golden_name = PathBuf::from(save_golden_program::GOLDEN_FIXTURE)
+        .file_name()
+        .expect("the golden fixture path has a file name")
+        .to_string_lossy()
+        .into_owned();
+    let mut expected = vec![golden_name];
     expected.sort();
     assert_eq!(actual, expected, "every save fixture must be listed here");
 }

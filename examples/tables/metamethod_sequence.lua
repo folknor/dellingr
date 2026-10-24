@@ -1,6 +1,5 @@
 -- The table library follows Lua 5.4's metamethod rules: lengths come from
 -- __len, reads go through __index and writes through __newindex.
--- DIFF: Lua 5.2 reads raw sequence elements and has no table.move.
 
 local function proxy(...)
   local store = {...}

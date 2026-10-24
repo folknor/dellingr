@@ -440,7 +440,8 @@ pub enum ErrorKind {
         available: usize,
     },
     /// A panic unwound through this State's execution, leaving its internal
-    /// bookkeeping inconsistent. The State refuses every further operation;
+    /// bookkeeping inconsistent. The State refuses every further fallible
+    /// operation (see [`State::is_poisoned`](crate::State::is_poisoned));
     /// drop it and build a new one.
     StatePoisoned,
     /// Parser rejected the source.

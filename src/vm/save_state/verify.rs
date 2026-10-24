@@ -1082,19 +1082,9 @@ mod tests {
 
     fn payload(delta: super::super::SavedEnvDelta) -> SavePayload {
         SavePayload {
-            has_standard_environment: true,
-            rng_state: 0,
-            cost: crate::cost_meter::CostState::default(),
             strings: vec![b"same".to_vec(), b"same".to_vec()],
-            bytecode: Vec::new(),
-            upvalues: Vec::new(),
-            objects: Vec::new(),
-            globals: super::super::SavedObject::empty_table(),
-            global_pins: Vec::new(),
-            globals_sealed: false,
             env_deltas: vec![delta],
-            next_format_pointer_id: 1,
-            format_pointer_ids: Vec::new(),
+            ..SavePayload::empty(true)
         }
     }
 
@@ -1145,11 +1135,7 @@ mod tests {
             )
         };
         SavePayload {
-            has_standard_environment: true,
-            rng_state: 0,
-            cost: crate::cost_meter::CostState::default(),
             strings,
-            bytecode: Vec::new(),
             upvalues: vec![
                 super::super::SavedVal::Fn(iterator_id.to_string()),
                 super::super::SavedVal::Obj(0),
@@ -1166,12 +1152,7 @@ mod tests {
                     upvalues: vec![0, 1],
                 },
             ],
-            globals: super::super::SavedObject::empty_table(),
-            global_pins: Vec::new(),
-            globals_sealed: false,
-            env_deltas: Vec::new(),
-            next_format_pointer_id: 1,
-            format_pointer_ids: Vec::new(),
+            ..SavePayload::empty(true)
         }
     }
 
@@ -1508,19 +1489,10 @@ mod tests {
     #[test]
     fn pointer_ids_must_sit_below_the_next_id() {
         let with_next = |next: u64| SavePayload {
-            has_standard_environment: true,
-            rng_state: 0,
-            cost: crate::cost_meter::CostState::default(),
             strings: vec![b"x".to_vec()],
-            bytecode: Vec::new(),
-            upvalues: Vec::new(),
-            objects: Vec::new(),
-            globals: super::super::SavedObject::empty_table(),
-            global_pins: Vec::new(),
-            globals_sealed: false,
-            env_deltas: Vec::new(),
             next_format_pointer_id: next,
             format_pointer_ids: vec![(super::super::SavedVal::Str(0), 1)],
+            ..SavePayload::empty(true)
         };
         assert!(validate_pointer_ids(&with_next(2)).is_ok());
         for next in [0, 1] {
@@ -1537,13 +1509,7 @@ mod tests {
         let with_globals = |entries: Vec<(super::super::SavedVal, super::super::SavedVal)>,
                             pins: Vec<super::super::SavedVal>,
                             sealed: bool| SavePayload {
-            has_standard_environment: true,
-            rng_state: 0,
-            cost: crate::cost_meter::CostState::default(),
             strings: vec![b"a".to_vec(), b"b".to_vec()],
-            bytecode: Vec::new(),
-            upvalues: Vec::new(),
-            objects: Vec::new(),
             globals: super::super::SavedObject::Table {
                 array_len: 0,
                 array_slots: 0,
@@ -1552,9 +1518,8 @@ mod tests {
             },
             global_pins: pins,
             globals_sealed: sealed,
-            env_deltas: Vec::new(),
             next_format_pointer_id: 0,
-            format_pointer_ids: Vec::new(),
+            ..SavePayload::empty(true)
         };
         let one = (Str(0), Bool(true));
         let two = (Str(0), Bool(false));

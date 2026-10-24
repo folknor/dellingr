@@ -64,6 +64,9 @@ mod trig_dint;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+pub(crate) use tests::{TestRng, parse_hex_float};
+
 pub(crate) use acos::acos;
 pub(crate) use asin::asin;
 pub(crate) use atan::atan;

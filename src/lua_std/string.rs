@@ -25,10 +25,9 @@ end
 // Error reporting identifies this outer chunk and the iterator bytecode by
 // Arc identity and omits these implementation frames, so lazy pattern
 // failures point at the caller.
-// It is process-global and compiled on the first gmatch in the process,
-// whichever State that is (a RustFunc cannot carry upvalues, hence the shim).
-// Compilation is deterministic and charges no cost, so which State pays for it
-// is not observable; the only effect is one-time host work.
+// It is process-global and compiled when the string library opens (a RustFunc
+// cannot carry upvalues, hence the shim). Compilation is deterministic and
+// charges no script cost; the only effect is one-time host work during setup.
 static GMATCH_WRAPPER: OnceLock<Arc<crate::compiler::Bytecode>> = OnceLock::new();
 
 fn gmatch_wrapper() -> Arc<crate::compiler::Bytecode> {
@@ -57,9 +56,9 @@ impl State {
 }
 
 /// The process-global bytecode of the iterator function the gmatch wrapper
-/// returns, compiling the wrapper if no gmatch has run yet. Snapshot load
-/// substitutes it for a restored iterator's chunk, so the restored closure
-/// shares the identity `State::is_gmatch_wrapper` recognises.
+/// returns. The wrapper is compiled when the string library opens. Snapshot
+/// load substitutes it for a restored iterator's chunk, so the restored
+/// closure shares the identity `State::is_gmatch_wrapper` recognises.
 #[cfg(feature = "snapshot")]
 pub(crate) fn gmatch_iterator_bytecode() -> Arc<crate::compiler::Bytecode> {
     let wrapper = gmatch_wrapper();
@@ -1005,6 +1004,11 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
 
     // Set the string table as a global
     state.set_global("string")?;
+
+    // Compile the wrapper during setup, after string function registration.
+    // Compilation has no State cost accounting and registers no functions, so
+    // this preserves script costs and the standard library registration order.
+    drop(gmatch_wrapper());
     Ok(())
 }
 

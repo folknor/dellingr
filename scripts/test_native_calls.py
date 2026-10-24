@@ -8,16 +8,19 @@ from unittest.mock import patch
 import native_calls as guard
 
 
-class NativeCallTests(unittest.TestCase):
+class SourceFixture(unittest.TestCase):
+    """A throwaway source tree under .scratch/, shared by the checkers built
+    on native_calls' lexer (test_poison_contract.py subclasses it)."""
+
     def setUp(self):
         scratch = guard.ROOT / ".scratch"
         scratch.mkdir(exist_ok=True)
         self.directory = tempfile.TemporaryDirectory(dir=scratch)
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
-        self.patch = patch.object(guard, "ROOT", self.root)
-        self.patch.start()
-        self.addCleanup(self.patch.stop)
+        root_patch = patch.object(guard, "ROOT", self.root)
+        root_patch.start()
+        self.addCleanup(root_patch.stop)
 
     def source(self, text, name="src/lib.rs"):
         path = self.root / name
@@ -25,6 +28,8 @@ class NativeCallTests(unittest.TestCase):
         path.write_text(text)
         return guard.Source(path)
 
+
+class NativeCallTests(SourceFixture):
     def test_lexer_blanks_literals_nested_comments_but_keeps_offsets(self):
         text = '''fn live<'a>() {
  let a = br##"call_unguarded() { // hidden }"##;

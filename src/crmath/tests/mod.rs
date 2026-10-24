@@ -20,6 +20,7 @@ mod golden;
 mod oracle;
 mod rng;
 
+pub(crate) use oracle::parse_hex_float;
 pub(crate) use rng::TestRng;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

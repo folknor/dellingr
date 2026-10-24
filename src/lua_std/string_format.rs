@@ -881,3 +881,86 @@ fn quote_string(bytes: &[u8]) -> Result<Vec<u8>> {
     output.push(b'"');
     Ok(output)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::format_hex_float;
+    use crate::numeral::parse_lua_numeral;
+
+    fn rounded_hex_bits(number: f64, precision: u8) -> u64 {
+        let bits = number.to_bits();
+        let sign = bits & (1 << 63);
+        let exponent_bits = (bits >> 52) & 0x7ff;
+        let fraction = bits & ((1 << 52) - 1);
+        let (exponent, significand) = if exponent_bits == 0 {
+            (-1022, fraction)
+        } else {
+            (
+                i32::try_from(exponent_bits).expect("the f64 exponent field fits in i32") - 1023,
+                (1 << 52) | fraction,
+            )
+        };
+        let dropped_bits = 52 - u32::from(precision) * 4;
+        let mut rounded = significand >> dropped_bits;
+        if dropped_bits > 0 {
+            let remainder = significand & ((1 << dropped_bits) - 1);
+            let halfway = 1 << (dropped_bits - 1);
+            if remainder > halfway || (remainder == halfway && rounded & 1 == 1) {
+                rounded += 1;
+            }
+        }
+
+        if exponent_bits == 0 {
+            return sign | (rounded << dropped_bits);
+        }
+
+        let bit_count = u64::BITS - rounded.leading_zeros();
+        let top_exponent = exponent - 52
+            + i32::try_from(dropped_bits).expect("the dropped-bit count fits in i32")
+            + i32::try_from(bit_count - 1).expect("the rounded significand bit count fits in i32");
+        if top_exponent > 1023 {
+            return sign | f64::INFINITY.to_bits();
+        }
+
+        let normalized = rounded << (53 - bit_count);
+        let exponent_field = u64::try_from(top_exponent + 1023)
+            .expect("a finite normal result has a nonnegative exponent field");
+        sign | (exponent_field << 52) | (normalized & ((1 << 52) - 1))
+    }
+
+    #[test]
+    fn hex_float_precision_rounds_across_f64_classes() {
+        let fractions = [0, 1, 1 << 51, (1 << 52) - 1];
+
+        for exponent in 0..=0x7ff_u64 {
+            for fraction in fractions {
+                for sign in [0, 1 << 63] {
+                    let number = f64::from_bits(sign | (exponent << 52) | fraction);
+                    if !number.is_finite() {
+                        continue;
+                    }
+
+                    for precision in 0..=13 {
+                        let mut formatted =
+                            format_hex_float(number.abs(), Some(precision), false, false);
+                        if number.is_sign_negative() {
+                            formatted.insert(0, b'-');
+                        }
+                        let text =
+                            std::str::from_utf8(&formatted).expect("hex float output is ASCII");
+                        let parsed = parse_lua_numeral(&formatted)
+                            .expect("formatted hex floats are valid Lua numerals");
+                        let rounded_bits = rounded_hex_bits(number, precision);
+                        assert_eq!(
+                            parsed.to_bits(),
+                            rounded_bits,
+                            "formatted {text} from bits {:016x} at precision {precision}: parser {parsed:?} ({:016x}), rounded result {rounded_bits:016x}",
+                            number.to_bits(),
+                            parsed.to_bits()
+                        );
+                    }
+                }
+            }
+        }
+    }
+}

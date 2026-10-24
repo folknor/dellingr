@@ -107,32 +107,6 @@ print at least one line matching `: (true|false)$` or call `error(`, unless it
 is on an explicit smoke-test allowlist; or require every DIFF file to have an
 `.expected` sibling.
 
-## VC-004 - Nothing notices a DIFF marker that is no longer needed
-
-Reported by: corpus-harness.
-
-A DIFF marker skips both reference runs. If dellingr starts matching a
-reference (a divergence fixed, a reference upgraded), the marker keeps
-suppressing comparison forever. Candidates today:
-
-- `examples/tables/metamethod_sequence.lua`: the stated reason is that *Lua
-  5.2* reads raw elements and has no `table.move`. The gate passes on a match
-  with *either* reference, and every behaviour the file asserts (`__len` and
-  `__index` in unpack and concat, `__newindex` order in insert/remove, move
-  through metamethods, explicit-bounds unpack skipping `__len`) is what Lua
-  5.4's `ltablib.c` does. The hunter did not run lua5.4 to confirm.
-- `upvalue_stress.lua`, `stress_tables.lua`, `stress_rustfn.lua` (SKIP-DIFF):
-  nothing in them is dellingr-specific.
-- `edge_cases.lua`'s reason ("C Lua prints `-nan` for 0/0 on x86-64") is
-  architecture-dependent: on aarch64 the reference prints `nan` and the marker
-  would be unnecessary there.
-
-Fix: have the gate run the references for DIFF files too and fail with "stale
-DIFF marker" when dellingr matches either. SKIP-DIFF stays for files that
-cannot run under the references.
-
-Enforceable: yes, that is the check itself.
-
 ## VC-007 - The fingerprint cannot see a kernel's scale, and the composite's "same proportions" claim is false
 
 Reported by: corpus-harness.
@@ -156,37 +130,6 @@ composite as the documented exception and fix its header, or pick a scale where
 the claim holds for every section.
 
 Enforceable: yes, a disassembly-equality assertion in `bench_scripts.rs`.
-
-## VC-009 - `corpus::disassembly` checks one thing that cannot happen, and the corpus is compiled three times
-
-Reported by: corpus-harness, compiler-cost.
-
-`every_example_disassembles_into_well_formed_rows` asserts no line contains
-`<out of range>`; its own doc comment says why that holds (finalized bytecode is
-verified, so every operand is in range by construction). The other assertion
-(each line is empty, starts with `function main` or two spaces) admits almost
-any output. The string `"<out of range>"` is duplicated from
-`src/disassemble.rs`, so a rename there turns the check into a silent no-op.
-`compiler_examples_pass_bytecode_verification` in `src/compiler.rs` compiles
-the same corpus and asserts much more (verifier pass plus coverage of open
-call/return/setlist/vararg shapes). `bench_scripts.rs` compiles it a third time,
-besides `run_examples` and the diff gate executing it. The compiles are cheap
-(seconds); the point is that one pass could feed the verifier proof, the
-disassembly check, the open-shape census and a corpus cost golden together.
-
-Smaller inconsistencies in the same walks: `src/compiler.rs`'s corpus test
-reads with `read_to_string`, so a non-UTF-8 example (legal Lua source) would
-panic there while `corpus::disassembly` (`fs::read`) accepts it; chunk names
-differ per walker (absolute path in `corpus::disassembly`, `None` in the
-compiler test, manifest-relative in `run_feature_test_extended_in_process`),
-and the absolute one would embed the developer's directory in any future
-golden.
-
-Fix: fold the disassembly pass into the compiler's corpus test (one walk, one
-compile per file, manifest-relative names, `fs::read`), and export the
-annotation text as a `pub(crate) const` if the check stays.
-
-Enforceable: the shared constant makes the string check rename-proof.
 
 ## VC-011 - Timeouts, the 20-second cap and hard-coded concurrency do not nest
 

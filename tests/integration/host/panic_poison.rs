@@ -1,6 +1,9 @@
 //! A panic that unwinds through a State's execution poisons it: every later
-//! public entry point refuses with `ErrorKind::StatePoisoned`, and dropping
-//! the State stays safe. Covers a panicking RustFn, a panic inside
+//! fallible public receiver refuses with `ErrorKind::StatePoisoned` (or the
+//! snapshot error equivalent), and dropping the State stays safe. The lexical
+//! scripts/poison_contract.py guard checks new entry points; these tests check
+//! refusal behavior after real panics. Infallible host controls and observations
+//! remain available. Covers a panicking RustFn, a panic inside
 //! `with_restricted_env`, a panic swallowed by a callback (which must abandon
 //! the outer execution rather than resume it), and panics reached through a
 //! metamethod and a vararg frame.
@@ -77,8 +80,8 @@ fn assert_poisoned(result: dellingr::Result<()>) {
     );
 }
 
-/// Every refusal a poisoned State owes, plus the operations that must stay
-/// safe on it.
+/// Representative refusals after each panic path, plus operations that must
+/// stay safe. The script guard inventories the public receiver methods.
 fn assert_refuses_everything(state: &mut State) {
     assert!(state.is_poisoned());
     assert_poisoned(state.call(ArgCount::Fixed(0), RetCount::Fixed(0)));

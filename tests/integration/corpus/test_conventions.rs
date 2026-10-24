@@ -198,47 +198,9 @@ fn tokens(line: &str) -> impl Iterator<Item = &str> {
         .filter(|token| !token.is_empty())
 }
 
-#[test]
-fn cli_paths_and_test_file_mutations_stay_in_support_helpers() {
-    let cli_binary_marker = concat!("CARGO", "_BIN_EXE_");
-    let file_mutation_markers = [
-        concat!("fs::", "write("),
-        concat!("write", "_all("),
-        concat!("File::", "create("),
-        concat!("OpenOptions::", "new("),
-        concat!("fs::", "create_dir("),
-        concat!("fs::", "create_dir_all("),
-        concat!("fs::", "remove_file("),
-        concat!("fs::", "remove_dir("),
-    ];
-
-    for (relative_path, source) in test_sources() {
-        if source.contains(cli_binary_marker) {
-            assert_eq!(
-                relative_path,
-                Path::new("integration/support/mod.rs"),
-                "the Cargo-built CLI binary path belongs in tests/integration/support/mod.rs"
-            );
-        }
-        if file_mutation_markers
-            .iter()
-            .any(|marker| source.contains(*marker))
-        {
-            assert_eq!(
-                relative_path,
-                Path::new("integration/support/scratch.rs"),
-                "test file mutations must use the scratch helper"
-            );
-        }
-    }
-
-    let scratch_source = read(&tests_dir().join("integration/support/scratch.rs"));
-    assert!(
-        scratch_source.contains("CARGO_TARGET_TMPDIR")
-            && scratch_source.contains(".starts_with(scratch_root)"),
-        "test file mutations must be restricted to Cargo's temporary test directory"
-    );
-}
+// Test filesystem mutations and CLI paths are checked before compilation by
+// brokkr's test-scoped textlint rules, including unit tests under src/.
+// The scratch helper tests its path guard by behavior rather than source text.
 
 /// Cargo makes every `tests/*.rs` and `tests/*/main.rs` its own test binary.
 /// The suites share the integration crate and `native_stack` is the one other

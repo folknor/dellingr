@@ -39,6 +39,19 @@ only = [
 ]
 curated = true
 
+# Inline-cache differential. Under `disable-inline-caches` every cache read
+# misses; the library's unit-test build alone can turn hits back on per
+# thread, so one dev build runs each corpus program with hits on and off and
+# compares prints, cost and errors. The feature is debug-only (compile_error)
+# and appears in no other shape: other cache tests would fail with hits off,
+# so this shape runs only the differential, from the library harness.
+[[check]]
+name = "inline-cache-differential"
+features = ["disable-inline-caches"]
+lib_tests = true
+only = ["vm::cache_differential::corpus_inline_cache_differential"]
+curated = true
+
 # The native-stack envelope (docs/limits.md "Envelope") is 4 MiB in dev and
 # 2 MiB in release, and the sweeps above are dev builds, so the release half
 # would otherwise go untested. These run tests/native_stack.rs alone,
@@ -277,6 +290,61 @@ paths = ["src/**/*.rs", "tests/**/*.rs", "examples/**/*.rs"]
 exclude = ["src/main.rs", "examples/hotpath.rs"]
 message = "hotpath-alloc implies hotpath; use hotpath for instrumentation guards"
 
+# Test-only policy belongs here rather than in crate-wide Clippy bans: host
+# entry points and explicit fixture regenerators legitimately mutate files.
+# Keep Write::write_all available for memory buffers and child stdin pipes.
+# These are lexical guards, not alias resolution or a subprocess sandbox.
+[[textlint]]
+name = "test-filesystem-mutations-use-scratch"
+pattern = '::\s*(?:write|copy|rename|create|create_new|options|create_dir|create_dir_all|remove_file|remove_dir|remove_dir_all|hard_link|soft_link|symlink|symlink_file|symlink_dir|set_permissions)\b|\bOpenOptions\b|\.\s*(?:set_permissions|set_len)\s*\('
+paths = ["src/**/*.rs", "tests/**/*.rs"]
+exclude = ["tests/integration/support/scratch.rs"]
+region = "code"
+test_code = "only"
+must_scan = ["src/compiler/parser/tests.rs", "tests/integration/cli/cli_arguments.rs"]
+message = "test filesystem mutations belong in tests/integration/support/scratch.rs"
+
+# Joining use statements catches bare imports and renamed mutators even when
+# the import wraps. Qualified calls above also catch renamed fs modules.
+[[textlint]]
+name = "test-filesystem-mutation-imports-use-scratch"
+pattern = '\b(?:write|copy|rename|create|create_new|options|OpenOptions|create_dir|create_dir_all|remove_file|remove_dir|remove_dir_all|hard_link|soft_link|symlink|symlink_file|symlink_dir|set_permissions)\b|\bfs\s*::[^;]*\*'
+paths = ["src/**/*.rs", "tests/**/*.rs"]
+exclude = ["tests/integration/support/scratch.rs"]
+join_wrapped_use = true
+must_scan = ["src/compiler/parser/tests.rs", "tests/integration/cli/cli_arguments.rs"]
+message = "import filesystem mutation primitives only in the scratch helper"
+
+[[textlint]]
+name = "test-cli-binary-path-use-support"
+pattern = 'CARGO_BIN_EXE_'
+paths = ["src/**/*.rs", "tests/**/*.rs"]
+exclude = ["tests/integration/support/mod.rs"]
+region = "string"
+test_code = "only"
+must_scan = ["src/compiler/parser/tests.rs", "tests/integration/cli/cli_arguments.rs"]
+message = "the Cargo-built CLI binary path belongs in tests/integration/support/mod.rs"
+
+[[textlint]]
+name = "test-no-target-paths"
+pattern = '(?:^|[/\\"])target[/\\]'
+paths = ["src/**/*.rs", "tests/**/*.rs"]
+region = "string"
+test_code = "only"
+must_scan = ["src/compiler/parser/tests.rs", "tests/integration/cli/cli_arguments.rs"]
+message = "tests must use Cargo's artifact path or the scratch helper instead of target/ paths"
+
+# Ban the executable literal rather than matching Command::new on one line:
+# command construction can wrap or use an imported alias.
+[[textlint]]
+name = "test-no-cargo-processes"
+pattern = '"(?:[^"\r\n]*[/\\])?cargo(?:\.exe)?"'
+paths = ["src/**/*.rs", "tests/**/*.rs"]
+region = "string"
+test_code = "only"
+must_scan = ["src/compiler/parser/tests.rs", "tests/integration/cli/cli_arguments.rs"]
+message = "tests must use the artifacts Cargo already built instead of spawning cargo"
+
 # Native-stack guard (reference/native-calls.md). Every direct call to a
 # function that can reach a call back into Lua carries a
 # `// native-call: <edge-id>` marker naming its edge in
@@ -308,6 +376,20 @@ stream = "stdout"
 [[script_check]]
 name = "native-call-checker-tests"
 command = "python3 -B scripts/test_native_calls.py"
+expect = "ok"
+match = "last-line"
+stream = "stdout"
+
+[[script_check]]
+name = "poison-contract"
+command = "python3 -B scripts/poison_contract.py"
+expect = "ok"
+match = "last-line"
+stream = "stdout"
+
+[[script_check]]
+name = "poison-contract-checker-tests"
+command = "python3 -B scripts/test_poison_contract.py"
 expect = "ok"
 match = "last-line"
 stream = "stdout"

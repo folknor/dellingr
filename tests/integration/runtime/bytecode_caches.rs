@@ -134,7 +134,7 @@ fn repeated_loads_release_runtime_entries_while_programs_stay_retained() {
 
 /// Neither runtime-cache population (literal interning, cache construction)
 /// nor warm cache hits may charge cost: the charged total for a fixed source
-/// must be identical on a cold first execution and on a re-parsed second
+/// must be identical on a cold first execution and on a reloaded second
 /// execution in the same State.
 ///
 /// Hand count for the source below (creation and writes cost 1, everything
@@ -143,6 +143,7 @@ fn repeated_loads_release_runtime_entries_while_programs_stay_retained() {
 #[test]
 fn runtime_cache_population_and_hits_charge_nothing() {
     const SOURCE: &str = r#"
+        local cached = math.pi
         local a = { x = 1 }
         local b = { x = 2 }
         local function f(t)
@@ -154,14 +155,19 @@ fn runtime_cache_population_and_hits_charge_nothing() {
     "#;
 
     let mut state = State::new();
-    support::run(&mut state, SOURCE);
+    let program = Program::compile(SOURCE, None).expect("cache probe compiles");
+    state.load(&program).expect("cold program loads");
+    state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect("cold program runs");
     let cold = state.cost_used();
     assert_eq!(cold, 12);
 
-    // A second execution re-parses (a fresh Bytecode identity) while the
-    // State already carries warm entries for identical code; the charged
-    // total must not move either way.
-    support::run(&mut state, SOURCE);
+    // Reloading preserves Bytecode identity and reuses its runtime bundle.
+    state.load(&program).expect("warm program loads");
+    state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect("warm program runs");
     assert_eq!(state.cost_used(), cold * 2);
 }
 

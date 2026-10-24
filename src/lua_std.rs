@@ -162,7 +162,8 @@ fn open_libs_unchecked(state: &mut State) -> Result<()> {
 /// State that already has them passes. A State with an empty registry cannot
 /// conflict and skips the scratch build.
 /// Setup only installs values and registers function pointers: it executes no
-/// Lua or callbacks, including the lazily compiled gmatch wrapper. The scratch
+/// Lua or callbacks (opening the string library compiles the fixed gmatch
+/// wrapper chunk but does not run it). The scratch
 /// State owns its heap and registry; construction advances the process-global
 /// anchor state-id counter (observable only through `Anchor`'s `Debug` and
 /// `Hash`, which are documented as non-deterministic) but does not draw from the

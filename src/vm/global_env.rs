@@ -313,6 +313,10 @@ impl GlobalEnv {
 
     #[inline(always)]
     pub(super) fn read_builtin(&self, heap: &GcHeap, slot: u8) -> Val {
+        #[cfg(feature = "disable-inline-caches")]
+        if super::caches::hits_disabled() {
+            return self.refresh_builtin(heap, slot);
+        }
         let (epoch, val) = self.builtin_mirror[usize::from(slot)].get();
         if epoch == heap.watched_epoch() {
             return val;

@@ -25,36 +25,6 @@ reported it.
 
 # Cross-cutting
 
-## VA-001 - Tests on `State::new()` print to the real stdout, past libtest's capture
-
-Reported by: corpus-harness, library.
-
-`DefaultCallbacks::on_print` (`src/host.rs`) writes through
-`std::io::stdout().lock()`, which bypasses libtest's capture (it captures only
-the `print!`/`eprint!` machinery). Under brokkr the test binary's stdout is the
-libtest JSON event stream (`--format json`). `State::new()` is the convenient
-constructor, so it is what tests reach for:
-
-- `run_feature_test_extended_in_process` runs `feature_test_extended.lua` on
-  `State::new()`, so ~100 `[PASS] ...` lines go straight onto that stream. It
-  checks only that `call` returned `Ok` (relying on the script's `error()` on
-  failure, so it is not vacuous), but it is strictly weaker than the CLI run of
-  the same file in `run_all_examples`, and it finds the file by walking the whole
-  corpus to look up one fixed path.
-- `gsub_errors::gsub_string_replacement_inside_dynamic_argument` prints two
-  `[PASS] ...` lines on every run. It is also misfiled: a register-allocation
-  regression (20 locals plus a dynamic argument) in a gsub error suite.
-
-Fix: a shared test constructor that installs a recording `HostCallbacks`; assert
-the captured lines (no `[FAIL]`, at least N `[PASS]`) and read the file by path.
-Alternatively give `DefaultCallbacks` a sibling that writes via `print!`, which
-libtest captures.
-
-Enforceable: a rule that no test outside the CLI suites uses `DefaultCallbacks`,
-or that the integration crate's `support` module (which now has a recording
-`Recorder` callbacks type) is the only place a State is constructed. A grep for
-`State::new()` in files whose Lua calls `print` is crude.
-
 ## VA-002 - "Deterministic" tests that compare a run with itself
 
 Reported by: native-stack-errors, runtime, compiler-cost.
@@ -148,6 +118,9 @@ A focused run by subject misses these, and coverage reads under a misleading nam
   corpus proof and the nesting-depth tests; `src/cost_meter.rs` holds
   `gmatch_string_checks_preserve_relative_indexes_in_nested_frames`, an
   argument-index test unrelated to the meter.
+- `gsub_errors.rs::gsub_string_replacement_inside_dynamic_argument` is a
+  register-allocation regression (20 locals plus a dynamic argument) filed in a
+  gsub error suite.
 - `string_format.rs` holds `script_error_has_source_line_and_state_remains_reusable`
   and `tostring_metamethod_must_return_a_string_like_value` (which also duplicates
   a case in `tostring_and_print_reject_non_string_metamethod_results`);
@@ -255,27 +228,6 @@ defines where).
 
 Enforceable: yes, the assertion is the enforcement.
 
-## VA-014 - The poisoning contract is a hand list
-
-Reported by: native-stack-errors.
-
-`panic_poison.rs` doc: "every later public entry point refuses with
-`ErrorKind::StatePoisoned`". `assert_refuses_everything` lists about twenty entry
-points by hand; the source enforces it with a `self.check_poisoned()?` line at the
-top of each `pub fn` (over thirty sites across `vm.rs`, `vm/stack.rs`,
-`vm_aux.rs`, `vm/anchor.rs`, `vm/table_ops.rs`). A new `pub fn` that forgets the
-line passes everything.
-
-Fix, script: the lexical machinery of `native_calls.py` can list every `pub fn` in
-an `impl State` returning `Result` and require its body to start with
-`check_poisoned()?` or delegate to `guarded`/`with_...` helpers, with an allowlist
-for infallible accessors that must stay safe on a poisoned State (`is_poisoned`,
-`cost_used`, `gc_collect`, `release_anchor`...). Fix, structural: route the host
-API through one checked accessor (`fn live(&mut self) -> Result<&mut Live>`, with
-the methods on `Live`), making the unchecked spelling unrepresentable.
-
-Enforceable: yes, either way.
-
 ## VA-015 - Fault-event sites are strings, and eligibility is computed twice
 
 Reported by: native-stack-errors.
@@ -330,25 +282,6 @@ move the parity tests to a unit test reading a `cfg(test)` path counter, as
 
 Enforceable: no general rule.
 
-## VA-029 - The cache-collection test's family list is still hand-maintained
-
-Reported by: runtime.
-
-`RuntimeCaches::named_handles` and the `runtime_tests::cache_cells` oracle now
-destructure exhaustively, so a new cache family must be enumerated there. But
-`collection_clears_cache_entries_naming_freed_objects` (`src/vm.rs`) still
-checks a fixed list of families. Deriving the list from the warmed entries
-was tried and rejected: a family whose warmup stopped filling any cell would
-then drop out silently. A new family is therefore enumerated by the oracle but
-not required by the test.
-
-Fix: keep the fixed list and also assert that it equals the set of families
-`cache_cells` can produce (derived from the exhaustive destructuring, not
-from what the warmup happened to fill), so adding a family fails the test until
-the list and the warmup cover it.
-
-Enforceable: yes, by that assertion.
-
 ## VA-031 - Growth-limit coverage exists only under `snapshot`
 
 Reported by: runtime.
@@ -388,34 +321,6 @@ invariant on load or in a test.
 Enforceable: by those tests.
 
 # Compiler and cost
-
-## VA-035 - `runtime_cache_population_and_hits_charge_nothing` runs cold against cold
-
-Reported by: compiler-cost.
-
-`bytecode_caches.rs`. The doc says the second execution "re-parses (a fresh
-Bytecode identity) while the State already carries warm entries for identical
-code". Runtime entries are keyed by `Arc::as_ptr(bytecode)`
-(`State::resolve_bytecode_runtime`), so a re-parse gets a brand-new cold runtime;
-nothing is warm except interned strings. The only warm hit is inside the first run
-(`f(b)` after `f(a)`).
-
-Fix: also `load` the same `Program` a second time, which reuses the runtime and
-hits warm caches. The corpus-wide version is the cache-disable differential in
-verif-goldens.md.
-
-Enforceable: no.
-
-## VA-036 - `decimal_and_hex_literals_use_the_shared_numeral_parser` is a wiring test
-
-Reported by: compiler-cost.
-
-The test (`src/compiler/parser/tests.rs`) compares the parser's pooled literal
-with `crate::numeral::parse_lua_numeral`, the function the lexer calls: a wiring
-test, not numeral coverage. Rename it to say it checks wiring, or give it
-independent expected values.
-
-Enforceable: no.
 
 ## VA-037 - `COST_CHECK_INTERVAL` has no injection point, so the batching test needs a hand model
 
@@ -498,128 +403,18 @@ structured-error assertions.
 
 Enforceable: by the diff gate.
 
-## VA-043 - Optional-argument behaviour is claimed per function and tested for two
-
-Reported by: library.
-
-`lua_std.rs`: "An optional argument that is absent or nil takes its default ...
-they are not shared code". Since each function reads its own optionals, the claim
-needs per-function coverage. Tested: `math.atan` and `math.log`
-(`stdlib_divergences::optional_math_nil_arguments_use_their_defaults`),
-`error(msg, nil)`, the `vm_aux` helper. Untested with explicit nil: `string.sub`
-`j`, `find` `init`/`plain`, `match` and `gmatch` `init`, `gsub` `n`, `concat`
-`sep`/`i`/`j`, `unpack` `i`/`j`, `table.remove` `pos`, `tonumber` `base`.
-(`tests/stdlib_optional_args.rs`, in the hunt's brief, does not exist and never
-has.)
-
-Fix: a table-driven test, one row per (function, optional parameter), asserting
-`f(required..., nil) == f(required...)` in results and cost; structurally, declare
-each library function's signature in one table both registration and the test read.
-
-Enforceable: yes, by the test or the declarative table.
-
-## VA-045 - Parsers and formatters with thin cross-checks
-
-Reported by: library.
-
-- Three hex-float parsers, none checked against another: `crmath::hf` (const,
-  rejects inexact literals), `numeral::parse_hex` (runtime, rounds), and
-  `oracle::parse_hex_float` (test, exact through libbeef then rounded).
-  `numeral::parse_hex` is tested on about 30 hand-picked cases. A randomized
-  differential in the lib test binary comparing `parse_lua_numeral` with
-  `parse_hex_float` over random mantissas and exponents, long digit strings and
-  subnormal boundaries is cheap and strong.
-- `%a` round-trip is tested for six values
-  (`quoted_floats_round_trip_through_the_parser`). Running `format_hex_float` then
-  `parse_lua_numeral` over the 16k bit-class sweep `number_rendering.rs` uses, at
-  every precision `0..=13`, would cover the formatter's rounding branch.
-
-Enforceable: by the tests.
-
 # Snapshot
 
-## VA-047 - `saves_are_byte_stable` checks only that saving is pure
+## VA-053 - The corruption sweep never asserts that a truncated save is rejected
 
-Reported by: snapshot.
+Reported by: the resolution loop's reconciler.
 
-It saves one State twice in a row and compares. That fails only if `save_state`
-mutates the State, and it takes `&self`. The determinism that matters is across
-processes, address-space layouts and slotmap histories: `object_ids`, `string_ids`
-and `env_reverse` are `BTreeMap`s keyed by `ObjectPtr`/`StringPtr`, and
-`rust_fn_ids_by_addr` is keyed by function address. Only the golden exercises
-cross-process stability, and only in debug. The code comment at `finish` ("Address
-keys are lookup-only") is the only guard against iterating a pointer-keyed map in
-the walker, and it is unenforced.
+`tests/integration/snapshot/save_state.rs::corruption_sweep_never_panics`
+truncates a save at every prefix but only checks that load returns without
+panicking. Every proper prefix should be rejected; asserting `is_err()` for
+each is cheap and turns the old "must error" comment into a tested fact.
 
-Fix: build the same logical state twice by different routes so slotmap keys differ
-(State A allocates and drops 1000 throwaway tables first, then builds the graph;
-State B builds it directly; same for strings and closures) and compare bytes.
+Fix: assert rejection for every proper prefix; if some prefix loads, that is a
+finding about the integrity layer, not a reason to drop the assertion.
 
-Enforceable: the test is the enforcement; no lint can express "do not iterate a
-pointer-keyed map in the save walker".
-
-## VA-048 - Snapshot tests that cannot tell their claim from a near miss
-
-Reported by: snapshot.
-
-- `literal_identity_strings_follow_chunk_ids_instead_of_addresses` orders chunks by
-  descending `Arc` address, encodes in that order and expects literals in the same
-  order. It catches an ascending-address sort; a descending-address sort also
-  passes. Run it twice with the encode order flipped.
-- `tombstones_are_preserved_in_snapshots` asserts `tombstoned_bytes.len() >
-  clean_bytes.len()`. In case 1 the extra bytes are already supplied by the dead
-  key's string `"b"` entering the string pool, whether or not slot history is
-  encoded; the pairs-order half carries the weight. Decode both saves and assert
-  the dead slot itself is present.
-- `every_save_fixture_is_declared_and_referenced` checks "declared" only.
-  `FIXTURE_NAMES` is a second spelling of `save_golden_program::GOLDEN_FIXTURE`;
-  rename the constant and `FIXTURE_NAMES` still names the old file. Derive one from
-  the other.
-- `saved_main_chunk_keeps_zero_defined_line` round-trips `valid_saved_bytecode()`
-  and asserts nothing about main chunks or line 0 beyond
-  `saved_bytecode_round_trips`.
-
-Enforceable: the tests themselves; the fixture name by derivation.
-
-## VA-049 - `corruption_sweep_never_panics` covers one mutation of one small save
-
-Reported by: snapshot.
-
-It truncates at every prefix and XORs `0xff` at every offset of one save of a
-four-global program. One mutation kind (no single-bit flips, length fields set to
-`u32::MAX`, swapped ids). Many flips land in the `EngineVersion` string, which load
-reads and discards. A flip that loads successfully is never exercised, so a forged
-save that loads and then breaks an interpreter invariant on first use (the
-verifier's purpose) is invisible. The comment says "never panics or OOMs"; an OOM
-aborts the process and nothing bounds or measures allocation. Cost: about 2x the
-save length in `load_state` calls (the similar golden program saves 2467 bytes, so
-roughly 5000 loads), each successful flip building a full standard State in debug;
-unmeasured (`brokkr test corruption_sweep --timings` would give it).
-
-Fix: after each successful mutated load, call every global function, iterate every
-table with `pairs`, then `save_state`; run over a corpus of saves (the corpus round
-trip in verif-goldens.md); move open-ended mutation to a `cargo fuzz` target with a
-grammar-aware mutator over `SavePayload`.
-
-Enforceable: the in-check sweep is a test; a fuzz target cannot gate, but a
-fixed-seed bounded mutator can.
-
-## VA-050 - Four hand-written copies of the save header and five hand-built payloads
-
-Reported by: snapshot.
-
-The header (`write_magic_and_versions` plus the `CARGO_PKG_VERSION` field) is
-written in production `save_state()`, `integrity_tests::encode_fixture`,
-`tests::load_bytecode_with_globals` and `tests::forged_literal_save`. If the header
-changes, the test copies keep producing the old shape and their failures read as
-decoder rejections, not stale fixtures. `SavePayload { .. }` literals are
-hand-built in five places (those three, `integrity_tests::empty_payload`, and
-`verify.rs`'s `payload` and `gmatch_payload`); every new payload field touches all
-five.
-
-Fix: one `fn encode_save(payload: &SavePayload) -> Result<Vec<u8>, SaveError>` that
-`save_state` and every test call, and one `SavePayload::empty(standard_env: bool)`
-test constructor.
-
-Enforceable: a textlint rule allowing `write_magic_and_versions(` only inside
-`encode_save`.
+Enforceable: by the assertion.
