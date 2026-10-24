@@ -551,12 +551,11 @@ impl State {
 
         // First pass: type-check and compute the EXACT total byte length.
         //
-        // Numbers are rendered here rather than estimated. A fixed estimate is
-        // wrong in both directions: 32 bytes over-counts `1` and would reject a
-        // legal result - which would also change what the script costs, since
-        // the next costed operation never runs - while under-counting the likes
-        // of `1e308`, which Rust renders as 309 bytes, would let the buffer grow
-        // past the cap unchecked.
+        // Numbers are rendered here rather than estimated. A fixed estimate can
+        // be wrong in both directions: over-counting short spellings could
+        // reject a legal result - which would also change what the script costs,
+        // since the next costed operation never runs - while under-counting
+        // long spellings could let the buffer grow past the cap unchecked.
         let mut total_len = 0;
         let mut rendered_numbers = Vec::new();
         for val in &self.stack[operands.clone()] {

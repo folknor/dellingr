@@ -1039,7 +1039,7 @@ fn open_libs_with_values_on_the_stack_targets_its_own_g_table() {
     assert_eq!(
         state.typ(-1),
         crate::LuaType::Table,
-        "_G keeps its proxy metatable"
+        "_G has its protected metatable"
     );
 }
 

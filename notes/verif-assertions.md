@@ -161,53 +161,6 @@ ValidationReason::X)` helper for the verifier.
 Enforceable: partly; a textlint rule over `verify.rs` test code banning
 `validate_bytecode(` followed by `.is_err()`.
 
-## VA-005 - Tests cannot observe whether a collection, a cache hit or a slot reuse happened
-
-Reported by: runtime, compiler-cost, library.
-
-Several tests exist to prove "a collection at point X does not free Y" or "the
-cache was hit/evicted", but nothing lets them assert the precondition happened:
-
-- `gc_upvalues.rs`, `table_metamethods.rs::sequence_values_stay_rooted_across_allocating_handlers`,
-  `table_sort_metamethods.rs::proxy_sort_roots_scratch_values_*` and
-  `src/vm/tests.rs::auto_gc_marks_a_deep_lua_table_chain_iteratively` arrange
-  collections with `gc_set_threshold(1)` or a `force_gc` RustFn; the deep-chain
-  test relies on automatic collection happening at a depth large enough to matter.
-  `string_charges.rs::gsub_keeps_its_pattern_across_collections_in_its_replacement`
-  has no proof a collection ran during the replacement.
-- `cost_determinism.rs::gmatch_resume_cost_ignores_fifo_cache_eviction` assumes
-  256 distinct patterns evict the iterator's pattern;
-  `gmatch_first_use_cost_ignores_a_shared_pattern_cache_hit` has no proof of a hit;
-  `string_charges.rs::refusal_leaves_snapshot_state_quiescent` says "matcher refusal
-  occurs after the cache hit", unverified. `string_charges.rs` says twice "The
-  compile-once half of this check is a crate unit test, since the compilation
-  counter is test-only instrumentation": the property is split across two
-  binaries because of where the counter lives.
-- `string_metatable::cached_handler_is_not_reused_after_it_is_collected` runs
-  `for i = 1, 40 do local unused = {upper = i} end` to reuse the collected
-  handler's slot; with slotmap versioned keys the stale key may never collide, in
-  which case the test cannot fail either way.
-  `removing_and_readding_index_after_a_warm_hit` adds 40 keys to "reshape" the
-  metatable; nothing asserts the hash slot of `__index` moved.
-
-The existing instrumentation is `#[cfg(test)]` only: `State::pattern_compilations`
-is a `cfg(test)` field incremented inside production `cached_pattern_at`, visible
-to unit tests only, and it makes the unit-test `State` a different layout from the
-integration-test and production one (harmless for correctness, worth knowing for
-anything layout-sensitive; the native-stack probes are integration tests and see
-the real layout). The `cfg(test)` accessors on `GcHeap`, `UpvaluePool`,
-`GlobalEnv`, `Val` are harmless.
-
-Fix: a collection counter on `GcHeap` exposed as `State::gc_cycles()` (cheap, not
-replay-visible, useful to embedders as a diagnostic), so "a collection happened
-between A and B" is one assertion; expose cache residency and compilation counts,
-and slot/index identity, through one test-infrastructure feature or
-`#[doc(hidden)]` diagnostic accessor used by both test kinds and compiled out of
-production; assert the precondition in each test (or construct the collision
-directly in a `vm/` unit test).
-
-Enforceable: yes, as a test pattern once the counters exist.
-
 ## VA-006 - Tests filed under the wrong subject, or named by sequence number
 
 Reported by: native-stack-errors, runtime, compiler-cost, library.
@@ -368,7 +321,9 @@ Reported by: native-stack-errors.
 - `metamethod_errors.rs::set_field_cache_value_update_takes_fast_path` names a fast
   path it cannot observe; it asserts only that 100 increments give 100.
 
-Fix: read the stored value back; observe the path (VA-005) or rename.
+Fix: read the stored value back; rename the fast-path test to what it checks
+(observing the path needs the diagnostics deferred in notes/todo.md "Observable
+GC and cache diagnostics").
 
 Enforceable: no.
 
@@ -488,9 +443,9 @@ Reported by: runtime.
   reverting the root it was written for; then make the handler allocate before it
   reads `self` (`local _ = {}`), as
   `executing_returned_closure_roots_closed_upvalues_during_auto_gc` does with
-  `trigger_gc = {}`, and assert a collection happened (VA-005).
+  `trigger_gc = {}`.
 
-Enforceable: no, beyond the collection counter in VA-005.
+Enforceable: no.
 
 ## VA-019 - Anchor slot recycling is not observed by the integration test
 
@@ -556,8 +511,8 @@ documented contract (`docs/limits.md` "Garbage collection policy") and of replay
 timing. Also, `custom_gc_policy_is_used_before_and_after_state_construction` names
 "before construction" (`docs/limits.md`: "The initial threshold is in force while
 `open_libs` initializes the standard library") but only reads the threshold after
-construction; whether `open_libs` ran under it is not observable without the
-collection counter in VA-005.
+construction; whether `open_libs` ran under it is not observable without a
+collection counter (deferred in notes/todo.md).
 
 Fix: a case on `State::raw()` (or with a minimum larger than `survivors * growth`)
 where the minimum wins.
@@ -639,52 +594,24 @@ Reported by: runtime.
 
 Enforceable: no.
 
-## VA-027 - "Proxy" vocabulary for `_G` is false since 41ad774
+## VA-029 - The cache-collection test's family list is still hand-maintained
 
 Reported by: runtime.
 
-`_G` is the real global table (41ad774; AGENTS.md, `global_env.rs`). Still saying
-"proxy": `src/vm/tests.rs::open_libs_with_values_on_the_stack_targets_its_own_g_table`
-(message `"_G keeps its proxy metatable"`);
-`global_write_cache.rs::append_and_g_proxy_writes_do_not_displace_a_warmed_global`
-and the `proxy_marker` global in `builtin_rebind_does_not_disturb_a_warmed_writer`;
-`plain_field_miss.rs::global_proxy_does_not_expose_table_library_names`; and
-`src/snapshot_format.rs`'s header (filed with the snapshot laterals in
-verif-goldens.md). False today.
+`RuntimeCaches::named_handles` and the `runtime_tests::cache_cells` oracle now
+destructure exhaustively, so a new cache family must be enumerated there. But
+`collection_clears_cache_entries_naming_freed_objects` (`src/vm.rs`) still
+checks a fixed list of families. Deriving the list from the warmed entries
+was tried and rejected: a family whose warmup stopped filling any cell would
+then drop out silently. A new family is therefore enumerated by the oracle but
+not required by the test.
 
-Enforceable: a textlint rule banning `proxy` near `_G` in `src/` and `tests/`.
+Fix: keep the fixed list and also assert that it equals the set of families
+`cache_cells` can produce (derived from the exhaustive destructuring, not
+from what the warmup happened to fill), so adding a family fails the test until
+the list and the warmup cover it.
 
-## VA-028 - The `drain_mark_worklist` assertion has no test
-
-Reported by: runtime.
-
-AGENTS.md: "A `debug_assert!` in `drain_mark_worklist` enforces this" (root through
-`GcHeap::mark`, never a bare worklist push). `object.rs` has `should_panic` tests
-for "GC marked a vacant object key" and "... string key", none for "GC worklist
-entry was not marked reachable". If the assertion were weakened or deleted, nothing
-would notice. True today, checkable.
-
-Fix: a `#[cfg(debug_assertions)] #[should_panic(expected = "pushed directly")]`
-test that pushes a live allocation onto the worklist without `mark`.
-
-Enforceable: yes, by that test.
-
-## VA-029 - The test-side cache enumerations are not exhaustive
-
-Reported by: runtime.
-
-`RuntimeCaches::named_handles` (`#[cfg(test)]`, `caches.rs`) iterates
-`self.global_lookup`, `self.field_lookup`, ... by field access, and
-`runtime_tests::cache_cells` plus the family list in
-`collection_clears_cache_entries_naming_freed_objects` repeat that list. The
-production sweep destructures exhaustively; the test oracle does not. A new cache
-family would be cleared by production (compile-forced) but reported by neither
-test enumeration, so "no entry names a freed value" would silently not cover it.
-
-Fix: destructure in `named_handles` the same way and derive the test's families
-from it.
-
-Enforceable: yes, by the destructuring.
+Enforceable: yes, by that assertion.
 
 ## VA-030 - "Every RustFn call path shares that check" covers four paths
 
@@ -745,21 +672,6 @@ exhaustively; extend the identity test to the string pool.
 Enforceable: the weak-table half structurally.
 
 # Compiler and cost
-
-## VA-032 - `direct_and_native_meters_share_budget_semantics` compares a function with itself
-
-Reported by: compiler-cost.
-
-`src/cost_meter.rs`. `consume_cost` is `check_poisoned()` then `charge_cost`, and
-`charge_cost` is `self.cost_meter().consume(cost)` (`src/vm.rs`), so the asserted
-agreement on acceptance, `cost_used` and `cost_remaining` cannot fail. The only
-independent bit is the trailing `cost_used() == u64::MAX` saturation check in
-count-only mode. `consume_units_matches_the_unit_at_a_time_loop_exactly` is the
-real independent oracle.
-
-Fix: delete the equality half, keep the saturation assertion.
-
-Enforceable: no.
 
 ## VA-033 - Leftover load halves and a snapshot block with nothing between its two saves
 
@@ -929,15 +841,6 @@ Reported by: library.
 
 Enforceable: the tests themselves; the class-membership check by the diff gate.
 
-## VA-041 - Names that claim more than the body
-
-Reported by: library.
-
-`argument_details_are_structured_without_changing_text` checks `detail()` only,
-never the text.
-
-Enforceable: no.
-
 ## VA-042 - "Verified against Lua 5.2/5.4" expectations frozen in Rust literals
 
 Reported by: library.
@@ -975,28 +878,6 @@ each library function's signature in one table both registration and the test re
 
 Enforceable: yes, by the test or the declarative table.
 
-## VA-044 - FMA test modes duplicate one another and change silently with the host
-
-Reported by: library.
-
-`fma_modes()` returns `Default`, `Software` and, when available, `Hardware`. On an
-FMA-capable x86 host `Default` takes the `Hardware` path; on a host without FMA, the
-`Software` path. The golden evaluates every row three times where two would do, a
-third of its cost, paid twice per check. `kernel_dispatch_honors_forced_fma` skips
-`Default`, so nothing asserts production selection picks hardware when available: a
-broken `is_x86_feature_detected` path would silently run every kernel in software,
-a performance loss invisible to every test. On an x86 host without FMA, or any host
-other than x86/aarch64, `fma_modes()` drops `Hardware` and `fma::check` skips the
-hardware comparison: tests pass with a smaller scope and report nothing, so an old
-CI box would read as full coverage.
-
-Fix: drop `Default` from the golden loop; assert in the dispatch test that `Default`
-records the hardware backend iff `hardware_fma` is `Some`; print the modes
-exercised once (as the golden failure message already does).
-
-Enforceable: the dispatch assertion by test; the host coverage is information, not
-a gate.
-
 ## VA-045 - Parsers and formatters with thin cross-checks
 
 Reported by: library.
@@ -1014,17 +895,6 @@ Reported by: library.
   every precision `0..=13`, would cover the formatter's rounding branch.
 
 Enforceable: by the tests.
-
-## VA-046 - Stale claim in `concat_values`
-
-Reported by: library.
-
-`src/vm/eval.rs` `concat_values`: "`1e308`, which Rust renders as 309 bytes".
-Numbers render through `number_to_string` (`%.14g`), so `1e308` is `"1e+308"`, six
-bytes. The point about exact lengths stands; the example describes the old
-renderer. Reword without the figure.
-
-Enforceable: no.
 
 # Snapshot
 

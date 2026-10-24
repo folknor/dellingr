@@ -1537,8 +1537,8 @@ impl State {
         // gate, so it is deliberately not compared.
         let _engine_version = decoder.read_bytes(SnapshotField::EngineVersion)?;
         let decoded = SavePayload::decode(&mut decoder)?;
-        let payload = verify::verify_payload(decoded)?;
         decoder.finish()?;
+        let payload = verify::verify_payload(decoded)?;
 
         let mut state = if payload.has_standard_environment() {
             State::with_callbacks(callbacks)

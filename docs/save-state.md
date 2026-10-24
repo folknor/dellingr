@@ -132,7 +132,8 @@ returns; the loaded State starts with an empty stack.
   the callback and leaves the table unchanged. A restore step that cannot
   grow a table rejects the load as `InvalidTable` with
   `TableRestoreFailure::GrowthFailed`.
-- An older format version is rejected as unsupported before other checks.
+- A format version other than `FORMAT_VERSION` is rejected while reading the
+  header, before payload decoding.
 - The cost model version must match `COST_MODEL_VERSION` exactly.
 - Loading restores the saved cost counters. Hosts must call `set_cost_budget`
   afterwards.

@@ -501,7 +501,11 @@ impl<'a> Lexer<'a> {
                     }
                 }
             } else if matches!(c, b'\r' | b'\n') {
-                return Err(self.error(SyntaxError::UnclosedString));
+                // Report the newline's first byte: the end of the line the
+                // string broke off on, where its closing quote is missing.
+                // That matches the end-of-source case above and does not
+                // depend on whether the newline is CR, LF, CRLF or LFCR.
+                return Err(self.error_at(SyntaxError::UnclosedString, char_start));
             } else if failure.is_none() && char_start >= decoded_until {
                 match Self::check_decoded_string_growth(decoded.len()) {
                     Ok(()) => decoded.push(c),
@@ -1303,21 +1307,21 @@ mod tests {
             .expect_err("invalid character must fail");
         assert_eq!((err.line_num(), err.column()), (2, 2));
 
-        // Pre-existing quirk, preserved: the unterminated-string error fires
-        // on the newline's FIRST byte, before a CRLF/LFCR pair's line start
-        // is recorded (next_char records the pair only after its second
-        // byte), so the pair renders on line 1 while a bare CR/LF - recorded
-        // immediately - renders on line 2. The old linear walk saw the same
-        // linebreaks state and gave the same answers.
+        // An unclosed short string reports the newline's first byte, the end
+        // of the line it broke off on, for every newline flavour; the
+        // end-of-source case reports the same column. A string continued by
+        // an escaped newline reports the line it actually broke off on.
         for (source, expected) in [
-            ("\"a\r\"", (2, 1)),
-            ("\"a\n\"", (2, 1)),
-            ("\"a\r\n\"", (1, 4)),
-            ("\"a\n\r\"", (1, 4)),
+            ("\"a\r\"", (1, 3)),
+            ("\"a\n\"", (1, 3)),
+            ("\"a\r\n\"", (1, 3)),
+            ("\"a\n\r\"", (1, 3)),
+            ("\"a", (1, 3)),
+            ("\"a\\\r\nbc\r\n\"", (2, 3)),
         ] {
             let err = Lexer::new(source.as_bytes())
                 .next_token()
-                .expect_err("physical newline must leave a string unclosed");
+                .expect_err("a newline or end of source must leave a string unclosed");
             assert_eq!((err.line_num(), err.column()), expected, "{source:?}");
         }
     }

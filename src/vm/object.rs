@@ -1027,6 +1027,16 @@ mod tests {
 
     #[cfg(debug_assertions)]
     #[test]
+    #[should_panic(expected = "pushed directly")]
+    fn pushing_an_unmarked_object_to_the_worklist_is_detected() {
+        let mut heap = GcHeap::with_threshold(100);
+        let ptr = heap.no_gc_allocator().alloc_table();
+        let mut worklist = vec![ptr];
+        heap.drain_mark_worklist(&mut worklist, &UpvaluePool::new());
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
     #[should_panic(expected = "GC marked a vacant string key")]
     fn marking_a_swept_string_reports_the_stale_root() {
         let mut pool = StringPool::new();

@@ -111,7 +111,7 @@ fn standalone_dispatcher_matches_software() {
     for _ in 0..2_000 {
         let (a, b, c) = (rng.finite(), rng.finite(), rng.finite());
         let soft = soft_fma(a, b, c);
-        for mode in fma_modes() {
+        for mode in std::iter::once(super::ForcedFma::Default).chain(fma_modes()) {
             let dispatched = with_forced_fma(mode, || fma(a, b, c));
             assert!(
                 same(soft, dispatched),

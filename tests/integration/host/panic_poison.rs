@@ -19,6 +19,7 @@ const PANIC_MESSAGE: &str = "deliberate test panic";
 /// The hook is process-wide and stays installed, so it filters on this
 /// module's exact payload and forwards every other panic to the hook it
 /// replaced: no other test can tell it is there.
+#[allow(clippy::disallowed_methods)] // One permanent payload-filtering hook, installed once.
 fn quiet_deliberate_panics() {
     // process-global: guards the one-time install below.
     static HOOK: Once = Once::new();

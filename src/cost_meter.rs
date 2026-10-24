@@ -275,26 +275,16 @@ mod tests {
     }
 
     #[test]
-    fn direct_and_native_meters_share_budget_semantics() {
+    fn count_only_charges_saturate_used_cost() {
         use crate::vm::State;
-        for budget in [None, Some(-1), Some(0), Some(1), Some(10)] {
-            let mut direct = State::new();
-            let mut native = State::new();
-            if let Some(budget) = budget {
-                direct.set_cost_budget(budget);
-                native.set_cost_budget(budget);
-            }
-            for cost in [0, 3, 0, 8, 1, u64::MAX, 0, 1] {
-                let accepted = direct.consume_cost(cost).is_ok();
-                assert_eq!(accepted, native.cost_meter().consume(cost));
-                assert_eq!(direct.cost_used(), native.cost_used());
-                assert_eq!(direct.cost_remaining(), native.cost_remaining());
-            }
-            if budget.is_none() {
-                assert_eq!(direct.cost_remaining(), i64::MAX);
-                assert_eq!(direct.cost_used(), u64::MAX);
-            }
-        }
+        let mut state = State::new();
+        state
+            .consume_cost(u64::MAX - 1)
+            .expect("count-only charges are never blocked");
+        state
+            .consume_cost(2)
+            .expect("count-only charges saturate instead of overflowing");
+        assert_eq!(state.cost_used(), u64::MAX);
     }
 
     fn assert_argument(error: &crate::error::Error, number: isize) {

@@ -1,6 +1,7 @@
 mod gsub_errors;
 mod number_format_g14;
 mod number_rendering;
+mod replay_goldens;
 mod stdlib_argument_errors;
 mod stdlib_divergences;
 mod stdlib_numeric_format;

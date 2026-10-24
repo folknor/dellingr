@@ -633,7 +633,6 @@ impl State {
     /// Crate-internal (VM-007): the comparator slot is `table.sort`'s argument
     /// layout, a stdlib calling convention a host has no reason to mirror.
     /// Hosts sort by calling `table.sort` through the stack.
-    #[hotpath::measure]
     pub(crate) fn table_sort(&mut self, table_idx: isize, has_comp: bool) -> Result<usize> {
         let idx = self.convert_idx(table_idx)?;
 
@@ -794,7 +793,6 @@ impl State {
     ///
     /// Guarded like [`State::call`]: refused on a poisoned State, and a
     /// panic out of `__tostring` poisons it.
-    #[hotpath::measure]
     pub fn to_string_with_meta(&mut self, idx: isize) -> Result<String> {
         // native-call: to_string_with_meta->tostring_bytes
         let raw = self.tostring_bytes(idx)?;

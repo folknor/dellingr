@@ -179,23 +179,6 @@ is present; or rename it to announce itself (`__test-fault-injection`).
 
 Enforceable: yes, structurally or by `compile_error!`.
 
-## VG-005 - `native_calls.py` skips files by name pattern
-
-Reported by: check-machinery.
-
-`production_sources` drops any `src/` file whose path matches
-`(^|/)(tests?|[a-z_]*_tests)(\.rs|/)`, without checking that its `mod`
-declaration is `#[cfg(test)]`. Today every such file is (`vm/tests.rs`,
-`compiler/parser/tests.rs`, `line_attribution_tests.rs`,
-`save_state/integrity_tests.rs`, `crmath/tests/`). A production module named
-`test.rs` or `foo_tests.rs` would be silently unscanned, and its calls into Lua
-would need no markers.
-
-Fix: for every file the name rule skips, find the `mod` item that declares it
-and require a `cfg(test)` or `cfg(all(test, ..))` attribute, or report it.
-
-Enforceable: yes, in the script.
-
 ## VG-006 - Indirect calls into Lua are a reviewer-only rule
 
 Reported by: check-machinery.
@@ -307,9 +290,6 @@ Reported by: check-machinery, corpus-harness, library, snapshot.
 - `crmath_tables.py`'s mismatch path calls `destination.read_text()` with no
   encoding, so it uses the locale default; harmless for ASCII tables,
   `encoding="utf-8"` would make it explicit.
-
-(`scripts/notes_move.py`'s unconditional rewrites are filed with its data-loss
-bug in bugs.md.)
 
 Fix: write only when the bytes differ, using one shared helper; say so when
 skipping.

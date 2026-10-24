@@ -251,6 +251,14 @@ xxh128 = "4df913d61046b591ea1f67ce6381e776"
 hotpath_file = "examples/parse/large_source.lua"
 hotpath_xxh128 = "4df913d61046b591ea1f67ce6381e776"
 
+# `_G` is the global table itself, not a proxy in front of it; this keeps the
+# old wording from returning to code, comments and test names.
+[[textlint]]
+name = "global-table-not-proxy"
+pattern = '\b_G(?: +keeps +its)? +proxy\b'
+paths = ["src/**/*.rs", "tests/**/*.rs"]
+message = "_G is the global table, not a proxy"
+
 # Native-stack guard (reference/native-calls.md). Every direct call to a
 # function that can reach a call back into Lua carries a
 # `// native-call: <edge-id>` marker naming its edge in

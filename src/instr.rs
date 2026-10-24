@@ -232,6 +232,7 @@ define_builtins! {
 #[repr(transparent)]
 pub(crate) struct Instr(u64);
 
+// Keep the version in src root for both feature shapes; the opcode fixture reads it through instr.
 #[path = "snapshot_format.rs"]
 pub(crate) mod snapshot_format;
 

@@ -51,8 +51,9 @@ EDGE_ID = re.compile(r"^([\w:.]+)->(\w+)(?::([\w-]+))?$")
 # ---------------------------------------------------------------- lexing
 
 
-def sanitize(text):
-    """Blank strings, chars and comments, keeping offsets and newlines.
+def sanitize(text, keep_strings=False):
+    """Blank literals and comments, keeping offsets and newlines.
+    With keep_strings, retain string literals but still blank comments/chars.
     Returns the code and the line comments as (line, text)."""
     out = []
     comments = []
@@ -106,7 +107,7 @@ def sanitize(text):
             j = end + 1 + len(hashes)
             seg = text[i:j]
             line += seg.count("\n")
-            out.append(blank(seg))
+            out.append(seg if keep_strings else blank(seg))
             i = j
             continue
         if c == '"' or (c in "bc" and text.startswith('"', i + 1) and not ident_before(i)):
@@ -116,7 +117,7 @@ def sanitize(text):
             j += 1
             seg = text[i:j]
             line += seg.count("\n")
-            out.append(blank(seg))
+            out.append(seg if keep_strings else blank(seg))
             i = j
             continue
         if c == "'" or (c == "b" and text.startswith("'", i + 1) and not ident_before(i)):
@@ -322,16 +323,53 @@ class Source:
         return None
 
 
-TEST_FILE = re.compile(r"(^|/)(tests?|[a-z_]*_tests)(\.rs|/)")
-
-
 def production_sources():
-    out = []
-    for path in sorted(SRC.rglob("*.rs")):
-        if TEST_FILE.search(path.relative_to(SRC).as_posix()):
-            continue
-        out.append(Source(path))
-    return out
+    sources = [Source(path) for path in sorted(SRC.rglob("*.rs"))]
+    test_files = set()
+    test_dirs = set()
+    for source in sources:
+        # Out-of-line test modules inherit their cfg throughout their subtree.
+        # A suggestive filename alone never exempts production code.
+        base = source.path.parent
+        if source.path.stem not in ("lib", "main", "mod"):
+            base = base / source.path.stem
+        inline_modules = []
+        for module in re.finditer(r"\bmod\s+(\w+)\s*\{", source.code):
+            opening = module.end() - 1
+            inline_modules.append((opening, match_brace(source.code, opening), module.group(1)))
+        for m in re.finditer(r"\bmod\s+(\w+)\s*;", source.code):
+            if source.in_test(m.start()):
+                module_base = base
+                for opening, closing, name in inline_modules:
+                    if opening < m.start() < closing:
+                        module_base = module_base / name
+                test_files.add(module_base / (m.group(1) + ".rs"))
+                test_dirs.add(module_base / m.group(1))
+    return [source for source in sources
+            if source.path not in test_files
+            and not any(directory in source.path.parents for directory in test_dirs)]
+
+
+def item_attributes(fn):
+    """The contiguous outer attributes before a function's modifiers."""
+    prefix = fn.src.code[:fn.start]
+    prefix = re.sub(r"(?:pub(?:\([^()]*\))?\s+)?"
+                    r"(?:(?:async|unsafe|const)\s+)*$", "", prefix).rstrip()
+    attributes = []
+    while prefix.endswith("]"):
+        depth = 1
+        j = len(prefix) - 2
+        while j >= 0 and depth:
+            if prefix[j] == "]":
+                depth += 1
+            elif prefix[j] == "[":
+                depth -= 1
+            j -= 1
+        if j < 0 or prefix[j] != "#":
+            break
+        attributes.append(prefix[j:])
+        prefix = prefix[:j].rstrip()
+    return "\n".join(attributes)
 
 
 # ------------------------------------------------------------ call graph
@@ -447,14 +485,15 @@ def scan_test_lists(problems):
     """Names declared in tests/native_stack.rs: `const NAME: &[...] = &[`
     lists whose entries carry `name: "..."`."""
     text = TEST.read_text()
+    code, _ = sanitize(text)
+    names_code, _ = sanitize(text, keep_strings=True)
     lists = {}
     for const in ("SCENARIOS", "CHAINS", "LEAVES"):
-        m = re.search(rf"const {const}: &\[\w+\] = &\[", text)
+        m = re.search(rf"const {const}: &\[\w+\] = &\[", code)
         if not m:
             problems.append(f"tests/native_stack.rs: no `const {const}` list")
             lists[const] = []
             continue
-        code, _ = sanitize(text)
         depth = 0
         end = m.end() - 1
         for j in range(m.end() - 1, len(code)):
@@ -465,8 +504,24 @@ def scan_test_lists(problems):
                 if depth == 0:
                     end = j
                     break
-        body = text[m.end():end]
-        lists[const] = re.findall(r'\bname:\s*"([\w-]+)"', body)
+        # Only fields of direct entries count; comments, Lua strings and
+        # nested structs must not manufacture scenario coverage.
+        names = []
+        depth = 0
+        for field in re.finditer(r'[{}\[\]()]|\bname\s*:', code[m.end():end]):
+            token = field.group()
+            if token in ("{", "[", "("):
+                depth += 1
+            elif token in ("}", "]", ")"):
+                depth -= 1
+            elif depth == 1:
+                offset = m.end() + field.end()
+                name = re.match(r'\s*"([\w-]+)"', names_code[offset:])
+                if name:
+                    names.append(name.group(1))
+        if len(names) != len(set(names)):
+            problems.append(f"tests/native_stack.rs: duplicate names in {const}")
+        lists[const] = names
     return lists
 
 
@@ -542,6 +597,18 @@ def check():
     defs = definitions(sources)
     reached, sites, toplevel = closure(sources)
     inv = tomllib.loads(INVENTORY.read_text())
+
+    # Timing guards stay live across the entire nested Lua invocation and
+    # add native-stack frames while attributing arbitrary script work here.
+    unmeasured = set(reached) | {
+        (entry.get("owner"), entry["name"]) for entry in inv.get("function", [])
+    } | set(BOUNDARIES) | {
+        ("State", "run_invocation"), ("Frame", "run")}
+    for key in sorted(unmeasured, key=lambda key: (key[0] or "", key[1])):
+        for fn in defs.get(key, []):
+            if re.search(r"\bhotpath\s*::\s*measure\b", item_attributes(fn)):
+                problems.append(f"{fn.src.rel}:{fn.line}: {fn.qual} stays live across "
+                                "native re-entry and must not use hotpath::measure")
 
     for s, off, key in toplevel:
         problems.append(f"{s.rel}:{s.line_of(off)}: call to {key[1]} outside any function")

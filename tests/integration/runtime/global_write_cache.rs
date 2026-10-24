@@ -40,7 +40,7 @@ fn writer_repopulates_across_restricted_environment_swaps() {
 }
 
 #[test]
-fn append_and_g_proxy_writes_do_not_displace_a_warmed_global() {
+fn append_and_g_table_writes_do_not_displace_a_warmed_global() {
     let mut state = State::new();
     support::run(&mut state, "x = 0; function writer(v) x = v end");
     call_writer(&mut state, "writer", 1.0);
@@ -57,11 +57,11 @@ fn builtin_rebind_does_not_disturb_a_warmed_writer() {
     call_writer(&mut state, "writer", 1.0);
     support::run(
         &mut state,
-        "table = { marker = 7 }; builtin_marker = table.marker; proxy_marker = _G.table.marker",
+        "table = { marker = 7 }; builtin_marker = table.marker; g_table_marker = _G.table.marker",
     );
     call_writer(&mut state, "writer", 2.0);
     assert_eq!(support::global_number(&mut state, "builtin_marker"), 7.0);
-    assert_eq!(support::global_number(&mut state, "proxy_marker"), 7.0);
+    assert_eq!(support::global_number(&mut state, "g_table_marker"), 7.0);
     assert_eq!(support::global_number(&mut state, "x"), 2.0);
 }
 

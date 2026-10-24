@@ -93,15 +93,35 @@ fn stdlib_integer_arguments_reject_fractional_numbers_consistently() {
 }
 
 #[test]
-fn argument_details_are_structured_without_changing_text() {
+fn argument_details_are_structured_and_rendered_as_expected() {
     use dellingr::error::ArgDetail;
 
-    for (code, expected) in [
-        ("return tonumber('10', 37)", ArgDetail::BaseOutOfRange),
-        ("return select(0, 'a')", ArgDetail::IndexOutOfRange),
-        ("return rawlen(1)", ArgDetail::TableOrStringExpected),
-        ("return math.random(2, 1)", ArgDetail::IntervalEmpty),
-        ("return string.sub('a', 1.5)", ArgDetail::NoInteger),
+    for (code, expected_detail, expected_text) in [
+        (
+            "return tonumber('10', 37)",
+            ArgDetail::BaseOutOfRange,
+            "bad argument #2 to 'tonumber' (base out of range)",
+        ),
+        (
+            "return select(0, 'a')",
+            ArgDetail::IndexOutOfRange,
+            "bad argument #1 to 'select' (index out of range)",
+        ),
+        (
+            "return rawlen(1)",
+            ArgDetail::TableOrStringExpected,
+            "bad argument #1 to 'rawlen' (table or string expected)",
+        ),
+        (
+            "return math.random(2, 1)",
+            ArgDetail::IntervalEmpty,
+            "bad argument #1 to 'random' (interval is empty)",
+        ),
+        (
+            "return string.sub('a', 1.5)",
+            ArgDetail::NoInteger,
+            "bad argument #2 to 'sub' (number has no integer representation)",
+        ),
     ] {
         let mut state = State::new();
         support::load(&mut state, code);
@@ -111,7 +131,8 @@ fn argument_details_are_structured_without_changing_text() {
         let ErrorKind::ArgError(argument) = error.kind() else {
             panic!("expected argument error for {code}");
         };
-        assert_eq!(argument.detail(), &expected, "{code}");
+        assert_eq!(argument.detail(), &expected_detail, "{code}");
+        assert_eq!(argument.to_string(), expected_text, "{code}");
     }
 }
 

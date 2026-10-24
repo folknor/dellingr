@@ -336,22 +336,39 @@ impl RuntimeCaches {
                 entry.for_each_handle(&mut |val| out.push(val));
             }
         }
+        let Self {
+            global_lookup,
+            field_lookup,
+            set_field_lookup,
+            tfor_cursor,
+        } = self;
         let mut out = Vec::new();
-        for slot in &self.global_lookup {
-            push(&slot.entry, &mut out);
+        // Global entries name no handle today; walking them anyway keeps
+        // their `CacheEntry` destructuring the one place that decides that.
+        for slot in global_lookup {
+            let GlobalLookupCacheSlot { entry } = slot;
+            push(entry, &mut out);
         }
-        for slot in &self.field_lookup {
-            push(&slot.field_entry, &mut out);
-            for cell in &slot.method_entries {
+        for slot in field_lookup {
+            let FieldLookupCacheSlot {
+                field_entry,
+                method_entries,
+                method_victim: _,
+                string_method_entry,
+            } = slot;
+            push(field_entry, &mut out);
+            for cell in method_entries {
                 push(cell, &mut out);
             }
-            push(&slot.string_method_entry, &mut out);
+            push(string_method_entry, &mut out);
         }
-        for slot in &self.set_field_lookup {
-            push(&slot.entry, &mut out);
+        for slot in set_field_lookup {
+            let SetFieldLookupCacheSlot { entry } = slot;
+            push(entry, &mut out);
         }
-        for slot in &self.tfor_cursor {
-            push(&slot.entry, &mut out);
+        for slot in tfor_cursor {
+            let TforCursorSlot { entry } = slot;
+            push(entry, &mut out);
         }
         out
     }

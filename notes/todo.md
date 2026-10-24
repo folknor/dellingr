@@ -49,6 +49,31 @@ pinned by `tests/integration/runtime/newindex_depth_routes.rs`.
 
 ## Deferred forward-looking ideas
 
+### Observable GC and cache diagnostics
+
+What: a collection counter on `GcHeap`, exposed as `State::gc_cycles()`
+(not replay-visible, useful to embedders as a diagnostic), plus cache
+residency, pattern compilation counts and slot identity through one
+test-infrastructure feature or `#[doc(hidden)]` accessor usable from both unit
+and integration tests. Today `State::pattern_compilations` is a `cfg(test)`
+field visible only to unit tests (and makes the unit-test `State` a different
+layout from production).
+
+Why it matters: several tests exist to prove "a collection at point X does
+not free Y" or "the cache was hit/evicted" but cannot assert the precondition
+happened: the GC-rooting tests in `gc_upvalues.rs`, `table_metamethods.rs`,
+`table_sort_metamethods.rs`, `src/vm/tests.rs`'s deep-chain test and
+`string_charges.rs`'s gsub test; the gmatch cache-eviction and cache-hit cost
+tests in `cost_determinism.rs` and `string_charges.rs`; and
+`string_metatable`'s slot-reuse tests. Each could then assert its
+precondition, or construct the collision directly in a `vm/` unit test.
+
+Why deferred: a new public API surface, which is a feature decision rather
+than a test fix.
+
+Signal: an embedder asking for GC diagnostics, or a GC rooting bug that one of
+those tests should have caught.
+
 ### `\u{XXX}` string escapes
 
 What: Lua 5.3+ accepts `\u{XXX}` UTF-8 escapes in string literals; dellingr's

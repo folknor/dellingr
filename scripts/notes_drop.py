@@ -28,6 +28,10 @@ def drop_sections(lines, ids):
 
 
 def main() -> int:
+    if len(sys.argv) < 3:
+        print(f"usage: {sys.argv[0]} <file> <ID> [<ID> ...]", file=sys.stderr)
+        return 2
+
     path, ids = sys.argv[1], set(sys.argv[2:])
     with open(path, encoding="utf-8") as f:
         lines = f.read().split("\n")

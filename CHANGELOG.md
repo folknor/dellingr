@@ -607,6 +607,11 @@ All notable changes to dellingr are documented here. The format follows
 
 ### Fixed
 
+- A short string broken off by a newline reports `unfinished string` at the
+  end of the line it broke off on (the newline's first byte, where the closing
+  quote is missing), the same column the end-of-source case reports. It used
+  to report the start of the next line after a bare CR or LF, and the column
+  after the newline's first byte after CRLF or LFCR.
 - A reachable `ipairs` iterator can be saved (registered as `ipairs.iter`).
 - `table.move` charges and copies identically with and without a budget; a
   budget that runs out mid-move keeps the prefix it paid for.

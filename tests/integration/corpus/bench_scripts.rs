@@ -5,6 +5,10 @@ use std::path::{Path, PathBuf};
 use dellingr::{Program, ScopeCost, State};
 use xxhash_rust::xxh3::xxh3_128;
 
+// The generated parse probe has no separate verdict-side benchmark file.
+const SAME_FILE_WORKLOAD_ALLOWLIST: &[(&str, &str)] =
+    &[("large_source", "examples/parse/large_source.lua")];
+
 // Keep the expected function name tied to the constant used by the harness.
 const HOTPATH_SOURCE: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/hotpath.rs"));
@@ -177,6 +181,48 @@ fn registered_workload_file_digests_match_brokkr_pins() {
 }
 
 #[test]
+fn registered_workload_files_cover_bench_scripts() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let pairs = workload_pairs(&root);
+    let bench_dir = root.join("bench");
+    let mut expected_files = bench_scripts(&bench_dir)
+        .iter()
+        .map(|path| {
+            path.strip_prefix(&root)
+                .unwrap_or_else(|error| {
+                    panic!("{} is outside the repository: {error}", path.display())
+                })
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+
+    for &(workload, file) in SAME_FILE_WORKLOAD_ALLOWLIST {
+        assert!(
+            expected_files.insert(file.to_owned()),
+            "workload {workload} exception overlaps a bench file: {file}"
+        );
+        let pair = pairs
+            .iter()
+            .find(|pair| pair.name == workload)
+            .unwrap_or_else(|| panic!("workload {workload} is missing from brokkr.toml"));
+        assert_eq!(
+            pair.file, file,
+            "workload {workload} must use its listed non-bench file"
+        );
+    }
+
+    let registered_files = pairs
+        .iter()
+        .map(|pair| pair.file.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        registered_files, expected_files,
+        "registered workload file values must cover every bench Lua file, with only listed non-bench files"
+    );
+}
+
+#[test]
 fn bench_scripts_parse_and_follow_the_standalone_footer_contract() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let bench_dir = root.join("bench");
@@ -272,6 +318,18 @@ fn registered_workload_pairs_keep_kernel_cost_fingerprints_aligned() {
     let pairs = workload_pairs(&root);
 
     for pair in pairs {
+        if pair.file == pair.hotpath_file {
+            assert!(
+                SAME_FILE_WORKLOAD_ALLOWLIST.iter().any(|(name, file)| {
+                    *name == pair.name.as_str() && *file == pair.file.as_str()
+                }),
+                "workload {} uses the same file for file and hotpath_file without an explicit exception: {}",
+                pair.name,
+                pair.file
+            );
+            continue;
+        }
+
         let bench_path = root.join(&pair.file);
         let hotpath_path = root.join(&pair.hotpath_file);
         assert!(

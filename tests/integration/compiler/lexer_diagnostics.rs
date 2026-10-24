@@ -50,6 +50,23 @@ fn unfinished_long_comment_has_its_own_message() {
 }
 
 #[test]
+fn unclosed_short_string_position_is_independent_of_newline_style() {
+    // The error names the end of the line the string broke off on, where its
+    // closing quote is missing, whichever newline convention ends that line.
+    for source in ["\"a\r\"", "\"a\n\"", "\"a\r\n\"", "\"a\n\r\""] {
+        let err = load_error(source);
+        assert!(
+            matches!(
+                err.kind(),
+                ErrorKind::SyntaxError(SyntaxError::UnclosedString)
+            ),
+            "{err}"
+        );
+        assert_eq!((err.line_num(), err.column()), (1, 3), "{source:?}");
+    }
+}
+
+#[test]
 fn lparen_on_a_new_line_compiles_as_a_call() {
     let mut state = State::new();
     support::load(&mut state, "local f = print\nlocal x = f\n(1)");

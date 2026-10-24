@@ -166,22 +166,6 @@ patched to 1) on a budget-limited State; load with the harness's chunk name.
 
 Enforceable: yes, as a test.
 
-## VC-006 - The `large_source` fingerprint pair compares a file with itself
-
-Reported by: check-machinery, corpus-harness.
-
-`registered_workload_pairs_keep_kernel_cost_fingerprints_aligned` asserts that
-each workload's `file` and `hotpath_file` have equal cost fingerprints. For
-`[dellingr.workloads.large_source]` both name
-`examples/parse/large_source.lua`, so both sides come from the same bytes and
-it cannot fail. It reads as one more covered pair.
-
-Fix: skip a pair whose two paths are equal only when the workload is on a named
-allowlist (today just `large_source`, the documented parse probe), and fail for
-any other equal pair.
-
-Enforceable: yes, in the same test.
-
 ## VC-007 - The fingerprint cannot see a kernel's scale, and the composite's "same proportions" claim is false
 
 Reported by: corpus-harness.
@@ -205,22 +189,6 @@ composite as the documented exception and fix its header, or pick a scale where
 the claim holds for every section.
 
 Enforceable: yes, a disassembly-equality assertion in `bench_scripts.rs`.
-
-## VC-008 - `bench_scripts.rs` checks no orphan verdict files
-
-Reported by: check-machinery, corpus-harness.
-
-`corpus::bench_scripts` now parses `brokkr.toml` with the `toml` crate, but
-does not check that every `bench/*.lua` is registered (today 24 bench files map
-onto 25 workloads, `large_source` having none); an orphan verdict file would
-pass. AGENTS.md's "the parser caps a chunk at 255 nested functions" restates
-`MAX_NESTED` (`u8::MAX as usize`); `generate.py` reads the constant, the prose
-does not; reword to name the constant.
-
-Fix: assert the set of `file` values equals `bench/*.lua` plus named
-exceptions.
-
-Enforceable: yes, as a test.
 
 ## VC-009 - `corpus::disassembly` checks one thing that cannot happen, and the corpus is compiled three times
 

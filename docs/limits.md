@@ -129,9 +129,12 @@ implementation tuning values, not additional script-level resource limits.
 
 The heap counts GC-managed objects plus distinct interned strings. It checks
 that count before each heap allocation and collects when the count is at least
-the current threshold. The default automatic policy is an initial threshold of
-20 allocations, a minimum threshold of 20, and a growth factor of 2. Each State
-stores its own policy; these are the defaults used when a State is created.
+the current threshold. The default automatic policy uses
+`DEFAULT_GC_INITIAL_THRESHOLD` as its initial threshold,
+`DEFAULT_GC_MIN_THRESHOLD` as its minimum, and
+`DEFAULT_GC_THRESHOLD_GROWTH_FACTOR` as its growth factor. These crate-private
+defaults are defined in `src/limits/tuning.rs`. Each State stores its own
+policy; these are the defaults used when a State is created.
 After an automatic collection, the next threshold is
 `max(live_allocations * growth_factor, minimum_threshold)`, using saturating
 multiplication.
@@ -247,9 +250,10 @@ capacity; what a collection frees is the payloads and entries it removes.
   growing past the frame.
 - The cap bounds the shared value stack, not total host memory. Enforcing it
   charges no cost.
-- A stack at the cap holds about 16 MB of values on a 64-bit host. Tests that
-  push to `MAX_STACK_SIZE` pay that per State, inside the fixed virtual-memory
-  cap `scripts/test_limited.sh` applies (`TEST_LIMIT_KB` in `scripts/lib.sh`).
+- Each State can use up to `MAX_STACK_SIZE` value slots. Rust tests that
+  push to the cap run in the ordinary Rust test process, without the
+  virtual-memory cap used for standalone example runs by
+  `scripts/test_limited.sh` (`TEST_LIMIT_KB` in `scripts/lib.sh`).
 
 ## Host table methods
 

@@ -40,6 +40,22 @@ def main() -> int:
         return 2
     binary = args[0]
     needles = args[1:]
+    file_info = subprocess.run(
+        ["objdump", "-f", binary],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    architecture = re.search(r"^\s*architecture:\s*([^,\s]+)", file_info, re.MULTILINE)
+    if architecture is None or architecture.group(1) not in {
+        "i386:x86-64",
+        "x86-64",
+        "x86_64",
+        "i386:x86_64",
+    }:
+        print(f"{binary}: expected an x86-64 binary", file=sys.stderr)
+        return 1
+
     text = subprocess.run(
         ["objdump", "-d", "--no-show-raw-insn", "-C", binary],
         check=True,
@@ -54,6 +70,7 @@ def main() -> int:
     allocation = 0
     prologue = True
     targets: list[str] = []
+    matched_symbols = 0
 
     def flush() -> None:
         if matched and not body_dump:
@@ -68,6 +85,8 @@ def main() -> int:
             flush()
             name = m.group(1)
             matched = any(n in name for n in needles)
+            if matched:
+                matched_symbols += 1
             pushes = 0
             allocation = 0
             prologue = True
@@ -96,6 +115,9 @@ def main() -> int:
         elif body.startswith(("call", "ret", "j")):
             prologue = False
     flush()
+    if matched_symbols == 0:
+        print(f"{binary}: no symbols matched: {', '.join(needles)}", file=sys.stderr)
+        return 1
     return 0
 
 

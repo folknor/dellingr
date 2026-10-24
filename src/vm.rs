@@ -1630,17 +1630,25 @@ mod runtime_tests {
     type CellKey = (usize, &'static str, usize, usize);
 
     /// Every populated cell, keyed by [`CellKey`]. Only method entries have
-    /// more than one position.
+    /// more than one position. The exhaustive cache bundle destructuring
+    /// forces this test oracle to account for each cache family.
     fn cache_cells(state: &State) -> Vec<(CellKey, CachedEntry)> {
         let mut cells = Vec::new();
         for (identity, entry) in &state.bytecode_caches {
-            let caches = &entry.runtime.caches;
+            let caches::RuntimeCaches {
+                // Global lookup entries hold indexes into the State's live
+                // global table, so they name no object that can be collected.
+                global_lookup: _,
+                field_lookup,
+                set_field_lookup,
+                tfor_cursor,
+            } = &entry.runtime.caches;
             let mut push = |slot: usize, position: usize, cell: Option<CachedEntry>| {
                 if let Some(cell) = cell {
                     cells.push(((*identity, cell.family(), slot, position), cell));
                 }
             };
-            for (slot, cell) in caches.field_lookup.iter().enumerate() {
+            for (slot, cell) in field_lookup.iter().enumerate() {
                 push(slot, 0, cell.get_field().map(CachedEntry::Field));
                 for position in 0..caches::METHOD_ENTRIES {
                     push(
@@ -1655,10 +1663,10 @@ mod runtime_tests {
                     cell.get_string_method().map(CachedEntry::StringMethod),
                 );
             }
-            for (slot, cell) in caches.set_field_lookup.iter().enumerate() {
+            for (slot, cell) in set_field_lookup.iter().enumerate() {
                 push(slot, 0, cell.get().map(CachedEntry::SetField));
             }
-            for (slot, cell) in caches.tfor_cursor.iter().enumerate() {
+            for (slot, cell) in tfor_cursor.iter().enumerate() {
                 push(slot, 0, cell.get().map(CachedEntry::Tfor));
             }
         }
@@ -1738,6 +1746,8 @@ mod runtime_tests {
         let after = cache_cells(&state);
 
         let live = |val: &Val| state.heap.val_is_live(val);
+        // Fixed, not derived from `before`: a family whose warmup stopped
+        // populating any cell must fail here rather than drop out unchecked.
         for family in [
             "field",
             "set-field",

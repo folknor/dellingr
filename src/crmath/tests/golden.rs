@@ -77,6 +77,27 @@ fn corpus_digest(inputs: &[(f64, f64)]) -> u64 {
     hash
 }
 
+const GOLDEN_COUNTS: [(Func, usize); 11] = [
+    (Func::Sin, 1_144),
+    (Func::Cos, 1_144),
+    (Func::Tan, 1_144),
+    (Func::Asin, 1_144),
+    (Func::Acos, 1_144),
+    (Func::Atan, 1_146),
+    (Func::Atan2, 1_544),
+    (Func::Exp, 1_144),
+    (Func::Ln, 1_145),
+    (Func::Log10, 1_144),
+    (Func::Pow, 1_543),
+];
+
+#[allow(clippy::print_stderr)] // Test coverage depends on this host's CPU.
+fn report_fma_modes(modes: &[super::ForcedFma]) {
+    eprintln!(
+        "crmath golden FMA backends: {modes:?} (hardware absent means software-only coverage)"
+    );
+}
+
 fn parse_bits(token: &str) -> f64 {
     if token == "nan" {
         return f64::NAN;
@@ -94,7 +115,17 @@ fn show_bits(x: f64) -> String {
 
 #[test]
 fn golden_results_on_every_fma_path() {
-    let mut cases = 0;
+    let header = format!("# Worst-case sample from CORE-MATH commit {CORE_MATH_COMMIT}.");
+    assert_eq!(
+        GOLDEN.lines().filter(|line| *line == header).count(),
+        1,
+        "golden fixture must name the pinned CORE-MATH commit exactly once"
+    );
+    // Exact counts detect a lost function or truncated sample without a checkout.
+    // Update these only after reviewing a deliberate fixture regeneration.
+    let mut counts = GOLDEN_COUNTS.map(|(f, _)| (f, 0usize));
+    let modes = fma_modes();
+    report_fma_modes(&modes);
     let mut failures = Vec::new();
     for line in GOLDEN.lines() {
         if line.is_empty() || line.starts_with('#') {
@@ -102,6 +133,12 @@ fn golden_results_on_every_fma_path() {
         }
         let fields: Vec<&str> = line.split_whitespace().collect();
         let f = Func::from_name(fields[0]).expect("golden lines start with a function name");
+        assert_eq!(fields.len(), if f.binary() { 4 } else { 3 });
+        counts
+            .iter_mut()
+            .find(|(function, _)| *function == f)
+            .expect("every golden function has a row-count pin")
+            .1 += 1;
         let (x, y, expected) = if f.binary() {
             (
                 parse_bits(fields[1]),
@@ -111,15 +148,14 @@ fn golden_results_on_every_fma_path() {
         } else {
             (parse_bits(fields[1]), 0.0, parse_bits(fields[2]))
         };
-        for mode in fma_modes() {
+        for &mode in &modes {
             let got = with_forced_fma(mode, || f.port(x, y));
             if !same(got, expected) && failures.len() < 50 {
                 failures.push(format!("{line}: got {} under {mode:?}", show_bits(got)));
             }
         }
-        cases += 1;
     }
-    assert!(cases > 0, "golden file is empty");
+    assert_eq!(counts, GOLDEN_COUNTS, "golden fixture row counts changed");
     assert!(
         failures.is_empty(),
         "{} golden mismatches:\n{}",
@@ -289,16 +325,8 @@ fn parse_worst_cases(f: Func, path: &str, text: &str) -> Vec<(f64, f64)> {
 /// Certify every input and fail with every discrepancy (port against
 /// oracle, and between FMA paths).
 fn check_inputs(f: Func, inputs: &[(f64, f64)]) -> Vec<String> {
-    // Oracle panics are reported per input below; keep their default
-    // messages from flooding the output.
-    let previous_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
-    let problems = check_inputs_quietly(f, inputs);
-    std::panic::set_hook(previous_hook);
-    problems
-}
-
-fn check_inputs_quietly(f: Func, inputs: &[(f64, f64)]) -> Vec<String> {
+    // Keep the process hook intact: caught oracle panics still need diagnostics,
+    // and silencing them globally would also hide unrelated test failures.
     let threads = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
     let chunk = inputs.len().div_ceil(threads).max(1);
     std::thread::scope(|scope| {

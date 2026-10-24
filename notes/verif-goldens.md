@@ -323,45 +323,6 @@ and makes the second (snapshot) sweep earn its cost.
 Enforceable: yes; the corpus walker is shared, so new examples are covered
 automatically.
 
-## VD-010 - The Lua-visible RNG draw sequence is not pinned
-
-Reported by: library.
-
-`math_random_is_deterministic_per_seed` checks `draw(42) == draw(42)` inside one
-process, which cannot fail for an in-crate SplitMix64, and `draw(42) !=
-draw(43)`, which is close to certain. The replay contract needs the Lua-visible
-draw sequence stable across builds and hosts, and nothing pins it.
-`vm/rng.rs::splitmix64_stream_is_pinned` pins `next_u64` and
-`random_range_i64(1, 6)`, not `random_f64` (whose scale comes from
-`numeral::MAX_EXACT_INTEGER`, defined elsewhere) nor the mapping from Lua
-arguments to draws in `math.random`. `docs/determinism.md` says a singleton
-integer range (`math.random(1)`, `math.random(m, m)`) "returns its only value
-without advancing the RNG stream" and calls it part of the replay-visible draw
-sequence; no test checks the following draw.
-
-Fix: a golden test that seeds a State, runs `math.random()`, `math.random(n)`,
-`math.random(m, n)` and the singleton forms from Lua, and compares the printed
-sequence with literal expected strings.
-
-Enforceable: yes, by the test.
-
-## VD-011 - Stock library `pairs` order is unpinned
-
-Reported by: library.
-
-The `math.rs` header says "Registration order determines table iteration order
-and snapshot baselines". `pairs(math)`, `pairs(string)`, `pairs(table)` and the
-order of `_G` on a fresh State are replay-visible (AGENTS.md: "`pairs` order ...
-feed game replays"). No test pins them; the `save_state.rs` order tests look
-only at user-added keys. Reordering `MATH_FUNCTIONS` or the string registration
-list passes every test. The hunter did not establish whether it would change
-`save_golden_current.bin`; its program mentions no library table.
-
-Fix: a golden of `for k in pairs(lib)` key order for each stock library on a
-fresh State, in both feature shapes.
-
-Enforceable: yes, by the test.
-
 ## VD-012 - The gmatch schema is a persisted format with no golden, and its recognition fails open
 
 Reported by: library, snapshot.
@@ -402,50 +363,6 @@ variant fails to compile until the golden covers it.
 
 Enforceable: yes, by the exhaustive match.
 
-## VD-014 - The crmath golden passes a truncated fixture
-
-Reported by: library.
-
-`golden_results_on_every_fma_path` asserts only `cases > 0`. If the fixture loses
-every row for some function (a bad regeneration, a merge), it stays green. It
-never checks the fixture's `# Worst-case sample from CORE-MATH commit ...` header
-against `CORE_MATH_COMMIT`.
-
-Fix: count rows per `Func` and require a floor for each, or pin `(rows per
-function, digest of the file body)` the way `CORPUS_PINS` pins the worst-case
-corpora; assert the header names `CORE_MATH_COMMIT`. No checkout needed.
-
-Enforceable: yes, by the test.
-
-## VD-015 - Snapshot docs that state a rule the code does not have
-
-Reported by: snapshot.
-
-`docs/save-state.md` "Load": "An older format version is rejected as
-unsupported." Any mismatch is rejected, newer included (`read_magic_and_versions`;
-`unsupported_format_versions_fail_before_setup` tests both directions). The
-README says the same. It suggests a forward-compatibility rule that does not
-exist. (The byte-stability contradiction is in bugs.md.)
-
-Enforceable: no; reword.
-
-## VD-016 - `docs/limits.md` restates the GC defaults with nothing tying them to code
-
-Reported by: runtime.
-
-"The default automatic policy is an initial threshold of 20 allocations, a
-minimum threshold of 20, and a growth factor of 2." These are
-`limits/tuning.rs` constants. The only test touching them is
-`gc_collect_preserves_disabled_auto_gc`, which asserts `>= 20`. The same doc says
-collection timing affects `%p` ids and snapshot contents, so a silent change is
-replay-visible.
-
-Fix: a docs-parity test over the "Garbage collection policy" paragraph in the
-shape of `frame.rs::documented_opcode_charges_match_static_units`, or reword the
-doc to name the constants instead of their values.
-
-Enforceable: yes, by the test.
-
 ## VD-018 - The host's floating-point environment is assumed, never detected
 
 Reported by: library.
@@ -477,20 +394,3 @@ check in verif-gates.md would at least record `fmod` as the one permitted libm
 import.
 
 Enforceable: yes, by a golden.
-
-## VD-020 - Snapshot laterals
-
-Reported by: snapshot.
-
-- `load_state` runs `verify::verify_payload` before `decoder.finish()`, so a
-  forged save with trailing garbage pays for full verification before the cheap
-  trailing-bytes rejection. Swap the calls.
-- `src/snapshot_format.rs` sits at the crate root but is mounted as
-  `instr::snapshot_format` through `#[path]`, so its location does not match its
-  module path. A crate-root `mod snapshot_format;` works just as well for the
-  opcode fixture test that needs it in non-snapshot builds.
-- `src/snapshot_format.rs`'s header comment still says "the `_G` proxy's
-  environment delta", false since `_G` became the real global table (see the
-  proxy-vocabulary entry in verif-assertions.md).
-
-Enforceable: no.

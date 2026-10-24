@@ -1,4 +1,6 @@
 disallowed-methods = [
+    { path = "std::panic::set_hook", reason = "Process-wide hook replacement can hide concurrent test failures. Use a scoped allow only for a permanent filtering installer." },
+    { path = "std::panic::take_hook", reason = "Process-wide hook replacement can hide concurrent test failures. Use a scoped allow only for a permanent filtering installer." },
     { path = "core::result::Result::ok", reason = "Silently discards errors. Use `?` to propagate, or handle the error explicitly." },
     { path = "core::result::Result::unwrap_or", reason = "Silently discards errors. Handle the error explicitly, or use a scoped allow for an intentional fallback." },
     { path = "core::result::Result::unwrap_or_default", reason = "Silently discards errors. Handle the error explicitly, or use a scoped allow for an intentional fallback." },

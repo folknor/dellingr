@@ -271,24 +271,6 @@ with rendering `r` (as `check` does), so the probe's own error fails it.
 
 Enforceable: by that match.
 
-## VN-011 - `docs/limits.md` places at-cap tests under `test_limited.sh`; they are not
-
-Reported by: native-stack-errors.
-
-`docs/limits.md`, Value stack: "Tests that push to `MAX_STACK_SIZE` pay that per
-State, inside the fixed virtual-memory cap `scripts/test_limited.sh` applies".
-Only `corpus::run_examples` runs anything under `test_limited.sh` (the example
-scripts). The Rust tests that push to the cap (`frame_reservation.rs`,
-`index_depth_routes.rs`, `host_error_reporting.rs`, `host_call_preflight.rs`,
-`vm_depth_regressions.rs`, `error_boundary.rs`) run as ordinary `cargo test`
-processes, and nothing in `brokkr.toml` wraps them. False today.
-
-Fix: reword to say the cost is paid per State with no cap applied, or apply a cap
-(an `RLIMIT_AS` set by a test-crate helper before the State is built; `libc` is
-already a dev-dependency).
-
-Enforceable: only the second.
-
 ## VN-012 - Envelope and parse-depth claims checked for fewer shapes than stated
 
 Reported by: native-stack-errors, compiler-cost.
@@ -356,15 +338,3 @@ Fix: run each on an explicitly sized thread (a lib-side equivalent of
 
 Enforceable: partly; a convention check requiring `*iterative*`/`*deep*` tests to
 spawn their own thread is keyed on a name and would fail open.
-
-## VN-014 - `frame_sizes.py` prints nothing on a non-matching arch
-
-Reported by: check-machinery.
-
-`scripts/frame_sizes.py` parses AT&T x86-64 prologues (`sub $0x..,%rsp`). On
-another arch, or when no symbol matches, it prints nothing and exits 0, so a probe
-comparison reads as "no frames".
-
-Fix: fail when no symbol matched or the arch is not x86-64.
-
-Enforceable: yes, in the script.

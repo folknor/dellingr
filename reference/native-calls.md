@@ -68,6 +68,9 @@ prefixes in one place; `@name` in a path expands one.
   holds: a callback has the `RustFunc` signature and is used as a value, a
   host-api root is a `pub fn` on `State`, a binary root is `src/main.rs`'s
   `main`.
+- No function in that closure, either execution boundary, `run_invocation`
+  or `Frame::run` carries `hotpath::measure`. Its guard would remain live
+  across native re-entry and include the nested script's work in its time.
 - Every call to an inventoried function has exactly one marker, on its line
   or the line directly above, and the marker's caller and callee are the
   enclosing function and the called one. Every marker belongs to a call,
@@ -78,6 +81,9 @@ prefixes in one place; `@name` in a path expands one.
 - The scenarios in the inventory are exactly the `SCENARIOS` list of
   `tests/native_stack.rs`, and the chain and leaf names exist in its
   `CHAINS` and `LEAVES` lists.
+  Names are read only from direct entry fields in active source text;
+  commented-out entries and nested fields do not supply coverage. This is
+  a lexical check, not proof that the test or every entry executes.
 - The textlint rule's pattern and `except` equal the inventory's names, and
   nothing outside the rule's `exclude` matches the pattern without being a
   call to an inventoried function. `src/compiler/` is excluded because it
@@ -88,12 +94,14 @@ prefixes in one place; `@name` in a path expands one.
 ## The lexical model and the direct-call convention
 
 The script reads source text, not a compiler call graph. It finds `fn`
-items and their bodies, skips `#[cfg(test)]` items and test files, and
+items and their bodies, skips `#[cfg(test)]` items and out-of-line module
+subtrees declared under `cfg(test)` or `cfg(all(test, ...))`, and
 attributes a closure's body to the function that contains it, so a call
 inside `self.guarded(|state| ...)` or `with_metamethod_depth(|state| ...)`
 belongs to the enclosing function. Higher-order helpers that only invoke
 such a closure (`guarded`, `with_metamethod_depth`, `with_rooted_values`)
 are frames on the path but not inventoried: the scenarios run them.
+Test-like filenames alone never exclude a source file from scanning.
 
 A call resolves by name and receiver. That is the convention re-entering
 functions are called by, and new code should keep to it:

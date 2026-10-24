@@ -139,9 +139,9 @@ Save files are user-editable input. Loading restores the saved cost counters,
 so hosts that load user-editable saves must call `set_cost_budget` after a
 successful load. Saves containing a Lua string larger than `limits::MAX_STRING_BYTES`
 are rejected on load, including ones written by an earlier build using the same snapshot
-format version - an older format version is rejected before that, as an
-unsupported version. Save authentication is required if tampering with future
-RNG outcomes matters.
+format version. A format version other than `FORMAT_VERSION` is rejected while
+reading the header, before payload decoding. Save authentication is required
+if tampering with future RNG outcomes matters.
 
 ## Status
 

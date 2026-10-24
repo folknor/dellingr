@@ -10,6 +10,7 @@ EOF; trailing blank lines and `---` separators stay in the source. Fails before
 writing anything if a placeholder has no section or a wanted ID occurs more
 than once among the sources.
 """
+import os
 import re
 import sys
 
@@ -29,17 +30,41 @@ def split_section(lines, start, heading_flags=None):
     return body_end, end
 
 
+def read_lines(path):
+    with open(path, "rb") as f:
+        original = f.read()
+    text = original.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    return original, text.split("\n")
+
+
+def write_if_changed(path, lines, original):
+    content = ("\n".join(lines).rstrip("\n") + "\n").encode("utf-8")
+    if content != original:
+        with open(path, "wb") as f:
+            f.write(content)
+
+
 def main() -> int:
+    if len(sys.argv) < 3:
+        print(f"usage: {sys.argv[0]} <dest> <source> [<source> ...]", file=sys.stderr)
+        return 2
+
     dest, sources = sys.argv[1], sys.argv[2:]
-    with open(dest, encoding="utf-8") as f:
-        dest_lines = f.read().split("\n")
+    originals = {}
+    originals[dest], dest_lines = read_lines(dest)
     wanted = [m.group(1) for line in dest_lines if (m := re.fullmatch(r"<<([A-Z]+-\d{3})>>", line))]
     texts = {}
     for path in sources:
-        with open(path, encoding="utf-8") as f:
-            texts[path] = f.read().split("\n")
+        originals[path], texts[path] = read_lines(path)
+
+    for path in sources:
+        if os.path.samefile(dest, path):
+            print(f"destination is also a source: {path}", file=sys.stderr)
+            return 1
+
     sections = {}
     duplicates = []
+    changed_sources = set()
     for path, lines in texts.items():
         i = 0
         heading_flags = section_heading_flags(lines)
@@ -55,6 +80,7 @@ def main() -> int:
                     sections[section_id] = lines[i:body_end]
                 del lines[i:body_end]
                 del heading_flags[i:body_end]
+                changed_sources.add(path)
                 while i < len(lines) and lines[i] == "" and i > 0 and lines[i - 1] == "":
                     del lines[i]
                     del heading_flags[i]
@@ -71,11 +97,10 @@ def main() -> int:
     for line in dest_lines:
         m = re.fullmatch(r"<<([A-Z]+-\d{3})>>", line)
         out.extend(sections[m.group(1)] if m else [line])
-    with open(dest, "w", encoding="utf-8") as f:
-        f.write("\n".join(out).rstrip("\n") + "\n")
-    for path, lines in texts.items():
-        with open(path, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines).rstrip("\n") + "\n")
+    write_if_changed(dest, out, originals[dest])
+    for path in texts:
+        if path in changed_sources:
+            write_if_changed(path, texts[path], originals[path])
     return 0
 
 

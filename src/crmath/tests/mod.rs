@@ -39,14 +39,35 @@ pub(crate) fn forced_fma() -> ForcedFma {
 /// backend, and every standalone [`super::fma`] call routed to it.
 pub(crate) fn with_forced_fma<T>(mode: ForcedFma, f: impl FnOnce() -> T) -> T {
     let previous = FORCED_FMA.with(|cell| cell.replace(mode));
-    let result = f();
-    FORCED_FMA.with(|cell| cell.set(previous));
-    result
+    struct Restore(ForcedFma);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            FORCED_FMA.with(|cell| cell.set(self.0));
+        }
+    }
+    let _restore = Restore(previous);
+    f()
 }
 
-/// The FMA paths this host can exercise.
+#[test]
+fn forced_fma_restores_after_nested_unwind() {
+    let previous = forced_fma();
+    with_forced_fma(ForcedFma::Software, || {
+        let caught = std::panic::catch_unwind(|| {
+            with_forced_fma(ForcedFma::Default, || {
+                panic!("deliberate unwind while overriding the FMA backend");
+            });
+        });
+        assert!(caught.is_err());
+        assert_eq!(forced_fma(), ForcedFma::Software);
+    });
+    assert_eq!(forced_fma(), previous);
+}
+
+/// The distinct FMA backends this host can exercise.
+/// Production selection is tested separately.
 pub(crate) fn fma_modes() -> Vec<ForcedFma> {
-    let mut modes = vec![ForcedFma::Default, ForcedFma::Software];
+    let mut modes = vec![ForcedFma::Software];
     if super::hardware_fma(1.0, 1.0, 1.0).is_some() {
         modes.push(ForcedFma::Hardware);
     }
@@ -138,10 +159,8 @@ pub(crate) fn record_kernel_backend(hardware: bool) {
 
 #[test]
 fn kernel_dispatch_honors_forced_fma() {
-    for mode in fma_modes() {
-        if mode == ForcedFma::Default {
-            continue;
-        }
+    let hardware = super::hardware_fma(1.0, 1.0, 1.0).is_some();
+    for mode in std::iter::once(ForcedFma::Default).chain(fma_modes()) {
         KERNEL_BACKENDS.with(|cell| cell.set((0, 0)));
         with_forced_fma(mode, || {
             let unary: [fn(f64) -> f64; 9] = [
@@ -161,11 +180,12 @@ fn kernel_dispatch_honors_forced_fma() {
             assert!(super::atan2(0.5, 0.75).is_finite());
             assert!(super::pow(0.5, 0.75).is_finite());
         });
-        let expected = if mode == ForcedFma::Software {
-            (11, 0)
-        } else {
-            (0, 11)
+        let uses_hardware = match mode {
+            ForcedFma::Default => hardware,
+            ForcedFma::Software => false,
+            ForcedFma::Hardware => true,
         };
-        KERNEL_BACKENDS.with(|cell| assert_eq!(cell.get(), expected));
+        let expected = if uses_hardware { (0, 11) } else { (11, 0) };
+        KERNEL_BACKENDS.with(|cell| assert_eq!(cell.get(), expected, "{mode:?}"));
     }
 }

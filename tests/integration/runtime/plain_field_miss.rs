@@ -46,7 +46,7 @@ fn class_index_miss_does_not_reach_table_library() {
 }
 
 #[test]
-fn global_proxy_does_not_expose_table_library_names() {
+fn global_table_does_not_expose_table_library_names() {
     let mut state = State::new();
     assert!(run_bool(&mut state, "return _G.insert == nil"));
 }

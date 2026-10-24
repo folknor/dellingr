@@ -75,7 +75,6 @@ impl State {
 
     /// TForCall: Call iterator(state, control) from the registers at `base`,
     /// store results in the loop variable registers after them.
-    #[hotpath::measure]
     pub(super) fn instr_tfor_call(
         &mut self,
         base: usize,
