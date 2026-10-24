@@ -1,5 +1,6 @@
 -- brokkr verdict workload derived from examples/globals/write.lua (see
--- that file for the probe rationale: SET_GLOBAL has no inline cache).
+-- that file for the probe rationale: the regression tracker for the
+-- per-site global write caches).
 -- Same kernel, repeated K times per _bench call so one call is ~100ms and
 -- the standalone run takes a few seconds in a release build.
 
@@ -16,7 +17,7 @@ local function kernel()
     return counter + scratch
 end
 
-local K = 800
+local K = 2000
 
 function _bench()
     local acc = 0

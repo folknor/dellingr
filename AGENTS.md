@@ -249,7 +249,11 @@ path so that a candidate optimization has something to measure against;
 all probes. Their ratios against
 reference Lua are worst cases by construction, not representative numbers, and
 each carries a header comment naming the candidate it exists to measure and the
-sibling bench to compare it against.
+sibling bench to compare it against. When a probe's candidate ships, the probe
+stays as the regression tracker for that fix: its header is rewritten to
+historical-probe status (`calls/many_literals`, `numerics/constants` and
+`globals/write` are there), and its `bench/` port's `K` is recalibrated back
+to the seconds scale so the verdict wall can still resolve a regression.
 
 `examples/parse/large_source.lua` is generated - regenerate with `python3
 examples/parse/generate.py`, do not edit it by hand. `brokkr check` verifies the

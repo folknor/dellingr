@@ -1,9 +1,10 @@
--- Hypothesis: global assignment has no inline cache. GET_GLOBAL caches an
--- entry index validated by `globals_version`, but SET_GLOBAL does UTF-8
--- validation, a fresh String allocation, and an IndexMap hash lookup on every
--- write, then re-checks `Builtin::from_name` on the way through.
--- `tally = tally + 1` pays the cached read and the uncached write in the same
--- statement, so the remaining cost here is the write side.
+-- Historical probe, kept as the regression tracker for its fix. Global
+-- assignment once had no inline cache: every SET_GLOBAL paid name
+-- validation, an allocation and a hash lookup while reads were already
+-- cached. Per-site global write caches (commit 7ee46fd) made a warmed write
+-- a validated in-place store; this file guards against the uncached path
+-- coming back. `tally = tally + 1` pays a cached read and a cached write in
+-- the same statement.
 -- Compare against fields/same_obj_write.lua, which measures cached field
 -- writes on a table rather than globals.
 

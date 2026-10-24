@@ -1,11 +1,12 @@
--- Probe: literal-only arithmetic in a hot loop.
--- There is no constant folding in the parser today, so `60 * 1000` emits
--- PUSH_NUM + PUSH_NUM + MUL and `-5` emits PUSH_NUM + NEGATE on every
--- execution, each charging cost. A folding pass collapses all of these to a
--- single PUSH_NUM.
+-- Historical probe, kept as the regression tracker for its fix. Literal-only
+-- arithmetic in a hot loop: before parse-time constant folding (commit
+-- 2685dd6), `60 * 1000` and `-5` re-executed their operand loads and
+-- arithmetic on every iteration, each charging cost. The parser now folds
+-- each literal subexpression to one number literal, so only the
+-- accumulation into `sum` runs; this file guards against folding regressing.
 -- Compare against numerics/arithmetic.lua, where every operand involves a
 -- loop variable and nothing is foldable - that bench is deliberately immune
--- to this optimization, so the pair isolates the folding win.
+-- to folding, so the pair isolates it.
 
 function _bench()
     local sum = 0

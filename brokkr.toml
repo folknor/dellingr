@@ -118,9 +118,9 @@ hotpath_xxh128 = "05c3e1c32866e2a166fe2c764e1d5605"
 
 [dellingr.workloads.constants]
 file = "bench/constants.lua"
-xxh128 = "78d3fe1436826a60c8df7d9b3123d0ce"
+xxh128 = "468576a94bddba291b96b604288b988c"
 hotpath_file = "examples/numerics/constants.lua"
-hotpath_xxh128 = "0986d40dc16ad2a193952a404c627ac5"
+hotpath_xxh128 = "87b19adab31986fbe9154c2618ccb3ef"
 
 [dellingr.workloads.math]
 file = "bench/math.lua"
@@ -199,9 +199,9 @@ hotpath_xxh128 = "191d9faa08b1dcc258ea0f89b583f9eb"
 
 [dellingr.workloads.write]
 file = "bench/write.lua"
-xxh128 = "e083a0a88b2838c78d0b684dd2bbd1dc"
+xxh128 = "5b7919b3243dd95d587bdc10b38f3a46"
 hotpath_file = "examples/globals/write.lua"
-hotpath_xxh128 = "2b1eee4dc05ff8a546448a438637c7ae"
+hotpath_xxh128 = "b8cbb28c33f77bc0822275e6dd62e233"
 
 [dellingr.workloads.global]
 file = "bench/global.lua"
@@ -211,7 +211,7 @@ hotpath_xxh128 = "f3ba381b19862c5f269b97ebc129d6f0"
 
 [dellingr.workloads.many_literals]
 file = "bench/many_literals.lua"
-xxh128 = "af2ca0e8c8623e2c31e9d1c5cfc9e6fc"
+xxh128 = "595df87ab2324092ce74b20a95818ec2"
 hotpath_file = "examples/calls/many_literals.lua"
 hotpath_xxh128 = "19aa377694a551e4817077fff79add56"
 

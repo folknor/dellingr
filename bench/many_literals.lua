@@ -1,5 +1,6 @@
 -- brokkr verdict workload derived from examples/calls/many_literals.lua
--- (see that file for the probe rationale: per-call literal re-interning).
+-- (see that file for the probe rationale: the regression tracker for the
+-- per-call literal re-interning fix).
 -- Same kernel, repeated K times per _bench call so one call is ~100ms and
 -- the standalone run takes a few seconds in a release build.
 
@@ -48,7 +49,7 @@ local function kernel()
     return hits
 end
 
-local K = 125
+local K = 1000
 
 function _bench()
     local acc = 0

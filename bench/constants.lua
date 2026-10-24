@@ -1,6 +1,6 @@
 -- brokkr verdict workload derived from examples/numerics/constants.lua
--- (see that file for the probe rationale: no constant folding today, so
--- literal arithmetic re-executes per hit). Same kernel, repeated K times
+-- (see that file for the probe rationale: the regression tracker for
+-- parse-time constant folding). Same kernel, repeated K times
 -- per _bench call so one call is ~100ms and the standalone run takes a
 -- few seconds in a release build.
 
@@ -16,7 +16,7 @@ local function kernel()
     return sum
 end
 
-local K = 1000
+local K = 1800
 
 function _bench()
     local acc = 0
