@@ -587,7 +587,7 @@ impl State {
     /// print-location tests pin each opcode's caller line.
     #[inline]
     pub(super) fn record_call_site(&mut self, call_site: usize) {
-        if let Some(call_info) = self.call_stack.last_mut() {
+        if let Some(call_info) = self.in_flight.call_stack.last_mut() {
             call_info.ip = call_site;
         }
     }
@@ -621,7 +621,7 @@ impl State {
     /// window the next operation reshapes.
     #[inline(always)]
     pub(super) fn check_window(&self, first: usize) -> Result<()> {
-        match self.open_upvalues.last() {
+        match self.in_flight.open_upvalues.last() {
             Some(&(index, _)) if index >= first => Err(Error::internal_fault(
                 super::super::error::InternalFault::WindowOverlapsOpenUpvalue,
             )),

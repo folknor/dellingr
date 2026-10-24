@@ -11,6 +11,7 @@ mod eval_store;
 mod fault_injection;
 mod frame;
 mod global_env;
+mod inventory;
 mod lua_val;
 mod meta_name;
 mod metamethod;
@@ -56,13 +57,16 @@ use super::patterns::{AnchorMode, LuaPattern, SharedPattern};
 
 use anchor::Registry;
 use global_env::{GlobalEnv, SuspendedEnv};
+use inventory::InFlight;
+#[cfg(any(debug_assertions, feature = "snapshot"))]
+use inventory::RestState;
 pub(crate) use meta_name::MetaName;
 use meta_name::MetaNames;
 
 pub(super) use lua_val::PointerIdKey;
 pub(super) use lua_val::Val;
 pub(super) use object::ObjectPtr;
-use object::{GcHeap, GcPolicy, Markable, StringPtr, UpvaluePool, UpvalueRef};
+use object::{GcHeap, GcPolicy, StringPtr, UpvaluePool};
 use rng::VmRng;
 use table::Table;
 pub(crate) use table::integer_index;
@@ -86,85 +90,7 @@ struct PatternCacheEntry {
     byte_len: usize,
 }
 
-/// Values temporarily held outside the visible VM stack.
-pub(super) struct TransientRoots {
-    values: Vec<Val>,
-    suspended_envs: Vec<SuspendedEnv>,
-}
-
-impl TransientRoots {
-    #[cfg(feature = "snapshot")]
-    fn is_empty(&self) -> bool {
-        self.values.is_empty() && self.suspended_envs.is_empty()
-    }
-}
-
-impl Markable for TransientRoots {
-    fn mark_reachable(&self, heap: &GcHeap, worklist: &mut Vec<ObjectPtr>) {
-        self.values.mark_reachable(heap, worklist);
-        self.suspended_envs.mark_reachable(heap, worklist);
-    }
-}
-
-/// Marks all GC roots. Called before garbage collection to identify reachable objects.
-///
-/// This function is the single source of truth for what constitutes a GC root.
-/// All allocation functions that may trigger GC must call this with the same set of roots.
-///
-#[hotpath::measure]
-pub(super) fn mark_gc_roots(state: &State, worklist: &mut Vec<ObjectPtr>) {
-    // Mark all roots - closed upvalues are now marked transitively when
-    // marking LuaFn closures that reference them
-    state.stack.mark_reachable(&state.heap, worklist);
-    state.global_env.mark_reachable(&state.heap, worklist);
-    for (identity, entry) in &state.bytecode_caches {
-        debug_assert_eq!(*identity, Arc::as_ptr(&entry.bytecode) as usize);
-        entry.runtime.literals.mark_reachable(&state.heap, worklist);
-    }
-    state.transient_roots.mark_reachable(&state.heap, worklist);
-    // The executing closures need no entry here: each sits in its function
-    // slot on the value stack, just below its frame, until it returns.
-    state.vararg_stack.mark_reachable(&state.heap, worklist);
-    state.registry.mark_reachable(&state.heap, worklist);
-    // Event names live for the whole State so dispatch never interns them.
-    state.meta_names.mark(&state.heap);
-    // Strings carry no metatable pointer, so the shared metatable must remain
-    // rooted even when no Lua value explicitly references it. Use `GcHeap::mark`
-    // so the object itself is coloured, not only its children.
-    if let Some(mt) = state.string_metatable {
-        state.heap.mark(mt, worklist);
-    }
-    #[cfg(feature = "snapshot")]
-    {
-        // The canonical environment and its pristine baseline must survive even
-        // when user code currently reaches none of it: save/load diffs live
-        // against this snapshot.
-        // Must go through `GcHeap::mark`, which sets the object's color before
-        // queueing it. Pushing onto the worklist directly leaves the object
-        // Unmarked, so its children are traced but sweep still frees it - and a
-        // later save then dereferences a dangling canonical environment table.
-        for ptr in state.env_tokens.keys() {
-            state.heap.mark(*ptr, worklist);
-        }
-        for baseline in state.env_baselines.values() {
-            for (key, value) in baseline.entries.iter().chain(&baseline.hash_slots) {
-                key.mark_reachable(&state.heap, worklist);
-                value.mark_reachable(&state.heap, worklist);
-            }
-            if let Some(metatable) = &baseline.metatable {
-                metatable.mark_reachable(&state.heap, worklist);
-            }
-        }
-    }
-    // Open upvalues point at live stack slots but may not yet be held by
-    // any closure (mid-capture in reg_closure); their pool slots are
-    // roots for the pool sweep even though they hold no heap reference.
-    for (_, uv_ref) in &state.open_upvalues {
-        state.upvalue_pool.mark_slot(*uv_ref);
-    }
-}
-
-/// One active Lua activation. `State::call_stack` holds exactly one per
+/// One active Lua activation. `InFlight::call_stack` holds exactly one per
 /// active Lua function call, innermost last, across every dispatch-loop
 /// invocation; tracebacks, `print` locations and the bytecode-cache sweep
 /// read it. The hot frame
@@ -178,7 +104,7 @@ pub(super) struct CallInfo {
     /// `State::record_call_site`). Not the live instruction pointer of the
     /// executing frame; while this activation is innermost it may be stale.
     pub(super) ip: usize,
-    /// Start of this activation's extra arguments in `State::vararg_stack`.
+    /// Start of this activation's extra arguments in `InFlight::vararg_stack`.
     /// The innermost activation owns the suffix, including an empty suffix.
     /// Call depth times MAX_ARGUMENTS bounds the arena below u32::MAX.
     pub(super) vararg_start: u32,
@@ -189,55 +115,27 @@ pub(super) struct CallInfo {
     pub(super) chain_charges: u32,
 }
 
-// The single inventory of execution-lifetime state. New fields must be
-// classified here; host values and suspended environments are allowed at
-// rest, but are forbidden for snapshots. Fault-injection bookkeeping is
-// exempt: test-only, disarmed before observing quiescence, never serialized.
-macro_rules! in_flight {
-    (collections: [$($collection:ident),*], scalars: [$($scalar:ident = $zero:expr),*],
-     optionals: [$($optional:ident),*]) => {
-        impl State {
-            #[cfg(debug_assertions)]
-            #[cold]
-            #[inline(never)]
-            fn debug_assert_at_rest(&self) {
-                debug_assert!($(self.$collection.is_empty() &&)*
-                    $(self.$scalar == $zero &&)*
-                    $(self.$optional.is_none() &&)* self.transient_roots.values.is_empty());
-            }
+impl State {
+    /// Out of line so the check adds nothing to `guarded`'s frame.
+    #[cfg(debug_assertions)]
+    #[cold]
+    #[inline(never)]
+    fn debug_assert_at_rest(&self) {
+        debug_assert_ne!(self.rest_state(), RestState::Executing);
+    }
 
-            #[cfg(feature = "snapshot")]
-            fn validate_quiescent(&self) -> std::result::Result<(), save_state::SaveError> {
-                #[cfg(feature = "fault-injection")]
-                self.debug_assert_fault_injection_disarmed();
-                if self.stack.is_empty() && $(self.$collection.is_empty() &&)*
-                    $(self.$scalar == $zero &&)*
-                    $(self.$optional.is_none() &&)* self.transient_roots.is_empty() {
-                    Ok(())
-                } else {
-                    Err(save_state::SaveError::NotQuiescent)
-                }
-            }
-
-            #[cfg(feature = "snapshot")]
-            fn reset_in_flight(&mut self) {
-                self.stack.clear();
-                $(self.$collection.clear();)*
-                $(self.$scalar = $zero;)*
-                $(self.$optional = None;)*
-                let TransientRoots { values, suspended_envs } = &mut self.transient_roots;
-                values.clear();
-                suspended_envs.clear();
-            }
+    /// Refuse a snapshot unless only persistent state remains (see
+    /// `State::rest_state`).
+    #[cfg(feature = "snapshot")]
+    fn validate_quiescent(&self) -> std::result::Result<(), save_state::SaveError> {
+        #[cfg(feature = "fault-injection")]
+        self.debug_assert_fault_injection_disarmed();
+        if self.rest_state() == RestState::Quiescent {
+            Ok(())
+        } else {
+            Err(save_state::SaveError::NotQuiescent)
         }
-    };
-}
-
-in_flight! {
-    collections: [pending_bytecode_caches, open_upvalues, call_stack, vararg_stack],
-    scalars: [stack_bottom = 0, metamethod_depth = 0, call_depth = 0,
-        native_call_depth = 0],
-    optionals: [active_rust_fn]
+    }
 }
 
 /// State-local runtime data for one immutable bytecode chunk.
@@ -273,25 +171,22 @@ pub struct State {
     pub(super) string_mt_index_shape: Option<(u64, usize)>,
     /// Metamethod event keys, interned at construction and always rooted.
     meta_names: MetaNames,
-    /// The main stack which stores values.
+    /// The main stack which stores values. Host-held: it may hold values the
+    /// host pushed between calls, but must be empty for a snapshot.
     pub(super) stack: Vec<Val>,
-    /// The bottom index of the current frame in the stack.
-    pub(super) stack_bottom: usize,
+    /// Execution-lifetime state: frame bases, activation records, varargs,
+    /// open upvalues, transient roots and depths (see `inventory`).
+    pub(super) in_flight: InFlight,
     /// The heap which holds any garbage-collected Objects.
     pub(super) heap: GcHeap,
     /// State-local runtime data, keyed by the pinned Bytecode allocation.
     bytecode_caches: IndexMap<usize, BytecodeCacheEntry>,
-    /// Identities being turned into closure shells, retained during a GC sweep.
-    pending_bytecode_caches: Vec<usize>,
-    /// Temporary VM values and suspended environments retained across
-    /// allocation or re-entry.
-    pub(super) transient_roots: TransientRoots,
+    /// Environments suspended by `with_restricted_env`, innermost last.
+    /// Host-held, like `stack`: non-empty while a host callback runs inside
+    /// a restricted environment, refused by a snapshot.
+    suspended_envs: Vec<SuspendedEnv>,
     /// Pool for upvalue storage. Avoids per-upvalue heap allocations.
     pub(super) upvalue_pool: UpvaluePool,
-    /// Open upvalues currently pointing to stack slots.
-    /// Each entry is (stack_index, upvalue_ref). Kept sorted by stack_index ascending
-    /// so we can efficiently close them when a function returns.
-    pub(super) open_upvalues: Vec<(usize, UpvalueRef)>,
     /// Runtime cost accounting and optional budget.
     pub(super) cost: CostState,
     /// Compiled pattern programs shared by `string.find`, `string.match`,
@@ -312,39 +207,17 @@ pub struct State {
     /// Test instrumentation: how many patterns the cache has compiled.
     #[cfg(test)]
     pattern_compilations: u64,
-    /// Depth of __index, __newindex and non-function __call chains.
-    /// Prevents stack overflow from circular metamethod references.
-    pub(super) metamethod_depth: u32,
-    /// Active native callback, restored across nested Rust calls.
-    pub(super) active_rust_fn: Option<RustFunc>,
-    /// Active Lua activations (the length of `call_stack`, kept as a counter
-    /// for the hot depth check). Lua-to-Lua calls run in one dispatch loop
-    /// and cost no native stack, so this bounds heap-held frames only.
-    pub(super) call_depth: u32,
-    /// Active calls made from Rust: host `call`/`call_anchor`, metamethod
-    /// handlers, generic-for iterators and library callbacks, each of which
-    /// starts a native dispatch-loop invocation or Rust callback. Bounded by
-    /// `MAX_NATIVE_CALL_DEPTH`; see docs/limits.md, "Native stack".
-    pub(super) native_call_depth: u32,
     /// Set once a panic has unwound through VM execution. A panic skips every
-    /// pop and restore on its way out, so call_stack, stack_bottom, the
-    /// pending bases, transient roots and open upvalues no longer describe
+    /// pop and restore on its way out, so `in_flight` no longer describes
     /// the live frames; a poisoned State refuses further use (see
     /// `ErrorKind::StatePoisoned`). Never cleared.
     pub(super) poisoned: bool,
-    /// Call stack for generating stack traces on errors.
-    /// Each entry represents an active Lua function call.
-    pub(super) call_stack: Vec<CallInfo>,
     /// Spare frame stacks for dispatch-loop invocations, so a re-entry
     /// allocates none in steady state. Always empty stacks: an invocation
     /// takes one, and gives it back once its frames have all returned. Holds
     /// no VM values (frames own only `Arc`s), so it is no GC root, and it is
     /// capacity rather than state, so a snapshot ignores it.
     pub(in crate::vm) frame_stacks: Vec<Vec<frame::Frame>>,
-    /// Extra arguments of active Lua functions, in activation order. Each
-    /// record owns the suffix from `CallInfo::vararg_start` while innermost.
-    /// Only the live length is a GC root; retained capacity is not saved.
-    pub(super) vararg_stack: Vec<Val>,
     /// Host callbacks for print output, error handling, etc.
     pub(super) callbacks: Box<dyn HostCallbacks>,
     /// User-defined data that RustFuncs can access.
@@ -354,7 +227,7 @@ pub struct State {
     /// Use `set_rng_seed()` to set a specific seed for replay.
     pub(super) rng: VmRng,
     /// Registry of values retained from Rust via `Anchor` handles. Acts as
-    /// an additional GC root set; participates in `mark_gc_roots`. Carries
+    /// an additional GC root set (`GcRoot::Anchors`). Carries
     /// the State's process-unique `state_id` so cross-State misuse of an
     /// `Anchor` is caught.
     pub(super) registry: Registry,
@@ -417,7 +290,7 @@ pub(super) struct EnvBaseline {
 // Important note on how the stack is tracked:
 // A State uses a single stack for all local variables, temporary values,
 // function arguments, and function return values. Both Lua frames and Rust
-// frames use this stack. `self.stack_bottom` refers to the first value in the
+// frames use this stack. `self.in_flight.stack_bottom` refers to the first value in the
 // stack which belongs to the current frame. Note that Rust functions access
 // the stack using 1-based indexing, but Lua code uses 0-based indexing.
 
@@ -575,29 +448,18 @@ impl State {
             string_mt_index_shape: None,
             meta_names,
             stack: Vec::with_capacity(tuning::INITIAL_VM_STACK_CAPACITY),
-            stack_bottom: 0,
+            in_flight: InFlight::new(),
             heap,
             bytecode_caches: IndexMap::default(),
-            pending_bytecode_caches: Vec::new(),
-            transient_roots: TransientRoots {
-                values: Vec::with_capacity(tuning::INITIAL_TRANSIENT_ROOT_VALUES_CAPACITY),
-                suspended_envs: Vec::new(),
-            },
+            suspended_envs: Vec::new(),
             upvalue_pool: UpvaluePool::new(),
-            open_upvalues: Vec::new(),
             cost: CostState::default(),
             patterns: IndexMap::default(),
             pattern_bytes: 0,
             #[cfg(test)]
             pattern_compilations: 0,
-            metamethod_depth: 0,
-            active_rust_fn: None,
-            call_depth: 0,
-            native_call_depth: 0,
             poisoned: false,
-            call_stack: Vec::with_capacity(tuning::INITIAL_CALL_STACK_CAPACITY),
             frame_stacks: Vec::new(),
-            vararg_stack: Vec::new(),
             callbacks,
             user_data: None,
             #[cfg(feature = "fault-injection")]
@@ -956,19 +818,24 @@ impl State {
     /// before marking would reclaim them sooner; collection timing is not a
     /// cross-version contract (`docs/determinism.md`), so that is allowed as
     /// a called-out change.
-    fn sweep_bytecode_caches(&mut self) {
+    ///
+    /// `live` arrives holding what the root visit retained
+    /// (`GcRoot::ActiveChunk` trees and `GcRoot::PendingChunk` entries); the
+    /// marked closures can only be read once marking has finished, so they
+    /// are added here, before the pending identities.
+    fn sweep_bytecode_caches(&mut self, live: object::LiveChunks) {
         // Bytecode identity deduplication also covers nested prototypes and
         // active/pending functions with no reachable heap closure. Keep one
         // ordered set for all three sources rather than treating the heap's
         // marked closures as the complete runtime-cache root set.
-        let mut live = BTreeSet::new();
+        let object::LiveChunks {
+            trees: mut live,
+            pending,
+        } = live;
         for bytecode in self.heap.reachable_lua_bytecodes() {
             Self::retain_bytecode_tree(&mut live, bytecode);
         }
-        for call in &self.call_stack {
-            Self::retain_bytecode_tree(&mut live, &call.bytecode);
-        }
-        live.extend(self.pending_bytecode_caches.iter().copied());
+        live.extend(pending);
         self.bytecode_caches
             .retain(|identity, _| live.contains(identity));
     }
@@ -1022,12 +889,12 @@ impl State {
         for literal in &bytecode.string_literals {
             check_string_size(literal.len())?;
         }
-        let watermark = self.transient_roots.values.len();
+        let watermark = self.in_flight.rooted_values.len();
         let result = (|| {
             let mut literals = Vec::with_capacity(bytecode.string_literals.len());
             for literal in &bytecode.string_literals {
                 let value = self.alloc_string(literal)?;
-                self.transient_roots.values.push(value);
+                self.in_flight.rooted_values.push(value);
                 literals.push(value);
             }
             let runtime = Arc::new(BytecodeRuntime {
@@ -1043,7 +910,7 @@ impl State {
             );
             Ok(runtime)
         })();
-        self.transient_roots.values.truncate(watermark);
+        self.in_flight.rooted_values.truncate(watermark);
         result
     }
 
@@ -1082,6 +949,7 @@ impl State {
     pub(crate) fn host_print(&mut self, message: &[u8]) {
         // Get current line from call stack (if available)
         let line = self
+            .in_flight
             .call_stack
             .last()
             .and_then(|info| {
@@ -1093,6 +961,7 @@ impl State {
             .unwrap_or(0);
 
         let source = self
+            .in_flight
             .call_stack
             .last()
             .and_then(|info| info.bytecode.source.as_deref());
@@ -1107,11 +976,12 @@ impl State {
             // located (an unnamed caller included). A shim with no script
             // caller keeps its own name, as its trace keeps its own frame.
             let source = self
+                .in_flight
                 .call_stack
                 .iter()
                 .rev()
                 .find(|info| !Self::is_gmatch_wrapper(&info.bytecode))
-                .or(self.call_stack.last())
+                .or(self.in_flight.call_stack.last())
                 .and_then(|info| info.bytecode.source.as_ref());
             error.attach_source_name_if_absent(source);
             self.callbacks.on_error(error);
@@ -1121,7 +991,8 @@ impl State {
     /// Returns the active Lua frame's chunk name, byte-exact, or `None`
     /// outside execution or in an unnamed chunk.
     pub fn current_source(&self) -> Option<&[u8]> {
-        self.call_stack
+        self.in_flight
+            .call_stack
             .last()
             .and_then(|info| info.bytecode.source.as_deref())
     }
@@ -1217,7 +1088,7 @@ impl State {
     // unregistered callback stays anonymous. Snapshot ids are a fallback, not
     // names inferred from the Lua caller.
     pub(crate) fn active_rust_function_name(&self) -> Option<String> {
-        let function = self.active_rust_fn?;
+        let function = self.in_flight.active_rust_fn?;
         for (name, value) in self.global_env.live_string_bindings(&self.heap) {
             if let Val::RustFn(candidate) = value
                 && candidate as usize == function as usize
@@ -1404,7 +1275,7 @@ impl State {
     {
         self.guarded(|state| {
             let saved = state.global_env.restrict(&mut state.heap, whitelist);
-            state.transient_roots.suspended_envs.push(saved);
+            state.suspended_envs.push(saved);
 
             // Restore the environment on unwind too. This keeps the global
             // bindings coherent for whatever the host still reads before it
@@ -1413,7 +1284,6 @@ impl State {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(state)));
 
             let saved = state
-                .transient_roots
                 .suspended_envs
                 .pop()
                 .expect("suspended environment missing during restoration");
@@ -1432,7 +1302,7 @@ impl State {
     /// Whether a [`State::with_restricted_env`] callback is running, at any
     /// nesting depth.
     pub(super) fn in_restricted_env(&self) -> bool {
-        !self.transient_roots.suspended_envs.is_empty()
+        !self.suspended_envs.is_empty()
     }
 
     /// Refuse use of a poisoned State. One predictable branch; the error
@@ -1486,7 +1356,7 @@ impl State {
                     return Err(Self::poisoned_error());
                 }
                 #[cfg(debug_assertions)]
-                if self.active_rust_fn.is_none() {
+                if self.in_flight.active_rust_fn.is_none() {
                     self.debug_assert_at_rest();
                 }
                 result
@@ -1520,10 +1390,10 @@ impl State {
         // allocate, call Lua, or re-enter the host. The unwind guard keeps
         // this helper's own root bookkeeping balanced and poisons the State;
         // it does not make the State reusable after a panic.
-        let watermark = self.transient_roots.values.len();
-        self.transient_roots.values.extend_from_slice(values);
+        let watermark = self.in_flight.rooted_values.len();
+        self.in_flight.rooted_values.extend_from_slice(values);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self)));
-        self.transient_roots.values.truncate(watermark);
+        self.in_flight.rooted_values.truncate(watermark);
         match result {
             Ok(result) => result,
             Err(payload) => {
@@ -1589,13 +1459,14 @@ impl State {
         bytecode: &Arc<Bytecode>,
         cursor: usize,
     ) -> Vec<StackFrame> {
-        let mut trace = Vec::with_capacity(self.call_stack.len() + 1);
+        let mut trace = Vec::with_capacity(self.in_flight.call_stack.len() + 1);
 
         // First entry: the current frame where the error occurred
         // A host may call the iterator without a script caller. Keep its
         // implementation location in that case rather than inventing one.
         let shim_with_script_caller = Self::is_gmatch_wrapper(bytecode)
             && self
+                .in_flight
                 .call_stack
                 .iter()
                 .rev()
@@ -1608,7 +1479,7 @@ impl State {
         // Add entries from call_stack (most recent first).
         // Skip the last entry (current function) since we already have it.
         // The remaining entries are the callers, with ip pointing to their call sites.
-        for call_info in self.call_stack.iter().rev().skip(1) {
+        for call_info in self.in_flight.call_stack.iter().rev().skip(1) {
             if Self::is_gmatch_wrapper(&call_info.bytecode) {
                 continue;
             }

@@ -10,6 +10,8 @@
 
 mod collector;
 
+pub(in crate::vm) use collector::LiveChunks;
+
 use crate::det_hash::IndexMap;
 use crate::limits::tuning;
 use std::cell::Cell;
@@ -143,6 +145,18 @@ impl UpvaluePool {
     #[cfg(feature = "snapshot")]
     pub(super) fn set_closed(&mut self, uv_ref: UpvalueRef, val: Val) {
         self.slots[uv_ref.index()] = Upvalue::Closed(val);
+    }
+
+    /// Test-only: undo a mark phase without sweeping. `Free` stays `Free`:
+    /// those slots are on the free list, and the next sweep must not list
+    /// them again.
+    #[cfg(all(test, feature = "snapshot"))]
+    pub(super) fn reset_marks(&self) {
+        for color in &self.colors {
+            if color.get() == UpvalueSlotColor::Reachable {
+                color.set(UpvalueSlotColor::Unmarked);
+            }
+        }
     }
 
     /// Slots currently holding a live upvalue (total minus free-listed).
@@ -745,6 +759,22 @@ impl GcHeap {
         }
     }
 
+    /// Test-only: the objects a mark phase coloured, after which every
+    /// object and string colour is back to Unmarked, as a sweep would leave
+    /// them, without freeing anything. The caller resets the upvalue pool.
+    #[cfg(all(test, feature = "snapshot"))]
+    pub(super) fn take_marked_objects(&self) -> std::collections::BTreeSet<ObjectPtr> {
+        let mut marked = std::collections::BTreeSet::new();
+        for (key, obj) in &self.objects {
+            if obj.color.get() == Color::Reachable {
+                marked.insert(ObjectPtr(key));
+            }
+            obj.color.set(Color::Unmarked);
+        }
+        self.strings.reset_marks();
+        marked
+    }
+
     /// Number of GC-managed objects (tables and closures).
     pub(super) fn object_count(&self) -> usize {
         self.objects.len()
@@ -938,6 +968,14 @@ impl StringPool {
         );
         if let Some(entry) = self.strings.get(ptr.0) {
             entry.color.set(Color::Reachable);
+        }
+    }
+
+    /// Test-only: undo a mark phase without sweeping.
+    #[cfg(all(test, feature = "snapshot"))]
+    fn reset_marks(&self) {
+        for entry in self.strings.values() {
+            entry.color.set(Color::Unmarked);
         }
     }
 

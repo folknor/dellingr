@@ -83,7 +83,7 @@ therefore fail open under `hotpath-alloc`:
   false for `hotpath-alloc`.
 
 `tests/common/stack.rs`, `tests/native_stack.rs` and
-`tests/integration/errors/error_boundary.rs` spell both features and are
+`tests/integration/failures/error_boundary.rs` spell both features and are
 correct, so the repository already knows; the guards disagree.
 
 Fix: `hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]`, so
@@ -123,7 +123,7 @@ The hook exists only to keep oracle panics from flooding the output, and
 `catch_unwind` already isolates them. `with_forced_fma` has the same shape
 (restore only on the success path); it is harmless because the state is
 thread-local and the thread dies with the panic, but a drop guard costs
-nothing. `tests/panic_poison.rs` shows the right shape: install once behind a
+nothing. `tests/integration/host/panic_poison.rs` shows the right shape: install once behind a
 `Once`, filter on the payload, forward everything else.
 
 Fix: restore in a drop guard, or install one filtering hook once per process
@@ -230,7 +230,7 @@ Enforceable: yes, either way.
 
 Reported by: corpus-harness, snapshot, compiler-cost.
 
-`tests/save_golden.rs` documents that the fixture "must come from the profile
+`tests/integration/snapshot/save_golden.rs` documents that the fixture "must come from the profile
 the tests run under": a release build (`lto = "fat"`) can fold
 `base_unpack_values` and `table_unpack_values` (two byte-identical wrappers
 around `unpack_values` in `src/lua_std/basic.rs` and `src/lua_std/table.rs`),

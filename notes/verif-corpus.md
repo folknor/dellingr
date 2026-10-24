@@ -1,10 +1,11 @@
 # Verification: corpus and harness
 
 Findings from the verification hunt about everything that runs the
-`examples/` and `bench/` corpora: `tests/run_examples.rs`, `tests/diff_test.rs`
-and `scripts/diff_test.sh`, `tests/bench_scripts.rs`,
-`tests/integration/corpus/disassembly.rs`, `examples/hotpath.rs`, the CLI suites,
-`tests/common/`, and the Lua files themselves. Several entries would be removed
+`examples/` and `bench/` corpora: the integration crate's `corpus` subject
+(`run_examples.rs`, `diff_test.rs`, `bench_scripts.rs`, `disassembly.rs` under
+`tests/integration/corpus/`), `scripts/diff_test.sh`, `examples/hotpath.rs`,
+the `cli` subject, `tests/integration/support/` and `tests/common/`, and the
+Lua files themselves. Several entries would be removed
 by the in-process gate and per-example test rewrites in rewrites.md; they stay
 filed here until then. Each entry names the scopes whose hunters reported it.
 
@@ -491,11 +492,11 @@ Enforceable: yes.
 
 Reported by: corpus-harness.
 
-- `tests/cli_arguments.rs::analyze_rejects_limit_and_sends_its_warning_to_stderr`
-  and `tests/cli_output.rs::analyze_warning_uses_the_library_caveat` both assert
+- `cli::cli_arguments::analyze_rejects_limit_and_sends_its_warning_to_stderr`
+  and `cli::cli_output::analyze_warning_uses_the_library_caveat` both assert
   the analyze warning equals `ANALYSIS_WARNING_PREFIX + CostAnalysis::caveat()`;
   one is redundant.
-- `cli::run` runs the CLI with `current_dir(".")`, whatever the harness cwd is
+- `support::process::run` runs the CLI with `current_dir(".")`, whatever the harness cwd is
   (cargo and brokkr both use the package root, so it works by convention);
   `limited_command` pins `CARGO_MANIFEST_DIR`. Pick one.
 
@@ -531,7 +532,7 @@ Reported by: check-machinery, corpus-harness.
 
 - `examples/globals/write.lua`'s header describes `globals_version`, an
   uncached `SET_GLOBAL`, UTF-8 validation and a fresh `String` per write.
-  `globals_version` no longer exists in `src/`, and `tests/global_write_cache.rs`
+  `globals_version` no longer exists in `src/`, and `runtime::global_write_cache`
   tests a global write cache. The file is pinned, so correcting the comment cuts
   the workload's history (brokkr.md).
 - AGENTS.md's comment for `examples/alloc/` (`closure, short_tables,

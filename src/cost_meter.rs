@@ -310,7 +310,7 @@ mod tests {
         state.push_nil().unwrap();
         state.push_nil().unwrap();
         state.push_nil().unwrap();
-        state.stack_bottom = 2;
+        state.in_flight.stack_bottom = 2;
         assert_argument(
             &state
                 .cached_pattern_matcher(1)

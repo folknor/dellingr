@@ -146,7 +146,7 @@ impl State {
         self.record_call_site(call_site);
         // native-call: index_call->call_unguarded
         let result = self.call_unguarded(ArgCount::Fixed(2), RetCount::Fixed(1));
-        self.metamethod_depth -= units;
+        self.in_flight.metamethod_depth -= units;
         result?;
         self.pop_into(dst);
         Ok(())
@@ -237,7 +237,7 @@ impl State {
         self.record_call_site(call_site);
         // native-call: newindex_call->call_unguarded
         let result = self.call_unguarded(ArgCount::Fixed(3), RetCount::Fixed(0));
-        self.metamethod_depth -= units;
+        self.in_flight.metamethod_depth -= units;
         result
     }
 
@@ -486,17 +486,18 @@ impl State {
     pub(super) fn reg_vararg(&mut self, dst: usize, count: RetCount) -> Result<()> {
         // While innermost, the activation owns the arena suffix.
         let start = self
+            .in_flight
             .call_stack
             .last()
             .expect("an executing frame has an activation record")
             .vararg_start as usize;
-        let available = self.vararg_stack.len() - start;
+        let available = self.in_flight.vararg_stack.len() - start;
         match count {
             RetCount::Fixed(n) => {
                 let n = usize::from(n);
                 let copied = n.min(available);
                 if copied > 0 {
-                    let varargs = &self.vararg_stack[start..];
+                    let varargs = &self.in_flight.vararg_stack[start..];
                     self.stack[dst..dst + copied].copy_from_slice(&varargs[..copied]);
                 }
                 self.stack[dst + copied..dst + n].fill(Val::Nil);
@@ -510,7 +511,7 @@ impl State {
                 self.check_stack_space(additional)?;
                 self.stack.truncate(dst);
                 if available > 0 {
-                    let varargs = &self.vararg_stack[start..];
+                    let varargs = &self.in_flight.vararg_stack[start..];
                     self.stack.extend_from_slice(varargs);
                 }
             }
@@ -538,13 +539,13 @@ mod tests {
             Val::Num(40.0),
         ];
         state.stack.clone_from(&original);
-        state.vararg_stack.extend_from_slice(&[
+        state.in_flight.vararg_stack.extend_from_slice(&[
             Val::Num(50.0),
             Val::Num(60.0),
             Val::Num(70.0),
             Val::Num(80.0),
         ]);
-        state.call_stack.push(CallInfo {
+        state.in_flight.call_stack.push(CallInfo {
             bytecode: Arc::new(Bytecode::default()),
             ip: 0,
             vararg_start: 0,

@@ -3,7 +3,7 @@
 //! Every dispatch site that looks up an event in a metatable reads its key
 //! from [`MetaNames`] instead of interning the spelling on demand. The names
 //! are interned when the State is built and stay rooted for its lifetime (see
-//! `vm::mark_gc_roots`), so a lookup never allocates, never collects and needs
+//! `GcRoot::MetaNames` in `vm/inventory.rs`), so a lookup never allocates, never collects and needs
 //! no rooting of the values the caller holds.
 //!
 //! Because the names never die, a `%p` identity assigned to one of them is

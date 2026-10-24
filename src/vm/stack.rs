@@ -14,7 +14,7 @@ impl State {
     /// at 1, this result is equal to the number of elements in the stack (and
     /// so 0 means an empty stack).
     pub fn get_top(&self) -> usize {
-        self.stack.len() - self.stack_bottom
+        self.stack.len() - self.in_flight.stack_bottom
     }
 
     /// Accepts any acceptable index, or 0, and sets the stack top to this index.
@@ -227,7 +227,7 @@ impl State {
                 index: isize::try_from(count).unwrap_or(isize::MAX),
             }));
         }
-        let bottom = self.stack_bottom;
+        let bottom = self.in_flight.stack_bottom;
         self.stack.drain(bottom..bottom + count);
         Ok(())
     }
@@ -404,7 +404,7 @@ impl State {
     /// Given a relative index, convert it to an absolute index to the stack.
     pub(super) fn convert_idx(&self, fake_idx: isize) -> Result<usize> {
         let stack_top = self.stack.len() as isize;
-        let stack_bottom = self.stack_bottom as isize;
+        let stack_bottom = self.in_flight.stack_bottom as isize;
         let stack_len = stack_top - stack_bottom;
         if fake_idx > 0 && fake_idx <= stack_len {
             Ok((fake_idx - 1 + stack_bottom) as usize)

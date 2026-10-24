@@ -300,7 +300,7 @@ impl State {
                     (ArgCount::Fixed(2), &mut handler_called),
                     RetCount::Fixed(1),
                 );
-                self.metamethod_depth -= units;
+                self.in_flight.metamethod_depth -= units;
                 called.map(|()| self.pop_val())
             }
             Err(error) => Err(error),
@@ -436,7 +436,7 @@ impl State {
         if let Some(units) = pending {
             // native-call: set_table->call_unguarded
             let called = self.call_unguarded(ArgCount::Fixed(3), RetCount::Fixed(0));
-            self.metamethod_depth -= units;
+            self.in_flight.metamethod_depth -= units;
             called?;
         }
         self.stack.truncate(top - 2);
@@ -687,7 +687,7 @@ impl State {
                 let mut roots = Vec::new();
                 reserve_sort_values(&mut roots, arr.len())?;
                 roots.extend_from_slice(&arr);
-                reserve_sort_values(&mut self.transient_roots.values, roots.len())?;
+                reserve_sort_values(&mut self.in_flight.rooted_values, roots.len())?;
                 self.with_rooted_values(&roots, |state| {
                     // native-call: table_sort->table_sort_values:comparator
                     state.table_sort_values(&mut arr, comp_idx)

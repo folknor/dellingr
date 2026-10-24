@@ -98,7 +98,10 @@ fn saved_keys_share_numeric_equality_and_string_content_equality() {
 }
 
 #[test]
-fn reset_and_quiescence_share_the_snapshot_inventory() {
+// Per-field coverage of `InFlight` lives in `inventory`'s tests; this checks
+// the State-level reset also clears the host-held fields, and leaves nothing
+// a save could tell apart from a pristine State.
+fn reset_clears_in_flight_and_host_held_state() {
     let mut state = State::new();
     assert!(state.validate_quiescent().is_ok());
     let before = state
@@ -106,16 +109,15 @@ fn reset_and_quiescence_share_the_snapshot_inventory() {
         .expect("pristine state can be saved")
         .bytes;
     state.push_nil().expect("one value fits the test stack");
-    state.stack_bottom = 1;
-    state.pending_bytecode_caches.push(1);
-    state.transient_roots.values.push(Val::Nil);
+    state.in_flight.stack_bottom = 1;
+    state.in_flight.pending_bytecode_caches.push(1);
+    state.in_flight.rooted_values.push(Val::Nil);
     state
-        .transient_roots
         .suspended_envs
         .push(super::super::global_env::SuspendedEnv::detached());
-    state.metamethod_depth = 1;
-    state.call_depth = 1;
-    state.native_call_depth = 1;
+    state.in_flight.metamethod_depth = 1;
+    state.in_flight.call_depth = 1;
+    state.in_flight.native_call_depth = 1;
     assert_eq!(state.validate_quiescent(), Err(SaveError::NotQuiescent));
     state.reset_in_flight();
     assert!(state.validate_quiescent().is_ok());

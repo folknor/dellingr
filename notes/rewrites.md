@@ -92,6 +92,34 @@ compiler-verification, disassembly, cost-golden and save-round-trip passes.
 
 Enforceable: structural; the walker becomes the only enumeration.
 
+Open costs, from `brokkr man test-lanes` (checked after the integration
+merge, which put both corpus tests in the shared `integration` crate):
+
+- brokkr sweeps are serial unless a profile sets `test_threads`; `brokkr test`
+  is always serial. Split into about 160 tests on a serial sweep, the 36 debug
+  kernels (about a second each) plus three processes per diff-gate example
+  would add on the order of a minute per dev sweep, in both dev sweeps, against
+  today's 8 in-test workers and 7 partitions.
+- Recovering that wall time means `test_threads` on the dev sweeps, which
+  parallelises every test of the integration crate, including the
+  million-slot at-cap tests and their memory peaks. The manual warns that a
+  CPU-starved (not hung) test can trip the 20s wall-clock cap under heavy
+  `test_threads`.
+- `harness = "nextest"` runs process-per-test concurrently but, per the manual,
+  retires the shared-process lane that detects process-global-state contention,
+  which the merged crate now relies on.
+- A `build.rs` runs in every consumer's build of the library; the alternative
+  is a checked-in generated list with a `--check` test, like
+  `examples/parse/large_source.lua`.
+- With the shell differential gate staying, each per-example diff test still
+  spawns `bash diff_test.sh` and three interpreters.
+
+The per-example hang attribution can be had without the rewrite: the
+timeout-and-concurrency entry in verif-corpus.md proposes per-example timeouts
+derived from one constant below the cap, and the runner can report the
+examples in flight before the cap kills the test. What only the rewrite gives
+is a focused `brokkr test <example>`.
+
 ## RW-004 - Identify Rust functions by registry handle instead of code address
 
 Reported by: snapshot, runtime.
@@ -194,42 +222,3 @@ representability once at generation time.
 
 Enforceable: the crate boundary is a structural rule; the profile override is
 config.
-
-## RW-007 - Make State's GC-root and in-flight inventories exhaustive by construction
-
-Reported by: runtime, snapshot.
-
-AGENTS.md: "`vm::mark_gc_roots` is the *single source of truth* for what's
-reachable." `mark_gc_roots` reads State fields one by one; nothing makes a new
-State field holding `Val`s show up there. The same holds for the `in_flight!`
-macro ("New fields must be classified here"), which feeds
-`debug_assert_at_rest`, `validate_quiescent` and `reset_in_flight`. A field
-added and forgotten is caught only if some test collects or saves at the right
-moment. The tests that look like guards claim more than they check:
-
-- `save_walker_object_count_matches_gc_live_minus_env` says "Adding a GC root
-  without teaching the save walker would break this identity". That holds only
-  if the test's program puts an object into the new root. Anchors are the
-  counterexample already in the tree: a GC root the walker deliberately does
-  not follow, and the identity holds only because the program creates no
-  anchor.
-- `reset_and_quiescence_share_the_snapshot_inventory` dirties `stack_bottom`,
-  `pending_bytecode_caches`, the transient roots and the three depths, but not
-  `open_upvalues`, `call_stack`, `vararg_stack` or `active_rust_fn`, and
-  nothing forces a new in-flight field into the macro list at all (pooled
-  `frame_stacks` is a candidate worth a look).
-
-`src/vm/caches.rs::drop_dead_entries` shows the repository already knows the
-fix: it destructures every struct without `..` "so a new cache family, cell or
-handle field fails to compile until its verdict is decided".
-
-Fix: write `mark_gc_roots` as an exhaustive `let State { stack, global_env,
-..., rng: _, user_data: _ } = state;`, each ignored field with a one-line
-reason, and give it a root-category enum the save walker must `match`
-exhaustively ("walked", "saved by token", "deliberately not saved: reason").
-Move the in-flight fields into one `InFlight` sub-struct with
-`#[derive(Default, PartialEq)]`; quiescence is `self.in_flight ==
-InFlight::default()` and reset is `= InFlight::default()`, and the test reduces
-to "default is quiescent".
-
-Enforceable: yes, structurally (exhaustive destructuring and match, a type).

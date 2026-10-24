@@ -27,7 +27,7 @@ entry names the scopes whose hunters reported it.
 
 Reported by: snapshot.
 
-`tests/save_golden.rs`'s header says the fixture "pins the save codec's
+`tests/integration/snapshot/save_golden.rs`'s header says the fixture "pins the save codec's
 traversal order against a byte fixture captured before the iterative-walker
 rewrite". The fixture has been regenerated 15 times since e4bb8de, so the
 "captured before" wording is false today. In practice it pins the whole byte
@@ -130,7 +130,7 @@ Enforceable: the existing test holds it.
 Reported by: compiler-cost.
 
 `docs/budget.md`: "It moves whenever `cost_used` for identical source changes."
-`src/cost_meter.rs` points at `tests/cost_golden.rs` as the check. What it
+`src/cost_meter.rs` points at `tests/integration/cost/cost_golden.rs` as the check. What it
 enforces: `cost_used_matches_golden_corpus` and the error corpus pin 18 sources;
 `golden_corpus_fingerprint_matches_cost_model_version` hashes those sources,
 their expected costs and the version. Editing an expected cost forces a
@@ -150,7 +150,7 @@ tests in `cost_golden.rs` (`table_library_native_charges_are_one_or_zero`,
 `error_handling`, ...). Changing `math.floor`'s charge means editing
 `stdlib_cost_golden.rs`; no test asks for a bump.
 
-Stale facts in the same area: `tests/cost_golden.rs` says "Fingerprint of
+Stale facts in the same area: `tests/integration/cost/cost_golden.rs` says "Fingerprint of
 `CORPUS` together with `COST_MODEL_VERSION`", but the fingerprint also covers
 `ERROR_CORPUS`. `CHANGELOG.md` Unreleased says "`COST_MODEL_VERSION` is 7." in
 the register-VM entry and "`COST_MODEL_VERSION` is 8." in a later entry; the
@@ -236,7 +236,7 @@ Enforceable: the first is structural; the others are tests.
 Reported by: check-machinery, compiler-cost, library.
 
 Replays must be byte-for-byte reproducible "on every host", and goldens exist
-for it (`tests/cost_golden.rs`, `tests/fixtures/save_golden_current.bin`,
+for it (`tests/integration/cost/cost_golden.rs`, `tests/fixtures/save_golden_current.bin`,
 `tests/fixtures/crmath_golden.txt`, `tests/fixtures/opcode_encoding.txt`). Every
 sweep runs them on one host and one target. There is no CI directory.
 `examples/hotpath.rs` uses `std::os::unix` and `libc::O_NONBLOCK`, and `cargo
@@ -286,7 +286,7 @@ returns and costs, its stack need and metamethod depth "never depend on which
 values the site saw before", and a State resumed from a snapshot "continues
 exactly as the State that saved it would have". The evidence is hand-written
 cases (`bytecode_caches.rs`, `global_write_cache.rs`, `plain_field_miss.rs`;
-gmatch charges in `tests/cost_determinism.rs`; output and bytes in a handful of
+gmatch charges in `tests/integration/cost/cost_determinism.rs`; output and bytes in a handful of
 save tests). No test compares `cost_used()` after a continuation through cold
 caches against a continuous run. (The one test that claims warm-across-executions
 runs cold-versus-cold; see verif-assertions.md.)

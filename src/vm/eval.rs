@@ -140,24 +140,24 @@ impl State {
             }
         };
         let idx = self.call_base(num_args)?;
-        let old_stack_bottom = self.stack_bottom;
+        let old_stack_bottom = self.in_flight.stack_bottom;
         #[cfg(not(feature = "fault-injection"))]
         let injected = false;
         #[cfg(feature = "fault-injection")]
         let injected = self.inject_fault(
             "native_depth",
-            self.native_call_depth as usize,
-            self.native_call_depth > 0,
+            self.in_flight.native_call_depth as usize,
+            self.in_flight.native_call_depth > 0,
         );
-        let result = if injected || self.native_call_depth >= MAX_NATIVE_CALL_DEPTH {
+        let result = if injected || self.in_flight.native_call_depth >= MAX_NATIVE_CALL_DEPTH {
             // Only a nested call can exhaust the native bracket. The common
             // arm reports it like any other failure after dispatch.
             Err(self.error(ErrorKind::NativeCallDepthExceeded {
-                depth: self.native_call_depth,
+                depth: self.in_flight.native_call_depth,
                 limit: MAX_NATIVE_CALL_DEPTH,
             }))
         } else {
-            self.native_call_depth += 1;
+            self.in_flight.native_call_depth += 1;
             // Each `Result` here dies in its own `let` before the next step
             // runs: a `match` scrutinee would stay live across
             // `run_invocation`, and its slot then cannot be shared with
@@ -180,7 +180,7 @@ impl State {
                 };
                 self.finish_call(num_ret_expected, num_ret_actual)
             };
-            self.native_call_depth -= 1;
+            self.in_flight.native_call_depth -= 1;
             result
         };
         match result {
@@ -198,7 +198,7 @@ impl State {
                 index: -isize::from(num_args) - 1,
             })
         })?;
-        Ok(self.stack_bottom + offset)
+        Ok(self.in_flight.stack_bottom + offset)
     }
 
     /// A call made by the dispatch loop's `OP_CALL`. A Rust callee runs to
@@ -218,7 +218,7 @@ impl State {
         method: bool,
     ) -> Result<bool> {
         let idx = self.call_base(num_args)?;
-        let old_stack_bottom = self.stack_bottom;
+        let old_stack_bottom = self.in_flight.stack_bottom;
         // native-call: call_from_lua->begin_call
         match self.begin_call(idx, num_args, old_stack_bottom, method, ())? {
             Some(n) => {
@@ -320,7 +320,8 @@ impl State {
                 // it on return.
                 match self.admit_lua_call(bytecode, num_args, old_stack_bottom) {
                     Ok(()) => {
-                        self.call_stack
+                        self.in_flight
+                            .call_stack
                             .last_mut()
                             .expect("admission created an activation")
                             .chain_charges = charges;
@@ -381,15 +382,15 @@ impl State {
                 let injected = false;
                 #[cfg(feature = "fault-injection")]
                 let injected =
-                    self.inject_fault("call_chain", self.metamethod_depth as usize, true);
-                if injected || self.metamethod_depth >= MAX_METAMETHOD_DEPTH {
+                    self.inject_fault("call_chain", self.in_flight.metamethod_depth as usize, true);
+                if injected || self.in_flight.metamethod_depth >= MAX_METAMETHOD_DEPTH {
                     let error = self.error(ErrorKind::MetamethodDepthExceeded {
-                        depth: self.metamethod_depth,
+                        depth: self.in_flight.metamethod_depth,
                         limit: MAX_METAMETHOD_DEPTH,
                     });
                     break 'resolve Err(error);
                 }
-                self.metamethod_depth += 1;
+                self.in_flight.metamethod_depth += 1;
                 charges += 1;
             }
         };
@@ -406,15 +407,20 @@ impl State {
     #[inline(never)]
     fn fail_call(&mut self, error: Error, idx: usize, old_stack_bottom: usize) -> Error {
         debug_assert!(self.stack.len() >= idx);
-        debug_assert_eq!(self.stack_bottom, old_stack_bottom);
-        debug_assert!(self.open_upvalues.iter().all(|(slot, _)| *slot < idx));
+        debug_assert_eq!(self.in_flight.stack_bottom, old_stack_bottom);
+        debug_assert!(
+            self.in_flight
+                .open_upvalues
+                .iter()
+                .all(|(slot, _)| *slot < idx)
+        );
         self.stack.truncate(idx);
-        self.stack_bottom = old_stack_bottom;
+        self.in_flight.stack_bottom = old_stack_bottom;
         self.report_escaping(error)
     }
 
     fn release_chain_charges(&mut self, charges: u32) {
-        self.metamethod_depth -= charges;
+        self.in_flight.metamethod_depth -= charges;
     }
 
     /// The one place a Rust callback is invoked. Every RustFn call - `call_op`
@@ -453,14 +459,14 @@ impl State {
         call_base: usize,
         method: bool,
     ) -> Result<u8> {
-        let old_stack_bottom = self.stack_bottom;
-        self.stack_bottom = call_base;
+        let old_stack_bottom = self.in_flight.stack_bottom;
+        self.in_flight.stack_bottom = call_base;
 
         // Invariant: the caller's active Rust function and stack_bottom are
         // both restored before a callback error propagates. Every stack index
         // and get_top() after this call is relative to stack_bottom, so the
         // callback result is handled explicitly rather than with `?`.
-        let previous_rust_fn = self.active_rust_fn.replace(f);
+        let previous_rust_fn = self.in_flight.active_rust_fn.replace(f);
         let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self))) {
             Ok(result) => result,
             Err(payload) => {
@@ -471,11 +477,11 @@ impl State {
         if self.poisoned {
             Self::abandon_poisoned();
         }
-        self.active_rust_fn = previous_rust_fn;
+        self.in_flight.active_rust_fn = previous_rust_fn;
         let num_ret_reported = match result {
             Ok(n) => n,
             Err(e) => {
-                self.stack_bottom = old_stack_bottom;
+                self.in_flight.stack_bottom = old_stack_bottom;
                 // The argument numbering of an argument error is settled
                 // here, by the call that directly invoked the callback.
                 return Err(e.settle_method_call(method));
@@ -485,7 +491,7 @@ impl State {
         let available = self.get_top();
         let reported = usize::from(num_ret_reported);
         if reported > available {
-            self.stack_bottom = old_stack_bottom;
+            self.in_flight.stack_bottom = old_stack_bottom;
             let error = self.error(ErrorKind::ResultCountExceedsStack {
                 reported: num_ret_reported,
                 available,
@@ -501,7 +507,7 @@ impl State {
             self.stack.copy_within(kept_start.., call_base);
             self.stack.truncate(call_base + reported);
         }
-        self.stack_bottom = old_stack_bottom;
+        self.in_flight.stack_bottom = old_stack_bottom;
         Ok(num_ret_reported)
     }
 
@@ -601,16 +607,16 @@ impl State {
         #[cfg(not(feature = "fault-injection"))]
         let injected = false;
         #[cfg(feature = "fault-injection")]
-        let injected = self.inject_fault("call_depth", self.call_depth as usize, true);
-        if injected || self.call_depth >= MAX_CALL_DEPTH {
+        let injected = self.inject_fault("call_depth", self.in_flight.call_depth as usize, true);
+        if injected || self.in_flight.call_depth >= MAX_CALL_DEPTH {
             return Err(self.error(ErrorKind::CallDepthExceeded {
-                depth: self.call_depth,
+                depth: self.in_flight.call_depth,
                 limit: MAX_CALL_DEPTH,
             }));
         }
-        self.call_depth += 1;
+        self.in_flight.call_depth += 1;
         let frame_bottom = self.stack.len() - num_args as usize;
-        self.stack_bottom = frame_bottom;
+        self.in_flight.stack_bottom = frame_bottom;
 
         let num_params = bytecode.num_params;
         let max_stack = usize::from(bytecode.max_stack);
@@ -623,7 +629,7 @@ impl State {
         const {
             assert!(MAX_CALL_DEPTH as u64 * MAX_ARGUMENTS as u64 <= u32::MAX as u64);
         }
-        let vararg_start = self.vararg_stack.len() as u32;
+        let vararg_start = self.in_flight.vararg_stack.len() as u32;
         if is_vararg && num_args > num_params {
             let num_varargs = (num_args - num_params) as usize;
             self.collect_varargs(self.stack.len() - num_varargs);
@@ -631,12 +637,14 @@ impl State {
         // Extended from `once_with` so the record is written straight into
         // its slot; see the frame push in `drive_invocation` for why a plain
         // `push` does not.
-        self.call_stack.extend(std::iter::once_with(|| CallInfo {
-            bytecode,
-            ip: 0,
-            chain_charges: 0,
-            vararg_start,
-        }));
+        self.in_flight
+            .call_stack
+            .extend(std::iter::once_with(|| CallInfo {
+                bytecode,
+                ip: 0,
+                chain_charges: 0,
+                vararg_start,
+            }));
 
         // A public fixed call prevalidates these argument slots, so this pop
         // cannot fail through the host API. Undo admission for a future
@@ -684,7 +692,7 @@ impl State {
     /// The frame of the activation just admitted, built from the closure in
     /// its function slot.
     pub(super) fn admitted_frame(&self) -> Frame {
-        let closure = self.stack[self.stack_bottom - 1]
+        let closure = self.stack[self.in_flight.stack_bottom - 1]
             .as_object_ptr()
             .and_then(|ptr| self.heap.as_lua_function_ref(ptr))
             .expect("an admitted Lua activation's function slot holds its closure");
@@ -692,7 +700,7 @@ impl State {
             Arc::clone(&closure.bytecode),
             Arc::clone(&closure.runtime),
             Arc::clone(&closure.upvalues),
-            self.stack_bottom,
+            self.in_flight.stack_bottom,
         )
     }
 
@@ -702,7 +710,8 @@ impl State {
     #[hotpath::measure]
     #[inline]
     fn collect_varargs(&mut self, vararg_start: usize) {
-        self.vararg_stack
+        self.in_flight
+            .vararg_stack
             .extend_from_slice(&self.stack[vararg_start..]);
         self.stack.truncate(vararg_start);
     }
@@ -718,11 +727,12 @@ impl State {
         old_stack_bottom: usize,
     ) -> Error {
         self.stack.truncate(frame_bottom);
-        self.stack_bottom = old_stack_bottom;
+        self.in_flight.stack_bottom = old_stack_bottom;
         // The chain transfer happens after admission, so a rejected record
         // never holds units.
         debug_assert_eq!(
-            self.call_stack
+            self.in_flight
+                .call_stack
                 .last()
                 .expect("a rejected admission pushed its record")
                 .chain_charges,
@@ -761,7 +771,7 @@ impl State {
                     Ok(count) => {
                         self.pop_activation();
                         frames.clear();
-                        self.stack_bottom = old_stack_bottom;
+                        self.in_flight.stack_bottom = old_stack_bottom;
                         Ok(count)
                     }
                     Err(error) => Err(self.unwind_invocation(&mut frames, error, old_stack_bottom)),
@@ -799,7 +809,7 @@ impl State {
         self.pop_activation();
         frames.truncate(frames.len() - 1);
         let caller = frames.last().expect("a nested return has a Lua caller");
-        self.stack_bottom = caller.stack_bottom;
+        self.in_flight.stack_bottom = caller.stack_bottom;
         let expected = caller.pending_call_results();
         self.finish_call(expected, count)?;
         // A fixed result count resumes ordinary execution at the caller's
@@ -834,10 +844,10 @@ impl State {
             self.pop_activation();
             frames.truncate(frames.len() - 1);
             if let Some(caller) = frames.last() {
-                self.stack_bottom = caller.stack_bottom;
+                self.in_flight.stack_bottom = caller.stack_bottom;
             }
         }
-        self.stack_bottom = old_stack_bottom;
+        self.in_flight.stack_bottom = old_stack_bottom;
         error
     }
 
@@ -853,12 +863,14 @@ impl State {
     /// `Frame::run` and `begin_callable_call` had shared, growing a frame
     /// that is live across every native re-entry by 32 bytes in release.
     fn pop_activation(&mut self) {
-        let len = self.call_stack.len();
-        let info = &self.call_stack[len - 1];
-        self.metamethod_depth -= info.chain_charges;
-        self.vararg_stack.truncate(info.vararg_start as usize);
-        self.call_stack.truncate(len - 1);
-        self.call_depth -= 1;
+        let len = self.in_flight.call_stack.len();
+        let info = &self.in_flight.call_stack[len - 1];
+        self.in_flight.metamethod_depth -= info.chain_charges;
+        self.in_flight
+            .vararg_stack
+            .truncate(info.vararg_start as usize);
+        self.in_flight.call_stack.truncate(len - 1);
+        self.in_flight.call_depth -= 1;
     }
 
     /// Finish a returning frame's results, the `count` values from register
@@ -910,7 +922,7 @@ impl State {
         if error.is_reported() {
             return error;
         }
-        if let Some(info) = self.call_stack.last() {
+        if let Some(info) = self.in_flight.call_stack.last() {
             error = self.locate_error(error, &info.bytecode, info.ip);
         }
         self.host_error(&mut error);
@@ -990,7 +1002,7 @@ impl State {
         // pending identity so its cache sweep retains the runtime before the
         // closure becomes a root; the allocation itself never collects.
         // Nested captures finish beforehand.
-        self.pending_bytecode_caches.push(identity);
+        self.in_flight.pending_bytecode_caches.push(identity);
         let runtime_ptr = Arc::as_ptr(&runtime);
         let obj = self.allocator().alloc_lua_fn(bytecode, runtime, upvalues);
         // A collection inside `allocator` must have kept this runtime as the
@@ -1001,6 +1013,7 @@ impl State {
                 .is_some_and(|entry| std::ptr::eq(Arc::as_ptr(&entry.runtime), runtime_ptr))
         );
         let pending = self
+            .in_flight
             .pending_bytecode_caches
             .pop()
             .expect("pending bytecode cache missing after closure allocation");
@@ -1019,14 +1032,17 @@ impl State {
         // opened, so entries above the insertion point are this frame's own
         // (at most MAX_FRAME_SLOTS - 1 of them).
         let pos = match self
+            .in_flight
             .open_upvalues
             .binary_search_by_key(&stack_idx, |(idx, _)| *idx)
         {
-            Ok(pos) => return self.open_upvalues[pos].1,
+            Ok(pos) => return self.in_flight.open_upvalues[pos].1,
             Err(pos) => pos,
         };
         let uv_ref = self.upvalue_pool.alloc(Upvalue::Open(stack_idx));
-        self.open_upvalues.insert(pos, (stack_idx, uv_ref));
+        self.in_flight
+            .open_upvalues
+            .insert(pos, (stack_idx, uv_ref));
         uv_ref
     }
 
@@ -1037,11 +1053,12 @@ impl State {
     pub(crate) fn close_upvalues(&mut self, level: usize) {
         // Upvalues are sorted ascending by stack index, so highest indices are at the end.
         // We close highest first (they go out of scope first), popping from end in O(1).
-        while let Some(&(idx, _)) = self.open_upvalues.last() {
+        while let Some(&(idx, _)) = self.in_flight.open_upvalues.last() {
             if idx < level {
                 break;
             }
             let (_, uv_ref) = self
+                .in_flight
                 .open_upvalues
                 .pop()
                 .expect("open upvalue existed after checking last element");
@@ -1060,7 +1077,7 @@ impl State {
         self.push_chunk(Arc::clone(&bytecode))?;
         let func = self.pop_val();
         self.stack.insert(func_slot, func);
-        let old_stack_bottom = self.stack_bottom;
+        let old_stack_bottom = self.in_flight.stack_bottom;
         self.admit_lua_call(bytecode, num_args, old_stack_bottom)?;
         self.run_invocation(old_stack_bottom)
     }

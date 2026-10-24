@@ -52,6 +52,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::det_hash::{FixedState, IndexMap as DetMap, IndexSet as DetSet, map_with_capacity};
 
+use super::inventory::GcRoot;
 use super::lua_val::RustFunc;
 use super::object::{GcHeap, RawObject, StringPtr, Upvalue, UpvalueRef};
 use super::rng::VmRng;
@@ -646,6 +647,64 @@ enum PendingObject {
     },
 }
 
+/// What `SaveBuilder::walk` encoded besides the arenas it filled.
+struct SaveWalk {
+    globals: SavedObject,
+    global_pins: Vec<SavedVal>,
+    env_deltas: Vec<SavedEnvDelta>,
+    format_pointer_ids: Vec<(SavedVal, u64)>,
+}
+
+/// How a snapshot accounts for one kind of GC root. Accounting, not
+/// traversal: only `Serialized` roots are walked into the payload.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SaveCoverage {
+    /// Walked into the payload, with every object it reaches.
+    Serialized,
+    /// Recreated by the loaded State itself; at most a `%p` identity is
+    /// carried.
+    Rebuilt,
+    /// Execution-lifetime: `validate_quiescent` refuses a save while it
+    /// holds anything.
+    RefusedInFlight,
+    /// Owned by this process's host and never saved (`SaveDiagnostics`
+    /// reports how many).
+    ProcessLocal,
+}
+
+/// The snapshot's decision for each root kind. Exhaustive, so a new
+/// `GcRoot` variant cannot be added without deciding what a save does with
+/// it.
+pub(super) fn save_coverage(root: &GcRoot<'_>) -> SaveCoverage {
+    match root {
+        // Globals: encoded whole, every slot in physical order (tombstones
+        // included), its metatable and the seal pins (`encode_globals`).
+        // StringMetatable and EnvObject: a token for the object's identity,
+        // plus its current contents expanded and diffed against the
+        // baseline (`encode_env_deltas`).
+        GcRoot::Globals(_) | GcRoot::StringMetatable(_) | GcRoot::EnvObject(_) => {
+            SaveCoverage::Serialized
+        }
+        // MetaNames: interned again when the loaded State is built.
+        // ChunkLiterals: literals of saved bytecode are re-interned by load,
+        // carrying their `%p` identities; literals of cache-only chunks need
+        // not survive. EnvBaseline: recaptured by `open_libs` on load, which
+        // holds because `capture_env_tokens` records only freshly opened
+        // library tables.
+        GcRoot::MetaNames(_) | GcRoot::ChunkLiterals(_) | GcRoot::EnvBaseline(_) => {
+            SaveCoverage::Rebuilt
+        }
+        GcRoot::Stack(_)
+        | GcRoot::RootedValues(_)
+        | GcRoot::SuspendedEnv(_)
+        | GcRoot::Varargs(_)
+        | GcRoot::OpenUpvalue(_)
+        | GcRoot::ActiveChunk(_)
+        | GcRoot::PendingChunk(_) => SaveCoverage::RefusedInFlight,
+        GcRoot::Anchors(_) => SaveCoverage::ProcessLocal,
+    }
+}
+
 impl<'a> SaveBuilder<'a> {
     fn new(state: &'a State) -> Self {
         Self {
@@ -666,6 +725,13 @@ impl<'a> SaveBuilder<'a> {
     }
 
     fn finish(mut self) -> Result<SavePayload, SaveError> {
+        let walk = self.walk()?;
+        self.into_payload(walk)
+    }
+
+    /// Encode everything the snapshot reaches, in encounter order. Every
+    /// arena id is assigned here; `into_payload` only finalizes.
+    fn walk(&mut self) -> Result<SaveWalk, SaveError> {
         let (globals, global_pins) = self.encode_globals()?;
         let env_deltas = self.encode_env_deltas()?;
         // Every canonical environment object is rebuilt on load, even when
@@ -728,7 +794,21 @@ impl<'a> SaveBuilder<'a> {
                 format_pointer_ids.push((saved, id));
             }
         }
+        Ok(SaveWalk {
+            globals,
+            global_pins,
+            env_deltas,
+            format_pointer_ids,
+        })
+    }
 
+    fn into_payload(self, walk: SaveWalk) -> Result<SavePayload, SaveError> {
+        let SaveWalk {
+            globals,
+            global_pins,
+            env_deltas,
+            format_pointer_ids,
+        } = walk;
         let objects = self
             .objects
             .into_iter()
@@ -1392,6 +1472,17 @@ impl State {
             return Err(SaveError::StatePoisoned);
         }
         self.validate_quiescent()?;
+        if cfg!(debug_assertions) {
+            // The two inventories must agree: a root the snapshot refuses as
+            // in flight is empty once the lifetime inventory says quiescent.
+            self.for_each_gc_root(|root| {
+                debug_assert!(
+                    save_coverage(&root) != SaveCoverage::RefusedInFlight || root.is_empty(),
+                    "a quiescent State holds an in-flight GC root; \
+                     State::rest_state does not cover it"
+                );
+            });
+        }
         let payload = SaveBuilder::new(self).finish()?;
         let mut encoder = Encoder::with_capacity(payload.encoded_size_estimate());
         encoder.write_magic_and_versions();
@@ -4620,18 +4711,27 @@ mod tests {
         );
     }
 
+    /// The objects reachable from the roots `save_coverage` calls
+    /// `Serialized` are exactly the objects the save walker encoded or
+    /// tokenized. This checks the walker against the coverage decision for
+    /// every root kind the fixture populates; it cannot check a kind the
+    /// fixture leaves empty, and strings are outside the comparison.
     #[test]
-    fn save_walker_object_count_matches_gc_live_minus_env() {
+    fn save_walker_encodes_exactly_what_serialized_roots_reach() {
         let mut state = State::new();
         crate::Program::compile(
             r#"
                 a = { 1, 2, 3 }
                 a.b = {}
                 a.b.back = a
-                keep = function() return a end
+                local captured = { inner = {} }
+                keep = function() return a, captured end
                 m = math
                 junk = { x = {} }
                 junk = nil
+                shared = {}
+                orphan = { child = {} }
+                string.extra = {}
             "#,
             None,
         )
@@ -4640,14 +4740,38 @@ mod tests {
         state
             .call(ArgCount::Fixed(0), RetCount::Fixed(0))
             .expect("run");
+        // Anchors are `ProcessLocal`: one on a table the globals also reach
+        // (still encoded), one on a table nothing else reaches (live, but
+        // neither reached nor encoded).
+        state.get_global("shared").expect("global read");
+        let _shared = state.anchor().expect("anchor shared");
+        state.get_global("orphan").expect("global read");
+        let _orphan = state.anchor().expect("anchor orphan");
+        state.push_nil().expect("push");
+        state.set_global("orphan").expect("clear orphan");
         state.gc_collect();
 
-        let payload = SaveBuilder::new(&state).finish().expect("walk");
-        let env_count = build_env_reverse(&state).len();
+        let mut builder = SaveBuilder::new(&state);
+        let walk = builder.walk().expect("walk");
+        let mut saved: BTreeSet<ObjectPtr> = builder.object_ids.keys().copied().collect();
+        saved.extend(builder.env_reverse.keys().copied());
+        builder.into_payload(walk).expect("finish");
 
-        // Every live object is either an env object (tokenized, excluded from
-        // the payload) or a user object the walker materialized. Adding a GC
-        // root without teaching the save walker would break this identity.
-        assert_eq!(payload.objects.len() + env_count, state.object_count());
+        // After the collection every colour is Unmarked, so this mark phase
+        // starts clean; its marks are undone before anything can sweep.
+        let mut worklist = Vec::new();
+        let mut live_chunks = crate::vm::object::LiveChunks::default();
+        state.mark_roots(&mut worklist, &mut live_chunks, |root| {
+            save_coverage(root) == SaveCoverage::Serialized
+        });
+        state
+            .heap
+            .drain_mark_worklist(&mut worklist, &state.upvalue_pool);
+        let reached = state.heap.take_marked_objects();
+        state.upvalue_pool.reset_marks();
+
+        assert_eq!(reached, saved);
+        // The orphan and its child are the only live objects left out.
+        assert_eq!(state.object_count(), reached.len() + 2);
     }
 }

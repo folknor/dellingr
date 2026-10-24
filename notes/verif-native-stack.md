@@ -277,7 +277,7 @@ Reported by: native-stack-errors.
 
 `docs/limits.md`, Value stack: "Tests that push to `MAX_STACK_SIZE` pay that per
 State, inside the fixed virtual-memory cap `scripts/test_limited.sh` applies".
-Only `tests/run_examples.rs` runs anything under `test_limited.sh` (the example
+Only `corpus::run_examples` runs anything under `test_limited.sh` (the example
 scripts). The Rust tests that push to the cap (`frame_reservation.rs`,
 `index_depth_routes.rs`, `host_error_reporting.rs`, `host_call_preflight.rs`,
 `vm_depth_regressions.rs`, `error_boundary.rs`) run as ordinary `cargo test`

@@ -296,7 +296,7 @@ Enforceable: no.
 Reported by: runtime, compiler-cost.
 
 `src/vm/frame.rs::reentry_accounting_sources_cover_the_intended_dispatch_opcodes`
-exists to prove that `tests/reentrant_opcode_accounting.rs`'s sources exercise
+exists to prove that `tests/integration/cost/reentrant_opcode_accounting.rs`'s sources exercise
 `CALL`, `TFOR_CALL`, `LEN`, `GET_FIELD`, `GET_TABLE`, `SET_FIELD`, `SET_TABLE`
 and `SELF`. Its snippets are a hand copy that has already drifted: the integration
 cases prefix every source with `local prior = left + right\n`, use
@@ -327,7 +327,7 @@ Enforceable: no.
 
 Reported by: native-stack-errors.
 
-`tests/error_boundary.rs::error_boundary_budget_sweep` runs every budget from 0 to
+`failures::error_boundary::error_boundary_budget_sweep` runs every budget from 0 to
 the case's baseline cost. `run()` asserts that an error, if any, is
 `BudgetExceeded`, and that a success returns the right value. Nothing asserts any
 budget fails. If `set_cost_budget` became a no-op, every run would succeed with the
@@ -345,7 +345,7 @@ Enforceable: yes, the assertion is the enforcement.
 
 Reported by: native-stack-errors.
 
-`tests/index_depth_routes.rs`. `try_index` returns whether `get_table` failed, but
+`runtime::index_depth_routes`. `try_index` returns whether `get_table` failed, but
 the probe `(function() try_index(r) try_index(r) return field_site(two) end)()`
 discards both results. If the lookup through `function_behind_table` (two units at
 depth `MAX - 1`) started succeeding, or failed before taking any unit, the test
@@ -721,6 +721,28 @@ directly, used by both sweeps; keep one snapshot-specific test for the load path
 (The `Limits` rewrite in rewrites.md is the broader alternative.)
 
 Enforceable: no general rule.
+
+## VA-051 - Weak tables and strings sit outside the root inventory's checks
+
+Reported by: the agent that made State's root and in-flight inventories
+exhaustive (`src/vm/inventory.rs`).
+
+`State::for_each_gc_root` and `rest_state` force every State field to be named,
+and `save_coverage` forces every `GcRoot` kind to be classified, but:
+
+- The weak tables (`patterns`, `format_pointer_ids`, ...) are only named as
+  pruned in `collect_garbage`; nothing forces a new weak table to actually be
+  pruned there.
+- `save_walker_encodes_exactly_what_serialized_roots_reach` compares objects
+  only, and only for the root kinds its fixture fills. Strings (pins, builtin
+  and event names, chunk literals) are outside it.
+- That env baselines can be rebuilt on load is a stated invariant of
+  `capture_env_tokens`, not something the code checks.
+
+Fix: a `WeakTable` trait or enum that `collect_garbage` must iterate
+exhaustively; extend the identity test to the string pool.
+
+Enforceable: the weak-table half structurally.
 
 # Compiler and cost
 

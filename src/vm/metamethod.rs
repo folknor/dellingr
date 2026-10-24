@@ -83,14 +83,15 @@ impl State {
         #[cfg(not(feature = "fault-injection"))]
         let injected = false;
         #[cfg(feature = "fault-injection")]
-        let injected = self.inject_fault("metamethod", self.metamethod_depth as usize, true);
-        if injected || self.metamethod_depth >= MAX_METAMETHOD_DEPTH {
+        let injected =
+            self.inject_fault("metamethod", self.in_flight.metamethod_depth as usize, true);
+        if injected || self.in_flight.metamethod_depth >= MAX_METAMETHOD_DEPTH {
             return Err(self.error(ErrorKind::MetamethodDepthExceeded {
-                depth: self.metamethod_depth,
+                depth: self.in_flight.metamethod_depth,
                 limit: MAX_METAMETHOD_DEPTH,
             }));
         }
-        self.metamethod_depth += 1;
+        self.in_flight.metamethod_depth += 1;
         Ok(())
     }
 
@@ -143,12 +144,12 @@ impl State {
         let mut units = 0;
         match self.walk_index(receiver, start, key, cache, local_cost, &mut units) {
             Ok(Some(val)) => {
-                self.metamethod_depth -= units;
+                self.in_flight.metamethod_depth -= units;
                 Ok(IndexOutcome::Value(val))
             }
             Ok(None) => Ok(IndexOutcome::Call(units)),
             Err(error) => {
-                self.metamethod_depth -= units;
+                self.in_flight.metamethod_depth -= units;
                 Err(error)
             }
         }
@@ -471,7 +472,7 @@ impl State {
         match result {
             Ok(false) => Ok(Some(units)),
             other => {
-                self.metamethod_depth -= units;
+                self.in_flight.metamethod_depth -= units;
                 other.map(|_| None)
             }
         }

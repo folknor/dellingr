@@ -45,7 +45,7 @@ script would. Exposing a public `set_table` needs the same treatment
 `get_table` got: a defined error boundary and operand contract, `on_error`
 reporting, a scenario in `reference/native-calls.toml` and
 `tests/native_stack.rs` for the handler call, and the `__newindex` depth rule
-pinned by `tests/newindex_depth_routes.rs`.
+pinned by `tests/integration/runtime/newindex_depth_routes.rs`.
 
 ## Deferred forward-looking ideas
 

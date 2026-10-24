@@ -25,7 +25,7 @@ One loop:
 10. Delete the shipped entry from its backlog, run `brokkr fmt` +
     `brokkr check`, commit.
 
-`brokkr check` is the whole gate. Its test phase includes `tests/diff_test.rs`,
+`brokkr check` is the whole gate. Its test phase includes `tests/integration/corpus/diff_test.rs`,
 which runs the whole corpus through `scripts/diff_test.sh` for every feature
 shape, so the differential comparison
 against reference Lua 5.2/5.4 is already covered - do not also run

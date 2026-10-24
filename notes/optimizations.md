@@ -285,7 +285,7 @@ Observable surface (the 2026-10-23 survey; re-check before starting):
   for tables, functions and Rust functions come from the counter in
   `format_pointer_ids`, not from handle bits or addresses. `pairs` follows
   insertion order. The snapshot encoder is explicit per variant, so no
-  `FORMAT_VERSION` bump; `tests/save_golden.rs` compares saves byte for byte
+  `FORMAT_VERSION` bump; `tests/integration/snapshot/save_golden.rs` compares saves byte for byte
   and is the oracle. No charge depends on representation, so no
   `COST_MODEL_VERSION` bump. `Val` is `pub(crate)`.
 - **The one host-visible edge:** a host that pushes a NaN with a nonzero
@@ -792,7 +792,7 @@ in todo.md's workload-registry entry).
   contiguous Rust callback ABI may use every slot up to the global stack
   cap, so a retained callee would refuse a callback push one slot earlier
   (`rust_call_releases_callee_slot_before_callback_push` in
-  tests/host_call_preflight.rs). Moving the callee elsewhere still shifts
+  tests/integration/host/host_call_preflight.rs). Moving the callee elsewhere still shifts
   the arguments; see the comment at the remove in src/vm/eval.rs.
 - **Dispatch micro-items, verify with asm/bench first (B-O6):** opcode space
   is 0-26, 30-55, 60-72 - only two small holes (27-29, 56-59) since the

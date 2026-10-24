@@ -1,7 +1,7 @@
 # Verification: gates and check machinery
 
 Findings from the verification hunt about the check machinery itself:
-`tests/test_conventions.rs`, `clippy.toml`, textlint and script checks,
+`tests/integration/corpus/test_conventions.rs`, `clippy.toml`, textlint and script checks,
 `scripts/native_calls.py`, the gremlins gate, feature shapes and sweeps in
 `brokkr.toml`, the `Cargo.toml` package, generators, and the scripts around
 them. Each entry names the scopes whose hunters reported it.
@@ -28,8 +28,11 @@ them. Each entry names the scopes whose hunters reported it.
 Reported by: check-machinery, corpus-harness, native-stack-errors, runtime,
 compiler-cost, library.
 
-`cli_paths_and_test_file_mutations_stay_in_common_helpers` flags file
-mutations outside `tests/common/scratch.rs` by substring. Problems:
+`cli_paths_and_test_file_mutations_stay_in_support_helpers` flags file
+mutations outside `tests/integration/support/scratch.rs` by substring. The
+merged crate's newer convention tests (`every_integration_source_is_reached_from_main`,
+`process_global_constructs_are_marked`, ...) share its lexical approach.
+Problems:
 
 - Missed spellings: `fs::remove_dir_all(` (`fs::remove_dir(` does not match
   it), `fs::rename(`, `fs::copy(`, `File::options(`, `fs::hard_link(`,
@@ -49,13 +52,13 @@ mutations outside `tests/common/scratch.rs` by substring. Problems:
   a durable comment cites a transient document.
 - Over-reach: `write_all(` is banned everywhere outside `scratch.rs`,
   including writes into a child's stdin pipe, so
-  `tests/cli_arguments.rs::run_with_stdin` writes its stdin bytes to a scratch
+  `tests/integration/cli/cli_arguments.rs::run_with_stdin` writes its stdin bytes to a scratch
   *file* and opens it as stdin instead of piping in memory. The lexical rule
   caused the filesystem writes it was meant to prevent.
 - It scans only `tests/`. In-crate unit tests under `src/` are outside it:
   `src/crmath/tests/golden.rs` does `std::fs::write(GOLDEN_PATH, ...)` into the
   tracked fixture, spawns `python3` with `Command::new`, and reads a gitignored
-  sibling checkout. The "no CLI binary path outside common" rule cannot see
+  sibling checkout. The "no CLI binary path outside support" rule cannot see
   `src/` either. `examples/` (the save-golden regenerator's `fs::write`) is
   also outside it, deliberately.
 - The AGENTS.md rule "no test may reference `target/` or spawn cargo" has no
@@ -145,7 +148,7 @@ Reported by: check-machinery, native-stack-errors, runtime, library.
 Uncompiled and unlinted as a result:
 
 - every `#[hotpath::measure]` expansion, and the `cfg(feature = "hotpath")`
-  branches in `tests/common/stack.rs` and `tests/diff_test.rs`;
+  branches in `tests/common/stack.rs` and `tests/integration/corpus/diff_test.rs`;
 - `src/vm/fault_injection.rs`, the six `cfg(feature = "fault-injection")` arms
   in `eval.rs`, `stack.rs` and `metamethod.rs`, the debug assertion in
   `vm.rs::validate_quiescent` (`debug_assert_fault_injection_disarmed` on the
@@ -155,8 +158,9 @@ Uncompiled and unlinted as a result:
   `string_bytes.rs::gmatch_refused_push_preserves_the_next_match`, the only
   fault-injection test outside `error_boundary.rs`. The documented on-demand
   command (`brokkr check --features fault-injection,snapshot -- --test
-  error_boundary`) selects only the `error_boundary` binary, so it is reached
-  only by an undocumented whole-suite run.
+  integration -- failures::error_boundary:: --include-ignored`) filters to the
+  `error_boundary` module, so it is reached only by an undocumented run of the
+  whole integration crate under the feature.
 
 AGENTS.md asks a human to remember `brokkr check --features hotpath`. A bad
 annotation surfaces on the next `--hotpath` run; a rename in any preflight
@@ -171,13 +175,15 @@ Fix options:
   into its own target dir (the manual endorses this for "one that drives its own
   cargo");
 - a `[[check]]` shape with `features = ["fault-injection", "snapshot"]`,
-  `tests = ["error_boundary", "string_bytes"]` and `include_ignored`, plus the
-  lib unit tests if brokkr can select them (see brokkr.md); cost estimated as
-  one more dev build of the library plus two test binaries, unmeasured; at
+  `tests = ["integration"]`, a filter to `failures::error_boundary::` and
+  `library::string_bytes::` if a `[[check]]` can carry one (unconfirmed), and
+  `include_ignored`, plus the lib unit tests if
+  brokkr can select them (see brokkr.md); cost estimated as one more dev build
+  of the library plus the integration crate, unmeasured; at
   minimum a clippy-only lane;
 - a `curated` `[[check]]` entry with those features and a narrow `only` filter;
 - for `string_bytes`: move the test into `error_boundary.rs`, or change the
-  documented command to run every binary, with a convention check that
+  documented filter to include `string_bytes`, with a convention check that
   `feature = "fault-injection"` appears only in files the documented command
   reaches.
 
@@ -302,7 +308,8 @@ other than brokkr's 5-minute `script_check` limit applies.
 Reported by: check-machinery.
 
 These inspect files only, yet are compiled and run once per sweep (and under
-the release sweeps whenever those widen, see brokkr.md): `test_conventions.rs`,
+the release sweeps whenever those widen, see brokkr.md): every test in
+`corpus::test_conventions` (more of them since the integration merge),
 `diff_test.rs::diff_markers_have_nonempty_reasons`,
 `diff_test.rs::shell_and_rust_example_corpora_match`, and
 `diff_test.rs::malformed_timeout_is_rejected...`. They fail late, after clippy
@@ -380,7 +387,7 @@ Enforceable: yes.
 
 Reported by: check-machinery, library.
 
-`brokkr.toml` has `exclude = ["tests/string_bytes.rs"]`. The manual says
+`brokkr.toml` has `exclude = ["tests/integration/library/string_bytes.rs"]`. The manual says
 "Entries are project-root-relative directories matched by path prefix", so
 whether a file path matches is behaviour the manual does not promise. The
 file's non-ASCII content is six lines: a literal U+26A0 in Lua source and a
@@ -401,10 +408,10 @@ Reported by: check-machinery, snapshot.
 `Cargo.toml`'s comment says `tests/` and `examples/` stay in the package
 because they carry the corpus `run_examples.rs` and the diff gate execute. Yet
 the package excludes `scripts/` (which holds `diff_test.sh`, driven by
-`tests/diff_test.rs`, and `test_limited.sh`, driven by
-`tests/integration/support/process.rs::limited_command`), `bench/` and `brokkr.toml` (both read
-by `tests/bench_scripts.rs`). `cargo test` on the published crate therefore
-fails in at least three binaries; `cargo package` verifies only that the crate
+`tests/integration/corpus/diff_test.rs`, and `test_limited.sh`, driven by
+`tests/integration/support/process.rs::limited_command`), `bench/` and
+`brokkr.toml` (both read by `tests/integration/corpus/bench_scripts.rs`).
+`cargo test` on the published crate therefore fails in at least three suites; `cargo package` verifies only that the crate
 builds. Meanwhile keeping `tests/` ships `tests/fixtures/crmath_golden.txt`
 (557 KB) and the save golden, while the `.lua` corpus the comment cites lives
 in `examples/`.
@@ -440,8 +447,9 @@ Reported by: runtime, library, native-stack-errors.
 No file in the repository defines these IDs (not `notes/`, `docs/`,
 `reference/` or `CHANGELOG.md`):
 
-- `tests/host_table_api_atomicity.rs` module doc: `VM-006`, `VM-007`,
-  `VM-025`; `src/vm/table_ops.rs` and `tests/stdlib_divergences.rs` cite
+- `tests/integration/host/host_table_api_atomicity.rs` module doc: `VM-006`,
+  `VM-007`, `VM-025`; `src/vm/table_ops.rs` and
+  `tests/integration/library/stdlib_divergences.rs` cite
   others;
 - `stdlib_divergences.rs`: `VM-041`, `STD-014`, `STD-015`;
   `stdlib_numeric_format.rs`: `STD-004`, `STD-007`, `STD-009`;
@@ -495,7 +503,7 @@ content", and the same for `snapshot`, and for the two release sweeps
 --no-run` re-uplifts `target/<profile>/dellingr`, so the binary
 `CARGO_BIN_EXE_dellingr` names belongs to whichever shape built last.
 
-`tests/diff_test.rs`'s claim that "the corpus is checked against the CLI build
+`tests/integration/corpus/diff_test.rs`'s claim that "the corpus is checked against the CLI build
 of that shape" holds only because brokkr runs sweeps serially and re-uplifts
 between them, and because nothing else writes that path mid-run. Under plain
 `cargo test`, a parallel sweep layout, a `brokkr run --debug` between prepare

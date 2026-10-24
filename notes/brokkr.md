@@ -70,7 +70,7 @@ is stale (see verif-corpus.md), and correcting it re-pins the workload and
 cuts its history, which is exactly why such comments stay wrong.
 
 Fix: verify the pins in the gate. Dellingr can do it alone with a pure-Rust
-`xxhash-rust` dev-dependency in `tests/bench_scripts.rs`. brokkr-side, consider
+`xxhash-rust` dev-dependency in `tests/integration/corpus/bench_scripts.rs`. brokkr-side, consider
 pinning a semantic fingerprint instead (the `analyze_cost` tree
 `bench_scripts.rs` already computes, or the bytecode listing) so comment edits
 do not cut history; that is a brokkr design call.

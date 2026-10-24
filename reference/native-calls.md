@@ -335,7 +335,7 @@ The arena uses a u32 start offset per activation, including empty
 suffixes, keeping the x86-64 activation record at 24 bytes. Call depth times
 MAX_ARGUMENTS bounds the arena below u32::MAX, checked at compile time.
 Admission appends extra arguments and pop_activation truncates to the recorded start on return,
-refused admission and unwind. mark_gc_roots marks only the arena's live
+refused admission and unwind. The collector marks only the arena's live
 length; quiescence still requires it empty. Capacity remains unsaved, and
 the snapshot format and opcode charges are unchanged. Warm vararg-heavy
 calls should avoid one allocation and free per call after arena capacity
