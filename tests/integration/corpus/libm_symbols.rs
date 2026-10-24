@@ -5,7 +5,7 @@
 //! the linked symbols instead, through `scripts/libm_symbols.py`. `brokkr
 //! check` runs it once per ordinary `[[check]]` feature shape, which checks the
 //! dev-profile binary of each shape, retaining coverage before release
-//! optimization. The dedicated libm_symbols target checks the fat-LTO
+//! optimization. The dedicated libm_symbols target checks the release
 //! binaries in both release sweeps. `support::dellingr_bin()` also verifies
 //! that the CLI binary has the integration harness's snapshot feature shape.
 

@@ -208,8 +208,9 @@ marker, which is the quickest way to see what a change touched.
 
 ## Measured native stack, 2026-10-23
 
-Measured on x86-64 Linux with the repository's dev and release settings.
-The baseline is 97973d1; the middle column of each cell is unmodified
+Measured on x86-64 Linux with the repository's dev and release settings of
+the time; release then meant fat LTO and one codegen unit (see "Cargo's
+default release profile" below for the current profile). The baseline is 97973d1; the middle column of each cell is unmodified
 22a263a; the last is 22a263a with `run_invocation` forced inline into both
 `call_unguarded` monomorphizations. These are compiler-dependent measurements,
 not additional limits or assertions of headroom for another build.
@@ -517,3 +518,84 @@ The first build of this shape let the compiler inline the closure, template
 constructor and concatenation bodies into `Frame::run` (their buffers,
 capture list and runtime handle), which grew it to 808 in plain release.
 They are `inline(never)` now; no dispatch cycle pays for them.
+
+### Cargo's default release profile
+
+The repository dropped its `[profile.release]` overrides (fat LTO, one
+codegen unit), so release sweeps now build Cargo's default release profile
+(thin-local LTO, 16 codegen units), the one an embedder most likely builds.
+Every release figure in the sections above was taken under the old
+overrides, so a release comparison across this change measures profile and
+code together.
+
+Measured 2026-10-25 on plantasjen (x86-64 Linux), on top of 0779c08, with
+`rustc 1.101.0-nightly (e9bbadf68 2026-10-12)` and that host's global
+rustflags (`-Ctarget-cpu=native`, the `wild` linker through clang). Release
+cells are **0779c08 with the old overrides / Cargo's default release**;
+dev is unaffected by the change and its default and snapshot shapes agree.
+Every scenario's cycle shrinks under the default profile; the largest is now
+3,104 bytes in release and 3,168 with snapshot, from 3,376 and 3,408. The
+dev column also records drift since the 41ad774 measurement in
+docs/limits.md (13,552 then, 13,680 now for the largest cycle).
+
+| Scenario | Dev, also snapshot | Release | Release + snapshot |
+|---|---|---|---|
+| `index_field` | 6688 | 832 / 528 | 864 / 528 |
+| `index_method` | 6688 | 832 / 528 | 864 / 528 |
+| `index_key` | 6656 | 736 / 624 | 768 / 624 |
+| `index_rust` | 8544 | 1312 / 944 | 1344 / 944 |
+| `newindex_field` | 6928 | 736 / 672 | 768 / 672 |
+| `newindex_key` | 6704 | 736 / 624 | 768 / 624 |
+| `newindex_rust` | 8784 | 1216 / 1088 | 1248 / 1088 |
+| `length` | 6560 | 736 / 432 | 768 / 432 |
+| `string_index_field` | 6688 | 832 / 528 | 864 / 528 |
+| `string_index_key` | 6656 | 736 / 624 | 768 / 624 |
+| `index_string_handler` | 6688 | 832 / 528 | 864 / 528 |
+| `string_library_index` | 6688 | 832 / 528 | 864 / 528 |
+| `host_get_table` | 7952 | 1136 / 864 | 1168 / 864 |
+| `host_get_table_string` | 7952 | 1136 / 864 | 1168 / 864 |
+| `host_call` | 7600 | 1072 / 784 | 1104 / 784 |
+| `host_anchor` | 8096 | 1168 / 944 | 1200 / 944 |
+| `host_tostring_bytes` | 8448 | 1424 / 1120 | 1456 / 1120 |
+| `host_to_string_with_meta` | 8608 | 1456 / 1184 | 1488 / 1184 |
+| `tostring` | 7808 | 1232 / 944 | 1264 / 944 |
+| `print` | 8192 | 1392 / 1088 | 1424 / 1088 |
+| `format` | 10304 | 1744 / 1472 | 1776 / 1472 |
+| `error_tostring` | 8352 | 1376 / 1200 | 1408 / 1200 |
+| `sort_comparator` | 9632 | 1664 / 1408 | 1696 / 1392 |
+| `sort_comparator_right` | 9632 | 1664 / 1408 | 1696 / 1392 |
+| `sort_comparator_sortdown` | 9632 | 1664 / 1408 | 1696 / 1392 |
+| `callable_rust` | 10048 | 1936 / 1616 | 1968 / 1600 |
+| `sort_metamethods_comparator` | 8880 | 1600 / 1312 | 1632 / 1312 |
+| `sort_metamethods_length` | 8016 | 1312 / 1008 | 1344 / 1008 |
+| `sort_metamethods_read` | 8256 | 1296 / 976 | 1328 / 976 |
+| `sort_metamethods_write` | 8272 | 1376 / 1088 | 1440 / 1104 |
+| `insert_length` | 7984 | 1200 / 1008 | 1232 / 1008 |
+| `insert_shift_read` | 8224 | 1184 / 976 | 1216 / 976 |
+| `insert_shift_write` | 8256 | 1264 / 1088 | 1328 / 1104 |
+| `insert_value` | 8256 | 1264 / 1088 | 1328 / 1104 |
+| `remove_length` | 7952 | 1184 / 1008 | 1216 / 1008 |
+| `remove_read` | 8192 | 1168 / 976 | 1200 / 976 |
+| `remove_shift_read` | 8192 | 1168 / 976 | 1200 / 976 |
+| `remove_shift_write` | 8224 | 1248 / 1088 | 1312 / 1104 |
+| `remove_clear` | 8224 | 1248 / 1088 | 1312 / 1104 |
+| `concat_length` | 9328 | 1280 / 1024 | 1312 / 1024 |
+| `concat_read` | 9568 | 1264 / 992 | 1296 / 992 |
+| `move_read` | 8544 | 1216 / 976 | 1248 / 976 |
+| `move_write` | 8576 | 1296 / 1040 | 1360 / 1056 |
+| `unpack_length` | 7808 | 1216 / 928 | 1248 / 928 |
+| `unpack_read` | 8048 | 1200 / 896 | 1232 / 896 |
+| `gsub_empty_function` | 10240 | 1712 / 1424 | 1744 / 1408 |
+| `gsub_plain_function` | 10272 | 1776 / 1488 | 1808 / 1472 |
+| `gsub_pattern_function` | 13680 | 3376 / 3104 | 3408 / 3168 |
+| `gsub_pattern_captures` | 13680 | 3376 / 3104 | 3408 / 3168 |
+| `gsub_empty_table` | 10144 | 1680 / 1392 | 1712 / 1376 |
+| `gsub_plain_table` | 10176 | 1744 / 1456 | 1776 / 1440 |
+| `gsub_pattern_table` | 13584 | 3344 / 3072 | 3376 / 3136 |
+| `tfor_lua` | 6720 | 704 / 640 | 736 / 640 |
+| `tfor_ipairs` | 8272 | 992 / 928 | 1024 / 928 |
+| `tfor_host_iterator` | 8128 | 1008 / 880 | 1040 / 880 |
+| `chain_index` | 0 | 0 / 0 | 0 / 0 |
+| `chain_newindex` | 0 | 0 / 0 | 0 / 0 |
+
+Frames were not re-attributed with `scripts/frame_sizes.py` for this change.

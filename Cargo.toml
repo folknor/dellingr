@@ -24,11 +24,6 @@ include = [
     "/examples/hotpath.rs",
 ]
 
-[profile.release]
-opt-level = 3
-lto = "fat"
-codegen-units = 1
-
 [features]
 hotpath = ["dep:hotpath", "hotpath/hotpath"]
 hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
@@ -130,6 +125,11 @@ required-features = ["snapshot"]
 [[example]]
 name = "regenerate_crmath_golden"
 path = "examples/regenerate_crmath_golden.rs"
+test = false
+
+[[example]]
+name = "regenerate_corpus_cost"
+path = "examples/regenerate_corpus_cost.rs"
 test = false
 
 [[example]]

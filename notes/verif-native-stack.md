@@ -23,34 +23,6 @@ scopes whose hunters reported it.
 
 ---
 
-## VN-006 - The release envelope is validated for a profile no embedder ships
-
-Reported by: native-stack-errors.
-
-`[profile.release]` here is fat LTO with one codegen unit. Cargo profiles of a
-dependency come from the embedding workspace, so the game builds dellingr with
-its own profile, typically Cargo's default release (thin-local LTO, 16 codegen
-units), whose inlining and frame sizes differ. `docs/limits.md` says other
-configurations are the embedder's to validate, which is honest, but the
-repository's own release envelope certifies an artifact nobody links.
-
-Fix: run the release envelope sweep under Cargo's default release settings too
-(a custom profile `release-default` inheriting from `release` with the defaults
-restored), or state the envelope for that profile instead.
-
-Enforceable: yes, as a `[[check]]` shape.
-
-Decision (2026-10-24): change the repository's defaults instead. Delete
-`[profile.release]`'s `lto = "fat"` and `codegen-units = 1` (`opt-level = 3`
-is already the default, so the section goes), so the existing release sweeps
-certify the profile an embedder most likely builds. Consequences to handle with
-the change: every `brokkr dellingr` number shifts and comparisons across the
-change measure profile and code together; measured numbers in
-`reference/performance.md` and the README state the profile they were taken
-under; the release envelope and the per-cycle figures in `docs/limits.md` and
-`reference/native-calls.md` are re-measured. No opt-in fat-LTO profile until
-something needs one.
-
 ## VN-007 - The envelope depends on build inputs the repository neither pins nor records
 
 Reported by: native-stack-errors, corpus-harness.

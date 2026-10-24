@@ -6,7 +6,33 @@ All notable changes to dellingr are documented here. The format follows
 
 ## [Unreleased]
 
+### Build
+
+- The repository no longer overrides `[profile.release]` (it set fat LTO and
+  one codegen unit), so its release tests, native-stack envelope and
+  benchmarks cover Cargo's default release profile, the one an embedding
+  workspace most likely builds dellingr under. Every release cycle in the
+  native-stack probe is smaller under it; `brokkr dellingr` timings move (the
+  composite `benchmark`, `mixed` and `gc_churn` workloads measured 3 to 12%
+  slower, others unchanged; reference/performance.md), and stored results
+  before and after the change do not compare.
+- Building for 32-bit x86 without SSE2 is a compile error: x87 evaluation
+  would change replayed numbers.
+
 ### Testing
+
+- Release goldens: the `release-goldens` check shape runs every `cost::`
+  test, the crmath golden, the opcode-encoding fixture and the save golden in
+  an optimized snapshot build, and `release-corpus` runs the example corpus
+  gate in the default-feature release build. A new integration test,
+  `library::crmath_golden`, runs every crmath golden row through the shipped
+  `math` functions and `^`, beside the unit golden's forced FMA backends.
+- A corpus cost golden, `tests/fixtures/corpus_cost.txt`: each corpus test
+  reads the CLI's `Cost used` line and compares it with the example's row,
+  which also records the source digest, so a changed cost for unchanged
+  source is reported as a cost model change. `regenerate_corpus_cost` writes
+  the fixture and refuses to record such a change without a
+  `COST_MODEL_VERSION` bump.
 
 - The example runner and the differential gate are one Rust test per
   example, `corpus::run_examples::standalone::<name>`: each example runs
@@ -51,7 +77,7 @@ All notable changes to dellingr are documented here. The format follows
   helpers and error and print recorders, and a convention test keeps the tree
   to its named targets, every source reachable from `main.rs`, no dead-code
   allowances, and process-wide state marked.
-- A small `tests/libm_symbols.rs` target checks the fat-LTO release CLI for
+- A small `tests/libm_symbols.rs` target checks the release CLI for
   platform libm transcendental symbols in both release sweeps, replacing the
   manual `scripts/check_libm_symbols.sh`.
 - Calls that can re-enter Lua are wrapped in a `native_call!` marker macro

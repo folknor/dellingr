@@ -11,8 +11,8 @@ use crate::vm::MetaName;
 
 // `table.unpack` and global `unpack` are separate catalog entries, so they are
 // distinct values with their own save ids whatever this wrapper compiles to
-// (release LTO merges it with the global's identical wrapper); the wrapper
-// only gives the native-call inventory its own edge.
+// (an optimizing build may merge it with the global's identical wrapper); the
+// wrapper only gives the native-call inventory its own edge.
 fn table_unpack_values(state: &mut State) -> crate::Result<u8> {
     crate::native_call!(
         "table_unpack_values->unpack_values",

@@ -12,7 +12,7 @@ transcendental symbols (`fmod`, `sqrt` and the other exact operations are
 allowed). `brokkr check` runs it, through the integration test
 `corpus::libm_symbols`, on the dev-profile CLI binary of the default and
 `snapshot` sweeps. The dedicated `libm_symbols` test target also checks the
-fat-LTO release binaries in `release-native-stack` and
+release binaries in `release-native-stack` and
 `release-native-stack-snapshot`, using each sweep's `CARGO_BIN_EXE_dellingr`.
 Only code retained in the linked CLI is covered; discarded library code is
 outside this symbol check.
@@ -80,7 +80,8 @@ denormals-are-zero, exceptions masked). Rust assumes the same environment.
 On x86_64 and aarch64 dellingr reads the thread's control register at its
 entry points and refuses anything else (`src/fp_env.rs`;
 `docs/determinism.md`, "Floating-point environment"). x87-only targets (32-bit
-x86 without SSE2) evaluate with excess range and are not supported. NaN sign and payload bits
+x86 without SSE2) evaluate with excess range and are not supported; `src/lib.rs`
+refuses to compile for them. NaN sign and payload bits
 are not part of the guarantee: they never affect a non-NaN result, every NaN is
 treated as quiet (so `pow(NaN, 0)` and `pow(1, NaN)` are 1 whatever the
 NaN's bits), and the VM never lets a script observe them.
@@ -119,7 +120,11 @@ NaN's bits), and the VM never lets a script observe them.
   values, random inputs and a sample of CORE-MATH's worst cases for every
   kernel. Each line is checked under every FMA path the host can run. The
   same file has to pass on every supported host; it is the cross-platform
-  guarantee in executable form.
+  guarantee in executable form. These forced paths go through test-only
+  dispatch hooks, so the integration test `library::crmath_golden` also runs
+  every line through the shipped build: `math` functions and `^` from a
+  script. Both run in the dev sweeps and, optimized, in the `release-goldens`
+  check shape.
 - `crmath::tests::oracle`: an interval Ziv procedure over `libbeef` in
   directed rounding, which certifies the expected values. It reports an error
   instead of guessing if its explicit Ziv loop exceeds its precision cap: 512

@@ -222,7 +222,7 @@ historical evidence and must never be regenerated from current declarations.
 
 The current golden pins the save payload after the header, with the format
 word checked separately. The payload is the same in every build profile, and
-the `release-save-golden` check shape in `brokkr.toml` holds an optimized
+the `release-goldens` check shape in `brokkr.toml` holds an optimized
 build to the fixture alongside the dev sweeps. Engine and cost-model header metadata do not
 participate in this pin. The load probe uses the current cost-model header on
 this payload; released archives always retain strict, original headers.

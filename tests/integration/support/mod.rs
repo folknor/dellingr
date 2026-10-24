@@ -5,6 +5,8 @@
 //! the golden-regeneration example), so they stay self-contained and are
 //! included by path, here or by the suite that uses them.
 
+#[path = "../../common/corpus_cost_golden.rs"]
+pub(crate) mod corpus_cost_golden;
 #[path = "../../common/error_boundary_cases.rs"]
 pub(crate) mod error_boundary_cases;
 mod lua;

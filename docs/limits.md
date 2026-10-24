@@ -308,8 +308,9 @@ profile and thread size; none depends on how much native stack is left.
 
 The runtime limits are sized so that all of them at once fit:
 
-- a **2 MiB** thread, the Rust default for spawned threads, in this
-  repository's release build settings;
+- a **2 MiB** thread, the Rust default for spawned threads, in Cargo's
+  default release profile, which this repository builds (it sets no
+  `[profile.release]` overrides);
 - a **4 MiB** thread in its dev (unoptimized) build settings, whose frames
   are several times larger.
 
@@ -413,7 +414,16 @@ either setting, and the largest recurring cycle is 14,608 bytes in dev and
 3,552 in release (3,520 with snapshot). The loose bound is then about
 2.09 MiB in dev and 0.51 MiB in release.
 
-The latest (plantasjen, on top of 41ad774), taken when table allocation
+Every other release figure in this section was taken under the repository's
+former release profile (fat LTO, one codegen unit). The current measurement (plantasjen, on top of
+0779c08, recorded in the native-call reference under "Cargo's default
+release profile") is under Cargo's default release profile: every release
+cycle is smaller, the largest 3,104 bytes (3,168 with snapshot) against
+3,376 (3,408) under the old profile at the same commit, and the largest dev
+cycle is 13,680 bytes. No chain step costs native stack. The loose bound is
+then about 1.96 MiB in dev and 0.45 MiB in release.
+
+The previous one (plantasjen, on top of 41ad774), taken when table allocation
 moved out of the dispatch frame and global stores began reading their
 source register in place, measures the largest recurring cycle at 13,552
 bytes in dev (also with snapshot) and 3,344 in release (3,360 with
@@ -439,7 +449,9 @@ before a recursion limit is reached. Give such threads 4 MiB with
 `std::thread::Builder::stack_size` (the main thread usually has 8 MiB
 already). Other build configurations - a host's own optimization levels or
 profile overrides for its dependencies, other targets - are the embedder's
-to validate; the stated sizes are what this repository tests.
+to validate; the stated sizes are what this repository tests. Cargo applies
+the embedding workspace's profile to dellingr, so a host whose release
+profile matches Cargo's default builds what the release envelope covers.
 
 Outside the envelope, and the embedder's to provision:
 

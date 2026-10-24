@@ -41,6 +41,16 @@ compile_error!("the cost-check-interval feature requires debug assertions");
 #[cfg(all(feature = "native-call-trace", not(debug_assertions)))]
 compile_error!("the native-call-trace feature requires debug assertions");
 
+// Every number a script sees is IEEE binary64 rounded once per operation: VM
+// arithmetic, numeral parsing, number rendering and the `crmath` kernels all
+// rely on it, and replays depend on the bits. x87 evaluation (x86 without
+// SSE2, i586 and older) carries excess range and precision, so such targets
+// are refused rather than built to diverge.
+#[cfg(all(target_arch = "x86", not(target_feature = "sse2")))]
+compile_error!(
+    "dellingr needs SSE2 binary64 arithmetic on x86; x87-only targets (i586 and older) are not supported"
+);
+
 // With tracing disabled, preserve the call expression without adding a block,
 // local, closure or guard to any frame that can stay live across re-entry.
 /// Mark a native call edge for coverage tracing.

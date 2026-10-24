@@ -23,66 +23,31 @@ entry names the scopes whose hunters reported it.
 
 ---
 
-## VD-007 - Determinism is pinned on one host, one target and one profile
+## VD-007 - Determinism is pinned on one host and one target
 
 Reported by: check-machinery, compiler-cost, library.
 
 Replays must be byte-for-byte reproducible "on every host", and goldens exist
-for it (`tests/integration/cost/cost_golden.rs`, `tests/fixtures/save_golden_current.bin`,
-`tests/fixtures/crmath_golden.txt`, `tests/fixtures/opcode_encoding.txt`). Every
-sweep runs them on one host and one target. There is no CI directory.
-`examples/hotpath.rs` uses `std::os::unix` and `libc::O_NONBLOCK`, and `cargo
-test` builds examples, so the suite cannot build on Windows.
+for it. The release profile half is closed: the `release-goldens` and
+`release-corpus` check shapes run the cost, crmath, opcode-encoding, save and
+corpus cost goldens optimized, and x87-only x86 refuses to compile. What is
+still open:
 
-- Profile: every cost test runs only in the dev profile; the release
-  `[[check]]` shapes run `tests = ["native_stack"]` only. Release is what ships
-  and records replays. `docs/determinism.md` promises the same cost "on a given
-  build"; `docs/budget.md` and the `COST_MODEL_VERSION` doc imply
-  build-independence and tell hosts they may key stored fingerprints on it.
-  Overflow differs between profiles (debug panics, release wraps), and
-  `analyze_cost` uses plain `+=` on `u64`. The crmath golden ("the same file must
-  pass on every target") also runs only in dev; release (fat LTO,
-  `codegen-units = 1`, `#[target_feature]` inlining) never runs it. Rust does not
-  contract or reassociate, so the risk is a codegen bug, not semantics. The test
-  build's kernel entry also runs an extra thread-local `forced_fma()` read that
-  production does not, so the golden exercises a slightly different dispatch
-  prologue from the shipped one.
-- Target: the aarch64 hardware instance (`fma_dispatch` on `mul_add`, under
-  `#[allow(clippy::disallowed_methods)]`) and each kernel's aarch64 `cfg` arm
-  (11 copies of about 20 lines of dispatch plumbing, which one `dispatch!`
-  macro could replace) are not even compiled or linted on an x86 host. "x87-only
-  targets are not supported" is documented, but the code does not refuse to
-  build for them.
-
-Fix: a corpus-wide runtime cost golden (read `Cost used: N` from
-`run_examples` without `--quiet`, or a library runner), stored in the cost
-fixture and run in every `[[check]]` shape including a release one; run the
-crmath golden in a release shape (brokkr's `lib_tests = true` selects the lib
-unit-test harness with an `only` filter; or the crmath crate split in
-rewrites.md); a `[[check]] target =
-"x86_64-unknown-linux-musl"` (runs natively; different libc and allocator) and,
-with multilib, `i686-unknown-linux-gnu` (32-bit `usize`) entry with a narrow
-`only` filter for the golden and determinism tests; `cargo clippy --target
-aarch64-unknown-linux-gnu` (needs only `rustup target add`), plus the golden
-under qemu-user if available; `#[cfg(all(target_arch = "x86",
-not(target_feature = "sse2")))] compile_error!(...)` in `crmath/mod.rs`. None of
-these covers aarch64 execution without a runner.
-
-Enforceable: yes, as `[[check]]` entries and a `compile_error!`.
-
-Decision (2026-10-24):
-- Run the cost golden, the crmath golden and the opcode-encoding fixture in a
-  release `[[check]]` with an `only` filter (the save golden already has
-  `release-save-golden`), and add a corpus-wide cost golden, every example's
-  cost, produced by the corpus gate (`corpus::run_examples`, now one test
-  per example).
-- Add a `cargo clippy --target aarch64-unknown-linux-gnu` shape so the aarch64
-  arms are compiled and linted.
-- Add `compile_error!` for `target_arch = "x86"` without `sse2` in
-  `crmath/mod.rs`.
-- Optional, alongside the aarch64 shape: one `dispatch!` macro replacing the
-  per-kernel dispatch copies.
-- musl, i686 and qemu runs only if a player platform needs them.
+- Target: every sweep runs on one host and one target. There is no CI
+  directory. The aarch64 hardware instance (`fma_dispatch` on `mul_add`, under
+  `#[allow(clippy::disallowed_methods)]`), each kernel's aarch64 `cfg` arm (11
+  copies of about 20 lines of dispatch plumbing, which one `dispatch!` macro
+  could replace) and `src/fp_env.rs`'s aarch64 arm are not even compiled or
+  linted on an x86 host. A `cargo clippy --target aarch64-unknown-linux-gnu`
+  shape (needs the rustup target) would compile and lint them; none of the
+  options covers aarch64 execution without a runner. Undecided.
+- musl (`x86_64-unknown-linux-musl`, different libc and allocator), i686
+  (32-bit `usize`) and qemu-user runs: only if a player platform needs them.
+- `examples/hotpath.rs` uses `std::os::unix` and `libc::O_NONBLOCK`, and
+  `cargo test` builds examples, so the suite cannot build on Windows.
+- Overflow differs between profiles (debug panics, release wraps), and
+  `analyze_cost` uses plain `+=` on `u64`; the release cost tests exercise no
+  input near the wrap.
 
 ## VD-019 - `%` and `math.fmod` lower to the platform `fmod` with no edge-case golden
 

@@ -1,3 +1,4 @@
+mod crmath_golden;
 mod gsub_errors;
 mod number_format_g14;
 mod number_rendering;

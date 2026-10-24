@@ -239,17 +239,43 @@ profile = "release"
 features = ["snapshot"]
 tests = ["native_stack", "libm_symbols"]
 
-# The save golden in an optimized build. Saved Rust functions are function
-# table ids, not code addresses, so fat-LTO folding of identical functions
-# (base `unpack` and `table.unpack`) must not change the pinned payload; this
-# shape holds the release build to the same fixture as the dev sweeps.
+# The determinism goldens in an optimized build. Release is what ships and
+# records replays, and the dev sweeps alone cannot see an optimizer or codegen
+# divergence. Every cost test (`cost::`, its source and native-call goldens,
+# budget sweeps and accounting pins), the opcode-encoding fixture, the crmath
+# golden through its forced FMA backends (`crmath::tests::golden::`, the
+# library's test build) and through the shipped math library and `^`
+# (`library::crmath_golden::`), and the save golden: saved Rust functions are
+# function table ids, not code addresses, so the linker folding identical
+# functions (base `unpack` and `table.unpack`) must not change the pinned
+# payload. Snapshot features, since the save golden needs them; the
+# default-feature release build runs the corpus below.
 [[check]]
-name = "release-save-golden"
+name = "release-goldens"
 profile = "release"
 features = ["snapshot"]
 tests = ["integration"]
-lib_tests = false
-only = ["snapshot::save_golden::"]
+lib_tests = true
+only = [
+    "cost::",
+    "crmath::tests::golden::",
+    "instr::tests::persisted_encodings_match_fixture",
+    "library::crmath_golden::",
+    "snapshot::save_golden::",
+]
+
+# The example corpus gate, with its corpus cost golden and reference
+# comparison, in the default-feature release build: every example's
+# `Cost used` from the optimized CLI against `tests/fixtures/corpus_cost.txt`.
+# No release shape runs the whole integration crate, so this lane has no
+# serial parent (see `standalone_tests_run_in_one_parallel_lane_per_shape`).
+[[check]]
+name = "release-corpus"
+profile = "release"
+tests = ["integration"]
+only = ["corpus::run_examples::standalone::"]
+parallel = {}
+feature_unification = "workspace"
 
 [bin]
 default = "dellingr"

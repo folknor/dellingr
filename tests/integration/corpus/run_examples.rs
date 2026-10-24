@@ -1,7 +1,8 @@
 //! The example corpus gate: one test per example, in `standalone`, expanded
 //! from the checked-in list `tests/common/examples.rs`. Each example runs
 //! through the CLI once and must pass the example conventions
-//! (`check_cli_run`); an example not marked `-- SKIP-DIFF:` is then run by
+//! (`check_cli_run`), and the `Cost used: N` it reports must match the corpus
+//! cost golden (`check_corpus_cost`); an example not marked `-- SKIP-DIFF:` is then run by
 //! reference Lua 5.2 and 5.4 and compared with the CLI's output in memory
 //! (`compare_with_references`). `brokkr test standalone::calls_global` runs
 //! one example.
@@ -22,8 +23,9 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
-use dellingr::Program;
+use dellingr::{COST_MODEL_VERSION, Program};
 
+use crate::support::corpus_cost_golden as corpus_cost;
 #[cfg(not(feature = "hotpath"))]
 use crate::support::process::ReferenceLua;
 use crate::support::process::{self, Cut, Deadline, End};
@@ -212,9 +214,11 @@ fn check_example(display: &str, path: &Path, deadline: Deadline) -> Result<(), S
     let comparison = comparison(&source).map_err(|error| format!("{display}: {error}"))?;
     let defines_bench = defines_global_bench(&source);
 
-    // `capture` starts nothing once the deadline has passed.
+    // `capture` starts nothing once the deadline has passed. Without `--quiet`
+    // the CLI reports `Cost used: N` on stderr, which the corpus cost golden
+    // reads.
     let run = process::capture(
-        process::limited_command().arg("--quiet").arg(path),
+        process::limited_command().arg(path),
         OUTPUT_LIMIT_BYTES,
         deadline,
     )
@@ -224,40 +228,135 @@ fn check_example(display: &str, path: &Path, deadline: Deadline) -> Result<(), S
             EXAMPLE_DEADLINE.as_secs()
         )
     })?;
-    check_cli_run(display, &run, defines_bench)?;
+    let cost = check_cli_run(display, &run, defines_bench)?;
+    check_corpus_cost(display, source.as_bytes(), cost)?;
     compare_with_references(path, display, comparison, &run.stdout, deadline)
 }
 
 /// The example conventions for the CLI run: it exits 0 and writes nothing to
-/// stderr; no stdout line ends in `: false` (examples print
-/// `name: <condition>`); and a file whose main chunk assigns a global `_bench`
-/// prints a line ending in `: true`.
+/// stderr but its one `Cost used: N` line, whose `N` is returned; no stdout
+/// line ends in `: false` (examples print `name: <condition>`); and a file
+/// whose main chunk assigns a global `_bench` prints a line ending in
+/// `: true`.
 fn check_cli_run(
     display: &str,
     run: &process::Captured,
     defines_bench: bool,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     let status = match &run.end {
         End::Exited(status) => status,
         End::Cut(cut) => return Err(cut_failure(display, "dellingr", cut, run)),
     };
     let stdout = String::from_utf8_lossy(&run.stdout);
     let stderr = String::from_utf8_lossy(&run.stderr);
-    let failure = if !status.success() {
-        format!(
+    let cost = stderr
+        .strip_prefix("Cost used: ")
+        .and_then(|rest| rest.strip_suffix('\n'))
+        .map(str::parse::<u64>);
+    if !status.success() {
+        return Err(format!(
             "{display}: exit code {:?}\nstdout: {stdout}\nstderr: {stderr}",
             status.code()
-        )
-    } else if !stderr.is_empty() {
-        format!("{display}: unexpected stderr\nstdout: {stdout}\nstderr: {stderr}")
-    } else if stdout.lines().any(|line| line.ends_with(": false")) {
-        format!("{display}: test assertion failed\noutput: {stdout}")
-    } else if defines_bench && !stdout.lines().any(|line| line.ends_with(": true")) {
-        format!("{display}: _bench example did not print a success line\noutput: {stdout}")
-    } else {
-        return Ok(());
+        ));
+    }
+    let Some(Ok(cost)) = cost else {
+        return Err(format!(
+            "{display}: stderr should be exactly one `Cost used: N` line\nstdout: {stdout}\nstderr: {stderr}"
+        ));
     };
-    Err(failure)
+    if stdout.lines().any(|line| line.ends_with(": false")) {
+        return Err(format!(
+            "{display}: test assertion failed\noutput: {stdout}"
+        ));
+    }
+    if defines_bench && !stdout.lines().any(|line| line.ends_with(": true")) {
+        return Err(format!(
+            "{display}: _bench example did not print a success line\noutput: {stdout}"
+        ));
+    }
+    Ok(cost)
+}
+
+/// The recorded corpus costs (`tests/common/corpus_cost_golden.rs` describes the
+/// format and its verdicts).
+const CORPUS_COST: &str = include_str!("../../fixtures/corpus_cost.txt");
+
+fn corpus_cost_fixture() -> corpus_cost::Fixture {
+    corpus_cost::parse(CORPUS_COST)
+        .unwrap_or_else(|error| panic!("tests/fixtures/corpus_cost.txt: {error}"))
+}
+
+/// The corpus cost golden: the CLI's `cost_used` for an example matches the
+/// row recorded for its source.
+fn check_corpus_cost(display: &str, source: &[u8], cost: u64) -> Result<(), String> {
+    corpus_cost_fixture().judge(
+        COST_MODEL_VERSION,
+        display,
+        corpus_cost::source_digest(source),
+        cost,
+    )
+}
+
+/// The fixture has exactly one row per listed example, in list order, and is
+/// in the form the regeneration tool writes, so a hand edit or a stale row
+/// fails here rather than lingering.
+#[test]
+fn corpus_cost_fixture_rows_are_the_example_list() {
+    let fixture = corpus_cost_fixture();
+    let recorded: Vec<&str> = fixture.rows.iter().map(|row| row.path.as_str()).collect();
+    let listed: Vec<&str> = examples::EXAMPLES
+        .iter()
+        .map(|example| example.relative)
+        .collect();
+    assert_eq!(
+        recorded, listed,
+        "tests/fixtures/corpus_cost.txt must list every example once, in list order; \
+         regenerate it with `brokkr run --release regenerate_corpus_cost -- tests/fixtures/corpus_cost.txt`"
+    );
+    assert_eq!(
+        corpus_cost::render(&fixture),
+        CORPUS_COST,
+        "tests/fixtures/corpus_cost.txt is not in the regeneration tool's form"
+    );
+}
+
+/// The regeneration tool refuses to record a new cost for unchanged source
+/// under an unchanged cost model, and allows it for changed source or after a
+/// version bump.
+#[test]
+fn corpus_cost_regeneration_refuses_unversioned_drift() {
+    let fixture = corpus_cost_fixture();
+    let row = &fixture.rows[0];
+    let replacement = |cost_model, source, cost| corpus_cost::Fixture {
+        cost_model,
+        rows: vec![corpus_cost::Row {
+            path: row.path.clone(),
+            source,
+            cost,
+        }],
+    };
+    let model = fixture.cost_model;
+    assert!(
+        fixture
+            .unversioned_changes(&replacement(model, row.source, row.cost))
+            .is_empty()
+    );
+    assert_eq!(
+        fixture
+            .unversioned_changes(&replacement(model, row.source, row.cost + 1))
+            .len(),
+        1
+    );
+    assert!(
+        fixture
+            .unversioned_changes(&replacement(model, row.source ^ 1, row.cost + 1))
+            .is_empty()
+    );
+    assert!(
+        fixture
+            .unversioned_changes(&replacement(model + 1, row.source, row.cost + 1))
+            .is_empty()
+    );
 }
 
 /// The failure of a process whose capture was cut short.
@@ -449,7 +548,9 @@ fn build_shape(check: &toml::Table) -> String {
 /// of their own (see the module comment). Every sweep that runs the
 /// integration crate without an `only` filter skips them; each such sweep has
 /// exactly one sibling of the same build that runs only them, in brokkr's
-/// shared-process parallel lane; and no other sweep names or selects them.
+/// shared-process parallel lane; a build may also have a standalone lane
+/// without such a parent (the release corpus), but never two lanes; and no
+/// other sweep names or selects them.
 /// The selector comes from the module's own path, so renaming the module
 /// fails here rather than moving the corpus into the serial lane or out of
 /// both. brokkr refuses a sweep in which no test ran, which covers an
@@ -603,14 +704,24 @@ fn standalone_tests_run_in_one_parallel_lane_per_shape() {
             "[[check]] {parent} ({shape}) needs exactly one standalone sibling of the same build, found {matching:?}"
         );
     }
+    // A build with no full serial sweep (the release corpus) still gets one
+    // standalone lane at most, so no build runs the corpus twice.
     for (sibling, shape) in &siblings {
-        assert_eq!(
+        assert!(
             parents
                 .iter()
                 .filter(|(_, parent_shape)| parent_shape == shape)
+                .count()
+                <= 1,
+            "standalone sweep {sibling} ({shape}) has more than one sweep of the same build that skips it"
+        );
+        assert_eq!(
+            siblings
+                .iter()
+                .filter(|(_, other_shape)| other_shape == shape)
                 .count(),
             1,
-            "standalone sweep {sibling} ({shape}) needs exactly one sweep of the same build that skips it"
+            "standalone sweep {sibling} ({shape}) shares its build with another standalone sweep"
         );
     }
 }
