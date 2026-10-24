@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use dellingr::{Program, ScopeCost, State};
+use xxhash_rust::xxh3::xxh3_128;
 
 // Keep the expected function name tied to the constant used by the harness.
 const HOTPATH_SOURCE: &str =
@@ -71,75 +72,55 @@ fn cost_fingerprint(scope: &ScopeCost) -> CostFingerprint {
 struct WorkloadPair {
     name: String,
     file: String,
+    xxh128: String,
     hotpath_file: String,
+    hotpath_xxh128: String,
 }
 
 fn workload_pairs(root: &Path) -> Vec<WorkloadPair> {
     let source =
         fs::read_to_string(root.join("brokkr.toml")).expect("brokkr.toml should be readable");
-    let mut pairs = Vec::new();
-    let mut current: Option<WorkloadPair> = None;
-
-    for line in source.lines().chain(std::iter::once("[end]")) {
-        let line = line.trim();
-        if line.starts_with('[') {
-            if let Some(pair) = current.take() {
-                pairs.push(pair);
-            }
-
-            if let Some(name) = line
-                .strip_prefix("[dellingr.workloads.")
-                .and_then(|name| name.strip_suffix(']'))
-            {
-                assert!(!name.is_empty(), "workload name in brokkr.toml is empty");
-                current = Some(WorkloadPair {
-                    name: name.to_owned(),
-                    file: String::new(),
-                    hotpath_file: String::new(),
-                });
-            }
-            continue;
-        }
-
-        let Some(pair) = current.as_mut() else {
-            continue;
-        };
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        match key.trim() {
-            "file" => pair.file = parse_toml_string(value, "file", &pair.name),
-            "hotpath_file" => {
-                pair.hotpath_file = parse_toml_string(value, "hotpath_file", &pair.name);
-            }
-            _ => {}
-        }
-    }
+    let config = source
+        .parse::<toml::Value>()
+        .unwrap_or_else(|error| panic!("brokkr.toml is not valid TOML: {error}"));
+    let workloads = config
+        .get("dellingr")
+        .and_then(|dellingr| dellingr.get("workloads"))
+        .and_then(toml::Value::as_table)
+        .unwrap_or_else(|| panic!("brokkr.toml has no [dellingr.workloads] table"));
 
     assert!(
-        !pairs.is_empty(),
+        !workloads.is_empty(),
         "brokkr.toml contains no workload registrations"
     );
-    for pair in &pairs {
-        assert!(!pair.file.is_empty(), "workload {} has no file", pair.name);
-        assert!(
-            !pair.hotpath_file.is_empty(),
-            "workload {} has no hotpath_file",
-            pair.name
-        );
-    }
-    pairs
+    workloads
+        .iter()
+        .map(|(name, registration)| {
+            assert!(
+                registration.is_table(),
+                "workload {name} registration in brokkr.toml must be a table"
+            );
+            WorkloadPair {
+                name: name.clone(),
+                file: workload_string(registration, "file", name),
+                xxh128: workload_string(registration, "xxh128", name),
+                hotpath_file: workload_string(registration, "hotpath_file", name),
+                hotpath_xxh128: workload_string(registration, "hotpath_xxh128", name),
+            }
+        })
+        .collect()
 }
 
-fn parse_toml_string(value: &str, key: &str, workload: &str) -> String {
-    let value = value.trim();
-    let Some(quoted) = value
-        .strip_prefix('"')
-        .and_then(|value| value.strip_suffix('"'))
-    else {
-        panic!("workload {workload} {key} should be a quoted TOML string");
-    };
-    quoted.to_owned()
+fn workload_string(registration: &toml::Value, key: &str, workload: &str) -> String {
+    let value = registration
+        .get(key)
+        .and_then(toml::Value::as_str)
+        .unwrap_or_else(|| panic!("workload {workload} {key} must be a string in brokkr.toml"));
+    assert!(
+        !value.is_empty(),
+        "workload {workload} {key} must not be empty in brokkr.toml"
+    );
+    value.to_owned()
 }
 
 fn scope<'a>(analysis: &'a dellingr::CostAnalysis, name: &str) -> &'a ScopeCost {
@@ -162,6 +143,36 @@ fn shared_helper_fingerprints(
         .filter(|scope| !excluded_names.contains(&scope.name.as_str()))
         .map(|scope| (scope.name.clone(), cost_fingerprint(scope)))
         .collect()
+}
+
+#[test]
+fn registered_workload_file_digests_match_brokkr_pins() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let pairs = workload_pairs(&root);
+
+    for pair in pairs {
+        let workload_name = pair.name.as_str();
+        for (digest_key, file, expected) in [
+            ("xxh128", pair.file.as_str(), pair.xxh128.as_str()),
+            (
+                "hotpath_xxh128",
+                pair.hotpath_file.as_str(),
+                pair.hotpath_xxh128.as_str(),
+            ),
+        ] {
+            let path = root.join(file);
+            let bytes = fs::read(&path).unwrap_or_else(|error| {
+                panic!(
+                    "cannot read workload registration [dellingr.workloads.{workload_name}] pinned file {file}: {error}"
+                )
+            });
+            let actual = format!("{:032x}", xxh3_128(&bytes));
+            assert_eq!(
+                actual, expected,
+                "workload registration [dellingr.workloads.{workload_name}].{digest_key} drifted for file {file}: expected {expected}, actual {actual}. Editing a pinned file means re-registering its pin, which cuts its stored benchmark history."
+            );
+        }
+    }
 }
 
 #[test]

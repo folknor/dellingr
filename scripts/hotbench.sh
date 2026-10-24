@@ -52,7 +52,7 @@ then
 fi
 
 DELLINGR_BIN="$(dellingr_bin_built release)" || exit 1
-HOTPATH_BIN="$(cargo_artifact release hotpath example "$HOTPATH_FEATURES")" || exit 1
+HOTPATH_BIN="$(brokkr_artifact release hotpath example "$HOTPATH_FEATURES")" || exit 1
 
 if [ ! -x "$DELLINGR_BIN" ] || [ ! -x "$HOTPATH_BIN" ]
 then

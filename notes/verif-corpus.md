@@ -206,28 +206,19 @@ the claim holds for every section.
 
 Enforceable: yes, a disassembly-equality assertion in `bench_scripts.rs`.
 
-## VC-008 - `bench_scripts.rs` reads `brokkr.toml` with a hand-written parser, and checks no orphans
+## VC-008 - `bench_scripts.rs` checks no orphan verdict files
 
 Reported by: check-machinery, corpus-harness.
 
-`workload_pairs` recognises a workload only from a line that is exactly
-`[dellingr.workloads.NAME]` and a `key = "value"` pair. Valid TOML that silently
-drops a workload from the fingerprint check: a trailing comment on the header,
-spaces inside the brackets, a quoted name, dotted keys under `[dellingr]`, an
-inline table (`[dellingr.workloads]` then `foo = { file = "..." }`), a
-single-quoted literal string. The only failure caught is an empty registry. The
-repository has three readers for this one file: `tomllib` in `scripts/lib.sh`
-and `native_calls.py`, this one in Rust, and brokkr's own.
+`corpus::bench_scripts` now parses `brokkr.toml` with the `toml` crate, but
+does not check that every `bench/*.lua` is registered (today 24 bench files map
+onto 25 workloads, `large_source` having none); an orphan verdict file would
+pass. AGENTS.md's "the parser caps a chunk at 255 nested functions" restates
+`MAX_NESTED` (`u8::MAX as usize`); `generate.py` reads the constant, the prose
+does not; reword to name the constant.
 
-The test also does not check that every `bench/*.lua` is registered (today 24
-bench files map onto 25 workloads, `large_source` having none); an orphan
-verdict file would pass. AGENTS.md's "the parser caps a chunk at 255 nested
-functions" restates `MAX_NESTED` (`u8::MAX as usize`); `generate.py` reads the
-constant, the prose does not; reword to name the constant.
-
-Fix: a `toml` dev-dependency and a real parse (or brokkr exposing the resolved
-registry as JSON); assert the set of `file` values equals `bench/*.lua` plus
-named exceptions, and the set of names equals what brokkr resolves.
+Fix: assert the set of `file` values equals `bench/*.lua` plus named
+exceptions.
 
 Enforceable: yes, as a test.
 
@@ -389,10 +380,10 @@ Reported by: check-machinery, corpus-harness, native-stack-errors.
 | `scripts/diff_test.sh` via `differential_examples` | `.scratch/dellingr-diff-*` (three `mktemp` files per invocation, top level) | removed by an `EXIT` trap that brokkr's SIGKILL never runs; 18 leaked files now (six sets from 2026-10-21 and 22), one of them 70,691,826 bytes; bypasses the scratch convention because the write is in a shell child | no files (the in-process gate rewrite), or `--scratch <dir>` with `diff_test.rs` passing a `ScratchDirectory` under `CARGO_TARGET_TMPDIR`, or `.scratch/diff-test/` cleaned at start |
 | `scripts/bench.sh` | `.scratch/bench-results/<run>/` | fine: owns its subdir and prunes by pattern (GNU `find -printf`) | as is |
 | `error_boundary_transcript` via `scratch::write_boundary_transcript` | `.scratch/error-boundary/transcript.txt` | fixed path in a dir with many owners, last writer wins, nothing owns or cleans it; breaks the scratch helper's own rule; runs on focused `brokkr test` (bugs.md) | a `brokkr run` tool with an output path argument, or a committed golden (the transcript entry in verif-assertions.md), or `CARGO_TARGET_TMPDIR/error-boundary/` through `write_scratch_file` |
-| `research/bench_luars.sh` | `.bench-luars.json` at the repo root | not ignored (verif-gates.md) | `.scratch/bench-luars/` |
 
 `.scratch/` is the developer's scratch area (patches, perf data, notes; about
-200 entries today) with at least four tool owners, and nothing says which
+200 entries today) with several tool owners (`research/bench_luars.sh` now also keeps its JSON
+under `.scratch/bench-luars/`), and nothing says which
 subtree belongs to whom; a cleanup by one tool can destroy another's state. The
 native-stack hunter notes the transcript's stated reason for the exception
 ("must outlive the test process") does not hold: `CARGO_TARGET_TMPDIR` also
@@ -453,25 +444,20 @@ refresh script, which records `lua5.x -v` beside the outputs.
 
 Enforceable: yes, with recorded versions checked by the refresh tool.
 
-## VC-019 - Tests of the shell tool rather than the product, one of which can become a nested release build
+## VC-019 - Tests of the shell tool rather than the product
 
 Reported by: check-machinery, corpus-harness.
 
 `malformed_timeout_is_rejected_once_before_other_checks` and
 `shell_and_rust_example_corpora_match` test `diff_test.sh`'s argument parser and
 its `find | sort` walk; they exist because the gate is split between a Rust
-walker and a shell walker that must agree. The first runs `diff_test.sh
---timeout "5 s"` without `--bin`: if the regex validation ever regressed, the
-script would continue to `dellingr_bin_built release` (`cargo build --release`,
-fat LTO, `codegen-units = 1`) inside a test under brokkr's lock and 20s cap, and
-the failure would show as a per-test timeout and a stray cargo, not a clean
-assertion.
+walker and a shell walker that must agree. Every `diff_test.sh` run from
+`corpus::diff_test` now passes `--bin` (the timeout probe passes `/dev/null`),
+so none can fall through to a build, but nothing requires the next one to.
 
-Fix: pass `--bin` with `common::dellingr_bin()` or a nonexistent path
-(validation still runs first). The in-process gate rewrite deletes the need for
-both tests.
+Fix: the in-process gate rewrite deletes the need for both tests.
 
-Enforceable: yes. A textlint rule can require `--bin` on every `diff_test.sh`
+Enforceable: a textlint rule can require `--bin` on every `diff_test.sh`
 invocation in `tests/`.
 
 ## VC-020 - The corpus walk is a filesystem walk, so untracked files join the gate

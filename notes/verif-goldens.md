@@ -265,8 +265,9 @@ test` builds examples, so the suite cannot build on Windows.
 Fix: a corpus-wide runtime cost golden (read `Cost used: N` from
 `run_examples` without `--quiet`, or a library runner), stored in the cost
 fixture and run in every `[[check]]` shape including a release one; run the
-crmath golden in a release shape (needs lib-target selection in brokkr, see
-brokkr.md, or the crmath crate split in rewrites.md); a `[[check]] target =
+crmath golden in a release shape (brokkr's `lib_tests = true` selects the lib
+unit-test harness with an `only` filter; or the crmath crate split in
+rewrites.md); a `[[check]] target =
 "x86_64-unknown-linux-musl"` (runs natively; different libc and allocator) and,
 with multilib, `i686-unknown-linux-gnu` (32-bit `usize`) entry with a narrow
 `only` filter for the golden and determinism tests; `cargo clippy --target
@@ -444,22 +445,6 @@ shape of `frame.rs::documented_opcode_charges_match_static_units`, or reword the
 doc to name the constants instead of their values.
 
 Enforceable: yes, by the test.
-
-## VD-017 - The regeneration example writes through a compile-time path
-
-Reported by: snapshot.
-
-`examples/regenerate_save_golden.rs` writes to
-`env!("CARGO_MANIFEST_DIR")/tests/fixtures/...`, an absolute path fixed at compile
-time. Under `brokkr run --commit REF regenerate_save_golden`, brokkr builds in its
-own persistent worktree, so the binary writes the fixture into brokkr's worktree,
-not the live tree, and reports success with `wrote <path>`.
-
-Fix: write relative to the current working directory's repository root, or take
-the destination as an argument; skip the write when bytes are unchanged and say so
-(see the generators entry in verif-gates.md).
-
-Enforceable: no rule needed beyond the fix.
 
 ## VD-018 - The host's floating-point environment is assumed, never detected
 

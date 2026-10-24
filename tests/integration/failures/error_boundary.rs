@@ -297,7 +297,6 @@ fn error_boundary_transcript() {
 
 #[cfg(feature = "fault-injection")]
 #[test]
-#[ignore = "on-demand single-refusal sweep"]
 fn error_boundary_fault_sweep() {
     for (name, source) in CASES {
         let baseline = run(name, source, None, Some(None));

@@ -1,18 +1,25 @@
 #!/usr/bin/env bash
 # Bench dellingr vs lua-rs (https://github.com/ianm199/lua-rs), both pure-Rust
 # Lua VMs, anchored to reference C Lua 5.4 and the LuaJIT floor. Same scripts,
-# same host, one hyperfine pass per script. Mirrors ../bench.sh's jq extraction.
+# same host, one hyperfine pass per script. jq extracts the per-script means.
 #
-# Run from the dellingr repo root:  ./research/bench_luars.sh
+# Run with the script path from any working directory.
 #
-# Requires: hyperfine, jq, lua5.4, luajit on PATH; the dellingr release binary
-# and the lua-rs release binary built (see header check below).
+# Requires: brokkr, hyperfine, jq, lua5.4 and luajit on PATH, plus the lua-rs
+# release binary at research/lua-rs/target/release/lua-rs. The script builds
+# dellingr through brokkr.
 #
 # Usage: ./research/bench_luars.sh                  # curated default set
 #        ./research/bench_luars.sh script1.lua ...  # explicit scripts
 #        ./research/bench_luars.sh --dry-run [...]   # validate, don't run
 
 set -u
+
+# Script paths below are repo-relative, so anchor to the repo root regardless
+# of where this was invoked from.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+cd "$SCRIPT_DIR/.." || exit 1
+. "$SCRIPT_DIR/../scripts/lib.sh"
 
 DRY_RUN=0
 if [ "${1:-}" = "--dry-run" ]
@@ -21,9 +28,7 @@ then
     DRY_RUN=1
 fi
 
-DELLINGR="target/release/dellingr"
 LUARS="research/lua-rs/target/release/lua-rs"
-JSON_FILE=".bench-luars.json"
 
 if [ $# -gt 0 ]
 then
@@ -45,15 +50,14 @@ fi
 
 # Validate before doing anything expensive.
 errors=()
-for tool in hyperfine jq lua5.4 luajit
+for tool in brokkr hyperfine jq lua5.4 luajit
 do
     if ! command -v "$tool" >/dev/null
     then
         errors+=("missing tool: $tool")
     fi
 done
-[ -x "$DELLINGR" ] || errors+=("missing/!x dellingr binary: $DELLINGR (build with: cargo build --release)")
-[ -x "$LUARS" ]    || errors+=("missing/!x lua-rs binary: $LUARS (build with: cargo build --release --bin lua-rs --manifest-path research/lua-rs/Cargo.toml)")
+[ -x "$LUARS" ] || errors+=("missing/!x lua-rs binary: $LUARS")
 for script in "${scripts[@]}"
 do
     if [ ! -f "$script" ]
@@ -73,6 +77,24 @@ then
     exit 0
 fi
 
+HYPERFINE_WARMUP_COUNT="$(hyperfine_warmup)" || exit 2
+DELLINGR="$(brokkr build dellingr --release)" || exit 1
+if [ ! -x "$DELLINGR" ]; then
+    echo "dellingr binary is not executable: $DELLINGR" >&2
+    exit 1
+fi
+DELLINGR_COMMAND="$(shell_quote "$DELLINGR")"
+LUARS_COMMAND="$(shell_quote "$LUARS")"
+
+SCRATCH_ROOT=".scratch/bench-luars"
+if ! mkdir -p "$SCRATCH_ROOT"; then
+    echo "cannot create benchmark scratch directory: $SCRATCH_ROOT" >&2
+    exit 1
+fi
+RUN_DIR="$(mktemp -d "$SCRATCH_ROOT/run.XXXXXX")" || exit 1
+JSON_FILE="$RUN_DIR/results.json"
+trap 'rm -rf "$RUN_DIR"' EXIT
+
 echo "==== bench start ===="
 echo "  host:    $(hostname -s)"
 echo "  date:    $(date -Iseconds)"
@@ -87,13 +109,14 @@ failures=()
 START=$(date +%s)
 for script in "${scripts[@]}"
 do
+    SCRIPT_COMMAND="$(shell_quote "$script")"
     rm -f "$JSON_FILE"
-    if ! hyperfine --warmup 2 -N \
+    if ! hyperfine --warmup "$HYPERFINE_WARMUP_COUNT" -N \
         --export-json "$JSON_FILE" \
-        -n dellingr "$DELLINGR $script" \
-        -n lua-rs "$LUARS $script" \
-        -n lua5.4 "lua5.4 $script" \
-        -n luajit "luajit $script" \
+        -n dellingr "$DELLINGR_COMMAND $SCRIPT_COMMAND" \
+        -n lua-rs "$LUARS_COMMAND $SCRIPT_COMMAND" \
+        -n lua5.4 "lua5.4 $SCRIPT_COMMAND" \
+        -n luajit "luajit $SCRIPT_COMMAND" \
         >/dev/null 2>&1
     then
         failures+=("$script")

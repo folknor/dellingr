@@ -26,6 +26,9 @@ fn manifest_path(relative: &str) -> PathBuf {
 fn malformed_timeout_is_rejected_once_before_other_checks() {
     let output = Command::new("bash")
         .arg(manifest_path("scripts/diff_test.sh"))
+        .arg("--bin")
+        // Timeout validation should fail before the non-executable path is checked.
+        .arg("/dev/null")
         .args(["--timeout", "5 s"])
         .output()
         .expect("bash should be available to check timeout validation");

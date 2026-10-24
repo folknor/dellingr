@@ -102,6 +102,8 @@ libc = "0.2.190"
 # test oracle (directed-rounding enclosures). Its own `pow` is not used: a
 # power-of-two-base shortcut truncates the exponent.
 libbeef = "0.1.1"
+toml = "0.8"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [[example]]
 name = "hotpath"

@@ -21,6 +21,22 @@ name = "default"
 name = "snapshot"
 features = ["snapshot"]
 
+# Compile and lint instrumentation and refusal hooks in one extra dev shape.
+# Run only refusal tests: the ordinary sweeps already cover the corpus, and
+# instrumentation is not a production native-stack configuration.
+[[check]]
+name = "instrumentation-faults"
+features = ["hotpath", "hotpath-alloc", "fault-injection", "snapshot"]
+tests = ["integration"]
+lib_tests = true
+only = [
+    "failures::error_boundary::error_boundary_fault_sweep",
+    "library::string_bytes::gmatch_refused_push_preserves_the_next_match",
+    "vm::fault_injection::tests::",
+    "vm::registers::tests::",
+]
+curated = true
+
 # The native-stack envelope (docs/limits.md "Envelope") is 4 MiB in dev and
 # 2 MiB in release, and the sweeps above are dev builds, so the release half
 # would otherwise go untested. These run tests/native_stack.rs alone,

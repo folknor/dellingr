@@ -140,54 +140,24 @@ intrinsic to a libcall, and dependencies doing so; it needs the toolchain's
 Enforceable: yes. That is what `fixture_lint` exists for; the symbol check is
 mechanical.
 
-## VG-003 - Three features no gate compiles
+## VG-003 - The fault-injection sweep runs a hand-listed set of tests
 
 Reported by: check-machinery, native-stack-errors, runtime, library.
 
-`hotpath`, `hotpath-alloc` and `fault-injection` appear in no `[[check]]`.
-Uncompiled and unlinted as a result:
+The curated `instrumentation-faults` `[[check]]` in `brokkr.toml` compiles and
+lints every target under `hotpath`, `hotpath-alloc`, `fault-injection` and
+`snapshot`, but runs only the tests its `only` list names
+(`failures::error_boundary::error_boundary_fault_sweep`,
+`library::string_bytes::gmatch_refused_push_preserves_the_next_match`,
+`vm::fault_injection::tests::`, `vm::registers::tests::`). A new
+fault-injection test anywhere else compiles there and never runs, in any
+sweep.
 
-- every `#[hotpath::measure]` expansion, and the `cfg(feature = "hotpath")`
-  branches in `tests/common/stack.rs` and `tests/integration/corpus/diff_test.rs`;
-- `src/vm/fault_injection.rs`, the six `cfg(feature = "fault-injection")` arms
-  in `eval.rs`, `stack.rs` and `metamethod.rs`, the debug assertion in
-  `vm.rs::validate_quiescent` (`debug_assert_fault_injection_disarmed` on the
-  snapshot path), the unit tests in `fault_injection.rs` (two) and
-  `src/vm/registers.rs` (`cfg(all(test, feature = "fault-injection"))`);
-- the *non-ignored*
-  `string_bytes.rs::gmatch_refused_push_preserves_the_next_match`, the only
-  fault-injection test outside `error_boundary.rs`. The documented on-demand
-  command (`brokkr check --features fault-injection,snapshot -- --test
-  integration -- failures::error_boundary:: --include-ignored`) filters to the
-  `error_boundary` module, so it is reached only by an undocumented run of the
-  whole integration crate under the feature.
+Fix: a convention check that every `cfg(feature = "fault-injection")` test is
+matched by one of the sweep's `only` entries, or keep fault-injection tests in
+modules the list names by prefix.
 
-AGENTS.md asks a human to remember `brokkr check --features hotpath`. A bad
-annotation surfaces on the next `--hotpath` run; a rename in any preflight
-breaks fault injection silently until someone runs the on-demand sweep. The
-fault sweep is the only test of "every eligible refusal leaves the operands,
-notifications and quiescence right", the error-cleanup contract AGENTS.md calls
-load-bearing.
-
-Fix options:
-- a `background` `script_check` running
-  `cargo clippy --all-targets --features hotpath,hotpath-alloc,fault-injection`
-  into its own target dir (the manual endorses this for "one that drives its own
-  cargo");
-- a `[[check]]` shape with `features = ["fault-injection", "snapshot"]`,
-  `tests = ["integration"]`, a filter to `failures::error_boundary::` and
-  `library::string_bytes::` if a `[[check]]` can carry one (unconfirmed), and
-  `include_ignored`, plus the lib unit tests if
-  brokkr can select them (see brokkr.md); cost estimated as one more dev build
-  of the library plus the integration crate, unmeasured; at
-  minimum a clippy-only lane;
-- a `curated` `[[check]]` entry with those features and a narrow `only` filter;
-- for `string_bytes`: move the test into `error_boundary.rs`, or change the
-  documented filter to include `string_bytes`, with a convention check that
-  `feature = "fault-injection"` appears only in files the documented command
-  reaches.
-
-Enforceable: yes, in config.
+Enforceable: yes, by that check.
 
 ## VG-004 - Test-only fault-injection API is reachable by any host through feature unification
 
@@ -307,8 +277,8 @@ other than brokkr's 5-minute `script_check` limit applies.
 
 Reported by: check-machinery.
 
-These inspect files only, yet are compiled and run once per sweep (and under
-the release sweeps whenever those widen, see brokkr.md): every test in
+These inspect files only, yet are compiled and run once per dev sweep: every
+test in
 `corpus::test_conventions` (more of them since the integration merge),
 `diff_test.rs::diff_markers_have_nonempty_reasons`,
 `diff_test.rs::shell_and_rust_example_corpora_match`, and
@@ -334,8 +304,6 @@ Reported by: check-machinery, corpus-harness, library, snapshot.
 - `regenerate_crmath_golden` rewrites its fixture unconditionally (see also
   bugs.md "A focused brokkr test runs ignored tests that rewrite a tracked
   fixture").
-- `examples/regenerate_save_golden.rs` writes unconditionally (matters little
-  for a manual tool).
 - `crmath_tables.py`'s mismatch path calls `destination.read_text()` with no
   encoding, so it uses the locale default; harmless for ASCII tables,
   `encoding="utf-8"` would make it explicit.
@@ -543,7 +511,9 @@ half (not in the log).
 Fix: make the second run earn its cost (the corpus save round trip in
 verif-goldens.md; an explicit cross-shape cost equality); run the reference-Lua
 half of the diff gate once per check, not per shape; restrict the snapshot
-sweep with `tests = [...]` or an exclusion if brokkr has one (see brokkr.md).
+sweep with `tests = [...]`, `lib_tests`, or `skip`/`only` filters. (brokkr's
+`exclude_tests` drops whole test targets and only on lanes that run their
+binaries themselves, so it cannot drop subjects inside the integration crate.)
 
 Enforceable: yes, in `brokkr.toml`.
 
@@ -570,24 +540,6 @@ commit) as `brokkr results`.
 
 Enforceable: partly. A deleted script cannot drift.
 
-## VG-021 - `research/bench_luars.sh` has several faults
-
-Reported by: check-machinery.
-
-- It runs whatever `target/release/dellingr` holds (see brokkr.md, the
-  artifact-path entry), and hard-codes `DELLINGR="target/release/dellingr"`,
-  which makes AGENTS.md's "no script hard-codes a `target/` path" false.
-- It writes `.bench-luars.json` at the repo root, which is not in
-  `.gitignore`, so an interrupted run leaves an untracked file; it should use
-  `.scratch/bench-luars/`.
-- It does not anchor to the repo root.
-- It hard-codes `--warmup 2` instead of `HYPERFINE_WARMUP`.
-- Its header says it "Mirrors ../bench.sh's jq extraction", but `bench.sh`
-  lives in `scripts/`.
-- It tells the reader to `cargo build --release`, which the project rules ban.
-
-Enforceable: partly, by the textlint rule in brokkr.md's artifact-path entry.
-
 ## VG-022 - Smaller script and config drift
 
 Reported by: check-machinery.
@@ -611,11 +563,26 @@ Reported by: corpus-harness.
 environment input in the repository" and that "the scripts read no environment
 variables". The harness also consumes `HOTPATH_OUTPUT_PATH` (through the
 `hotpath` crate; brokkr sets it); every script resolves `bash`, `lua5.2`,
-`lua5.4`, `timeout`, `python3` and `cargo` through `PATH`; and `cargo` itself
-reads `~/.cargo/config.toml` (see verif-native-stack.md on what that config
+`lua5.4`, `timeout`, `python3` and `brokkr` through `PATH`; and the cargo
+brokkr drives reads `~/.cargo/config.toml` (see verif-native-stack.md on what that config
 changes).
 
 Fix: reword to "reads no environment variables of its own" and list what is
 resolved through `PATH`.
 
 Enforceable: no.
+
+## VG-024 - Nothing keeps raw `cargo` out of the scripts
+
+Reported by: check-machinery.
+
+The scripts build through `scripts/lib.sh::brokkr_artifact` (`brokkr build`),
+and `research/bench_luars.sh` builds dellingr the same way, because brokkr's
+stray reaper kills cargo processes without a brokkr owner and its rustc guard
+refuses compiles while a hold exists. Nothing stops a new script, or an edit,
+from calling `cargo` again.
+
+Fix: a `[[textlint]]` rule banning `cargo ` invocations in `scripts/**` and
+`research/*.sh`.
+
+Enforceable: yes, by that rule.

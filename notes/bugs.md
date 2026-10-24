@@ -254,11 +254,9 @@ bytes. Consequences:
   "the walker reordered the object graph and every existing save file is now
   unreadable", which is the wrong diagnosis (a pure traversal reorder does not
   make old saves unreadable either; ids are dense indices). `brokkr test
-  save_golden --release` fails on correct code. The snapshot hunter adds that
-  `brokkr test save_traversal_order` should also run in the
-  `release-native-stack-snapshot` sweep (brokkr drops each sweep's test
-  filter), so a focused run may fail in one of its two sweeps; whether LLVM
-  merges the two wrappers there needs one run to confirm.
+  save_golden --release` fails on correct code. (A plain `brokkr test
+  save_golden` no longer reaches a release sweep: brokkr now keeps each
+  sweep's `tests = ["native_stack"]` selection.)
 - `examples/regenerate_save_golden.rs` does not check its profile; run with
   `--release`, it silently writes a fixture every dev sweep then rejects.
 - The failure message offers only "format or traversal change"; a

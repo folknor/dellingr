@@ -105,9 +105,11 @@ are how a `tests/native_stack.rs` probe delta gets attributed to a function.
 saved `perf annotate --stdio` output down to its hot instructions, which is how
 a `Frame::run` listing of several hundred KB becomes readable.
 
-Shell scripts live in `scripts/` and share `scripts/lib.sh`, which builds a
-cargo target and asks cargo for the artifact path (it needs `python3`), so no
-script hard-codes a `target/` path. Each script anchors itself to the repo
+Shell scripts live in `scripts/` and share `scripts/lib.sh`, which builds bin
+and example targets through `brokkr build` and captures the immutable artifact
+path it prints, so no script runs cargo or hard-codes a `target/` path
+(`research/bench_luars.sh` builds dellingr the same way; only its external
+lua-rs comparator is expected at `research/lua-rs/target/release/lua-rs`). Each script anchors itself to the repo
 root, so they can be invoked from anywhere; `test_limited.sh` is the
 exception, since it is a transparent `exec` wrapper that should not move the
 caller's working directory.
@@ -194,7 +196,7 @@ boundary and operand contract. Handler writes survive an error.
 - `tests/integration/corpus/run_examples.rs` - runs every regular Lua file under `examples/` with the binary cargo built for the test run (`support` owns the binary path and `tests/common/examples.rs` the shared, manifest-rooted example list; no test may reference `target/` or spawn cargo), in parallel worker threads. The shared list skips symlinks and orders relative paths by encoded bytes to match `find -type f` and `LC_ALL=C sort`. That includes the stress examples and the generated `parse/large_source.lua`. Each example runs under `scripts/test_limited.sh` (so its memory cap applies) with a fixed 60-second timeout. The runner uses at most eight workers, bounded by available parallelism and the number of examples. It fails on timeout, nonzero exit, unexpected stderr, if any stdout line ends with `: false`, or if a file defining `_bench()` prints no line ending in `: true`. Examples that print test results follow the convention `print("test name: " .. tostring(condition))`. Adding an example that prints a line ending in `: false` will fail this test.
 - `tests/native_stack.rs` backs docs/limits.md's "Envelope": each path in `reference/native-calls.toml` recursed to `MAX_NATIVE_CALL_DEPTH` under every metamethod chain kind and deepest-point leaf, on `tests/common/stack.rs`'s profile-dependent thread size. `brokkr.toml` runs it in dev (the default and snapshot sweeps) and release (`release-native-stack` and `release-native-stack-snapshot`). A new call path into Lua needs a scenario there; reference/native-calls.md has the steps.
 - `tests/integration/corpus/diff_test.rs` is the differential gate: it uses the same shared example list, and checks that its ordered paths match `scripts/diff_test.sh --list-examples`. It drives the shell gate over the whole corpus in partitions that run concurrently inside one test, once per `[[check]]` feature shape in `brokkr.toml` (there is no separate brokkr script check for it), and also checks malformed timeout rejection and nonempty marker reasons. The corpus partitions are compiled out under the `hotpath` feature. `scripts/diff_gate.sh` is an optional debug-build wrapper around `diff_test.sh` for direct runs; nothing in `brokkr check` invokes it. Mark intentional divergences with a `-- DIFF: <reason>` comment; dellingr must still succeed, but the references are skipped. A file carrying a `-- SKIP-DIFF: <reason>` line is not run by the differential gate. Reference Lua is required for unmarked examples; the test leaves that check, and its error message, to `diff_test.sh`.
-- `tests/integration/corpus/bench_scripts.rs` checks the bench/ footer contract and that each `brokkr.toml` workload's `file` and `hotpath_file` give their `kernel` and shared helper functions matching `analyze_cost` fingerprints, which guards the same-kernel pairing described under Hotpath benchmarks.
+- `tests/integration/corpus/bench_scripts.rs` checks every `xxh128` and `hotpath_xxh128` pin in `brokkr.toml` against the registered file bytes, the bench/ footer contract, and that each `brokkr.toml` workload's `file` and `hotpath_file` give their `kernel` and shared helper functions matching `analyze_cost` fingerprints, which guards the same-kernel pairing described under Hotpath benchmarks.
 - Unit tests live alongside their modules (e.g. `src/vm/object.rs` has GC tests).
 - To intentionally refresh `tests/fixtures/save_golden_current.bin` after a
   serializer format change, run
@@ -205,18 +207,14 @@ boundary and operand contract. Handler writes survive an error.
 The non-default `fault-injection` feature is test infrastructure, never a
 production or native-stack-probe configuration. It adds a single-refusal
 countdown and event log, armed after setup, to stack and depth preflights.
-The ignored `error_boundary_fault_sweep` checks every eligible event of each
-fail-fast corpus execution, including event identity, surviving operands,
-notification count, State reuse and snapshot quiescence. Recovery execution
-is covered separately by focused caught-and-continue tests. No standing
-`[[check]]` shape enables it. Run on demand:
-
-```sh
-brokkr check --features fault-injection,snapshot -- --test integration -- failures::error_boundary:: --include-ignored
-```
-
-The filter matters: `--include-ignored` alone would also run every other
-ignored test of the integration crate.
+`error_boundary_fault_sweep` checks every eligible event of each fail-fast
+corpus execution, including event identity, surviving operands, notification
+count, State reuse and snapshot quiescence. Recovery execution is covered
+separately by focused caught-and-continue tests. The curated
+`instrumentation-faults` `[[check]]` shape in `brokkr.toml` enables it together
+with `snapshot`, `hotpath` and `hotpath-alloc`: it compiles and lints every
+target under those features and runs only the refusal sweep, the gmatch
+recovery test and the library's fault-injection unit tests.
 
 The budget and natural-failure sweeps also run in ordinary check shapes.
 `brokkr test error_boundary --release` exercises them without debug checks;
@@ -265,11 +263,11 @@ Each bench script is also a standalone-runnable test: top-level setup + a `_benc
 
 `bench/` holds the brokkr *verdict* workloads: seconds-scale ports of the curated examples/ benches - same kernels, wrapped in a repeat loop calibrated so one `_bench()` call is ~100ms, footer fixed at 30 calls, which lands the standalone run at ~3s. The harness warm phase scales with `DEFAULT_ITERATIONS` in `examples/hotpath.rs`. A short launch cannot resolve the deltas the optimization backlog targets; a seconds-scale one can. Ordinary `[dellingr.workloads.*]` registrations pair two files: `file`/`xxh128` (the bench/ port, for wall-clock verdict runs) and `hotpath_file`/`hotpath_xxh128` (the examples/ counterpart, for instrumented profiling, which only works at the ms scale). `large_source` is a parse/codegen probe and an exception: both modes use the generated examples/ source, and its timing is a parse/codegen diagnostic rather than a calibrated runtime verdict. `queue` cannot be baselined with `--bench --commit` before 2bcc71e (the commit that bounded a table's array storage): on older VMs every `pairs` start walks the queue's whole push history, so the seconds-scale `bench/queue.lua` runs quadratically for hours. Compare across that commit with `--hotpath`/`--alloc` on the ms-scale `examples/tables/queue.lua`, or with a smaller one-off variant. Editing a pinned file requires re-hashing its pin, which is the deliberate signal that older stored results no longer compare. For execution workloads, the paired files must keep the same kernel in the same proportions, or per-function distributions measured on the ms file stop describing the seconds-scale walls. `bench/` is intentionally outside every examples/ glob - `run_examples.rs`, the diff gate, and `bench.sh` do not see it - so the fast test/diff/ratio surfaces and the slow verdict surface stay independent.
 
-The harness measures four phases on one State and emits KV pairs to stderr: `parse_us`, `cold_call_us`, `warm_avg_us` (averaged over the configured warm iteration count; fractional, three decimals), plus the dellingr-specific `cold_cost`, `warm_avg_cost` (integer, truncated), `warm_total_cost` (exact, over all warm iterations) and the derived `cost_per_us` (from the exact total). The script is compiled with its path, as given, as the chunk name, so error locations read `bench/arithmetic.lua:12:` with no `@` prefix. Wall time is the benchmarking metric; cost is a deterministic property of the workload and rides along as a fingerprint (a cost change means the script or compiler changed, not the VM's speed). `setup_*` and `final_*` heap/object counts bracket GC pressure. Note the harness runs the script's top level during setup, so the standalone footer's calls execute there - the "cold" call is only cold with respect to what the footer has not already warmed.
+The harness measures four phases on one State and emits KV pairs to stderr: `parse_us`, `cold_call_us`, `warm_avg_us` (averaged over the configured warm iteration count; fractional, three decimals), plus the dellingr-specific `cold_cost`, `warm_avg_cost` (integer, truncated), `warm_total_cost` (exact, over all warm iterations) and the derived `cost_per_us` (from the exact total). The script is compiled with its path, as given, as the chunk name, so error locations read `bench/arithmetic.lua:12:` with no `@` prefix; `brokkr dellingr` passes the registered root-relative path from the project root, so chunk names and the stored `target=` carry no checkout path. Wall time is the benchmarking metric; cost is a deterministic property of the workload and rides along as a fingerprint (a cost change means the script or compiler changed, not the VM's speed). `setup_*` and `final_*` heap/object counts bracket GC pressure. Note the harness runs the script's top level during setup, so the standalone footer's calls execute there - the "cold" call is only cold with respect to what the footer has not already warmed.
 
 Internal functions carry `#[hotpath::measure]` annotations across `vm/table.rs`, `vm/table_ops.rs`, `vm/eval*.rs`, `vm/object.rs` and the compiler front end. The annotation is a no-op when the `hotpath` cargo feature is off, so it costs nothing in normal builds; it is cheap to add one when a new candidate needs a measurement point, and worth doing at the same time as the bench that will exercise it. **Don't add `#[hotpath::measure]` to a function that stays live across a native re-entry** (`call_unguarded`, `begin_call`, `begin_callable_call`, `run_invocation`, `Frame::run`, and the metamethod/iterator/library helpers between the dispatch loop and their `call_unguarded`): every native level carries those frames, and the limit tests drive `limits::MAX_NATIVE_CALL_DEPTH` levels on the envelope's thread (4 MiB in dev, 2 MiB in release; docs/limits.md "Envelope"). Instrumented builds already get a larger test stack (`tests/common/stack.rs`), but the margin is not unlimited. A function *called from* the dispatch loop whose frame is popped before any re-entry is fine. The release frames of the live-across-re-entry functions are also sensitive to live-range shape, not only to what is inlined: a value returned for the caller to consume after a drop, or a `match` scrutinee `Result` whose arm makes the re-entering call, costs a spill slot or an unshared result slot there, and deleting a redundant line in something inlined into `Frame::run` can re-pack its spill slots one alignment step larger. Measure with `brokkr test native_bytes_per_level` (dev and `--release`, default and `snapshot`) and attribute with `scripts/frame_sizes.py` before and after.
 
-When adding annotations, verify the `hotpath` configuration still builds (`brokkr check --features hotpath`); the plain gate does not compile that feature, so a bad annotation is otherwise invisible.
+The `instrumentation-faults` sweep in `brokkr check` compiles and lints the `hotpath` and `hotpath-alloc` configurations, so a bad annotation fails the gate.
 
 To add a new target: write `examples/{category}/{name}.lua` defining `_bench()` and a standalone runner footer. No Rust changes. `tests/integration/corpus/run_examples.rs` and the diff gate pick it up automatically; `scripts/hotbench.sh`, the default `scripts/bench.sh` list and brokkr's `--hotpath`/`--alloc` reach it only once it is the `hotpath_file` of a `[dellingr.workloads.*]` registration in `brokkr.toml`.
 

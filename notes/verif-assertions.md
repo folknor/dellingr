@@ -422,7 +422,7 @@ filters with `*site != "native_depth" || *argument > 0`, a copy of the rule in
 skips targets that fired nothing. Two writers of one rule, keyed on a string.
 Renaming the site string makes the filter count ineligible events; the sweep then
 panics on `position(...).unwrap()` rather than silently passing, so it fails
-loudly, but only in a configuration no gate runs (see verif-gates.md).
+loudly, in the `instrumentation-faults` sweep.
 
 Fix: an `Event { site: FaultSite, argument: usize, eligible: bool, fired: bool }`
 with `FaultSite` an enum, returned by `finish_fault_injection`; consumers filter
