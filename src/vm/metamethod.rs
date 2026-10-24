@@ -229,7 +229,7 @@ impl State {
                         match table.get_with_index(&key) {
                             Some((method_index, method)) => {
                                 if let Some(cache) = cache {
-                                    cache.set_method(MethodLookupCacheEntry {
+                                    cache.fill_method(MethodLookupCacheEntry {
                                         receiver_metatable,
                                         index_field_index,
                                         method_table: table_ptr,

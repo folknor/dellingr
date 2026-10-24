@@ -2,7 +2,8 @@ use super::MetaName;
 use super::State;
 use super::Val;
 use super::caches::{
-    FieldLookupCacheEntry, FieldLookupCacheSlot, MethodLookupCacheEntry, StringMethodCacheEntry,
+    FieldLookupCacheEntry, FieldLookupCacheSlot, METHOD_ENTRIES, MethodLookupCacheEntry,
+    StringMethodCacheEntry,
 };
 use super::object::ObjectPtr;
 
@@ -136,7 +137,8 @@ impl State {
     /// value. `None` is only "not answered here". Entries are proven hits
     /// (`State::resolve_index` fills them from a raw hit in the first
     /// handler table, a terminal step), so the cache can skip lookups but
-    /// never change an answer or its depth.
+    /// never change an answer or its depth. Each entry is validated on its
+    /// own; at most one can match the receiver's metatable.
     #[inline(always)]
     pub(super) fn get_cached_index_table_field(
         &self,
@@ -144,7 +146,25 @@ impl State {
         key: Val,
         cache: &FieldLookupCacheSlot,
     ) -> Option<Val> {
-        let entry = cache.get_method()?;
+        for position in 0..METHOD_ENTRIES {
+            if let Some(method) = self.cached_method_at(receiver_metatable, key, cache, position) {
+                cache.method_used(position);
+                return Some(method);
+            }
+        }
+        None
+    }
+
+    /// One method entry's validation; `None` rejects this entry only.
+    #[inline(always)]
+    fn cached_method_at(
+        &self,
+        receiver_metatable: ObjectPtr,
+        key: Val,
+        cache: &FieldLookupCacheSlot,
+        position: usize,
+    ) -> Option<Val> {
+        let entry = cache.get_method(position)?;
 
         // This route depends only on the receiver, its live __index handler,
         // and the method table below. Rebinding a global or swapping global
@@ -169,10 +189,13 @@ impl State {
 
         let (cached_key, method) = method_table.get_index(entry.method_index)?;
         if cached_key == key {
-            cache.set_method(MethodLookupCacheEntry {
-                method_table_version,
-                ..entry
-            });
+            cache.refresh_method(
+                position,
+                MethodLookupCacheEntry {
+                    method_table_version,
+                    ..entry
+                },
+            );
             Some(method)
         } else {
             None

@@ -43,6 +43,12 @@ One.__index = One
 function One.shout() return "one!" end
 one = setmetatable({}, One)
 
+-- A second one-level class, so one site holds two method entries.
+Other = {greet = "other"}
+Other.__index = Other
+function Other.shout() return "other!" end
+other = setmetatable({}, Other)
+
 Base = {greet = "base"}
 Base.__index = Base
 function Base.shout() return "base!" end
@@ -162,6 +168,8 @@ fn cases() -> Vec<(&'static str, u32, Outcome)> {
         ("field_site(one)", 0, value("one")),
         ("key_site(one, 'greet')", 0, value("one")),
         ("method_site(one)", 0, value("one!")),
+        ("field_site(other)", 0, value("other")),
+        ("method_site(other)", 0, value("other!")),
         ("absent_site(one)", 0, value("nil")),
         ("key_site(one, 'absent')", 0, value("nil")),
         // One step that nests (Derived dispatches to Base).
@@ -225,6 +233,7 @@ fn limit_edges_after_the_sites_cached_misses() {
 fn limit_edges_after_the_sites_cached_hits() {
     let mut state = state_with(
         "field_site(one) key_site(one, 'greet') method_site(one) absent_site(one)
+         field_site(other) method_site(other)
          string_site('x') string_key_site('x', 'upper')",
     );
     check_limit_edges(&mut state, "warm hit");
@@ -344,7 +353,11 @@ fn a_string_library_step_that_nests_takes_a_unit() {
 #[cfg(feature = "snapshot")]
 #[test]
 fn a_snapshot_round_trip_keeps_every_limit_edge() {
-    let mut state = state_with(MISS_WARMUP);
+    // Misses everywhere, then both method entries of two sites filled, so
+    // the continuing State is as warm as a site gets.
+    let mut state = state_with(&format!(
+        "{MISS_WARMUP} field_site(one) field_site(other) method_site(one) method_site(other)"
+    ));
     let save = state.save_state().expect("state saves");
     let mut loaded = State::load_state(&save.bytes, Box::new(dellingr::DefaultCallbacks), |_| {
         Ok::<(), std::convert::Infallible>(())
@@ -442,6 +455,57 @@ fn a_site_answers_from_the_heap_after_it_changes() {
             value(expected),
             "{change}"
         );
+    }
+}
+
+#[test]
+fn a_site_holding_two_classes_answers_from_the_heap_after_either_changes() {
+    // The site caches One and Other, in both orders, so the changed class's
+    // entry sits at either position. After each change the same site must
+    // give the new answer at exactly the new depth need, and still answer
+    // One at the limit.
+    for warmup in [
+        "field_site(one) field_site(other)",
+        "field_site(other) field_site(one)",
+    ] {
+        for (change, units, expected) in [
+            ("Other.__index = {greet = 'swapped'}", 0, "swapped"),
+            ("other.greet = 'own'", 0, "own"),
+            ("for i = 1, 40 do Other['pad' .. i] = i end", 0, "other"),
+            (
+                "Other.greet = nil setmetatable(Other, {__index = Base})",
+                1,
+                "base",
+            ),
+            (
+                "Other.greet = nil \
+                 setmetatable(Other, {__index = function() return 'fn' end})",
+                2,
+                "fn",
+            ),
+        ] {
+            let label = format!("{warmup}; {change}");
+            let mut state = state_with(warmup);
+            run(&mut state, change);
+            let fits = MAX_METAMETHOD_DEPTH - units;
+            assert_eq!(
+                probe(&mut state, fits, "field_site(other)"),
+                value(expected),
+                "{label}"
+            );
+            if units > 0 {
+                assert_eq!(
+                    probe(&mut state, fits + 1, "field_site(other)"),
+                    Outcome::DepthExceeded,
+                    "{label}"
+                );
+            }
+            assert_eq!(
+                probe(&mut state, MAX_METAMETHOD_DEPTH, "field_site(one)"),
+                value("one"),
+                "{label}"
+            );
+        }
     }
 }
 

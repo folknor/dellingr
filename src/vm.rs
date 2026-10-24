@@ -1755,29 +1755,40 @@ mod runtime_tests {
         }
     }
 
-    /// Every populated cell, keyed by (runtime identity, family, slot).
-    fn cache_cells(state: &State) -> Vec<((usize, &'static str, usize), CachedEntry)> {
+    /// (runtime identity, family, slot, position within the slot's family).
+    type CellKey = (usize, &'static str, usize, usize);
+
+    /// Every populated cell, keyed by [`CellKey`]. Only method entries have
+    /// more than one position.
+    fn cache_cells(state: &State) -> Vec<(CellKey, CachedEntry)> {
         let mut cells = Vec::new();
         for (identity, entry) in &state.bytecode_caches {
             let caches = &entry.runtime.caches;
-            let mut push = |slot: usize, cell: Option<CachedEntry>| {
+            let mut push = |slot: usize, position: usize, cell: Option<CachedEntry>| {
                 if let Some(cell) = cell {
-                    cells.push(((*identity, cell.family(), slot), cell));
+                    cells.push(((*identity, cell.family(), slot, position), cell));
                 }
             };
             for (slot, cell) in caches.field_lookup.iter().enumerate() {
-                push(slot, cell.get_field().map(CachedEntry::Field));
-                push(slot, cell.get_method().map(CachedEntry::Method));
+                push(slot, 0, cell.get_field().map(CachedEntry::Field));
+                for position in 0..caches::METHOD_ENTRIES {
+                    push(
+                        slot,
+                        position,
+                        cell.get_method(position).map(CachedEntry::Method),
+                    );
+                }
                 push(
                     slot,
+                    0,
                     cell.get_string_method().map(CachedEntry::StringMethod),
                 );
             }
             for (slot, cell) in caches.set_field_lookup.iter().enumerate() {
-                push(slot, cell.get().map(CachedEntry::SetField));
+                push(slot, 0, cell.get().map(CachedEntry::SetField));
             }
             for (slot, cell) in caches.tfor_cursor.iter().enumerate() {
-                push(slot, cell.get().map(CachedEntry::Tfor));
+                push(slot, 0, cell.get().map(CachedEntry::Tfor));
             }
         }
         cells
@@ -1835,7 +1846,11 @@ mod runtime_tests {
              function smethod_live(s) return s.upper end \
              keep = setmetatable({ k = 1 }, { __index = { m = 1 } }) \
              get_live(keep) set_live(keep) method_live(keep) iter_live(keep) \
-             smethod_live('x')",
+             smethod_live('x') \
+             function dead_first(t) return t.m end \
+             function dead_second(t) return t.m end \
+             dead_first(setmetatable({}, { __index = { m = 1 } })) dead_first(keep) \
+             dead_second(keep) dead_second(setmetatable({}, { __index = { m = 1 } }))",
             None,
         )
         .and_then(|program| state.load(&program))
@@ -1859,8 +1874,8 @@ mod runtime_tests {
             "string-method",
             "tfor cursor",
         ] {
-            let cells = before.iter().filter(|((_, f, _), _)| *f == family);
-            type Cells<'a> = Vec<&'a ((usize, &'static str, usize), CachedEntry)>;
+            let cells = before.iter().filter(|((_, f, _, _), _)| *f == family);
+            type Cells<'a> = Vec<&'a (CellKey, CachedEntry)>;
             let (dead, alive): (Cells<'_>, Cells<'_>) =
                 cells.partition(|(_, cell)| !cell.handles().iter().all(live));
             assert!(
@@ -1890,10 +1905,32 @@ mod runtime_tests {
             .iter()
             .filter(|(_, cell)| matches!(cell, CachedEntry::Method(_)))
             .count();
-        // method, thandler, mtdead and method_live; the miss behind tabsent
-        // and the function and string handlers behind fhandler and shandler
-        // are never cached.
-        assert_eq!(method_entries, 4, "only proven hits are cached");
+        // method, thandler, mtdead and method_live, plus both positions of
+        // dead_first and dead_second; the miss behind tabsent and the
+        // function and string handlers behind fhandler and shandler are
+        // never cached.
+        assert_eq!(method_entries, 8, "only proven hits are cached");
+        // One site holds a dying entry beside a surviving one in each
+        // position order, so clearing must be per position and must not
+        // move the survivor.
+        for (dead_position, live_position) in [(0, 1), (1, 0)] {
+            let mixed = before.iter().any(|((id, family, slot, position), cell)| {
+                *family == "method"
+                    && *position == dead_position
+                    && !cell.handles().iter().all(live)
+                    && before.iter().any(|((id2, f2, slot2, p2), other)| {
+                        id2 == id
+                            && f2 == family
+                            && slot2 == slot
+                            && *p2 == live_position
+                            && other.handles().iter().all(live)
+                    })
+            });
+            assert!(
+                mixed,
+                "no method site had a freed entry at {dead_position} beside a live one"
+            );
+        }
 
         for (key, cell) in &before {
             let kept = after.iter().find(|(k, _)| k == key).map(|(_, c)| c);
@@ -1922,6 +1959,77 @@ mod runtime_tests {
                 assert!(live(&val), "a cache entry names a freed value");
             }
         }
+    }
+
+    /// The receiver metatables a site's method entries name, by position.
+    fn method_positions(state: &State) -> Vec<[Option<ObjectPtr>; caches::METHOD_ENTRIES]> {
+        let mut sites = Vec::new();
+        for entry in state.bytecode_caches.values() {
+            for slot in &entry.runtime.caches.field_lookup {
+                let positions = std::array::from_fn(|position| {
+                    slot.get_method(position).map(|e| e.receiver_metatable)
+                });
+                if positions.iter().any(Option::is_some) {
+                    sites.push(positions);
+                }
+            }
+        }
+        sites
+    }
+
+    fn global_ptr(state: &mut State, name: &str) -> ObjectPtr {
+        state.get_global(name).expect("global fits");
+        state
+            .pop_val()
+            .as_object_ptr()
+            .expect("the global is an object")
+    }
+
+    /// The two method entries of one site replace the one not used last,
+    /// refill a class in place instead of naming it twice, and take a
+    /// position a collection emptied before evicting a survivor.
+    #[test]
+    fn method_entries_replace_least_recently_used_and_never_duplicate() {
+        let mut state = State::new();
+        state.gc_disable_auto();
+        let run = |state: &mut State, source: &str| {
+            crate::Program::compile(source, None)
+                .and_then(|program| state.load(&program))
+                .expect("test source compiles");
+            state
+                .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+                .expect("test source runs");
+        };
+        run(
+            &mut state,
+            "function site(t) return t.m end \
+             mta = { __index = { m = 1 } } mtb = { __index = { m = 1 } } \
+             mtc = { __index = { m = 1 } } \
+             a = setmetatable({}, mta) b = setmetatable({}, mtb) \
+             c = setmetatable({}, mtc) \
+             site(a) site(b) site(a) site(c)",
+        );
+        let (mta, mtb, mtc) = (
+            global_ptr(&mut state, "mta"),
+            global_ptr(&mut state, "mtb"),
+            global_ptr(&mut state, "mtc"),
+        );
+        // b was used less recently than a, so c replaced it.
+        assert_eq!(method_positions(&state), vec![[Some(mta), Some(mtc)]]);
+
+        // a was used last, so the victim is c's position. a's handler table
+        // then changes and its entry no longer validates; the refill
+        // rewrites a's own position rather than evicting c.
+        run(&mut state, "site(a) mta.__index = { m = 2 } site(a)");
+        assert_eq!(method_positions(&state), vec![[Some(mta), Some(mtc)]]);
+
+        // c is used last, so the victim is a's position; then c dies. Its
+        // position empties and the next class takes it instead of a's.
+        run(&mut state, "site(c) c = nil mtc = nil");
+        state.gc_collect();
+        assert_eq!(method_positions(&state), vec![[Some(mta), None]]);
+        run(&mut state, "site(b)");
+        assert_eq!(method_positions(&state), vec![[Some(mta), Some(mtb)]]);
     }
 
     #[test]

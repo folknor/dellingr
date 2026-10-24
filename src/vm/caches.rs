@@ -106,10 +106,24 @@ pub(super) struct StringMethodCacheEntry {
     pub(super) index: usize,
 }
 
+/// How many method entries a field slot holds: one site serving receivers of
+/// two classes (`shape:area()` over circles and squares) keeps both instead
+/// of refilling one entry on every alternation.
+pub(super) const METHOD_ENTRIES: usize = 2;
+// The victim cell names "the other position", which only two entries have.
+const _: () = assert!(METHOD_ENTRIES == 2);
+
 #[derive(Debug, Default)]
 pub(super) struct FieldLookupCacheSlot {
     field_entry: Cell<Option<FieldLookupCacheEntry>>,
-    method_entry: Cell<Option<MethodLookupCacheEntry>>,
+    /// Each entry is validated on its own, so each is a proven hit by itself.
+    /// No two name the same receiver metatable (`fill_method`).
+    method_entries: [Cell<Option<MethodLookupCacheEntry>>; METHOD_ENTRIES],
+    /// The position a fill replaces when both are full: the one not used
+    /// last, a two-way LRU that never moves an entry. Which entry survives
+    /// depends on history, but every entry is a proven hit, so it decides
+    /// only which lookups are skipped, never an answer or its route.
+    method_victim: Cell<u8>,
     string_method_entry: Cell<Option<StringMethodCacheEntry>>,
 }
 
@@ -122,12 +136,43 @@ impl FieldLookupCacheSlot {
         self.field_entry.set(Some(entry));
     }
 
-    pub(super) fn get_method(&self) -> Option<MethodLookupCacheEntry> {
-        self.method_entry.get()
+    /// The method entry at `position` (below [`METHOD_ENTRIES`]).
+    pub(super) fn get_method(&self, position: usize) -> Option<MethodLookupCacheEntry> {
+        self.method_entries[position].get()
     }
 
-    pub(super) fn set_method(&self, entry: MethodLookupCacheEntry) {
-        self.method_entry.set(Some(entry));
+    /// The entry at `position` answered a lookup, so the other one is the
+    /// next to be replaced.
+    pub(super) fn method_used(&self, position: usize) {
+        // A site that keeps hitting one entry only reads the victim.
+        let victim = u8::from(position == 0);
+        if self.method_victim.get() != victim {
+            self.method_victim.set(victim);
+        }
+    }
+
+    /// Rewrite the entry at `position` in place (a version refresh).
+    pub(super) fn refresh_method(&self, position: usize, entry: MethodLookupCacheEntry) {
+        self.method_entries[position].set(Some(entry));
+    }
+
+    /// Store a newly proven hit: over the entry for the same receiver
+    /// metatable if there is one (it no longer validates, or the probe would
+    /// have answered), else in an empty position, else over the victim.
+    pub(super) fn fill_method(&self, entry: MethodLookupCacheEntry) {
+        let same = self.method_entries.iter().position(|cell| {
+            cell.get()
+                .is_some_and(|old| old.receiver_metatable == entry.receiver_metatable)
+        });
+        let position = same
+            .or_else(|| {
+                self.method_entries
+                    .iter()
+                    .position(|cell| cell.get().is_none())
+            })
+            .unwrap_or(usize::from(self.method_victim.get()));
+        self.method_entries[position].set(Some(entry));
+        self.method_used(position);
     }
 
     pub(super) fn get_string_method(&self) -> Option<StringMethodCacheEntry> {
@@ -258,13 +303,18 @@ impl RuntimeCaches {
             clear_dead(entry, heap);
         }
         for slot in field_lookup {
+            // Method entries clear independently and stay in place. The
+            // victim is left alone: a fill takes an empty position before
+            // the victim, so a stale victim never evicts the survivor.
             let FieldLookupCacheSlot {
                 field_entry,
-                method_entry,
+                method_entries: [method_first, method_second],
+                method_victim: _,
                 string_method_entry,
             } = slot;
             clear_dead(field_entry, heap);
-            clear_dead(method_entry, heap);
+            clear_dead(method_first, heap);
+            clear_dead(method_second, heap);
             clear_dead(string_method_entry, heap);
         }
         for slot in set_field_lookup {
@@ -292,7 +342,9 @@ impl RuntimeCaches {
         }
         for slot in &self.field_lookup {
             push(&slot.field_entry, &mut out);
-            push(&slot.method_entry, &mut out);
+            for cell in &slot.method_entries {
+                push(cell, &mut out);
+            }
             push(&slot.string_method_entry, &mut out);
         }
         for slot in &self.set_field_lookup {

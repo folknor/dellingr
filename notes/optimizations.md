@@ -674,21 +674,38 @@ without any per-site cache.
 Signal: a workload where `t:insert(...)`-style sugar fires in a tight
 loop.
 
-### Method IC: one entry per site ping-pongs between classes
+### Method IC: past two classes per site, and what the second entry costs
 
-What: the method IC holds one entry per site, and every one-level hit
-overwrites it. A `shape:area()` site serving two one-level classes in
-alternation (`bench/method_polymorphic.lua` has Circle and Square) misses
-its entry on every other call and redoes the direct lookup. A two-entry or
-small polymorphic entry would keep both.
+Shipped: each field cache slot holds two method entries (two-way LRU by a
+victim byte, entries never move, each validated on its own), so a site
+serving two one-level classes keeps both. Matched interleaved pairs on
+plantasjen, warm ms per call, 7375bb4 against the change on top of it:
+`method_polymorphic` 88.9/89.7 to 86.7/86.5 (about -3%; -1.5% to -4.6%
+across three builds of the same mechanism, B faster in every pair),
+`same_obj_read` -1.2%, `method_chain` +0.5%, `arithmetic` +0.5%.
 
-Why deferred: unmeasured in isolation. The 2026-10-23 sticky-miss removal
-already made that workload 10% faster (plantasjen, against 4a722cf); the
-remaining per-call cost is a few table reads.
+Open:
 
-Signal: `--hotpath` on `examples/calls/method_polymorphic.lua` showing
-`State::resolve_index` hot. The register-native rewrite on top of df80d81
-made that workload about 8% faster again (plantasjen, matched pairs).
+- `method` (one class, one level) measured +1.8% (73.7 to 75.2), sign
+  consistent within a build but -1.9% on an earlier build of the same
+  mechanism. Skipping the victim read on a position-0 hit (a diagnostic,
+  not a policy) left it at +1.9%, so nothing on the executed hit path
+  explains it; code or data placement is the working hypothesis, not a
+  proven one. Revisit if a later layout shift leaves it standing. A
+  five-launch same-binary control of `method` on the change (plantasjen,
+  2026-10-24) read 75.08, 75.47, 76.91, 75.12 and 75.81 ms, a 2.4% spread,
+  so the +1.8% sits inside launch noise and the polymorphic -3% only just
+  clears it.
+- The slot grew from 88 to 136 bytes, paid by every GET_FIELD and SELF site,
+  not only polymorphic method sites. A separate per-slot method vector, or
+  method slots only on SELF sites (a compiler cache-family split), would
+  stop charging own-field sites.
+- Three or more cacheable classes at one site thrash two entries. A third
+  or fourth entry is unmeasured: no registered workload has more than two
+  one-level classes at a site, and each entry is 40 more bytes per slot.
+
+Signal: a workload with three-plus classes at one method site, or a
+memory profile where field cache slots matter.
 
 Note: caching misses was tried and dropped. An exact absence proof (no hash
 slot for the key, unchanged version and slot count) is sound but validating
