@@ -1020,7 +1020,7 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
     state.install_string_metatable()?;
 
     // Set the string table as a global
-    state.set_global("string")?;
+    state.pop_to_global("string")?;
 
     // Compile the wrapper during setup, after the string functions are
     // installed. Compilation has no State cost accounting and touches neither

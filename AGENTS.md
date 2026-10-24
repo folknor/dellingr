@@ -32,10 +32,11 @@ Use `brokkr` (not raw `cargo`) for check/test. It runs a gremlins scan (banned U
 - `brokkr check` - gremlins + clippy + all tests
 - `brokkr check --fix-gremlins` - rewrite banned Unicode in tracked files (em/en dash to `-`, smart quotes to straight, NBSP to space, zero-width/bidi deleted) before checking
 - `brokkr check -- --test <file>` - forward args to `cargo test` (args after the second `--` go to the test binary)
-- `brokkr test <NAME>` - focused single-test runner. With no per-sweep profile override, this repo's `[test] debug = true` selects the dev profile by default; explicit profile flags take precedence. Always passes `--include-ignored --nocapture --test-threads=1`. `<NAME>` is a case-sensitive substring filter (matches both unit and integration tests). Streams the test's own stdout/stderr live and prints a `[test] PASS/FAIL` footer with wall time.
+- `brokkr test <NAME>` - focused single-test runner. With no per-sweep profile override, this repo's `[test] debug = true` selects the dev profile by default; explicit profile flags take precedence. Always passes `--include-ignored --nocapture`; the test thread count comes from the selected profile, one when unset. `<NAME>` is a case-sensitive substring filter (matches both unit and integration tests). Streams the test's own stdout/stderr live and prints a `[test] PASS/FAIL` footer with wall time.
   - `-N, --repeat <N>` - run the test N times per sweep (flaky-test hunting).
   - `-j, --jobs <N>` - parallel cargo compile jobs.
-  - `--raw` - bypass output filtering, print everything cargo emits.
+  - `--timeout <SECS>` - raise brokkr's per-test cap for the resolved tests (the only exception to it), each run as its own process.
+  - `--timings` - after the run, list every test that ran by wall time.
   - `--debug`, `--release` - force the dev or release profile. Use `--debug` for subprocess-lifecycle / IPC / boot-path tests where release-LTO compile time dominates wall time and the optimization level doesn't change the behavior under test.
 
 `dellingr` is a single-crate repo, so `-p` is normally unnecessary; pass `-p dellingr` if a brokkr invocation requires an explicit package.
@@ -113,7 +114,8 @@ model and runs as a separate `brokkr check` script check.
 reference/native-calls.md explains the inventory, the direct-call convention
 the lexical check relies on, and how to add a path.
 `scripts/poison_contract.py`, built on the same lexer, checks that every
-public fallible `State` method refuses a poisoned State before other work and
+public fallible `State` method starts with the entry check that refuses a
+poisoned State and an unsupported floating-point environment, and
 that every infallible one is on its reviewed allowlist;
 `scripts/test_poison_contract.py` holds its fixture tests. Both are `brokkr
 check` script checks.

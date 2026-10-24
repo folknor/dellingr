@@ -368,7 +368,7 @@ impl State {
 
     fn with_callbacks_and_policy(callbacks: Box<dyn HostCallbacks>, policy: GcPolicy) -> Self {
         let mut me = Self::raw_with_callbacks_and_gc_policy(callbacks, policy);
-        me.open_libs()
+        me.open_libs_unchecked()
             .expect("standard library initialization starts with an empty value stack");
         me
     }
@@ -532,7 +532,7 @@ impl State {
     /// Use this in RustFuncs to charge for expensive operations.
     #[inline(always)]
     pub fn consume_cost(&mut self, cost: u64) -> Result<()> {
-        self.check_poisoned()?;
+        self.check_usable()?;
         self.charge_cost(cost)
     }
 
@@ -999,7 +999,7 @@ impl State {
     /// Pushes onto the stack the value of the global `name`.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn get_global(&mut self, name: &str) -> Result<()> {
-        self.check_poisoned()?;
+        self.check_usable()?;
         let val = self.global_env.read_name(&self.heap, name);
         self.push_val(val)
     }
@@ -1019,7 +1019,12 @@ impl State {
     /// calling Lua frame.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn set_global(&mut self, name: &str) -> Result<()> {
-        self.check_poisoned()?;
+        self.check_usable()?;
+        self.pop_to_global(name)
+    }
+
+    /// [`State::set_global`] without the entry check, for library setup.
+    pub(crate) fn pop_to_global(&mut self, name: &str) -> Result<()> {
         if self.get_top() == 0 {
             return Err(self.error(ErrorKind::InvalidStackIndex { index: -1 }));
         }
@@ -1120,7 +1125,7 @@ impl State {
     /// [`ErrorKind::RustFunctionLimit`] once the State holds
     /// `u32::MAX` entries, changing nothing.
     pub fn add_rust_fn(&mut self, function: RustFunc) -> Result<RustFnHandle> {
-        self.check_poisoned()?;
+        self.check_usable()?;
         self.rust_fns.add(function).ok_or_else(|| {
             Error::without_location(ErrorKind::RustFunctionLimit {
                 limit: RustFnTable::CAPACITY,
@@ -1141,9 +1146,7 @@ impl State {
         id: &str,
         func: RustFunc,
     ) -> std::result::Result<RustFnHandle, SaveError> {
-        if self.poisoned {
-            return Err(SaveError::StatePoisoned);
-        }
+        self.check_save_usable()?;
         // Checked before registering, so a rejected name registers nothing.
         if name.len() > crate::limits::MAX_STRING_BYTES {
             return Err(SaveError::FieldSizeExceeded {
@@ -1187,9 +1190,7 @@ impl State {
         id: &str,
         func: RustFunc,
     ) -> std::result::Result<RustFnHandle, save_state::SaveError> {
-        if self.poisoned {
-            return Err(save_state::SaveError::StatePoisoned);
-        }
+        self.check_save_usable()?;
         if id.len() > crate::limits::MAX_SAVE_IDENTIFIER_BYTES {
             return Err(save_state::SaveError::FieldSizeExceeded {
                 field: save_state::SnapshotField::FunctionId,
@@ -1311,20 +1312,78 @@ impl State {
         !self.suspended_envs.is_empty()
     }
 
-    /// Refuse use of a poisoned State. One predictable branch; the error
-    /// construction is out of line.
+    /// The prologue of every public fallible method: refuse a poisoned State,
+    /// then an unsupported floating-point environment on the calling thread
+    /// (`fp_env`). One predictable branch and one control-register read; the
+    /// error construction is out of line. Poison takes precedence: it is
+    /// permanent, the environment is the host's to fix.
+    ///
+    /// The standard library calls public methods too, so it re-checks inside
+    /// a call. That is redundant, since only host code changes the
+    /// environment, but harmless: the read changes nothing.
     #[inline(always)]
-    pub(crate) fn check_poisoned(&self) -> Result<()> {
-        if self.poisoned {
-            return Err(Self::poisoned_error());
+    pub(crate) fn check_usable(&self) -> Result<()> {
+        if self.poisoned || (self.host_code_active() && crate::fp_env::unsupported()) {
+            return Err(self.unusable_error());
         }
         Ok(())
+    }
+
+    /// Whether the code calling into the State is host code: no Rust
+    /// function is running (a direct host call), or a host function is.
+    /// While a standard-library function runs, the environment was checked
+    /// after the last host code that ran returned, at an entry point or at
+    /// a callback's return in `invoke_rust_fn`, so its own calls skip the
+    /// register read.
+    #[inline(always)]
+    fn host_code_active(&self) -> bool {
+        !self
+            .in_flight
+            .active_rust_fn
+            .is_some_and(rust_fn::RustFnId::is_library)
+    }
+
+    /// The refusal [`State::check_usable`] reports, poison first.
+    #[cold]
+    #[inline(never)]
+    fn unusable_error(&self) -> Error {
+        if self.poisoned {
+            Self::poisoned_error()
+        } else {
+            Self::float_environment_error()
+        }
     }
 
     #[cold]
     #[inline(never)]
     pub(crate) fn poisoned_error() -> Error {
         Error::without_location(ErrorKind::StatePoisoned)
+    }
+
+    /// The refusal of the calling thread's unsupported floating-point
+    /// environment, read again here. Called only after
+    /// `fp_env::unsupported` said so; no host code runs in between, so the
+    /// register still holds what it held then.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn float_environment_error() -> Error {
+        let environment = crate::fp_env::fault()
+            .expect("called only once fp_env::unsupported found the environment unsupported");
+        Error::without_location(ErrorKind::UnsupportedFloatEnvironment(environment))
+    }
+
+    /// [`State::check_usable`] for the snapshot entry points, which report
+    /// through [`SaveError`].
+    #[cfg(feature = "snapshot")]
+    #[inline(always)]
+    pub(crate) fn check_save_usable(&self) -> std::result::Result<(), SaveError> {
+        if self.poisoned {
+            return Err(SaveError::StatePoisoned);
+        }
+        if let Some(environment) = crate::fp_env::fault() {
+            return Err(SaveError::UnsupportedFloatEnvironment(environment));
+        }
+        Ok(())
     }
 
     /// Whether a panic has unwound through this State's execution. A
@@ -1356,7 +1415,7 @@ impl State {
     /// error back, and `invoke_rust_fn` re-raises the marker when that
     /// callback returns.
     pub(crate) fn guarded<R>(&mut self, f: impl FnOnce(&mut Self) -> Result<R>) -> Result<R> {
-        self.check_poisoned()?;
+        self.check_usable()?;
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self))) {
             Ok(result) => {
                 if self.poisoned {

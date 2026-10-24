@@ -499,6 +499,15 @@ impl State {
         if self.poisoned {
             Self::abandon_poisoned();
         }
+        // A callback is host code (and `print` runs `on_print`), so it may
+        // return with the thread's floating-point environment changed. Lua
+        // must not resume under it: an `Ok` becomes this callback's error,
+        // which the arm below unwinds like any other. A callback's own error
+        // is kept; nothing executes on the way out of an error.
+        let mut result = result;
+        if result.is_ok() && crate::fp_env::unsupported() {
+            result = Err(Self::float_environment_error());
+        }
         self.in_flight.active_rust_fn = previous_rust_fn;
         let num_ret_reported = match result {
             Ok(n) => n,
@@ -548,7 +557,7 @@ impl State {
         // The count is the problem, not a Lua argument, so this is not an
         // ArgError: `InvalidStackIndex` is what the other count-taking host
         // APIs return.
-        self.check_poisoned()?;
+        self.check_usable()?;
         if n < 2 || n > self.get_top() {
             return Err(self.error(ErrorKind::InvalidStackIndex {
                 index: isize::try_from(n).map_or(isize::MIN, |n| -n),

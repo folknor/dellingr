@@ -248,6 +248,12 @@ const GATED_MODULES: &[(&str, &str, &str)] = &[
         "save_golden_program",
         "#[cfg(feature = \"snapshot\")]",
     ),
+    // Writes MXCSR, so it exists only where dellingr reads it.
+    (
+        "host/mod.rs",
+        "float_environment",
+        "#[cfg(target_arch = \"x86_64\")]",
+    ),
 ];
 
 /// A source file under `tests/integration` that the module tree does not
@@ -492,8 +498,9 @@ fn no_dead_code_allowances_or_file_level_gates() {
 /// test to another, so each use needs a `// process-global:` comment on its
 /// line or the line above, saying why no other test can observe it: every
 /// `static` item, and the tokens `thread_local`, `set_hook`, `take_hook`,
-/// `set_var`, `remove_var` and `set_current_dir` (as tokens, so an aliasing
-/// `use` is caught too).
+/// `set_var`, `remove_var`, `set_current_dir`, and `asm`, `global_asm` and
+/// `_mm_setcsr`, which can write thread state such as the floating-point
+/// environment (as tokens, so an aliasing `use` is caught too).
 #[test]
 fn process_global_constructs_are_marked() {
     let flagged_tokens = [
@@ -503,6 +510,9 @@ fn process_global_constructs_are_marked() {
         concat!("set_", "var"),
         concat!("remove_", "var"),
         concat!("set_current", "_dir"),
+        concat!("as", "m"),
+        concat!("global_", "asm"),
+        concat!("_mm_set", "csr"),
     ];
     let justification = concat!("// process", "-global:");
     for (relative_path, source) in test_sources() {

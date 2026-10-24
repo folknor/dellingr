@@ -84,35 +84,6 @@ Decision (2026-10-24):
   per-kernel dispatch copies.
 - musl, i686 and qemu runs only if a player platform needs them.
 
-## VD-018 - The host's floating-point environment is assumed, never detected
-
-Reported by: library.
-
-The library assumes round-to-nearest and no flush-to-zero or
-denormals-are-zero: `reference/deterministic-math.md` names it the supported
-environment, and crmath's correctness, `numeral`'s subnormal parsing and every
-arithmetic opcode depend on it. A game engine embedding dellingr is exactly the
-kind of host that sets FTZ/DAZ in MXCSR, or changes the rounding mode, on its
-threads for speed. Every subnormal-touching result, and possibly kernel outputs,
-would then differ between hosts with no error: a silent replay break. The tests
-run in the default environment and cannot see it.
-
-Fix: a cheap probe at State creation and each `call` entry (e.g.
-`black_box(f64::MIN_POSITIVE) / black_box(2.0) != 0.0` detects FTZ; a
-subnormal-times-one probe detects DAZ) returning an error or panicking in debug;
-a unit test that sets MXCSR FTZ on x86 and expects the refusal.
-
-Enforceable: by the probe plus that test.
-
-Decision (2026-10-24, provisional): probe at `State` creation and every call
-into Lua (`black_box`ed checks for FTZ, DAZ and directed rounding), returning a
-dedicated host-environment error that is charged nothing and is not an ordinary
-script error. It lives in the prologue every public fallible method already has
-for the poison contract. A test sets FTZ on x86_64 and expects the refusal.
-CHANGELOG entry; `docs/determinism.md` says the contract is enforced. Resetting
-MXCSR on entry is rejected: changing the FP environment is undefined behaviour
-in Rust, and the reset is x86-only.
-
 ## VD-019 - `%` and `math.fmod` lower to the platform `fmod` with no edge-case golden
 
 Reported by: library.

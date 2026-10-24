@@ -1487,11 +1487,11 @@ impl State {
     /// [`SaveDiagnostics`].
     ///
     /// A poisoned State (see [`State::is_poisoned`]) is refused with
-    /// [`SaveError::StatePoisoned`].
+    /// [`SaveError::StatePoisoned`], and an unsupported floating-point
+    /// environment on the calling thread with
+    /// [`SaveError::UnsupportedFloatEnvironment`].
     pub fn save_state(&self) -> Result<SaveState, SaveError> {
-        if self.poisoned {
-            return Err(SaveError::StatePoisoned);
-        }
+        self.check_save_usable()?;
         self.validate_quiescent()?;
         if cfg!(debug_assertions) {
             // The two inventories must agree: a root the snapshot refuses as
@@ -1522,6 +1522,12 @@ impl State {
     /// through the State (it caught the panic) gets
     /// [`LoadError::StatePoisoned`].
     ///
+    /// The calling thread's floating-point environment is checked on entry
+    /// and again after `setup`, which is host code and may change it, before
+    /// any saved value is materialized; an unsupported one is
+    /// [`LoadError::UnsupportedFloatEnvironment`]. Constructing the State
+    /// itself computes nothing that depends on the environment.
+    ///
     /// A load is all-or-nothing by construction: the State is built here and
     /// only returned on success. Any error drops it, so a failure partway
     /// through materialization (for example after some environment deltas were
@@ -1539,6 +1545,9 @@ impl State {
         callbacks: Box<dyn HostCallbacks>,
         setup: impl FnOnce(&mut State) -> std::result::Result<(), E>,
     ) -> std::result::Result<State, LoadError<E>> {
+        if let Some(environment) = crate::fp_env::fault() {
+            return Err(LoadError::UnsupportedFloatEnvironment(environment));
+        }
         let mut decoder = Decoder::new(bytes);
         decoder.read_magic_and_versions()?;
         // Read and discard the diagnostic crate-version string. Compatibility is
@@ -1561,6 +1570,9 @@ impl State {
         setup(&mut state).map_err(LoadError::Setup)?;
         if state.poisoned {
             return Err(LoadError::StatePoisoned);
+        }
+        if let Some(environment) = crate::fp_env::fault() {
+            return Err(LoadError::UnsupportedFloatEnvironment(environment));
         }
         materialize_payload(&mut state, payload)?;
         Ok(state)

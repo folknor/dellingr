@@ -389,7 +389,7 @@ pub(crate) fn open_table(state: &mut State) -> Result<()> {
     super::install_library_functions(state, super::TABLE_SEGMENT)?;
 
     // Set the table table as a global
-    state.set_global("table")?;
+    state.pop_to_global("table")?;
     Ok(())
 }
 

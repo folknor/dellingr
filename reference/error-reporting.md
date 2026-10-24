@@ -132,3 +132,12 @@ instead of trying to make each site unwind-safe:
   guard returns straight to host code, so VM-internal callers use the
   unguarded bodies (`call_unguarded` and kin), never the public entry points.
 - Under `panic = "abort"` there is no unwind and nothing to mark.
+
+The same entry check, `State::check_usable` (`check_save_usable` for the
+snapshot methods, which report through `SaveError`), then refuses an
+unsupported floating-point environment with
+`ErrorKind::UnsupportedFloatEnvironment`; poison takes precedence.
+`scripts/poison_contract.py` checks that every public fallible method starts
+with it. Unlike poisoning, that refusal leaves the State usable once the host
+restores its environment (`docs/determinism.md`, "Floating-point
+environment").

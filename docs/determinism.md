@@ -36,10 +36,52 @@ are hosts and are exempt.
   be a replay-visible change.
 - The supported hosts are those that evaluate binary64 arithmetic exactly as
   IEEE 754 specifies, with gradual underflow and the default floating-point
-  environment (round to nearest, no flush-to-zero), which is also what Rust
-  assumes. x87-only targets (32-bit x86 without SSE2) are not supported.
+  environment (round to nearest, no flush-to-zero or denormals-are-zero,
+  every exception masked), which is also what Rust assumes. x87-only targets
+  (32-bit x86 without SSE2) are not supported. See "Floating-point
+  environment" below for how this is enforced.
 - The compiler never constant-folds `^` (a folded literal would be free where
   a runtime `^` is charged), so bytecode carries no precomputed `^` results.
+
+## Floating-point environment
+
+A host such as a game engine may set flush-to-zero, denormals-are-zero, a
+directed rounding mode or exception traps on its threads. Every subnormal or
+inexact result would then differ from other hosts with no error, so dellingr
+refuses to compute in such an environment instead.
+
+- On x86_64 and aarch64, dellingr reads the calling thread's control register
+  (`MXCSR`, `FPCR`) and refuses unsupported settings with
+  `ErrorKind::UnsupportedFloatEnvironment` (`SaveError::` and
+  `LoadError::UnsupportedFloatEnvironment` for snapshots). The error carries
+  the register value and decodes it. Reading changes nothing: dellingr never
+  resets the environment, which would be undefined behaviour in Rust.
+- Checked: every public fallible `State` method made by host code,
+  `Program::compile`, `save_state`, `load_state` on entry and again after
+  its setup closure, and every Rust callback's return, where a callback that
+  returns `Ok` with the environment changed fails with this error instead,
+  so Lua never resumes under it. A host function's own calls into the State
+  are checked; a standard-library function's are not, since it only runs
+  after a check that followed the last host code. Creating a State is not
+  checked: it computes nothing that depends on the environment, and a State
+  may be created on one thread and run on another.
+- Not checked: the infallible observations (`to_boolean`, `raw_equal`,
+  `typ`, `get_top`, ...). `raw_equal` on a subnormal under denormals-are-zero
+  answers as any host comparison would.
+- The refusal is charged nothing and does not poison the State. Refused at
+  entry, the operation did no work and is not reported to `on_error`; raised
+  at a callback's return, it is that callback's error, unwinds like any
+  other and is reported once. A call that failed partway keeps what it did
+  before the failure, so restoring the environment and retrying is not a
+  replay-safe recovery; reloading a snapshot is.
+- Detection is best-effort: a non-default environment violates what the
+  compiler assumes, so a floating-point instruction may be moved ahead of a
+  check, and an environment with exception traps enabled may fault rather
+  than be refused. Refusal paths publish no arithmetic result of the refused
+  operation. Values a host computes in a bad environment and restores the
+  environment before handing over cannot be detected.
+- Other targets (including 32-bit x86, whose x87 control word is not read)
+  keep the requirement without runtime enforcement.
 
 ## Number rendering
 

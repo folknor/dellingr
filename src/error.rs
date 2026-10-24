@@ -7,6 +7,8 @@ use crate::limits::{
     MAX_UPVALUES,
 };
 
+pub use crate::fp_env::{FloatControl, FloatEnvironment, RoundingDirection};
+
 // Types
 
 /// Display adapter for bytes that are usually, but not necessarily, UTF-8:
@@ -439,6 +441,16 @@ pub enum ErrorKind {
     /// operation (see [`State::is_poisoned`](crate::State::is_poisoned));
     /// drop it and build a new one.
     StatePoisoned,
+    /// The calling thread's floating-point environment is not the one
+    /// dellingr's results are defined in (round to nearest, gradual
+    /// underflow, exceptions masked), so the operation was refused rather
+    /// than let it compute host-dependent bits. Charged nothing. Refused
+    /// before the operation does any work, or, when a Rust callback returns
+    /// `Ok` with the environment changed, raised as that callback's error,
+    /// which unwinds like any other. Never poisons the State: once the host
+    /// restores the environment the State is usable again, though a call that
+    /// failed partway keeps the effects it had. See `docs/determinism.md`.
+    UnsupportedFloatEnvironment(FloatEnvironment),
     /// Parser rejected the source.
     SyntaxError(SyntaxError),
     /// Script exceeded its cost budget.
@@ -1657,6 +1669,11 @@ impl fmt::Display for ErrorKind {
             ),
             StatePoisoned => f.write_str(
                 "state poisoned: a panic unwound through it, so it can no longer be used",
+            ),
+            UnsupportedFloatEnvironment(environment) => write!(
+                f,
+                "unsupported floating-point environment ({environment}); dellingr requires \
+                 round to nearest, gradual underflow and masked exceptions"
             ),
             SyntaxError(e) => e.fmt(f),
             TypeError(e) => e.fmt(f),

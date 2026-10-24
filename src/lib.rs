@@ -85,6 +85,7 @@ mod cost_meter;
 mod crmath;
 mod det_hash;
 mod disassemble;
+mod fp_env;
 mod gmatch_schema;
 mod host;
 mod instr;
@@ -474,7 +475,16 @@ impl Program {
     /// `None` compiles an unnamed chunk, whose locations render without a
     /// name. Names exceeding [`limits::MAX_SOURCE_NAME_BYTES`] are rejected
     /// before the source is examined.
+    ///
+    /// Compilation parses numerals and folds constant arithmetic, so an
+    /// unsupported floating-point environment on the calling thread is
+    /// refused with [`error::ErrorKind::UnsupportedFloatEnvironment`] before
+    /// parsing starts (after `source.as_ref()`, which is caller code).
     pub fn compile(source: impl AsRef<[u8]>, name: Option<&[u8]>) -> Result<Program> {
+        let source = source.as_ref();
+        if fp_env::unsupported() {
+            return Err(State::float_environment_error());
+        }
         Ok(Program(Arc::new(compiler::compile(source, name)?)))
     }
 
@@ -516,7 +526,7 @@ impl State {
     /// concurrently from different threads (each State holds its own caches
     /// and heap; only the immutable bytecode is shared).
     pub fn load(&mut self, program: &Program) -> Result<()> {
-        self.check_poisoned()?;
+        self.check_usable()?;
         self.push_chunk(Arc::clone(&program.0))?;
         Ok(())
     }

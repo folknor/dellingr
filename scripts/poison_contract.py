@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Check public State receivers for an entry-time poison refusal.
+"""Check public State receivers for an entry-time refusal.
 
-This is a lexical guard, not a proof of arbitrary control flow. New fallible
-entry points must start with a check or a known checked boundary. Infallible
-host configuration and diagnostic methods are explicitly reviewed below.
+The entry check refuses a poisoned State and an unsupported floating-point
+environment on the calling thread. This is a lexical guard, not a proof of
+arbitrary control flow. New fallible entry points must start with a check or
+a known checked boundary. Infallible host configuration and diagnostic
+methods are explicitly reviewed below; they check neither.
 All feature configurations are scanned, using native_calls' Rust lexer.
 """
 
@@ -30,10 +32,11 @@ SAFE_INFALLIBLE = {
     "arm_fault_injection", "finish_fault_injection",
 }
 
-DIRECT = re.compile(r"self\s*\.\s*check_poisoned\s*\(\s*\)\s*\?\s*;")
-SAVE_REFUSAL = re.compile(
-    r"if\s+self\s*\.\s*poisoned\s*\{\s*return\s+Err\s*\(\s*"
-    r"(?:save_state\s*::\s*)?SaveError\s*::\s*StatePoisoned\s*\)\s*;\s*\}")
+# Both prologues refuse a poisoned State and then an unsupported
+# floating-point environment; the snapshot entry points report through
+# SaveError.
+DIRECT = re.compile(r"self\s*\.\s*check_usable\s*\(\s*\)\s*\?\s*;")
+SAVE_REFUSAL = re.compile(r"self\s*\.\s*check_save_usable\s*\(\s*\)\s*\?\s*;")
 GUARDED = re.compile(r"(?:return\s+)?self\s*\.\s*guarded\s*\(\s*\|state\|")
 STRING_CALL = r"self\s*\.\s*tostring_bytes\s*\(\s*idx\s*\)"
 # The lexer blanks the wrapper's edge-id string. Only this known macro may

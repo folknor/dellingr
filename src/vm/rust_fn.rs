@@ -41,6 +41,13 @@ impl RustFnId {
     fn index(self) -> usize {
         self.0 as usize
     }
+
+    /// Whether this is a standard-library catalog entry: dellingr's own
+    /// code, as opposed to a host function.
+    #[inline(always)]
+    pub(crate) fn is_library(self) -> bool {
+        (self.0 as usize) < crate::lua_std::CATALOG_LEN
+    }
 }
 
 /// A host-held reference to a Rust function created by

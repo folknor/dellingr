@@ -9,6 +9,7 @@ use crate::limits::{TONUMBER_BASE_MAX, TONUMBER_BASE_MIN};
 use crate::numeral::parse_lua_numeral;
 use crate::vm::MetaName;
 use crate::vm::TostringRendering;
+use crate::vm::Val;
 
 fn digit_value(byte: u8) -> Option<u32> {
     match byte {
@@ -463,8 +464,10 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
 
     // _G - the global table itself, so `pairs(_G)`, `rawget(_G, k)` and
     // `rawset(_G, k, v)` see and change the real globals.
+    // Setup goes through the crate-internal bodies, which skip the public
+    // entry check (see `State::open_libs_unchecked`).
     state.push_global_table()?;
-    state.new_table()?; // metatable
+    state.push_new_table()?; // metatable
 
     // Protect it with a metatable that changes nothing else. Bare global
     // access is raw, so a script-set `__index` or `__newindex` would apply to
@@ -473,15 +476,13 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
     // falsy), and `setmetatable(_G, mt)` - which reference allows - errors
     // loudly instead.
     for &(name, value) in GLOBAL_ENV_PROTECTION_FIELDS {
-        state.push_string(name)?;
-        state.push_boolean(value)?;
-        state.set_table_raw(-3)?;
+        state.set_table_str_key_value(-1, name, Val::Bool(value))?;
     }
 
     // Address the _G table relative to the top: a host may call open_libs
     // with values already on the stack, so absolute index 1 is not ours.
-    state.set_metatable_of(-2)?;
-    state.set_global("_G")?;
+    state.pop_metatable_onto(-2)?;
+    state.pop_to_global("_G")?;
     Ok(())
 }
 

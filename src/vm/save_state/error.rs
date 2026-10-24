@@ -7,7 +7,7 @@ use std::convert::Infallible;
 use std::fmt;
 
 use crate::compiler::verify::ValidationReason;
-use crate::error::SnapshotTableFault;
+use crate::error::{FloatEnvironment, SnapshotTableFault};
 use crate::limits::tuning::SAVE_LOGGED_USER_TEXT_BYTES as MAX_LOGGED_USER_TEXT_BYTES;
 use crate::limits::{
     MAX_CHUNK_NAME_BYTES, MAX_ENGINE_VERSION_BYTES, MAX_ENVIRONMENT_TOKEN_BYTES,
@@ -28,6 +28,10 @@ pub enum SaveError {
     /// A panic unwound through the State, so its contents no longer
     /// describe a consistent VM and are not snapshotted.
     StatePoisoned,
+    /// The calling thread's floating-point environment is unsupported (see
+    /// [`ErrorKind::UnsupportedFloatEnvironment`](crate::error::ErrorKind::UnsupportedFloatEnvironment));
+    /// nothing was saved or registered.
+    UnsupportedFloatEnvironment(FloatEnvironment),
     /// A reachable Rust function has no stable save/load id.
     UnregisteredFunction {
         /// Best-effort path to the value that made the function reachable.
@@ -71,6 +75,9 @@ impl fmt::Display for SaveError {
         match self {
             SaveError::NotQuiescent => write!(f, "state is not quiescent"),
             SaveError::StatePoisoned => write!(f, "state poisoned by a panic"),
+            SaveError::UnsupportedFloatEnvironment(environment) => {
+                write!(f, "unsupported floating-point environment ({environment})")
+            }
             SaveError::UnregisteredFunction { reachable_from } => {
                 f.write_str("unregistered Rust function reachable from ")?;
                 write_bounded_user_text(f, reachable_from)
@@ -336,6 +343,11 @@ pub enum LoadError<E = Infallible> {
     /// unwound through (it caught the panic), so the snapshot is not loaded
     /// into it.
     StatePoisoned,
+    /// The calling thread's floating-point environment is unsupported (see
+    /// [`ErrorKind::UnsupportedFloatEnvironment`](crate::error::ErrorKind::UnsupportedFloatEnvironment)),
+    /// on entry or after the setup closure returned success; nothing saved
+    /// was materialized.
+    UnsupportedFloatEnvironment(FloatEnvironment),
     /// The snapshot could not be restored: its bytes are malformed or
     /// unsupported, or they reference something the load-time environment
     /// does not provide.
@@ -353,7 +365,7 @@ impl<E> LoadError<E> {
     pub fn snapshot(&self) -> Option<&SnapshotError> {
         match self {
             Self::Snapshot(error) => Some(error),
-            Self::Setup(_) | Self::StatePoisoned => None,
+            Self::Setup(_) | Self::StatePoisoned | Self::UnsupportedFloatEnvironment(_) => None,
         }
     }
 }
@@ -363,6 +375,9 @@ impl<E: fmt::Display> fmt::Display for LoadError<E> {
         match self {
             LoadError::Setup(error) => write!(f, "load setup failed: {error}"),
             LoadError::StatePoisoned => write!(f, "load setup left the state poisoned by a panic"),
+            LoadError::UnsupportedFloatEnvironment(environment) => {
+                write!(f, "unsupported floating-point environment ({environment})")
+            }
             LoadError::Snapshot(error) => error.fmt(f),
         }
     }
@@ -372,7 +387,9 @@ impl<E: fmt::Debug + fmt::Display + 'static> std::error::Error for LoadError<E> 
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             LoadError::Snapshot(error) => Some(error),
-            LoadError::Setup(_) | LoadError::StatePoisoned => None,
+            LoadError::Setup(_)
+            | LoadError::StatePoisoned
+            | LoadError::UnsupportedFloatEnvironment(_) => None,
         }
     }
 }

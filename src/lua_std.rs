@@ -209,6 +209,10 @@ const CATALOG: &[CatalogSegment] = &[
     },
 ];
 
+/// How many entries the catalog has: every Rust function id below this is a
+/// library function.
+pub(crate) const CATALOG_LEN: usize = segment_offset(CATALOG.len());
+
 const BASE_SEGMENT: usize = 1;
 const MATH_SEGMENT: usize = 2;
 const STRING_SEGMENT: usize = 3;

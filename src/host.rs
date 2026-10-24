@@ -72,7 +72,10 @@ pub trait HostCallbacks: Send {
     /// `ArgCount::Dynamic`, insufficient stack values for a call, an invalid
     /// stack index, a missing `get_table` key, a wrong-State anchor, or no
     /// stack room to insert the anchored callee. Nor for a refusal of a
-    /// poisoned State (`StatePoisoned`), or for `to_string_with_meta()`'s
+    /// poisoned State (`StatePoisoned`) or of an unsupported floating-point
+    /// environment at an entry point (`UnsupportedFloatEnvironment`; raised
+    /// at a callback's return instead, it is that callback's error and is
+    /// reported), or for `to_string_with_meta()`'s
     /// UTF-8 size check after rendering succeeded. The host observes those
     /// solely through the `Result`; a callback that returns one of them as its
     /// own failure reports it then, like any other callback error.

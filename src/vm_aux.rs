@@ -20,7 +20,7 @@ impl State {
     /// values count from the top of the stack.
     #[deny(clippy::panic, clippy::manual_assert)]
     pub fn check_any(&mut self, arg_number: isize) -> Result<()> {
-        self.check_poisoned()?;
+        self.check_usable()?;
         if arg_number == 0 {
             return Err(self.error(ErrorKind::InvalidStackIndex { index: arg_number }));
         }
@@ -40,7 +40,7 @@ impl State {
     /// the stack.
     #[deny(clippy::panic, clippy::manual_assert)]
     pub fn check_type(&mut self, arg_number: isize, expected_type: LuaType) -> Result<()> {
-        self.check_poisoned()?;
+        self.check_usable()?;
         if arg_number == 0 {
             return Err(self.error(ErrorKind::InvalidStackIndex { index: arg_number }));
         }
@@ -134,7 +134,16 @@ impl State {
     /// [`ErrorKind::OpenLibsInRestrictedEnv`] before changing any state.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn open_libs(&mut self) -> Result<()> {
-        self.check_poisoned()?;
+        self.check_usable()?;
+        self.open_libs_unchecked()
+    }
+
+    /// [`State::open_libs`] without the entry check, for the constructors:
+    /// opening the libraries computes nothing that depends on the
+    /// floating-point environment, and a State may be created on one thread
+    /// and run on another, so creation is not where the environment is
+    /// checked. Everything this reaches is crate-internal and unchecked too.
+    pub(crate) fn open_libs_unchecked(&mut self) -> Result<()> {
         if self.in_restricted_env() {
             return Err(self.error(ErrorKind::OpenLibsInRestrictedEnv));
         }

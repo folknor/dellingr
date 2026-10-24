@@ -26,7 +26,7 @@ impl State {
     /// Returns [`ErrorKind::InvalidStackIndex`] for an index below the stack
     /// bottom, or [`ErrorKind::StackOverflow`] if growth exceeds the stack cap.
     pub fn set_top(&mut self, i: isize) -> Result<()> {
-        self.check_poisoned()?;
+        self.check_usable()?;
         let old_top = self.get_top();
         let new_top = match i.cmp(&0) {
             // Compute in signed space. `old_top + i` may be negative while
@@ -65,7 +65,7 @@ impl State {
     /// Returns [`ErrorKind::InvalidStackIndex`] when `n` is negative or exceeds
     /// the visible stack size.
     pub fn pop(&mut self, n: isize) -> Result<()> {
-        self.check_poisoned()?;
+        self.check_usable()?;
         self.pop_n(n)
     }
 
@@ -93,7 +93,7 @@ impl State {
 
     /// Pushes a `nil` value onto the stack.
     pub fn push_nil(&mut self) -> Result<()> {
-        self.check_poisoned()?;
+        self.check_usable()?;
         self.check_stack_slot()?;
         self.push_unchecked(Val::Nil);
         Ok(())
@@ -101,7 +101,7 @@ impl State {
 
     /// Pushes a number with value `n` onto the stack.
     pub fn push_number(&mut self, n: f64) -> Result<()> {
-        self.check_poisoned()?;
+        self.check_usable()?;
         self.check_stack_slot()?;
         self.push_unchecked(Val::Num(n));
         Ok(())
@@ -109,7 +109,7 @@ impl State {
 
     /// Pushes a boolean onto the stack.
     pub fn push_boolean(&mut self, b: bool) -> Result<()> {
-        self.check_poisoned()?;
+        self.check_usable()?;
         self.check_stack_slot()?;
         self.push_unchecked(Val::Bool(b));
         Ok(())
@@ -117,7 +117,7 @@ impl State {
 
     /// Pushes the given UTF-8 string onto the stack.
     pub fn push_string(&mut self, s: impl AsRef<str>) -> Result<()> {
-        self.check_poisoned()?;
+        self.check_usable()?;
         self.check_stack_slot()?;
         let val = self.alloc_string(s.as_ref().as_bytes())?;
         self.push_unchecked(val);
@@ -134,7 +134,7 @@ impl State {
 
     /// Pushes the given raw Lua string bytes onto the stack.
     pub fn push_bytes(&mut self, bytes: impl AsRef<[u8]>) -> Result<()> {
-        self.check_poisoned()?;
+        self.check_usable()?;
         self.check_stack_slot()?;
         let val = self.alloc_string(bytes.as_ref())?;
         self.push_unchecked(val);
@@ -171,7 +171,7 @@ impl State {
     ///
     /// [`ErrorKind::InvalidRustFnHandle`]: crate::error::ErrorKind::InvalidRustFnHandle
     pub fn push_rust_fn(&mut self, handle: RustFnHandle) -> Result<()> {
-        self.check_poisoned()?;
+        self.check_usable()?;
         let function = self
             .rust_fns
             .resolve(handle)
@@ -197,7 +197,7 @@ impl State {
 
     /// Pushes a copy of the element at the given index onto the stack.
     pub fn push_value(&mut self, i: isize) -> Result<()> {
-        self.check_poisoned()?;
+        self.check_usable()?;
         let val = self.at_index(i)?;
         self.check_stack_slot()?;
         self.push_unchecked(val);
@@ -210,7 +210,7 @@ impl State {
     /// visible stack.
     #[deny(clippy::panic, clippy::manual_assert)]
     pub fn insert(&mut self, index: isize) -> Result<()> {
-        self.check_poisoned()?;
+        self.check_usable()?;
         let idx = self.convert_idx(index)?;
         let slice = &mut self.stack[idx..];
         slice.rotate_right(1);
@@ -223,7 +223,7 @@ impl State {
     /// visible stack.
     #[deny(clippy::panic, clippy::manual_assert)]
     pub fn remove(&mut self, i: isize) -> Result<()> {
-        self.check_poisoned()?;
+        self.check_usable()?;
         let idx = self.convert_idx(i)?;
         self.stack.remove(idx);
         Ok(())
@@ -251,7 +251,7 @@ impl State {
     /// index is outside the visible stack.
     #[deny(clippy::panic, clippy::manual_assert)]
     pub fn replace(&mut self, i: isize) -> Result<()> {
-        self.check_poisoned()?;
+        self.check_usable()?;
         let idx = self.convert_idx(i)?;
         // A successful conversion requires a visible stack value above
         // stack_bottom, so this pop cannot empty the backing stack. Failure is
@@ -271,7 +271,7 @@ impl State {
     /// Copies the element at `from` into the valid index `to`, replacing the
     /// value at that position. Equivalent to Lua's `lua_copy`.
     pub fn copy_val(&mut self, from: isize, to: isize) -> Result<()> {
-        self.check_poisoned()?;
+        self.check_usable()?;
         let val = self.at_index(from)?;
         let to = self.convert_idx(to)?;
         self.stack[to] = val;
@@ -284,20 +284,23 @@ impl State {
     /// frame reads as `nil`, so this returns false. Standard library
     /// functions rely on that for optional trailing arguments. Use
     /// [`State::try_to_boolean`] to have an invalid index reported instead.
+    ///
+    /// Returns false on a poisoned State. Like the other infallible
+    /// observations it does not check the floating-point environment.
     pub fn to_boolean(&self, idx: isize) -> bool {
-        matches!(self.try_to_boolean(idx), Ok(true))
+        !self.poisoned && self.at_index(idx).is_ok_and(|v| v.truthy())
     }
 
     /// Like [`State::to_boolean`], but returns
     /// [`ErrorKind::InvalidStackIndex`] when the index is invalid.
     pub fn try_to_boolean(&self, idx: isize) -> Result<bool> {
-        self.check_poisoned()?;
+        self.check_usable()?;
         self.at_index(idx).map(|v| v.truthy())
     }
 
     /// Attempts to convert the value at the given index to a number.
     pub fn to_number(&self, idx: isize) -> Result<f64> {
-        self.check_poisoned()?;
+        self.check_usable()?;
         let i = self.convert_idx(idx)?;
         let val = &self.stack[i];
         val.as_num()
@@ -308,7 +311,7 @@ impl State {
     /// Lua strings with invalid UTF-8 bytes are converted lossily; a result
     /// that would exceed `MAX_STRING_BYTES` is rejected before conversion.
     pub fn to_string(&mut self, idx: isize) -> Result<String> {
-        self.check_poisoned()?;
+        self.check_usable()?;
         let raw = self.bytes_with_default_string_coercion(idx)?;
         Self::lossy_utf8_checked(&raw)
     }
@@ -339,7 +342,7 @@ impl State {
 
     /// Returns exact Lua string bytes at the given index.
     pub fn to_bytes(&self, idx: isize) -> Result<&[u8]> {
-        self.check_poisoned()?;
+        self.check_usable()?;
         let i = self.expect_string_at(idx)?;
         Ok(self.stack[i]
             .as_string(&self.heap)
@@ -386,7 +389,7 @@ impl State {
     /// Like [`State::typ`], but returns [`ErrorKind::InvalidStackIndex`]
     /// when the index is invalid.
     pub fn try_typ(&self, idx: isize) -> Result<super::LuaType> {
-        self.check_poisoned()?;
+        self.check_usable()?;
         self.at_index(idx).map(|val| val.typ(&self.heap))
     }
 
@@ -396,14 +399,22 @@ impl State {
     /// Follows Lua's acceptable-index rule as `lua_rawequal` does: if either
     /// index is outside the current frame, the result is false. Use
     /// [`State::try_raw_equal`] to have an invalid index reported.
+    ///
+    /// Returns false on a poisoned State. It does not check the
+    /// floating-point environment: under denormals-are-zero, a subnormal
+    /// number compares equal to zero here, as in any host arithmetic.
     pub fn raw_equal(&self, idx1: isize, idx2: isize) -> bool {
-        matches!(self.try_raw_equal(idx1, idx2), Ok(true))
+        !self.poisoned
+            && matches!(
+                (self.at_index(idx1), self.at_index(idx2)),
+                (Ok(a), Ok(b)) if a == b
+            )
     }
 
     /// Like [`State::raw_equal`], but returns
     /// [`ErrorKind::InvalidStackIndex`] when either index is invalid.
     pub fn try_raw_equal(&self, idx1: isize, idx2: isize) -> Result<bool> {
-        self.check_poisoned()?;
+        self.check_usable()?;
         Ok(self.at_index(idx1)? == self.at_index(idx2)?)
     }
 

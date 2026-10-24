@@ -14,10 +14,10 @@ class PoisonContractTests(SourceFixture):
     def test_new_method_and_late_or_discarded_checks_fail(self):
         problems = self.problems('''impl State {
  pub fn missing(&mut self) -> Result<()> { Ok(()) }
- pub fn late(&mut self) -> Result<()> { self.work(); self.check_poisoned()?; Ok(()) }
- pub fn discarded(&self) -> Result<()> { self.check_poisoned(); Ok(()) }
+ pub fn late(&mut self) -> Result<()> { self.work(); self.check_usable()?; Ok(()) }
+ pub fn discarded(&self) -> Result<()> { self.check_usable(); Ok(()) }
  pub fn nested(&self) -> Result<()> {
-  let f = || { self.check_poisoned()?; Ok(()) }; f()
+  let f = || { self.check_usable()?; Ok(()) }; f()
  }
 }''')
         self.assertEqual(len(problems), 4)
@@ -27,11 +27,11 @@ class PoisonContractTests(SourceFixture):
     def test_lexer_comments_and_literals_cannot_supply_check(self):
         problems = self.problems('''impl State {
  pub fn good(&self) -> Result<()> {
-  /* outer /* nested */ comment */ self.check_poisoned()?; Ok(())
+  /* outer /* nested */ comment */ self.check_usable()?; Ok(())
  }
  pub fn bad(&self) -> Result<()> {
-  // self.check_poisoned()?;
-  let text = r#"self.check_poisoned()?; { }"#; Ok(())
+  // self.check_usable()?;
+  let text = r#"self.check_usable()?; { }"#; Ok(())
  }
 }''')
         self.assertEqual(len(problems), 1)
@@ -39,7 +39,7 @@ class PoisonContractTests(SourceFixture):
 
     def test_visibility_owner_constructors_and_test_code(self):
         self.assertEqual(self.problems('''impl State {
- pub fn checked(&self) -> crate::Result<()> { self.check_poisoned()?; Ok(()) }
+ pub fn checked(&self) -> crate::Result<()> { self.check_usable()?; Ok(()) }
  pub(crate) fn internal(&self) -> Result<()> { Ok(()) }
  pub(super) fn internal_too(&self) -> Result<()> { Ok(()) }
  pub fn constructor() -> Result<Self> { make() }
@@ -54,7 +54,7 @@ impl Other { pub fn unrelated(&self) -> Result<()> { Ok(()) } }
 }''')
         helper = self.source('''impl State {
  pub(crate) fn guarded<R>(&mut self, f: impl FnOnce(&mut Self) -> Result<R>) -> Result<R> {
-  self.check_poisoned()?; f(self)
+  self.check_usable()?; f(self)
  }
 }''', "src/vm.rs")
         self.assertEqual(guard.check_sources([public, helper]), [])
@@ -68,13 +68,14 @@ impl Other { pub fn unrelated(&self) -> Result<()> { Ok(()) } }
         self.assertEqual(self.problems('''impl State {
  #[cfg(feature = "snapshot")]
  pub fn save(&self) -> std::result::Result<(), SaveError> {
-  if self.poisoned { return Err(save_state::SaveError::StatePoisoned); } Ok(())
+  self.check_save_usable()?; Ok(())
  }
 }'''), [])
+        # A bare poison test misses the floating-point environment.
         problems = self.problems('''impl State {
  #[cfg(feature = "snapshot")]
  pub fn save(&self) -> Result<(), SaveError> {
-  if self.poisoned { return Err(SaveError::Other); } Ok(())
+  if self.poisoned { return Err(SaveError::StatePoisoned); } Ok(())
  }
 }''')
         self.assertEqual(len(problems), 1)
@@ -89,7 +90,7 @@ impl Other { pub fn unrelated(&self) -> Result<()> { Ok(()) } }
 }''')
         renderer = self.source('''impl State {
  pub fn tostring_bytes(&mut self, idx: isize) -> Result<Vec<u8>> {
-  self.check_poisoned()?;
+  self.check_usable()?;
   render(idx)
  }
 }''', "src/renderer.rs")
@@ -106,7 +107,7 @@ impl Other { pub fn unrelated(&self) -> Result<()> { Ok(()) } }
 }''')
         renderer = self.source('''impl State {
  pub fn tostring_bytes(&mut self, idx: isize) -> Result<Vec<u8>> {
-  self.check_poisoned()?; render(idx)
+  self.check_usable()?; render(idx)
  }
 }''', "src/vm.rs")
         self.assertEqual(guard.check_sources([wrapper, renderer]), [])

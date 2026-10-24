@@ -173,13 +173,14 @@ fn table_sort_swap<A: TableSortAccess>(
 impl State {
     /// Creates a new empty table and pushes it onto the stack.
     pub fn new_table(&mut self) -> Result<()> {
-        self.check_poisoned()?;
+        self.check_usable()?;
         self.push_new_table()
     }
 
-    /// [`State::new_table`] without the poison check, for the dispatch loop.
+    /// [`State::new_table`] without the entry check, for the dispatch loop
+    /// and library setup.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    pub(super) fn push_new_table(&mut self) -> Result<()> {
+    pub(crate) fn push_new_table(&mut self) -> Result<()> {
         self.check_stack_space(1)?;
         let val = self.alloc_table();
         self.push_unchecked(val);
@@ -369,7 +370,7 @@ impl State {
     /// Pops the key and pushes the result. On error the stack is unchanged.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn get_table_raw(&mut self, i: isize) -> Result<()> {
-        self.check_poisoned()?;
+        self.check_usable()?;
         let idx = self.table_operand_below_top(i, 1)?;
         let key = self.stack[self.stack.len() - 1];
         let val = self.stack[idx]
@@ -392,7 +393,7 @@ impl State {
     /// target, or a nil/NaN key is rejected before either operand is popped.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn set_table_raw(&mut self, i: isize) -> Result<()> {
-        self.check_poisoned()?;
+        self.check_usable()?;
         let idx = self.table_operand_below_top(i, 2)?;
         let top = self.stack.len();
         let key = self.stack[top - 2];
@@ -453,7 +454,7 @@ impl State {
     /// detected before the key is popped, so a host loop can retry or resume.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn table_next(&mut self, table_idx: isize) -> Result<bool> {
-        self.check_poisoned()?;
+        self.check_usable()?;
         let idx = self.table_operand_below_top(table_idx, 1)?;
         let top = self.stack.len() - 1;
         let key = self.stack[top];
@@ -485,7 +486,7 @@ impl State {
     /// no length is an error rather than 0, so a host bug cannot read as an
     /// empty table. A bad index is `InvalidStackIndex`.
     pub fn raw_len(&self, idx: isize) -> Result<usize> {
-        self.check_poisoned()?;
+        self.check_usable()?;
         let i = self.convert_idx(idx)?;
         match self.stack[i] {
             Val::Str(s) => Ok(self.heap.get_string(s).len()),
@@ -527,7 +528,7 @@ impl State {
     /// other type has no metatable and returns nil.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn get_metatable_of(&mut self, idx: isize) -> Result<()> {
-        self.check_poisoned()?;
+        self.check_usable()?;
         let i = self.convert_idx(idx)?;
 
         let val = self.stack[i];
@@ -553,7 +554,13 @@ impl State {
     /// pop, leaving the stack unchanged.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn set_metatable_of(&mut self, table_idx: isize) -> Result<()> {
-        self.check_poisoned()?;
+        self.check_usable()?;
+        self.pop_metatable_onto(table_idx)
+    }
+
+    /// [`State::set_metatable_of`] without the entry check, for library
+    /// setup.
+    pub(crate) fn pop_metatable_onto(&mut self, table_idx: isize) -> Result<()> {
         let idx = self.table_operand_below_top(table_idx, 1)?;
         let mt = match self.stack[self.stack.len() - 1] {
             Val::Nil => None,
@@ -579,7 +586,7 @@ impl State {
     /// Charges no cost; the Lua `table.insert` wrapper charges a flat 1.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn table_insert_at(&mut self, table_idx: isize, pos: usize) -> Result<()> {
-        self.check_poisoned()?;
+        self.check_usable()?;
         // Resolve against the entry stack, including the value to be popped.
         // This keeps negative indices relative to the caller's visible top and
         // validates the table before mutating the stack.
@@ -608,7 +615,7 @@ impl State {
     /// position would silently clear an arbitrary key. Charges no cost.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn table_remove_at(&mut self, table_idx: isize, pos: usize) -> Result<()> {
-        self.check_poisoned()?;
+        self.check_usable()?;
         let idx = self.table_operand_below_top(table_idx, 0)?;
         let len = self.table_array_len_at(idx);
         let valid = (1..=len + 1).contains(&pos) || (len == 0 && pos == 0);

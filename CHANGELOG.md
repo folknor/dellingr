@@ -71,6 +71,25 @@ All notable changes to dellingr are documented here. The format follows
 
 ### Changed (breaking)
 
+- The floating-point environment is enforced, not assumed. On x86_64 and
+  aarch64 every public fallible `State` method made by host code,
+  `Program::compile`, `save_state`, `register_rust_fn` and `load_state`
+  (again after its setup closure) reads the calling thread's control register
+  and refuses flush-to-zero, denormals-are-zero, a directed rounding mode or
+  an unmasked exception with the new `ErrorKind::UnsupportedFloatEnvironment`
+  (`SaveError::UnsupportedFloatEnvironment`,
+  `LoadError::UnsupportedFloatEnvironment`). The error carries a
+  `FloatEnvironment` (in `dellingr::error`, with `FloatControl` and
+  `RoundingDirection`) that holds the raw register and decodes each setting.
+  A Rust callback that returns `Ok` with the environment changed now fails
+  with that error at its return, so Lua never resumes under it. The refusal
+  is charged nothing, does not poison the State and, at an entry point, is
+  not reported to `on_error`. Creating a State is not checked. Before, such
+  an environment silently produced host-dependent results. See
+  `docs/determinism.md`, "Floating-point environment".
+- `State::to_boolean` and `State::raw_equal` no longer go through their
+  `try_` twins; they still return false on a poisoned State and check
+  nothing else.
 - Rust function identity is a State-owned function-table entry, never a code
   address. `State::add_rust_fn` (and, under `snapshot`,
   `State::register_rust_fn`) creates a function and returns a State-bound

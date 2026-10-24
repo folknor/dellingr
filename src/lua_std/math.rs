@@ -334,6 +334,6 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
     }
 
     // Set the math table as a global
-    state.set_global("math")?;
+    state.pop_to_global("math")?;
     Ok(())
 }

@@ -2,6 +2,8 @@ mod anchor;
 mod callback_argument_names;
 mod caller_stack_isolation;
 mod concat_stack_indices;
+#[cfg(target_arch = "x86_64")]
+mod float_environment;
 mod host_call_preflight;
 mod host_error_reporting;
 mod host_frame_isolation;
