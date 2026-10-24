@@ -7,6 +7,20 @@ name = "no-host-entropy"
 from = "dellingr"
 forbid = ["rand", "rand_core", "getrandom"]
 
+# Direct consumer boundary only. The native rule reads --no-deps metadata;
+# it cannot detect a profiler dependency introduced transitively by hotpath.
+# `CARGO_NET_OFFLINE=true brokkr deps <crate> --json` can inspect transitive
+# normal-edge chains without its audit's network phases. It cannot be a
+# script_check here: deps acquires the lock already held by its check parent.
+# A native transitive rule or an exported graph is needed to gate that graph.
+[[dependency_rule]]
+name = "consumer-dependencies"
+from = "dellingr"
+kinds = ["normal", "build"]
+allow = ["indexmap", "foldhash", "hashbrown", "slotmap", "hotpath"]
+
+[rustdoc]
+
 [[fixture_lint]]
 name = "determinism-policy"
 path = "fixtures/lint-policy"
@@ -61,6 +75,16 @@ name = "default"
 [[check]]
 name = "snapshot"
 features = ["snapshot"]
+
+# Explicit dev lanes keep doctests out of instrumentation and release probes.
+[[check]]
+name = "docs-default"
+doc_only = true
+
+[[check]]
+name = "docs-snapshot"
+features = ["snapshot"]
+doc_only = true
 
 # Compile and lint instrumentation and refusal hooks in one extra dev shape.
 # Run only refusal tests: the ordinary sweeps already cover the corpus, and

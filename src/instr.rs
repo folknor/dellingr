@@ -1230,6 +1230,40 @@ mod tests {
         use std::fmt::Write;
 
         let golden = include_str!("../tests/fixtures/opcode_encoding.txt");
+        // Frozen release evidence remains checked even after FORMAT_VERSION
+        // moves. The first snapshot release predates the encoding fixture, so
+        // its complete instruction source is the historical encoding record.
+        let released = [
+            (
+                6,
+                2,
+                include_str!("../tests/fixtures/opcode_released_v6.txt"),
+                0x8e36_a36f_7b02_bb78_u64,
+            ),
+            (
+                7,
+                5,
+                include_str!("../tests/fixtures/opcode_released_v7.txt"),
+                0x98cd_eb55_805a_66e1_u64,
+            ),
+        ];
+        for (format, cost, archived, fingerprint) in released {
+            assert_eq!(
+                xxhash_rust::xxh3::xxh3_64(archived.as_bytes()),
+                fingerprint,
+                "released opcode encoding evidence changed for format {format}"
+            );
+            if (format, cost)
+                == (
+                    super::snapshot_format::FORMAT_VERSION,
+                    crate::COST_MODEL_VERSION,
+                )
+            {
+                // Future release entries archive opcode_encoding.txt. The
+                // source-only archive belongs to a historical format only.
+                assert_eq!(golden, archived, "released opcode contract changed");
+            }
+        }
         let (version, remainder) = golden.split_once('\n').expect("fixture has a format line");
         assert_eq!(
             version,

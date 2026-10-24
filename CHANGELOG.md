@@ -542,6 +542,11 @@ All notable changes to dellingr are documented here. The format follows
 - The test-only `fault-injection` cargo feature now fails to compile without
   debug assertions, so a dependency that enables it cannot reach a host's
   release build.
+- The published package is an allowlist: the runtime sources, `docs/`,
+  `reference/`, the README, license and lockfile, and the `hotpath` harness
+  example. The integration tests, the Lua example corpus and the fixture
+  regeneration tools are no longer shipped; they need the repository's
+  scripts and gates and never ran from the package.
 - **Replay-visible:** `math.sin`, `cos`, `tan`, `asin`, `acos`, `atan`,
   `atan2`, `exp`, `log` and the `^` operator no longer call the platform libm.
   They are in-crate ports of the CORE-MATH correctly rounded binary64

@@ -11,9 +11,36 @@ fn error_boundary_budget_sweep() {
     for (name, source) in CASES {
         let baseline = run(name, source, None, None);
         assert!(baseline.error.is_none(), "{name}: {:?}", baseline.error);
+        // Outcomes are monotone in the budget: every budget below one threshold
+        // fails with BudgetExceeded (asserted inside `run`), every budget at or
+        // above it succeeds. Budgets are swept consecutively, so the last
+        // failure sits directly below the threshold.
+        let mut first_success = None;
+        let mut last_failure = None;
         for budget in 0..=baseline.cost {
-            run(name, source, Some(i64::try_from(budget).unwrap()), None);
+            let outcome = run(name, source, Some(i64::try_from(budget).unwrap()), None);
+            if outcome.error.is_none() {
+                if first_success.is_none() {
+                    first_success = Some(budget);
+                }
+            } else {
+                if let Some(succeeded_at) = first_success {
+                    panic!("{name}: budget {budget} failed after budget {succeeded_at} succeeded");
+                }
+                last_failure = Some((budget, outcome.cost));
+            }
         }
+
+        let threshold = first_success.expect("the baseline cost must allow execution");
+        assert!(threshold > 0, "{name}: zero budget must fail");
+        let (last_failed_budget, cost_used) = last_failure.expect("zero budget must fail");
+        // The signed remaining lets a charge that starts positive cross zero, so
+        // the run one unit short spends its whole budget and stops at the next
+        // costed operation.
+        assert_eq!(
+            cost_used, last_failed_budget,
+            "{name}: the last failed run must spend exactly its budget"
+        );
     }
 }
 

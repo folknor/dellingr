@@ -85,59 +85,20 @@ walkers exist; the in-process gate rewrite in rewrites.md removes it.
 
 Enforceable: yes.
 
-## VG-013 - The published package carries tests that cannot run, and ships files they do not need
-
-Reported by: check-machinery, snapshot.
-
-`Cargo.toml`'s comment says `tests/` and `examples/` stay in the package
-because they carry the corpus `run_examples.rs` and the diff gate execute. Yet
-the package excludes `scripts/` (which holds `diff_test.sh`, driven by
-`tests/integration/corpus/diff_test.rs`, and `test_limited.sh`, driven by
-`tests/integration/support/process.rs::limited_command`), `bench/` and
-`brokkr.toml` (both read by `tests/integration/corpus/bench_scripts.rs`).
-`cargo test` on the published crate therefore fails in at least three suites; `cargo package` verifies only that the crate
-builds. Meanwhile keeping `tests/` ships `tests/fixtures/crmath_golden.txt`
-(557 KB) and the save golden, while the `.lua` corpus the comment cites lives
-in `examples/`.
-
-Fix: publish a coherent test surface (an `include` allowlist naming what the
-tests read) or none. Excluding `tests/` and the `.lua` corpus keeps
-`examples/hotpath.rs` and `regenerate_save_golden.rs`, which are all the
-declared `[[example]]` targets need.
-
-Enforceable: yes. A background `script_check` running `cargo package --list`
-asserting every path the tests open is in it, or that `tests/` is not.
-
-## VG-014 - Doctests never run, and there is no rustdoc phase
-
-Reported by: check-machinery.
-
-`[test] doctests` is unset, which brokkr defaults to `false`; the check log
-shows every sweep scoped to `--tests`. The five doc examples (crate docs in
-`src/lib.rs` and `src/host.rs`, `Program`'s in `src/lib.rs`, and two in
-`src/vm.rs`: `with_callbacks`, `set_user_data`) are the consumer-facing API
-surface, and none is compiled. There is no `[rustdoc]` table, so broken
-intra-doc links go unnoticed.
-
-Fix: `doctests = true` (dev sweeps only) or a `doc_only` entry, plus a
-`[rustdoc]` table.
-
-Enforceable: yes, in config.
-
 ## VG-017 - Nothing checks the consumer's dependency graph stays free of the profiler's crates
 
 Reported by: check-machinery.
 
-`hotpath` is a non-optional dependency of an embeddable deterministic library.
-`Cargo.lock` lists `tiny_http`, `quanta`, `time`, `serde_json`,
-`crossbeam-channel` and `hdrhistogram` among its possible dependencies; the
-hunter did not verify which compile with the feature off. The `Cargo.toml`
-comment says it "costs only compile time", but nothing checks that the
-consumer's graph stays free of a timing or HTTP crate.
+A `dependency_rule` now allowlists the direct normal and build dependencies.
+What remains is transitive: `hotpath`'s own dependencies (`tiny_http`,
+`quanta`, `time`, `serde_json`, `crossbeam-channel`, `hdrhistogram`) are not
+checked against the consumer's resolved default-feature graph. brokkr's
+`dependency_rule` sees direct edges only, and `brokkr deps` cannot run nested
+inside `brokkr check` (brokkr#21).
 
-Fix: a `cargo tree -e normal` script check against an allowlist.
+Fix: a transitive dependency rule once brokkr offers one.
 
-Enforceable: yes.
+Enforceable: blocked on brokkr#21.
 
 ## VG-018 - The default and snapshot sweeps share one `CARGO_BIN_EXE_dellingr` path
 

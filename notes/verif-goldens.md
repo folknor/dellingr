@@ -23,47 +23,6 @@ entry names the scopes whose hunters reported it.
 
 ---
 
-## VD-001 - The save golden still pins the whole stream, and its text companion is a hex dump
-
-Reported by: snapshot; narrowed by the resolution loop's reviewer.
-
-`tests/integration/snapshot/save_golden.rs` still compares the whole debug
-save, including `CARGO_PKG_VERSION`, `COST_MODEL_VERSION`, the compiler's output
-for the golden program and every stdlib registration id, so it must be
-regenerated on unrelated compiler, cost, stdlib or release-number changes, and
-a traversal reorder made in the same commit is blessed with them. The new
-`tests/fixtures/save_golden_current.txt` companion is a hex dump, so a one-byte
-insertion shifts every later row and a reorder is still not a readable diff.
-
-Fix: compare the payload after the header; make the text companion a
-structural decode (the arena in id order, bytecode as hash plus length) so a
-reorder is a readable diff and a codegen change touches one line; optionally
-keep a small separate binary golden from a raw State with no closures for exact
-codec bytes.
-
-Enforceable: structurally, by the decode-based companion.
-
-## VD-002 - Released-format archive gaps
-
-Reported by: snapshot; narrowed by the resolution loop's reviewer.
-
-`save_released_v6.bin` and `save_released_v7.bin` now pin the shipped formats,
-with fingerprints and a load-and-resave check while a listed format matches the
-current build. Remaining:
-
-- `tests/fixtures/opcode_encoding.txt` has no per-released-version digest, so
-  an opcode renumbering inside a released format is caught only by its
-  editable fixture.
-- Archives are keyed by format version alone. A release that ships the same
-  format with a different cost model has no slot for a second archive, and the
-  frozen check skips silently once the cost-model word moves; the release
-  procedure does not say what to do.
-
-Fix: pin opcode_encoding.txt per released format the same way; key archives by
-(format, cost model) or state the procedure.
-
-Enforceable: by the same test.
-
 ## VD-007 - Determinism is pinned on one host, one target and one profile
 
 Reported by: check-machinery, compiler-cost, library.
@@ -142,21 +101,3 @@ check in verif-gates.md would at least record `fmod` as the one permitted libm
 import.
 
 Enforceable: yes, by a golden.
-
-## VD-021 - The cost fixture fingerprint covers row names and order
-
-Reported by: the resolution loop's reconciler.
-
-`tests/fixtures/cost_golden.txt`'s fingerprint hashes whole row lines,
-including each row's name and their order, so renaming or reordering a row
-without changing any cost forces a `COST_MODEL_VERSION` bump and a new
-`COST_MODEL_HISTORY` pair. Strict and safe, but it ties a cosmetic edit to a
-replay-visible version number. Also, nothing checks that a `pin` row's last
-column still names a test that reads it, and `pinned_cost` matches by name
-across kinds (names are unique today).
-
-Fix: decide whether the fingerprint should cover only (kind, input, expected),
-sorted; add a check that every `pin` row is read by some test.
-
-Enforceable: the pin-consumer check by a test; the fingerprint scope is a
-design choice.

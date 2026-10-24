@@ -376,8 +376,11 @@ fn folded_functions_as_keys_of_one_table_are_rejected() {
 // capture. Exhaustive enum matches make new wire variants require review.
 #[test]
 fn golden_payload_covers_persisted_graph_shapes() {
-    let bytes = include_bytes!("../../../tests/fixtures/save_golden_current.bin");
-    let mut decoder = Decoder::new(bytes);
+    let mut bytes = include_bytes!("../../../tests/fixtures/save_golden_current.bin").to_vec();
+    // The golden pins its payload, not the cost-model header word: decode it
+    // under the current cost model, as the integration round-trip test does.
+    bytes[6..8].copy_from_slice(&COST_MODEL_VERSION.to_le_bytes());
+    let mut decoder = Decoder::new(&bytes);
     decoder.read_magic_and_versions().expect("golden header");
     decoder
         .read_bytes(SnapshotField::EngineVersion)

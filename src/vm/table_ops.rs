@@ -567,7 +567,7 @@ impl State {
     }
 
     /// Inserts a value into a table at a position, shifting elements.
-    /// Stack: [t, value] -> [t]
+    /// Stack: `[t, value] -> [t]`
     /// `table_idx` resolves against the entry stack, so a negative index counts
     /// from the top value that will be popped. The value is popped from the
     /// stack. `pos` must be in `1..=raw_len(table_idx) + 1`; a bad index, a

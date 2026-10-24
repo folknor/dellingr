@@ -5,6 +5,21 @@ use super::lua_val::Val;
 use crate::compiler::compile;
 use crate::instr::{ArithOp, ArithOperands, RetCount};
 
+/// The GC tests walk chains long enough that one native frame per link cannot
+/// fit this stack, even with release frames.
+const ITERATIVE_GC_TEST_STACK_BYTES: usize = 256 << 10;
+
+/// Run an iterative GC walker test with a fixed stack, independent of `RUST_MIN_STACK`.
+pub(super) fn on_iterative_gc_test_stack(name: &'static str, f: impl FnOnce() + Send + 'static) {
+    std::thread::Builder::new()
+        .name(name.to_owned())
+        .stack_size(ITERATIVE_GC_TEST_STACK_BYTES)
+        .spawn(f)
+        .expect("spawning the iterative GC test thread should succeed")
+        .join()
+        .expect("iterative GC test thread should not panic");
+}
+
 fn compile_unnamed(source: &str) -> crate::Result<Bytecode> {
     compile(source, None)
 }
@@ -16,16 +31,23 @@ fn force_gc(state: &mut State) -> crate::Result<u8> {
 
 #[test]
 fn auto_gc_marks_a_deep_lua_table_chain_iteratively() {
-    let mut state = State::new();
-    crate::Program::compile(
-        "t = {}\nfor i = 1, 100000 do t = { t } end\ndone = t ~= nil",
-        None,
-    )
-    .and_then(|program| state.load(&program))
-    .expect("deep chain compiles");
-    state
-        .call(crate::instr::ArgCount::Fixed(0), RetCount::Fixed(0))
-        .expect("deep chain completes without overflowing the native stack");
+    on_iterative_gc_test_stack("auto-gc-deep-table-chain", || {
+        let mut state = State::new();
+        crate::Program::compile(
+            "t = {}\nfor i = 1, 100000 do t = { t } end\ndone = t ~= nil",
+            None,
+        )
+        .and_then(|program| state.load(&program))
+        .expect("deep chain compiles");
+        state
+            .call(crate::instr::ArgCount::Fixed(0), RetCount::Fixed(0))
+            .expect("deep chain completes without overflowing the native stack");
+        state
+            .get_global("done")
+            .expect("the completed result is readable");
+        assert!(state.to_boolean(-1), "the deep chain remains reachable");
+        state.pop(1).expect("the completion result is popped");
+    });
 }
 
 #[test]

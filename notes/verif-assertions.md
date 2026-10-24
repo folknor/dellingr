@@ -154,24 +154,6 @@ Enforceable: no.
 
 # Errors and boundaries
 
-## VA-010 - The budget sweep passes if budgets are never enforced
-
-Reported by: native-stack-errors.
-
-`failures::error_boundary::error_boundary_budget_sweep` runs every budget from 0 to
-the case's baseline cost. `run()` asserts that an error, if any, is
-`BudgetExceeded`, and that a success returns the right value. Nothing asserts any
-budget fails. If `set_cost_budget` became a no-op, every run would succeed with the
-right value and the sweep would pass; it would still exercise the success path, but
-the test name and AGENTS.md describe a budget-refusal sweep.
-
-Fix: assert at least that budget 0 fails; better, that the outcome is monotone:
-a threshold below which every budget fails with `BudgetExceeded` and at or above
-which every budget succeeds (the signed `remaining` rule in `cost_meter.rs`
-defines where).
-
-Enforceable: yes, the assertion is the enforcement.
-
 ## VA-016 - Smaller items in the error suites
 
 Reported by: native-stack-errors.

@@ -1025,6 +1025,7 @@ impl StringPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vm::tests::on_iterative_gc_test_stack;
 
     #[cfg(debug_assertions)]
     #[test]
@@ -1087,26 +1088,28 @@ mod tests {
 
     #[test]
     fn deep_table_chain_marks_iteratively_and_reuses_the_empty_worklist() {
-        let mut heap = GcHeap::with_threshold(100);
-        let mut root = heap.no_gc_allocator().alloc_table();
-        for _ in 0..100_000 {
-            let next = heap.no_gc_allocator().alloc_table();
-            heap.as_table(next)
-                .expect("newly allocated object is a table")
-                .insert(Val::Num(1.0), Val::Obj(root))
-                .expect("table key is valid");
-            root = next;
-        }
-        for _ in 0..2 {
-            let mut worklist = heap.take_mark_worklist();
-            heap.mark(root, &mut worklist);
-            heap.drain_mark_worklist(&mut worklist, &UpvaluePool::new());
-            assert!(worklist.is_empty());
-            heap.restore_mark_worklist(worklist);
-            heap.collect();
-            assert_eq!(heap.object_count(), 100_001);
-            assert!(heap.mark_worklist.is_empty());
-        }
+        on_iterative_gc_test_stack("gc-deep-table-chain", || {
+            let mut heap = GcHeap::with_threshold(100);
+            let mut root = heap.no_gc_allocator().alloc_table();
+            for _ in 0..100_000 {
+                let next = heap.no_gc_allocator().alloc_table();
+                heap.as_table(next)
+                    .expect("newly allocated object is a table")
+                    .insert(Val::Num(1.0), Val::Obj(root))
+                    .expect("table key is valid");
+                root = next;
+            }
+            for _ in 0..2 {
+                let mut worklist = heap.take_mark_worklist();
+                heap.mark(root, &mut worklist);
+                heap.drain_mark_worklist(&mut worklist, &UpvaluePool::new());
+                assert!(worklist.is_empty());
+                heap.restore_mark_worklist(worklist);
+                heap.collect();
+                assert_eq!(heap.object_count(), 100_001);
+                assert!(heap.mark_worklist.is_empty());
+            }
+        });
     }
 
     #[test]

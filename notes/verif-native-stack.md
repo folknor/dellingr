@@ -169,38 +169,3 @@ rewrites.md is the alternative the runtime and library hunters prefer; the
 native-stack hunter argues against it.
 
 Enforceable: no; it is a fixture shape.
-
-## VN-013 - Tests of iterative algorithms run on the ambient thread stack
-
-Reported by: runtime, snapshot, compiler-cost.
-
-`tests/common/stack.rs` pins integration-test stacks explicitly "so
-`RUST_MIN_STACK` cannot loosen it", and the parser's depth tests use
-`DEEP_PARSE_TEST_STACK_BYTES` for the same reason. These do not, and run on
-libtest's default thread, whose size `RUST_MIN_STACK` sets (and release frames
-are smaller than dev frames):
-
-- `src/vm/tests.rs::auto_gc_marks_a_deep_lua_table_chain_iteratively` and
-  `object.rs::deep_table_chain_marks_iteratively_and_reuses_the_empty_worklist`;
-- `deep_global_chain_saves_and_loads_iteratively` (a 50000-deep chain), which
-  also computes `done` and never reads it;
-- `syntax_depth_headroom` (`src/compiler/parser/tests.rs`), "the empirical check
-  that MAX_SYNTAX_DEPTH fits the stack a debug cargo test thread gets (2MB by
-  default)", which also hard-codes depth 190, paren 95 and
-  `depth / (2 + SYNTAX_SUFFIX_COST)` instead of deriving them from
-  `MAX_SYNTAX_DEPTH`, and is superseded by
-  `nested_statement_and_expression_shapes_compile_within_the_test_stack` and
-  `deepest_nested_programs_compile_within_the_test_stack` in `src/compiler.rs`,
-  which measure the exact deepest program on an explicit 2 MiB thread.
-
-With a large `RUST_MIN_STACK` in the environment, a regression to recursion
-passes all of them.
-
-Fix: run each on an explicitly sized thread (a lib-side equivalent of
-`on_limit_test_stack`, e.g. 256 KiB for the save walker via
-`std::thread::Builder::stack_size`), assert on `done`, and delete
-`syntax_depth_headroom`. Route deep-parse tests through one helper
-(`on_parse_test_stack`) so the helper is the only place a depth loop lives.
-
-Enforceable: partly; a convention check requiring `*iterative*`/`*deep*` tests to
-spawn their own thread is keyed on a name and would fail open.

@@ -64,7 +64,7 @@ pub(super) fn goldens() -> Vec<Golden> {
 pub(super) fn pinned_cost(name: &str) -> u64 {
     goldens()
         .into_iter()
-        .find(|row| row.name == name)
+        .find(|row| row.kind == "pin" && row.name == name)
         .expect("named cost pin exists")
         .expected
         .expect("named pin has an expected cost")
@@ -204,6 +204,10 @@ fn fixture_version(fixture: &str) -> u16 {
         .expect("cost model is a u16")
 }
 
+/// Fingerprint the complete non-comment rows in fixture order, including
+/// names: specialized probes and diagnostics refer to cases by name, and the
+/// corpus loops exercise rows in fixture order. This keeps a rename or reorder
+/// visible instead of silently changing the meaning of a history entry.
 fn fixture_fingerprint(fixture: &str) -> u64 {
     let mut fingerprint = 0xcbf2_9ce4_8422_2325;
     for line in fixture.lines().skip(1) {
@@ -223,6 +227,65 @@ fn fixture_fingerprint(fixture: &str) -> u64 {
 /// reviewer looks for. The history starts at version 8, when this fixture
 /// replaced the in-test corpus.
 const COST_MODEL_HISTORY: &[(u16, u64)] = &[(8, 0x7731_8aae_9088_6a97)];
+
+const PIN_CONSUMER_SOURCES: &[(&str, &str)] = &[
+    ("cost_golden", include_str!("cost_golden.rs")),
+    ("string_charges", include_str!("string_charges.rs")),
+    (
+        "reentrant_opcode_accounting",
+        include_str!("reentrant_opcode_accounting.rs"),
+    ),
+];
+
+fn source_reads_pin(test_body: &str, module_source: &str, name: &str) -> bool {
+    if test_body.contains(&format!("pinned_cost(\"{name}\")")) {
+        return true;
+    }
+
+    const FORMATTED_LOOKUP: &str = "pinned_cost(&format!(\"";
+    test_body.match_indices(FORMATTED_LOOKUP).any(|(start, _)| {
+        let template_start = start + FORMATTED_LOOKUP.len();
+        let template_tail = &test_body[template_start..];
+        let Some(template_end) = template_tail.find('"') else {
+            return false;
+        };
+        let template = &template_tail[..template_end];
+        let Some((prefix, placeholder_tail)) = template.split_once('{') else {
+            return false;
+        };
+        let Some((_, suffix)) = placeholder_tail.split_once('}') else {
+            return false;
+        };
+        let Some(dynamic_name) = name
+            .strip_prefix(prefix)
+            .and_then(|tail| tail.strip_suffix(suffix))
+        else {
+            return false;
+        };
+        !dynamic_name.is_empty() && module_source.contains(&format!("\"{dynamic_name}\""))
+    })
+}
+
+fn named_test_body<'a>(source: &'a str, test_name: &str) -> Option<&'a str> {
+    let marker = format!("#[test]\nfn {test_name}() {{");
+    let body = source.split_once(&marker)?.1;
+    Some(body.split("\n#[test]").next().unwrap_or(body))
+}
+
+fn tests_reading_pin<'a>(source: &'a str, name: &str) -> Vec<&'a str> {
+    const TEST_MARKER: &str = "#[test]\nfn ";
+    source
+        .match_indices(TEST_MARKER)
+        .filter_map(|(start, _)| {
+            let test_start = start + TEST_MARKER.len();
+            let test_tail = &source[test_start..];
+            let test_name_end = test_tail.find('(')?;
+            let test_name = &test_tail[..test_name_end];
+            let body = test_tail.split("\n#[test]").next().unwrap_or(test_tail);
+            source_reads_pin(body, source, name).then_some(test_name)
+        })
+        .collect()
+}
 
 #[test]
 fn golden_corpus_fingerprint_matches_cost_model_version() {
@@ -252,6 +315,40 @@ fn golden_corpus_fingerprint_matches_cost_model_version() {
          src/cost_meter.rs, update the fixture header and append the new \
          (version, fingerprint) pair to COST_MODEL_HISTORY"
     );
+}
+
+#[test]
+fn every_cost_pin_names_a_test_that_reads_it() {
+    for row in goldens().into_iter().filter(|row| row.kind == "pin") {
+        let (module, test_name) = row
+            .input
+            .split_once("::")
+            .map_or((row.input, None), |(module, test)| (module, Some(test)));
+        let source = PIN_CONSUMER_SOURCES
+            .iter()
+            .find_map(|(candidate, source)| (*candidate == module).then_some(*source))
+            .unwrap_or_else(|| panic!("{} names an unknown pin consumer module", row.name));
+
+        if let Some(test_name) = test_name {
+            let body = named_test_body(source, test_name)
+                .unwrap_or_else(|| panic!("{} names missing test {module}::{test_name}", row.name));
+            assert!(
+                source_reads_pin(body, source, row.name),
+                "{} is not read by {module}::{test_name}",
+                row.name
+            );
+        } else {
+            // A module-only consumer is accepted only when one test in that
+            // module uniquely reads this pin.
+            let consumers = tests_reading_pin(source, row.name);
+            assert_eq!(
+                consumers.len(),
+                1,
+                "{} must resolve to one test in {module}, found {consumers:?}",
+                row.name
+            );
+        }
+    }
 }
 
 #[test]

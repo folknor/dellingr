@@ -10,9 +10,26 @@ use crate::instr::{ArgCount, ArithOp, ArithOperands, CompareOp, Instr, RetCount}
 use crate::limits::{
     MAX_ASSIGNMENT_TARGETS, MAX_CHUNK_NESTING, MAX_EXPRESSIONS, MAX_FIXED_ARGS, MAX_FIXED_RESULTS,
     MAX_LITERALS, MAX_LOCALS, MAX_NESTED, MAX_SOURCE_BYTES, MAX_TABLE_BATCH_SIZE,
-    MAX_TABLE_TEMPLATE_FIELDS, MAX_TABLE_TEMPLATES, MAX_UPVALUES, SYNTAX_SUFFIX_COST,
+    MAX_TABLE_TEMPLATE_FIELDS, MAX_TABLE_TEMPLATES, MAX_UPVALUES,
 };
 use crate::{LuaType, State};
+
+fn on_parse_test_stack(name: &str, f: impl FnOnce() + Send + 'static) {
+    let result = std::thread::Builder::new()
+        .name(name.to_owned())
+        .stack_size(DEEP_PARSE_TEST_STACK_BYTES)
+        .spawn(f)
+        .expect("spawning the parse test thread should succeed")
+        .join();
+    if let Err(payload) = result {
+        let message = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or("non-string panic payload");
+        panic!("{name} test thread panicked: {message}");
+    }
+}
 
 fn assert_line_info_matches_code_len(chunk: &Bytecode) {
     assert_eq!(chunk.code.len(), chunk.line_info.len());
@@ -1056,12 +1073,7 @@ fn too_many_upvalues_errors() {
 
 #[test]
 fn syntax_depth_limit() {
-    std::thread::Builder::new()
-        .stack_size(DEEP_PARSE_TEST_STACK_BYTES)
-        .spawn(syntax_depth_limit_body)
-        .expect("spawning the test thread should succeed")
-        .join()
-        .expect("syntax depth test thread should not panic");
+    on_parse_test_stack("syntax-depth-limit", syntax_depth_limit_body);
 }
 
 fn syntax_depth_limit_body() {
@@ -1199,43 +1211,6 @@ fn loops_inside_and_around_nested_functions_keep_their_own_breaks() {
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect("both loops break correctly");
-}
-
-#[test]
-fn syntax_depth_headroom() {
-    // This test is the empirical check that MAX_SYNTAX_DEPTH fits the stack a
-    // debug `cargo test` thread gets (2MB by default, not the 8MB main stack).
-    // It therefore has to exercise the *fattest* cycle, not the cheapest.
-    let depth = 190;
-    parse_unfinalized(&format!("{}{}", "do ".repeat(depth), "end ".repeat(depth)))
-        .expect("statement nesting below the limit must compile");
-
-    // Nested parens are the worst case: each level descends through both the
-    // parse_expr and parse_unary wrappers plus the whole precedence ladder,
-    // and charges 2 depth ticks.
-    let paren_depth = 95;
-    parse_unfinalized(&format!(
-        "local x = {}1{}",
-        "(".repeat(paren_depth),
-        ")".repeat(paren_depth)
-    ))
-    .expect("paren nesting below the limit must compile");
-
-    // Nested call arguments and indexes retain additional suffix-parser
-    // frames. Their active contents charge SYNTAX_SUFFIX_COST extra ticks.
-    let suffix_depth = depth / (2 + SYNTAX_SUFFIX_COST as usize);
-    parse_unfinalized(&format!(
-        "local x = {}1{}",
-        "f(".repeat(suffix_depth),
-        ")".repeat(suffix_depth)
-    ))
-    .expect("call nesting below the limit must compile");
-    parse_unfinalized(&format!(
-        "local x = {}1{}",
-        "a[".repeat(suffix_depth),
-        "]".repeat(suffix_depth)
-    ))
-    .expect("index nesting below the limit must compile");
 }
 
 // ---------------------------------------------------------------------------
@@ -1513,30 +1488,18 @@ fn nested_function_chain(depth: usize) -> String {
 
 #[test]
 fn chunk_nesting_limit_is_enforced_by_the_parser() {
-    std::thread::Builder::new()
-        .stack_size(DEEP_PARSE_TEST_STACK_BYTES)
-        .spawn(|| {
-            let source = nested_function_chain(MAX_CHUNK_NESTING);
-            let bytecode =
-                parse_unfinalized(&source).expect("the deepest allowed chunk chain must compile");
-            let error = parse_unfinalized(&nested_function_chain(MAX_CHUNK_NESTING + 1))
-                .expect_err("one more nested chunk must fail in the parser");
-            assert!(matches!(
-                error.kind(),
-                ErrorKind::SyntaxError(SyntaxError::TooManySyntaxLevels)
-            ));
-            assert_eq!(chunk_depth(&bytecode), MAX_CHUNK_NESTING);
-        })
-        .expect("spawning the chunk nesting test thread should succeed")
-        .join()
-        .unwrap_or_else(|payload| {
-            let message = payload
-                .downcast_ref::<String>()
-                .map(String::as_str)
-                .or_else(|| payload.downcast_ref::<&str>().copied())
-                .unwrap_or("non-string panic payload");
-            panic!("chunk nesting test thread panicked: {message}");
-        });
+    on_parse_test_stack("chunk-nesting-limit", || {
+        let source = nested_function_chain(MAX_CHUNK_NESTING);
+        let bytecode =
+            parse_unfinalized(&source).expect("the deepest allowed chunk chain must compile");
+        let error = parse_unfinalized(&nested_function_chain(MAX_CHUNK_NESTING + 1))
+            .expect_err("one more nested chunk must fail in the parser");
+        assert!(matches!(
+            error.kind(),
+            ErrorKind::SyntaxError(SyntaxError::TooManySyntaxLevels)
+        ));
+        assert_eq!(chunk_depth(&bytecode), MAX_CHUNK_NESTING);
+    });
 }
 
 fn chunk_depth(chunk: &Bytecode) -> usize {

@@ -1,5 +1,5 @@
-//! Pins the complete debug-profile save stream, including compiler output,
-//! registrations, engine metadata and cost-model version. Deterministic graph
+//! Pins the debug-profile save payload, including compiler output and
+//! registrations. Compatibility metadata is checked separately. Deterministic graph
 //! reorders also change this pin, even when round-trip tests still pass.
 //! Review the generated text companion before accepting any regeneration.
 //!
@@ -18,7 +18,7 @@ use std::path::PathBuf;
 
 use dellingr::{DefaultCallbacks, State};
 
-use save_golden_program::golden_bytes;
+use save_golden_program::{golden_bytes, payload_after_header};
 
 use crate::support::{self, save_golden_program};
 
@@ -57,7 +57,7 @@ fn every_save_fixture_is_declared_and_referenced() {
     expected.extend(
         RELEASED_FORMATS
             .iter()
-            .map(|(version, _)| format!("save_released_v{version}.bin")),
+            .map(|archive| archive.file.to_owned()),
     );
     expected.sort();
     assert_eq!(actual, expected, "every save fixture must be listed here");
@@ -68,6 +68,9 @@ fn every_save_fixture_is_declared_and_referenced() {
 // `brokkr run --debug --features snapshot regenerate_save_golden`.
 #[test]
 fn save_traversal_order_matches_golden_fixture() {
+    if !cfg!(debug_assertions) {
+        return;
+    }
     let expected = std::fs::read(current_fixture_path()).expect(
         "golden fixture missing; run the explicit regeneration example with the snapshot feature",
     );
@@ -81,15 +84,23 @@ fn save_traversal_order_matches_golden_fixture() {
         "fixture version bytes must match the current serializer's FORMAT_VERSION"
     );
     assert_eq!(
-        actual, expected,
+        payload_after_header(&actual),
+        payload_after_header(&expected),
         "save output changed: review traversal, compiler output, registrations, \
-         engine metadata and cost-model changes before regenerating both fixtures"
+         payload changes before regenerating both fixtures"
     );
 }
 
 #[test]
 fn golden_fixture_round_trips() {
-    let bytes = std::fs::read(current_fixture_path()).expect("current fixture is present");
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let mut bytes = std::fs::read(current_fixture_path()).expect("current fixture is present");
+    // The current golden pins payload, not compatibility metadata. The load
+    // probe exercises that payload under the current cost model; archived
+    // releases below retain their original headers and strict admission.
+    bytes[6..8].copy_from_slice(&dellingr::COST_MODEL_VERSION.to_le_bytes());
     let mut loaded = State::load_state(&bytes, Box::new(DefaultCallbacks), support::no_setup)
         .expect("fixture loads");
 
@@ -123,18 +134,30 @@ fn golden_fixture_round_trips() {
 // 0.4.0: 3170f83 (save_state.rs FORMAT_VERSION = 6),
 // 0.5.0: 6c795d1 (save_state.rs FORMAT_VERSION = 7).
 // Earlier releases predate the snapshot feature. Preserve these files and pins;
-// on release, archive the current binary and add its version and fingerprint.
-const RELEASED_FORMATS: &[(u16, u64)] = &[(6, 0x7ca2_be91_fa0f_7e03), (7, 0xcee0_80b7_9e3e_662b)];
-
-/// The bytes after the magic, both version words and the engine label.
-fn payload_after_header(bytes: &[u8]) -> &[u8] {
-    let length = u32::from_le_bytes(
-        bytes[8..12]
-            .try_into()
-            .expect("a save header carries a four-byte engine label length"),
-    );
-    &bytes[12 + length as usize..]
+// on release, regenerate the current binary at the release commit, archive it
+// under its format and cost-model pair and add both words and its fingerprint
+// (docs/save-state.md "Format release policy and golden review").
+struct ReleasedArchive {
+    format: u16,
+    cost_model: u16,
+    file: &'static str,
+    fingerprint: u64,
 }
+
+const RELEASED_FORMATS: &[ReleasedArchive] = &[
+    ReleasedArchive {
+        format: 6,
+        cost_model: 2,
+        file: "save_released_v6.bin",
+        fingerprint: 0x7ca2_be91_fa0f_7e03,
+    },
+    ReleasedArchive {
+        format: 7,
+        cost_model: 5,
+        file: "save_released_v7.bin",
+        fingerprint: 0xcee0_80b7_9e3e_662b,
+    },
+];
 
 /// A save written by a released build is the compatibility evidence: while
 /// its format and cost-model versions are still the current ones, the
@@ -144,16 +167,32 @@ fn payload_after_header(bytes: &[u8]) -> &[u8] {
 #[test]
 fn released_formats_are_frozen() {
     let current = golden_bytes();
-    for &(version, fingerprint) in RELEASED_FORMATS {
-        let frozen = std::fs::read(fixture_path(&format!("save_released_v{version}.bin")))
+    for (index, archive) in RELEASED_FORMATS.iter().enumerate() {
+        assert!(
+            RELEASED_FORMATS[..index]
+                .iter()
+                .all(|previous| (previous.format, previous.cost_model)
+                    != (archive.format, archive.cost_model)),
+            "archive keys must be unique format/cost-model pairs"
+        );
+        let version = archive.format;
+        let frozen = std::fs::read(fixture_path(archive.file))
             .expect("released format fixture must remain available");
         assert_eq!(u16::from_le_bytes([frozen[4], frozen[5]]), version);
+        assert_eq!(
+            u16::from_le_bytes([frozen[6], frozen[7]]),
+            archive.cost_model
+        );
         // FNV-1a is a review pin, not authentication of untrusted saves.
         let hash = frozen.iter().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
             (hash ^ u64::from(*byte)).wrapping_mul(0x100_0000_01b3)
         });
-        assert_eq!(hash, fingerprint, "released fixture changed");
-        if frozen[4..8] != current[4..8] {
+        assert_eq!(hash, archive.fingerprint, "released fixture changed");
+        if !cfg!(debug_assertions) || frozen[4..8] != current[4..8] {
+            eprintln!(
+                "historical archive {}: fingerprint checked; load requires matching format and cost model",
+                archive.file
+            );
             continue;
         }
         let loaded = State::load_state(&frozen, Box::new(DefaultCallbacks), support::no_setup)

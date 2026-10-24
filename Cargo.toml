@@ -7,19 +7,21 @@ description = "An embeddable, pure-Rust Lua VM with precise instruction-cost acc
 license = "MIT"
 repository = "https://github.com/folknor/dellingr"
 
-# Dev-only surface: the brokkr results DB alone was ~1.2 MB of the 2.7 MB
-# 0.4.0 artifact. `examples/` and `tests/` stay in - the declared
-# `[[example]]` target needs the former to build, and both carry the .lua
-# corpus that the integration suites' examples runner and the diff gate
-# execute.
-exclude = [
-    ".brokkr/",
-    "bench/",
-    "notes/",
-    "scripts/",
-    "fixtures/",
-    "brokkr.toml",
-    ".review.toml",
+# Publish the runtime, its documentation and the standalone host harness.
+# Repository tests, Lua workloads and regeneration tools need the checkout's
+# gates, fixtures or research tools; they are deliberately not a package test
+# surface. Run the integration and library unit suites from the repository.
+# Cargo omits example targets whose sources are absent from this allowlist.
+include = [
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/LICENSE",
+    "/README.md",
+    "/clippy.toml",
+    "/src/",
+    "/docs/",
+    "/reference/",
+    "/examples/hotpath.rs",
 ]
 
 [profile.release]
@@ -101,6 +103,8 @@ slotmap = "1.1"
 # `hotpath::measure` attribute, and without the `hotpath` cargo feature the
 # macro expands to nothing, so the dependency costs only compile time. Making
 # it optional would need a `cfg_attr` wrapper at every annotation site.
+# The dependency rule pins our direct boundary; it does not certify hotpath's
+# transitive graph. Review changes to its inactive-feature dependencies too.
 hotpath = "0.29.0"
 
 [dev-dependencies]

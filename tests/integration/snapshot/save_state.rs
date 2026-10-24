@@ -8,6 +8,10 @@ use dellingr::{
 
 use crate::support;
 
+/// The configured chain depth would need one native frame per link if a
+/// walker regressed to recursion, far beyond this stack in either profile.
+const DEEP_SNAPSHOT_TEST_STACK_BYTES: usize = 256 << 10;
+
 #[derive(Clone, Default)]
 struct Capture {
     lines: Arc<Mutex<Vec<String>>>,
@@ -24,18 +28,30 @@ impl HostCallbacks for Capture {
 
 #[test]
 fn deep_global_chain_saves_and_loads_iteratively() {
-    let mut state = State::new();
-    state.gc_disable_auto();
-    support::run(
-        &mut state,
-        "deep = {}\nfor i = 1, 50000 do deep = { next = deep } end",
-    );
-    let save = state.save_state().expect("deep chain saves");
-    let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), support::no_setup)
-        .expect("deep chain loads");
-    support::run(
-        &mut loaded,
-        "local t = deep\nfor i = 1, 50000 do t = t.next end\ndone = t ~= nil",
+    support::stack::on_stack(
+        "deep-global-chain-save-load",
+        DEEP_SNAPSHOT_TEST_STACK_BYTES,
+        || {
+            let mut state = State::new();
+            state.gc_disable_auto();
+            support::run(
+                &mut state,
+                "deep = {}\nfor i = 1, 50000 do deep = { next = deep } end",
+            );
+            let save = state.save_state().expect("deep chain saves");
+            let mut loaded =
+                State::load_state(&save.bytes, Box::new(DefaultCallbacks), support::no_setup)
+                    .expect("deep chain loads");
+            support::run(
+                &mut loaded,
+                "local t = deep\nfor i = 1, 50000 do t = t.next end\ndone = t ~= nil",
+            );
+            loaded
+                .get_global("done")
+                .expect("the completed traversal result is readable");
+            assert!(loaded.to_boolean(-1), "the deep chain reaches its end");
+            loaded.pop(1).expect("the traversal result is popped");
+        },
     );
 }
 

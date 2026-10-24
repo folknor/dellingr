@@ -180,18 +180,49 @@ formats 6 and 7. The 0.4.0 and 0.5.0 changelog sections, checked against the
 release trees at 3170f83 and 6c795d1, establish that list; earlier releases
 predate the snapshot feature. Their original binary fixtures are archived
 with fingerprints. They are historical evidence, not supported load formats.
-At release, archive the current debug golden under its format version and add
-its fingerprint to that list. Never regenerate a released fixture. While a
+At every release, archive the current debug golden for each new
+(format version, cost-model version) pair and add its file name, both version
+words and fingerprint to that list. Use `save_released_v<format>_cost<cost>.bin`
+for new archives; the original archive names stay unchanged. A cost-model-only
+release needs a new archive even when its format is unchanged. The current
+golden's header is not pinned, so regenerate it at the release commit
+first: the archive must carry that release's engine label and
+cost-model word. Never regenerate a released fixture. While a
 listed fixture's format and cost-model versions are the current ones, the
 check loads it with the current build, saves it again and requires the same
-payload (everything after the engine label). A change in how saves are read
+payload (everything after the engine label). Historical pairs still have
+their fingerprints and header words checked; a diagnostic explains when the
+load check cannot run. The load/resave check uses debug builds because release
+linker folding can change function ids. A change in how saves are read
 or written therefore fails it; compiler, registration and golden-program
 changes do not, because they leave the archived save alone. Deliberate edits
 to the list or fingerprints still require compatibility review.
 
-The current golden pins the full debug save stream. Its generated text
-companion shows offsets, bytes and printable strings for review. Run
+At release, also archive `opcode_encoding.txt` as
+`tests/fixtures/opcode_released_v<format>_cost<cost>.txt` and pin its XXH3-64 digest in
+`persisted_encodings_match_fixture` in `src/instr.rs`. While that format
+and cost model are current, require equality with the current encoding fixture
+as well as checking the archive digest. When only the cost model changes,
+archive another encoding fixture for that pair and review its diff: cost
+classes and the cost-model header may change, but persisted opcode numbers,
+layouts and builtin ids still require a new format. The original format's record is its
+release-tree instruction source, because it predates the encoding fixture;
+the next released format has its original encoding fixture. These records are
+historical evidence and must never be regenerated from current declarations.
+
+The current golden pins the debug save payload after the header, with the
+format word checked separately. Engine and cost-model header metadata do not
+participate in this pin. The load probe uses the current cost-model header on
+this payload; released archives always retain strict, original headers.
+The generated text companion lists string, bytecode, upvalue and object arenas
+in id order, table slots in storage order, globals, deltas and rendered
+identities. Each bytecode record is summarized by encoded length and FNV-1a
+hash so compiler changes stay local in the diff. The reader is test tooling,
+not the production decoder; complete consumption is checked. Both the
+regenerator and the golden test use the same reader. Run
 `brokkr run --debug --features snapshot regenerate_save_golden` to update
-both, and inspect the text diff before accepting the change. Deterministic traversal reorders are
+both, and inspect the text diff before accepting the change. The regenerator
+refuses release builds, and payload comparisons run only with debug assertions.
+Deterministic traversal reorders are
 replay-visible, but do not by themselves make old saves unreadable. Golden
 regeneration is not evidence that a format change is compatible.
