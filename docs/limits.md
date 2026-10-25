@@ -383,62 +383,20 @@ How `tests/native_stack.rs` validates it, on x86-64 Linux:
   error construction, unwinding) are covered by the full-depth runs, not by
   the probe.
 
-The 2026-10-23 x86-64 Linux measurement, comparing 97973d1 with the
-22a263a fixes and an explicitly inlined invocation driver, records the full
-scenario and frame tables in [the native-call reference](../reference/native-calls.md#measured-native-stack-2026-10-23).
-The largest recurring cycle changes from 15,344 to 15,600 bytes in dev
-(also with snapshot), from 3,824 to 3,776 in release, and from 3,872 to
-3,840 in release with snapshot (3,824 after the shared vararg arena
-follow-up recorded there, which leaves dev and plain release unchanged).
-The largest table-chain step is 1,232
-bytes in dev and 208 in release. A deliberately loose bound of 150 largest
-cycles plus 200 largest chain steps is about 2.47 MiB in dev and 0.59 MiB
-in release with snapshot, leaving about 1.53 and 1.41 MiB respectively
-for fixed frames and transient work. This is recurring-stack headroom,
-not a measurement of the transient peak; the unchanged full-depth tests
-validate those peaks on the stated threads.
-
-A later x86-64 Linux measurement (plantasjen, on top of 4a722cf), taken when
-`__index` table steps became a loop, is recorded in the same reference
-under "`__index` walk follow-up": an `__index` table step costs no native
-stack, so the largest chain step is the `__newindex` one, 1,168 bytes in dev
-and 208 in release; the largest recurring cycle is 14,720 bytes in dev and
-3,760 in release with snapshot. The same loose bound is about 2.33 MiB in
-dev and 0.58 MiB in release with snapshot.
-
-The next one (plantasjen, on top of df80d81), taken when the table and
-length instructions stopped copying operands above the frame and
-`__newindex` and string `__index` steps became loops too, is recorded there
-under "Register-native slow paths": no chain step costs native stack in
-either setting, and the largest recurring cycle is 14,608 bytes in dev and
-3,552 in release (3,520 with snapshot). The loose bound is then about
-2.09 MiB in dev and 0.51 MiB in release.
-
-Every other release figure in this section was taken under the repository's
-former release profile (fat LTO, one codegen unit). The current measurement (plantasjen, on top of
-0779c08, recorded in the native-call reference under "Cargo's default
-release profile") is under Cargo's default release profile: every release
-cycle is smaller, the largest 3,104 bytes (3,168 with snapshot) against
-3,376 (3,408) under the old profile at the same commit, and the largest dev
-cycle is 13,680 bytes. No chain step costs native stack. The loose bound is
-then about 1.96 MiB in dev and 0.45 MiB in release.
-
-The previous one (plantasjen, on top of 41ad774), taken when table allocation
-moved out of the dispatch frame and global stores began reading their
-source register in place, measures the largest recurring cycle at 13,552
-bytes in dev (also with snapshot) and 3,344 in release (3,360 with
-snapshot). The loose bound is then about 1.94 MiB in dev and 0.48 MiB in
-release.
-
-The release sort callback retains 32 bytes of frame growth for fallible
-array and root-copy allocation. The dispatch frame is 32 bytes smaller,
-and inlining the invocation driver into both call variants recovers the
-extra 128 bytes per ordinary release cycle introduced when the generic
-call path caused the compiler to outline it. Dev retains growth from the
-fallible table operations, entry observation and result-copy path; the
-two-native-level Rust-handler cycles grow more when the driver is inlined
-into their Rust-only call arm. These changes fit the existing envelope;
-neither the logical limits nor the test thread sizes change.
+The per-scenario recurring bytes per level, with the commit, host and
+toolchain they were measured under, are the table in
+[the native-call reference](../reference/native-calls.md#current-native-bytes-per-level);
+the history of earlier figures is in
+[the performance record](../reference/performance.md#native-stack-frames-and-cycles).
+No metamethod chain step costs native stack in either setting, so the
+recurring stack of a full-depth run is bounded by `MAX_NATIVE_CALL_DEPTH`
+times the largest cycle in that table. That is a deliberately loose bound:
+the two-native-level cycles are counted at their full size per level, and
+transient peaks (descent, return, error construction, unwinding) are not in
+it. Computed from the table, it stays well inside each setting's thread, and
+the rest of the thread is what fixed frames and transient work have. It is
+recurring-stack headroom, not a measurement of the transient peak; the
+full-depth tests validate those peaks on the stated threads.
 
 Parsing keeps the stricter promise: parsing at the syntax budget fits a
 2 MiB thread in both settings.

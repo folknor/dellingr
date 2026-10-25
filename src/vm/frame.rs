@@ -648,8 +648,8 @@ impl Frame {
                     // next/ipairs need no record or flush, but deferring this
                     // boundary into the iterator helper, or behind a separate
                     // fast-path probe here, grew the release Frame::run (see
-                    // reference/native-calls.md, "Shared vararg arena
-                    // follow-up"). Removing the fallback's redundant error
+                    // reference/performance.md, "Shared vararg arena").
+                    // Removing the fallback's redundant error
                     // truncate did not help. Keep the eager boundary rather
                     // than grow a frame live across every native re-entry.
                     // All call/refusal paths must record and flush before
