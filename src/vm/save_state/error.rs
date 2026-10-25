@@ -30,20 +30,12 @@ pub enum SaveError {
     StatePoisoned,
     /// The calling thread's floating-point environment is unsupported (see
     /// [`ErrorKind::UnsupportedFloatEnvironment`](crate::error::ErrorKind::UnsupportedFloatEnvironment));
-    /// nothing was saved or registered.
+    /// nothing was saved.
     UnsupportedFloatEnvironment(FloatEnvironment),
     /// A reachable Rust function has no stable save/load id.
     UnregisteredFunction {
         /// Best-effort path to the value that made the function reachable.
         reachable_from: String,
-    },
-    /// A save/load id is already registered in this State.
-    ///
-    /// Registration currently reports this through `SaveError` because the
-    /// registration API and its error type are outside this module's scope.
-    DuplicateFunctionRegistration {
-        /// The id that was already registered.
-        id: String,
     },
     /// A reachable upvalue was still open.
     OpenUpvalueReachable,
@@ -58,8 +50,7 @@ pub enum SaveError {
         /// The largest count the format can encode.
         limit: usize,
     },
-    /// A length-limited byte field exceeds its limit, such as a function id
-    /// passed to `register_rust_fn`.
+    /// A length-limited byte field exceeds its limit.
     FieldSizeExceeded {
         /// The field.
         field: SnapshotField,
@@ -81,11 +72,6 @@ impl fmt::Display for SaveError {
             SaveError::UnregisteredFunction { reachable_from } => {
                 f.write_str("unregistered Rust function reachable from ")?;
                 write_bounded_user_text(f, reachable_from)
-            }
-            SaveError::DuplicateFunctionRegistration { id } => {
-                f.write_str("id ")?;
-                write_bounded_user_text(f, id)?;
-                f.write_str(" is already registered")
             }
             SaveError::OpenUpvalueReachable => write!(f, "open upvalue reachable during save"),
             SaveError::Internal(reason) => write!(f, "save encode invariant failed: {reason}"),
@@ -196,8 +182,6 @@ pub enum SaveCollection {
     EnvironmentDeltas,
     /// The rendered pointer identity records.
     FormatPointerIds,
-    /// The State's Rust function table, which registration extends.
-    RustFunctions,
     /// An environment delta's deleted keys.
     EnvironmentDeletedKeys,
     /// An environment delta's upserts.
@@ -240,7 +224,6 @@ impl fmt::Display for SaveCollection {
             Self::Globals => "globals",
             Self::EnvironmentDeltas => "environment deltas",
             Self::FormatPointerIds => "format pointer ids",
-            Self::RustFunctions => "Rust functions",
             Self::EnvironmentDeletedKeys => "environment deleted keys",
             Self::EnvironmentUpserts => "environment upserts",
             Self::EnvironmentOrder => "environment order",
@@ -270,8 +253,6 @@ pub enum SnapshotField {
     /// A Lua string. Its load-time limit is reported as
     /// [`SnapshotError::StringSizeExceeded`].
     LuaString,
-    /// A user global's name.
-    GlobalName,
     /// A registered Rust function id.
     FunctionId,
     /// An environment-object token.
@@ -287,7 +268,7 @@ impl SnapshotField {
     pub const fn limit(self) -> usize {
         match self {
             Self::EngineVersion => MAX_ENGINE_VERSION_BYTES,
-            Self::LuaString | Self::GlobalName => MAX_STRING_BYTES,
+            Self::LuaString => MAX_STRING_BYTES,
             Self::FunctionId => MAX_SAVE_IDENTIFIER_BYTES,
             Self::EnvironmentToken => MAX_ENVIRONMENT_TOKEN_BYTES,
             Self::ChunkName => MAX_CHUNK_NAME_BYTES,
@@ -302,7 +283,6 @@ const _: () = {
     let fields = [
         SnapshotField::EngineVersion,
         SnapshotField::LuaString,
-        SnapshotField::GlobalName,
         SnapshotField::FunctionId,
         SnapshotField::EnvironmentToken,
         SnapshotField::ChunkName,
@@ -320,7 +300,6 @@ impl fmt::Display for SnapshotField {
         f.write_str(match self {
             Self::EngineVersion => "engine version",
             Self::LuaString => "Lua string",
-            Self::GlobalName => "global name",
             Self::FunctionId => "function id",
             Self::EnvironmentToken => "environment token",
             Self::ChunkName => "chunk name",
@@ -668,8 +647,8 @@ fn duplicate_text(f: &mut fmt::Formatter<'_>, entry: DuplicateEntry, form: KeyFo
         (E::EnvironmentOrderKey, Materialized) => "duplicate materialized environment order key",
         (E::EnvironmentToken, Saved) => "duplicate environment token",
         (E::EnvironmentToken, Materialized) => "duplicate materialized environment token",
-        (E::GlobalName, Saved) => "duplicate saved global name",
-        (E::GlobalName, Materialized) => "duplicate materialized global name",
+        (E::GlobalPin, Saved) => "duplicate saved global pin",
+        (E::GlobalPin, Materialized) => "duplicate materialized global pin",
         (E::FormatPointerValue, Saved) => "duplicate format pointer value",
         (E::FormatPointerValue, Materialized) => "duplicate materialized format pointer value",
         (E::FormatPointerId, Saved) => "duplicate format pointer id",
@@ -730,8 +709,8 @@ pub enum DuplicateEntry {
     EnvironmentOrderKey,
     /// The environment deltas' tokens.
     EnvironmentToken,
-    /// The user globals' names.
-    GlobalName,
+    /// The sealed global table's pinned names.
+    GlobalPin,
     /// The values given rendered pointer identities.
     FormatPointerValue,
     /// The rendered pointer identities.
@@ -1243,10 +1222,10 @@ mod tests {
             ),
             (
                 CorruptionReason::Duplicate {
-                    entry: DuplicateEntry::GlobalName,
+                    entry: DuplicateEntry::GlobalPin,
                     form: KeyForm::Saved,
                 },
-                "duplicate saved global name",
+                "duplicate saved global pin",
             ),
             (
                 CorruptionReason::Duplicate {

@@ -40,13 +40,14 @@ fn duplicate_registration_preserves_the_original_binding() {
         let error = state
             .register_rust_fn("host.same", function)
             .expect_err("id conflicts");
+        assert!(matches!(
+            error.kind(),
+            ErrorKind::DuplicateFunctionRegistration { id } if id == "host.same"
+        ));
         assert_eq!(
-            error,
-            dellingr::SaveError::DuplicateFunctionRegistration {
-                id: "host.same".to_owned()
-            }
+            error.kind().to_string(),
+            "duplicate Rust function registration: host.same"
         );
-        assert_eq!(error.to_string(), "id host.same is already registered");
     }
     assert_eq!(state.registered_rust_fn("host.same"), Some(original));
     let top = state.get_top();

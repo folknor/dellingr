@@ -719,7 +719,7 @@ fn validate_references(payload: &SavePayload) -> Result<(), SnapshotError> {
             &mut pins,
             *id,
             CorruptionReason::Duplicate {
-                entry: DuplicateEntry::GlobalName,
+                entry: DuplicateEntry::GlobalPin,
                 form: KeyForm::Saved,
             },
             index,

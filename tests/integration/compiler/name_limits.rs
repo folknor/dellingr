@@ -1,6 +1,7 @@
 //! Byte limits on source names, snapshot function ids and diagnostic
 //! function names: each boundary is accepted, and one byte more is rejected
-//! (or, for function names, truncated).
+//! (or, for function names, truncated). A registered global's name is held
+//! to the string limit, rejected before anything registers.
 
 use dellingr::error::ErrorKind;
 use dellingr::limits::MAX_SOURCE_NAME_BYTES;
@@ -56,18 +57,16 @@ fn registration_limits_are_checked_before_mutation() {
     let error = state
         .register_rust_fn(&format!("{id}f"), callback)
         .expect_err("oversized function id is rejected");
+    assert!(matches!(
+        error.kind(),
+        ErrorKind::FunctionIdSizeExceeded { size, limit }
+            if *size == dellingr::limits::MAX_SAVE_IDENTIFIER_BYTES + 1
+                && *limit == dellingr::limits::MAX_SAVE_IDENTIFIER_BYTES
+    ));
     assert_eq!(
-        error,
-        dellingr::SaveError::FieldSizeExceeded {
-            field: dellingr::snapshot::SnapshotField::FunctionId,
-            size: dellingr::limits::MAX_SAVE_IDENTIFIER_BYTES + 1,
-            limit: dellingr::limits::MAX_SAVE_IDENTIFIER_BYTES,
-        }
-    );
-    assert_eq!(
-        error.to_string(),
+        error.kind().to_string(),
         format!(
-            "save function id size {} exceeds limit {}",
+            "function id size {} exceeds limit {}",
             dellingr::limits::MAX_SAVE_IDENTIFIER_BYTES + 1,
             dellingr::limits::MAX_SAVE_IDENTIFIER_BYTES
         )
@@ -83,6 +82,42 @@ fn registration_limits_are_checked_before_mutation() {
         .set_global_named_rust_fn("callback", &id, callback)
         .expect("function id at the limit registers");
     state.save_state().expect("boundary function id saves");
+}
+
+/// The global name is checked as `set_global` checks it, before the id is
+/// registered: a rejected name leaves the id free, which save bytes alone
+/// cannot show, since an unreachable registration saves nothing.
+#[cfg(feature = "snapshot")]
+#[test]
+fn an_oversized_global_name_registers_nothing() {
+    fn callback(_: &mut State) -> dellingr::Result<u8> {
+        Ok(0)
+    }
+
+    let mut state = State::new();
+    let before = state.save_state().expect("initial state saves").bytes;
+    let name = "n".repeat(dellingr::limits::MAX_STRING_BYTES + 1);
+    let error = state
+        .set_global_named_rust_fn(&name, "host.callback", callback)
+        .expect_err("oversized global name is rejected");
+    assert!(matches!(
+        error.kind(),
+        ErrorKind::StringSizeExceeded { size, limit }
+            if *size == dellingr::limits::MAX_STRING_BYTES + 1
+                && *limit == dellingr::limits::MAX_STRING_BYTES
+    ));
+    assert_eq!(state.registered_rust_fn("host.callback"), None);
+    assert_eq!(
+        state
+            .save_state()
+            .expect("rejected name preserves state")
+            .bytes,
+        before
+    );
+    let handle = state
+        .set_global_named_rust_fn("callback", "host.callback", callback)
+        .expect("the id is still free");
+    assert_eq!(state.registered_rust_fn("host.callback"), Some(handle));
 }
 
 #[cfg(feature = "snapshot")]

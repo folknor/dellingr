@@ -96,7 +96,10 @@ returns; the loaded State starts with an empty stack.
 - A reachable Rust function is saved by its entry's registered stable id. One
   without an id (`add_rust_fn`) fails the save.
 - An id names one entry, and registering an id the State already has fails
-  with `DuplicateFunctionRegistration`, whatever function it names. To install
+  with `ErrorKind::DuplicateFunctionRegistration`, whatever function it
+  names. Registration reports through the crate's `Error`, like every other
+  `State` operation, so a `load_state` setup closure propagates it with `?`
+  into its own error type. To install
   one registered function under several names, push its handle for each.
 - The standard library's functions, including the iterator callbacks library
   functions return, are fixed catalog entries in every State. `open_libs` gives

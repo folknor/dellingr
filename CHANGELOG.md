@@ -106,6 +106,17 @@ All notable changes to dellingr are documented here. The format follows
 
 ### Changed (breaking)
 
+- `State::register_rust_fn` and `State::set_global_named_rust_fn` return the
+  crate's `Result`, like `add_rust_fn` and `set_global`, instead of
+  `SaveError`: registration is a State operation, and a `load_state` setup
+  closure is generic over its error type. A duplicate id is
+  `ErrorKind::DuplicateFunctionRegistration`, an over-long id the new
+  `ErrorKind::FunctionIdSizeExceeded`, a full function table
+  `ErrorKind::RustFunctionLimit` and an over-long global name
+  `ErrorKind::StringSizeExceeded`, as `set_global` reports it.
+  `SaveError::DuplicateFunctionRegistration`, `SaveCollection::RustFunctions`
+  and `SnapshotField::GlobalName` are removed, and `DuplicateEntry::GlobalName`
+  is renamed `GlobalPin` after the sealed globals' pin list it names.
 - The floating-point environment is enforced, not assumed. On x86_64 and
   aarch64 every public fallible `State` method made by host code,
   `Program::compile`, `save_state`, `register_rust_fn` and `load_state`

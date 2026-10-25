@@ -1139,22 +1139,20 @@ impl State {
     /// The id must be new to this State. To install one registered function
     /// under a second global name, push its handle and call
     /// [`State::set_global`].
+    ///
+    /// A rejected call changes nothing: the name is checked as
+    /// [`State::set_global`] checks it ([`ErrorKind::StringSizeExceeded`])
+    /// before the id is registered, and the install after registration
+    /// cannot fail.
     #[cfg(feature = "snapshot")]
     pub fn set_global_named_rust_fn(
         &mut self,
         name: &str,
         id: &str,
         func: RustFunc,
-    ) -> std::result::Result<RustFnHandle, SaveError> {
-        self.check_save_usable()?;
-        // Checked before registering, so a rejected name registers nothing.
-        if name.len() > crate::limits::MAX_STRING_BYTES {
-            return Err(SaveError::FieldSizeExceeded {
-                field: save_state::SnapshotField::GlobalName,
-                size: name.len(),
-                limit: crate::limits::MAX_STRING_BYTES,
-            });
-        }
+    ) -> Result<RustFnHandle> {
+        self.check_usable()?;
+        check_string_size(name.len())?;
         let handle = self.register_rust_fn(id, func)?;
         let function = self
             .rust_fns
@@ -1181,40 +1179,33 @@ impl State {
     ///
     /// The id must be new to this State, including the standard library's ids
     /// once `open_libs` ran: an id that is already registered fails with
-    /// `SaveError::DuplicateFunctionRegistration`, whatever function it names.
-    /// Ids exceeding [`crate::limits::MAX_SAVE_IDENTIFIER_BYTES`] are
-    /// rejected. A rejected registration changes nothing.
+    /// [`ErrorKind::DuplicateFunctionRegistration`], whatever function it
+    /// names. Ids exceeding [`crate::limits::MAX_SAVE_IDENTIFIER_BYTES`] fail
+    /// with [`ErrorKind::FunctionIdSizeExceeded`], and a full function table
+    /// with [`ErrorKind::RustFunctionLimit`]. A rejected registration changes
+    /// nothing.
     #[cfg(feature = "snapshot")]
-    pub fn register_rust_fn(
-        &mut self,
-        id: &str,
-        func: RustFunc,
-    ) -> std::result::Result<RustFnHandle, save_state::SaveError> {
-        self.check_save_usable()?;
+    pub fn register_rust_fn(&mut self, id: &str, func: RustFunc) -> Result<RustFnHandle> {
+        self.check_usable()?;
         if id.len() > crate::limits::MAX_SAVE_IDENTIFIER_BYTES {
-            return Err(save_state::SaveError::FieldSizeExceeded {
-                field: save_state::SnapshotField::FunctionId,
+            return Err(Error::without_location(ErrorKind::FunctionIdSizeExceeded {
                 size: id.len(),
                 limit: crate::limits::MAX_SAVE_IDENTIFIER_BYTES,
-            });
+            }));
         }
-        // Keep SaveError in this public signature: load setup closures
-        // propagate it. Moving the type needs a coordinated API migration
-        // rather than a local change. An id names one function entry, so a
-        // second registration of an id is refused without comparing function
-        // pointers: one Rust function need not have one address.
+        // An id names one function entry, so a second registration of an id
+        // is refused without comparing function pointers: one Rust function
+        // need not have one address.
         if self.rust_fns.is_bound(id) {
-            return Err(save_state::SaveError::DuplicateFunctionRegistration {
-                id: id.to_string(),
-            });
+            return Err(Error::without_location(
+                ErrorKind::DuplicateFunctionRegistration { id: id.to_string() },
+            ));
         }
-        self.rust_fns
-            .register(id, func)
-            .ok_or(save_state::SaveError::TooLarge {
-                collection: save_state::SaveCollection::RustFunctions,
-                count: RustFnTable::CAPACITY,
+        self.rust_fns.register(id, func).ok_or_else(|| {
+            Error::without_location(ErrorKind::RustFunctionLimit {
                 limit: RustFnTable::CAPACITY,
             })
+        })
     }
 
     /// The handle of the function registered under `id`, if any: a host

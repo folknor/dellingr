@@ -118,8 +118,8 @@ instead of trying to make each site unwind-safe:
   `with_restricted_env`). Nothing is added to the dispatch loop or the
   recursive Lua call path.
 - A poisoned State refuses every public `Result`-returning operation with
-  `ErrorKind::StatePoisoned` (`SaveError::StatePoisoned` for `save_state` and
-  function registration, `LoadError::StatePoisoned` when a `load_state` setup
+  `ErrorKind::StatePoisoned` (`SaveError::StatePoisoned` for `save_state`,
+  `LoadError::StatePoisoned` when a `load_state` setup
   closure returns success after a panic). `gc_collect` becomes a no-op.
   Dropping a poisoned State is always safe. Panics from caller-supplied
   `AsRef` arguments or `user_data` destructors touch no VM bookkeeping and do

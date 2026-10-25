@@ -33,8 +33,6 @@ get deleted as they ship or stop being worth tracking.
 - The compiler verifier still requires GET/SET_GLOBAL names to be UTF-8,
   although the runtime keys the global table with the interned literal and no
   longer needs it. Either drop the check or say why it stays.
-- `SnapshotField::GlobalName` now only serves the name-length error in
-  `set_global_named_rust_fn`; fold it or rename it to what it covers.
 - Strict-mode globals (`setmetatable(_G, {__index = ..., __newindex = ...})`)
   remain unavailable: `_G`'s metatable is protected and bare global access is
   raw. Supporting it would mean GET/SET_GLOBAL honouring `__index` and
@@ -78,15 +76,6 @@ than a test fix.
 
 Signal: an embedder asking for GC diagnostics, or a GC rooting bug that one of
 those tests should have caught.
-
-### `\u{XXX}` string escapes
-
-What: Lua 5.3+ accepts `\u{XXX}` UTF-8 escapes in string literals; dellingr's
-lexer does not, and nothing documents the gap (tests write UTF-8 as `\x`
-bytes). Either add the escape or list it under the README's won't-implement
-or divergences sections.
-
-Signal: a script author reaching for it.
 
 ### Sparse storage for the array part's stragglers
 

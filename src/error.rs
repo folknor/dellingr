@@ -521,6 +521,14 @@ pub enum ErrorKind {
         /// Maximum permitted source-name length in bytes.
         limit: usize,
     },
+    /// A stable Rust function id passed to `register_rust_fn` or
+    /// `set_global_named_rust_fn` exceeded its fixed byte limit.
+    FunctionIdSizeExceeded {
+        /// Requested id length in bytes.
+        size: usize,
+        /// Maximum permitted id length in bytes.
+        limit: usize,
+    },
     /// A host passed `ArgCount::Dynamic` to `call` or `call_anchor`. Only an
     /// executing Lua frame owns the call base a dynamic count resolves
     /// against, so a host must use `ArgCount::Fixed`. Rejected before
@@ -543,7 +551,8 @@ pub enum ErrorKind {
     /// Lua pattern compilation or matching failed. The string function is
     /// available through [`Error::pattern_function`].
     PatternError(PatternErrorDetail),
-    /// A stable Rust function id is already registered: `open_libs` found a
+    /// A stable Rust function id is already registered: a host registration
+    /// named an id the State already has, or `open_libs` found a
     /// standard-library id the host had registered for its own function.
     DuplicateFunctionRegistration {
         /// The conflicting stable function id.
@@ -1710,6 +1719,9 @@ impl fmt::Display for ErrorKind {
             }
             SourceNameSizeExceeded { size, limit } => {
                 write!(f, "source name size {size} exceeds limit {limit}")
+            }
+            FunctionIdSizeExceeded { size, limit } => {
+                write!(f, "function id size {size} exceeds limit {limit}")
             }
             DynamicArgumentsUnsupported { api } => {
                 write!(

@@ -1261,12 +1261,14 @@ fn load_setup_registration_errors_are_returned_directly() {
         Ok(_) => panic!("conflicting setup registration must fail"),
         Err(error) => error,
     };
-    assert_eq!(
-        error,
-        LoadError::Setup(SaveError::DuplicateFunctionRegistration {
-            id: "game.host_fn".to_string(),
-        })
-    );
+    assert!(matches!(
+        &error,
+        LoadError::Setup(error) if matches!(
+            error.kind(),
+            dellingr::error::ErrorKind::DuplicateFunctionRegistration { id }
+                if id == "game.host_fn"
+        )
+    ));
 }
 
 /// Identity is registration, not code: one Rust function registered under two

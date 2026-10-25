@@ -1094,14 +1094,22 @@ fn a_rejected_registration_changes_nothing() {
     let mut state = State::new();
     let first = state.register_rust_fn("host.fn", host_fn).unwrap();
     let entries = state.rust_fns.next_entry_for_test();
+    let error = state
+        .register_rust_fn("host.fn", host_fn)
+        .expect_err("duplicate id is refused");
     assert!(matches!(
-        state.register_rust_fn("host.fn", host_fn),
-        Err(crate::vm::save_state::SaveError::DuplicateFunctionRegistration { id }) if id == "host.fn"
+        error.kind(),
+        crate::error::ErrorKind::DuplicateFunctionRegistration { id } if id == "host.fn"
     ));
     let long_id = "x".repeat(crate::limits::MAX_SAVE_IDENTIFIER_BYTES + 1);
+    let error = state
+        .register_rust_fn(&long_id, host_fn)
+        .expect_err("over-long id is refused");
     assert!(matches!(
-        state.register_rust_fn(&long_id, host_fn),
-        Err(crate::vm::save_state::SaveError::FieldSizeExceeded { .. })
+        error.kind(),
+        crate::error::ErrorKind::FunctionIdSizeExceeded { size, limit }
+            if *size == crate::limits::MAX_SAVE_IDENTIFIER_BYTES + 1
+                && *limit == crate::limits::MAX_SAVE_IDENTIFIER_BYTES
     ));
     assert_eq!(state.rust_fns.next_entry_for_test(), entries);
     assert_eq!(state.registered_rust_fn("host.fn"), Some(first));
