@@ -28,15 +28,20 @@ include = [
 hotpath = ["dep:hotpath", "hotpath/hotpath"]
 hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
 snapshot = []
-# Debug-only infrastructure for the single-refusal error-boundary sweeps.
+# The next four are debug-only test infrastructure (src/lib.rs refuses them
+# without debug assertions), each enabled by its own curated brokkr.toml check
+# shape. Single-refusal error-boundary sweeps (`instrumentation-faults`).
 fault-injection = []
-# Debug-only infrastructure for the inline-cache differential.
+# Every inline-cache read misses, for the inline-cache differential
+# (`inline-cache-differential`).
 disable-inline-caches = []
-# Debug-only infrastructure for the opcode-batching differential.
+# Overridable cost-flush interval and charge-site log, for the opcode-batching
+# differential (`cost-check-interval-differential`).
 cost-check-interval = []
-# Debug-only observation of native-call inventory edges.
+# Records native-call inventory edges (`native-call-coverage`).
 native-call-trace = []
-# Explicit opt-in for checkout-dependent and long-running math verification.
+# Explicit opt-in for checkout-dependent and long-running math verification:
+# `brokkr test crmath::tests::golden --release --features crmath-sweeps`.
 crmath-sweeps = []
 
 [lints.rust]

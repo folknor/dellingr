@@ -30,8 +30,8 @@ kept current mechanically:
 
 With `native-call-trace` disabled, the marker macro expands to exactly the
 original call expression. It introduces no block, local, closure or guard:
-frames that stay live across a native re-entry are size-sensitive (AGENTS.md, "Hotpath
-benchmarks"), and `brokkr test native_bytes_per_level` in the dev and
+frames that stay live across a native re-entry are size-sensitive (docs/limits.md,
+"Native stack"), and `brokkr test native_bytes_per_level` in the dev and
 release profiles must report the same numbers before and after.
 
 The debug-only `native-call-trace` feature records each executed marker in a

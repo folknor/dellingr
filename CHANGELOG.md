@@ -6,908 +6,225 @@ All notable changes to dellingr are documented here. The format follows
 
 ## [Unreleased]
 
-### Build
+Saves and replays from 0.5.0 do not carry over: snapshot `FORMAT_VERSION` is
+13 (was 7), with no migration, and `COST_MODEL_VERSION` is 8 (was 5).
+Re-measure tick budgets and re-record replays.
 
-- The repository no longer overrides `[profile.release]` (it set fat LTO and
-  one codegen unit), so its release tests, native-stack envelope and
-  benchmarks cover Cargo's default release profile, the one an embedding
-  workspace most likely builds dellingr under. Every release cycle in the
-  native-stack probe is smaller under it; `brokkr dellingr` timings move (the
-  composite `benchmark`, `mixed` and `gc_churn` workloads measured 3 to 12%
-  slower, others unchanged; reference/performance.md), and stored results
-  before and after the change do not compare.
-- Building for 32-bit x86 without SSE2 is a compile error: x87 evaluation
-  would change replayed numbers.
+### Changed (breaking): execution
 
-### Testing
+- Register VM. The compiler builds a syntax tree per function and emits 64-bit
+  register bytecode in place of the 32-bit stack bytecode. Results, evaluation
+  order, `pairs` order, rendered values, RNG draws and `cost_used` are
+  unchanged for every run that never reaches `MAX_STACK_SIZE`.
+  - A Lua call reserves its whole register frame plus four slots of headroom
+    when admitted, so a run that reaches the cap fails at the call that cannot
+    reserve its frame, four slots earlier than before; in return an admitted
+    function's own instructions never fail the cap. Runs that reach the cap
+    end in a different state.
+  - A register keeps its last value reachable until overwritten or returned,
+    which can move when a collection reclaims it.
+  - `JumpTooFar` now means a span of 2^23 instructions (was 2^15);
+    `limits::MAX_VERIFIER_MARKER_DEPTH` is removed.
+- Lua-to-Lua calls no longer recurse on the native stack, so `MAX_CALL_DEPTH`
+  needs no native stack per level. Calls made from Rust (host `call`,
+  metamethod handlers, generic-`for` iterators, `table.sort` comparators,
+  `gsub` replacement functions) are bounded by the new
+  `limits::MAX_NATIVE_CALL_DEPTH` (150) and raise
+  `ErrorKind::NativeCallDepthExceeded`. A script recursing deeper than 150
+  through such calls now fails there.
+- The native-stack envelope is 2 MiB in release builds and 4 MiB in debug
+  builds (was 2 MiB for both). A debug-build host running scripts on its own
+  threads should give them 4 MiB. See docs/limits.md, "Envelope".
+- `math.sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `exp`, `log` and
+  `^` are in-crate ports of CORE-MATH's correctly rounded functions instead of
+  the platform libm: results are the same on every host, and can differ in the
+  last place from before and from reference Lua. Building for 32-bit x86
+  without SSE2 is a compile error.
+- The floating-point environment is enforced: host calls into a `State`,
+  `Program::compile`, `save_state` and `load_state` refuse flush-to-zero,
+  denormals-are-zero, directed rounding and unmasked exceptions with
+  `ErrorKind::UnsupportedFloatEnvironment` (and its `SaveError`/`LoadError`
+  twins), carrying a decoded `FloatEnvironment`. A callback that returns with
+  the environment changed fails at its return. See docs/determinism.md.
+- `_G` is the global table itself, not a proxy. `pairs(_G)` yields the globals
+  in binding order, `rawget`/`rawset` on `_G` read and define globals, and
+  `with_restricted_env` swaps the table's contents. `State::raw` has a global
+  table too, without a `_G` binding. `getmetatable(_G)` stays `false`.
+- `__index` and `__newindex` count metamethod depth by one rule: a handler
+  table that answers from its own contents takes no unit, a table continuing
+  to its own handler takes one, a function handler takes one (docs/limits.md).
+  Results at the depth limit no longer depend on the lookup site's history or
+  spelling. Chains of tables need no native stack or value-stack slot per
+  step.
+- A panic unwinding through a State's execution poisons it: later fallible
+  methods return `ErrorKind::StatePoisoned` (and its `SaveError`/`LoadError`
+  twins), `gc_collect` does nothing, and `State::is_poisoned` reports it.
+- A `RustFunc` returning `Ok(n)` with fewer than `n` values fails with
+  `ErrorKind::ResultCountExceedsStack` instead of padding with nil.
+- `table.insert` and `table.remove` through sequence metamethods refuse a
+  shift of `limits::TABLE_SORT_MAX_LEN` elements or more
+  (`LibraryError::SequenceShiftTooLarge`).
+- Any variable use of `_ENV` is a syntax error
+  (`SyntaxError::UnsupportedEnvironmentName`).
+- An assignment takes at most `limits::MAX_ASSIGNMENT_TARGETS` (255) targets
+  (`TooManyAssignmentTargets`), and a function needing more registers than
+  bytecode can name fails with `TooManyRegisters`.
 
-- Release goldens: the `release-goldens` check shape runs every `cost::`
-  test, the crmath golden, the opcode-encoding fixture and the save golden in
-  an optimized snapshot build, and `release-corpus` runs the example corpus
-  gate in the default-feature release build. A new integration test,
-  `library::crmath_golden`, runs every crmath golden row through the shipped
-  `math` functions and `^`, beside the unit golden's forced FMA backends.
-- A corpus cost golden, `tests/fixtures/corpus_cost.txt`: each corpus test
-  reads the CLI's `Cost used` line and compares it with the example's row,
-  which also records the source digest, so a changed cost for unchanged
-  source is reported as a cost model change. `regenerate_corpus_cost` writes
-  the fixture and refuses to record such a change without a
-  `COST_MODEL_VERSION` bump.
+### Changed (breaking): replay-visible details
 
-- The example runner and the differential gate are one Rust test per
-  example, `corpus::run_examples::standalone::<name>`: each example runs
-  through the CLI once and is compared with `lua5.2` and `lua5.4`, spawned
-  from Rust, in memory. A reference now
-  matches only when it exits 0 with empty stderr and the same stdout, rather
-  than on combined output with its exit status ignored. The references run
-  under `LC_ALL=C`, `-E`, the address-space cap and a zero process limit, so a
-  script cannot start a process through them. Each example's processes share
-  a 15-second deadline below brokkr's 20-second per-test cap, replacing the
-  60-second per-example and 5-second per-process timeouts, so a hung example
-  fails alone and by name. `brokkr check` runs these tests in their own
-  parallel lane per feature shape (`default-corpus`, `snapshot-corpus`), with
-  the rest of the integration crate still serial. `scripts/diff_test.sh` is a
-  manual tool outside the gate; the tests of its argument parser and file
-  walk are gone.
-- The example corpus is a checked-in list, `tests/common/examples.rs`,
-  instead of a directory walk: every corpus test reads it, the snapshot
-  round trip is one test per example and now covers the stress examples and
-  `parse/large_source.lua` it used to skip, and the `example-list`
-  script check (`scripts/example_list.py`, which also regenerates it) fails
-  while it differs from the `.lua` files on disk, so an untracked file can no
-  longer join the gate on one host. Textlint rules keep Rust code from
-  walking `examples/`, and `scripts/diff_test.sh` reads the list when given
-  no paths.
-- A pre-clippy script check, `scripts/check_tools.py`, names any missing gate
-  tool before anything compiles and pins the reference Luas' releases and
-  compatibility globals. bash and GNU `timeout` are no longer gate
-  requirements, and the `.scratch/` wipe no longer needs `rm`.
-- Textlint rules keep every process a Rust test starts in
-  `tests/integration/support/process.rs` (two marked `python3` spawns
-  excepted) and report a DIFF marker without a reason before anything
-  compiles.
-- Every example has an oracle independent of its own run. A `-- DIFF:`
-  example, which no reference can judge, must print exactly the transcript
-  its `-- EXPECT:` lines spell, and may declare only a divergence the pinned
-  reference releases determine. `-- SKIP-DIFF:` is gone. The examples that
-  carried a marker for one divergent statement lost it: `edge_cases.lua`'s
-  NaN line (pinned by a library test), `math.lua`'s random values (now range
-  checks) and `feature_test*.lua`'s global `unpack` and lone separators, now
-  `unpack_global.lua` (compared) and `lone_separators.lua` (DIFF). The four
-  stress examples are compared again.
+- Cost: `rawset` charges 1, like a table write; `string.gsub` rejects an invalid
+  replacement before charging; a leading-`^` `gmatch` pattern charges one unit
+  less.
+- Lines: operators record their operator's line, `function` statements and
+  expressions their `function` keyword's, and `...` its own; other
+  instructions take the last token consumed. Errors raised through a `gmatch`
+  iterator are located at the calling line. Error locations, tracebacks and
+  snapshot bytes change accordingly.
+- Identities and collection timing: metamethod event names are interned once
+  per State; registers keep values alive until overwritten; a cleared hash key
+  stays alive, and a valid `next` control, until its slot compacts; a dropped
+  `Anchor` releases its value. Each can move collections and with them
+  `%p`/`tostring` ids.
+- Global `unpack` and `table.unpack` are distinct functions in every build
+  (release LTO used to merge them), and one host function registered under two
+  ids is two functions.
+- Invalid UTF-8 in printed text and error values reaches the host as bytes, not
+  U+FFFD.
+- `x ^ y` with `|y| >= 2^1014` returns the overflowed or underflowed result
+  directly.
+- A `gmatch` iterator whose result push is refused no longer skips the match.
+- Snapshot contents: the global table is saved whole with its pins and rebuilt
+  in saved order; tables save their logical array length and live window plus
+  their hash-slot history; `%p` ids of string literals, environment objects
+  and setup-rendered values survive a load; string-literal ids follow the
+  save's function order, so saves are byte-stable; functions record their
+  definition line; bytecode drops unneeded upvalue closes.
 
-- The integration tests are one crate, `tests/integration`, instead of one
-  binary per file: each former file is a module, grouped by subject (`cli`,
-  `compiler`, `corpus`, `cost`, `failures`, `host`, `library`, `runtime`,
-  `snapshot`), so a focused run can select a subject by module path. The
-  snapshot suites are gated by a `cfg` on their module instead of compiling to
-  empty binaries in the default sweep. `tests/native_stack.rs` stays its own
-  target. A shared `support` module replaces the per-file compile-load-call
-  helpers and error and print recorders, and a convention test keeps the tree
-  to its named targets, every source reachable from `main.rs`, no dead-code
-  allowances, and process-wide state marked.
-- A small `tests/libm_symbols.rs` target checks the release CLI for
-  platform libm transcendental symbols in both release sweeps, replacing the
-  manual `scripts/check_libm_symbols.sh`.
-- Calls that can re-enter Lua are wrapped in a `native_call!` marker macro
-  instead of carrying a marker comment. It expands to the bare call; the
-  debug-only `native-call-trace` cargo feature records each executed edge, and
-  a curated check runs every native-stack scenario under it to confirm the
-  inventory's paths by execution.
-- Every `examples/` file that defines a global `_bench` prints its computed
-  `_bench()` result in its success line, so the differential gate compares a
-  value against lua5.2/lua5.4 instead of a constant string; a corpus test
-  enforces the footer shape. Each registered workload pair's kernel and shared
-  helpers must now match in bytecode and literal pools as well as in cost
-  fingerprint, and every registered `hotpath_file` opens with a `Probe:`,
-  `Historical probe:` or `Workload:` header. The `benchmark` verdict workload
-  now repeats the composite kernel of `examples/composite/benchmark.lua`
-  exactly, so its stored results before the re-pin do not compare.
+### Changed (breaking): host API
 
-### Changed (breaking)
-
-- `State::register_rust_fn` and `State::set_global_named_rust_fn` return the
-  crate's `Result`, like `add_rust_fn` and `set_global`, instead of
-  `SaveError`: registration is a State operation, and a `load_state` setup
-  closure is generic over its error type. A duplicate id is
-  `ErrorKind::DuplicateFunctionRegistration`, an over-long id the new
-  `ErrorKind::FunctionIdSizeExceeded`, a full function table
-  `ErrorKind::RustFunctionLimit` and an over-long global name
-  `ErrorKind::StringSizeExceeded`, as `set_global` reports it.
-  `SaveError::DuplicateFunctionRegistration`, `SaveCollection::RustFunctions`
-  and `SnapshotField::GlobalName` are removed, and `DuplicateEntry::GlobalName`
-  is renamed `GlobalPin` after the sealed globals' pin list it names.
-- The floating-point environment is enforced, not assumed. On x86_64 and
-  aarch64 every public fallible `State` method made by host code,
-  `Program::compile`, `save_state`, `register_rust_fn` and `load_state`
-  (again after its setup closure) reads the calling thread's control register
-  and refuses flush-to-zero, denormals-are-zero, a directed rounding mode or
-  an unmasked exception with the new `ErrorKind::UnsupportedFloatEnvironment`
-  (`SaveError::UnsupportedFloatEnvironment`,
-  `LoadError::UnsupportedFloatEnvironment`). The error carries a
-  `FloatEnvironment` (in `dellingr::error`, with `FloatControl` and
-  `RoundingDirection`) that holds the raw register and decodes each setting.
-  A Rust callback that returns `Ok` with the environment changed now fails
-  with that error at its return, so Lua never resumes under it. The refusal
-  is charged nothing, does not poison the State and, at an entry point, is
-  not reported to `on_error`. Creating a State is not checked. Before, such
-  an environment silently produced host-dependent results. See
-  `docs/determinism.md`, "Floating-point environment".
-- `State::to_boolean` and `State::raw_equal` no longer go through their
-  `try_` twins; they still return false on a poisoned State and check
-  nothing else.
-- Rust function identity is a State-owned function-table entry, never a code
-  address. `State::add_rust_fn` (and, under `snapshot`,
-  `State::register_rust_fn`) creates a function and returns a State-bound
-  `RustFnHandle`; `State::push_rust_fn` now takes that handle, and a handle
-  from another State fails with `ErrorKind::InvalidRustFnHandle`.
-  `push_named_rust_fn` is removed. `register_rust_fn` and
-  `set_global_named_rust_fn` return the handle, and registering an id the
-  State already has always fails with `DuplicateFunctionRegistration`, without
-  comparing function pointers (re-registering the same function under the
-  same id used to succeed). `State::registered_rust_fn` looks a handle up by
-  id. The standard library's functions are fixed catalog entries in every
-  State, so `open_libs` checks the host's ids against the catalog without
-  building a scratch State.
-  - **Replay-visible in release builds:** release LTO merged the identical
-    wrappers behind global `unpack` and `table.unpack`, so there the two
-    compared equal, shared one table key and one rendered identity, and saved
-    both as `table.unpack`. They are now two functions in every build, as dev
-    builds already had them, and saves write each one's own id. Saved bytes
-    no longer depend on the build profile; dev-build saves of the
-    standard library are unchanged, and the save golden is pinned in a release
-    sweep too. One host function registered under two ids is now two unequal
-    functions saving under their own ids (it used to be one value saving as
-    the smallest id); one added twice is two functions.
-  - The save format is unchanged. The fold-handling load path is gone: two
-    saved function ids now always load as two functions.
-- Register VM. The compiler builds a syntax tree per function and generates
-  64-bit register bytecode from it (locals live in registers, constant
-  operands are separate opcodes, comparisons branch in one instruction), in
-  place of the 32-bit stack bytecode. Results, evaluation and store order,
-  `pairs` order, rendered values, RNG draws, error kinds and lines, and
-  `cost_used` are unchanged for every run that never reaches
-  `MAX_STACK_SIZE`. The differences:
-  - **Replay-visible at the stack cap:** a Lua call reserves its function's
-    whole register frame when it is admitted, so a run that reaches
-    `MAX_STACK_SIZE` now fails at the call that cannot reserve its frame,
-    before the body runs. The surviving state, RNG position, error location,
-    traceback and `cost_used` of such runs differ. This requires a
-    `COST_MODEL_VERSION` bump.
-  - Multiple-assignment nil padding no longer occupies the stack, and a
-    fixed number of results returns into registers the caller already
-    holds, so some assignments and calls that failed with `StackOverflow`
-    near the cap now succeed.
-  - **Replay-visible at the stack cap:** admission also reserves four free
-    slots above the frame, the largest call window an instruction opens, so
-    a call (from Lua or the host) is refused four slots earlier. In return
-    an admitted function's own instructions never fail the cap: closures,
-    template constructors (`{x = 1}`), concatenation, generic `for` result
-    delivery and every table read, store and length that calls no handler
-    work in the registers. Near the cap these used to raise `StackOverflow`
-    depending on spelling (`obj.k` answered where `obj["k"]`, a string
-    receiver's method or `t.newkey = v` raised), on `__index`/`__newindex`
-    chain length, and on whether a loop had more variables than its Rust
-    iterator returned. A handler call can still be refused there, by the
-    handler's own admission.
-  - `__newindex` table chains and `__index` chains through strings are
-    resolved in a loop, without native recursion per step; their
-    metamethod-depth units are unchanged.
-  - A register whose value is no longer used keeps that value reachable
-    until the function overwrites it or returns, which can move when a
-    collection reclaims it (and so `%p` and `tostring` ids of values rebuilt
-    later, and `object_count`).
-  - Jumps carry 24-bit offsets: `JumpTooFar` now means a span of 2^23
-    instructions or more, where it was 2^15.
-  - Snapshot `FORMAT_VERSION` was bumped: instruction words are 64-bit and each
-    function records its register count. Older saves are rejected.
-  - `limits::MAX_VERIFIER_MARKER_DEPTH` is removed: the verifier no longer
-    simulates an operand stack.
-  - `--dump-bytecode` prints the register instruction set and each
-    function's register count.
-
-- Native-stack envelope split by build. Every runtime recursion limit at
-  once is now promised to fit a 2 MiB thread in release builds and a 4 MiB
-  thread in debug builds, where it was 2 MiB for both. A debug build of a
-  host that runs scripts on threads it spawns with the default 2 MiB should
-  give them 4 MiB (`std::thread::Builder::stack_size`); otherwise a deeply
-  recursive script can abort the process instead of failing with a limit
-  error. Parsing at the syntax budget still fits 2 MiB in both. The limits
-  themselves are unchanged. See docs/limits.md, "Envelope".
-
-- One compile path, byte-exact. `Program::compile(source, name)` is the only
-  way to compile Lua: `source` is `impl AsRef<[u8]>` and `name` is
-  `Option<&[u8]>`, so non-UTF-8 sources load (string literals keep their
-  bytes) and chunk names are kept exactly. `Engine` is removed (its
-  `compile`/`compile_named` become `Program::compile`, `new_state` becomes
-  `State::new`/`State::with_callbacks`, `raw` becomes `State::raw`/the new
-  `State::raw_with_callbacks`); `State::load_string` and
-  `load_string_named` are removed (compile, then `State::load`); the free
-  `analyze_cost(source)` and `Engine::analyze_cost` become
-  `Program::analyze_cost(&self)`. `State::empty` is renamed `State::raw`.
-  An oversized chunk name is still rejected before the source is examined.
+- One compile path: `Program::compile(source, name)` takes bytes for both and
+  is the only way to compile. `Engine` is removed (`new_state` becomes
+  `State::new`/`with_callbacks`, `raw` becomes `State::raw`, and
+  `State::raw_with_callbacks` is new); `load_string`/`load_string_named` are
+  removed (compile, then `State::load`); `analyze_cost` becomes
+  `Program::analyze_cost`; `State::empty` is `State::raw`.
 - Chunk names are bytes: `Program::source_name`, `Error::source_name` and
-  `State::current_source` return `Option<&[u8]>`, and `StackFrame::source`
-  is `Option<Arc<[u8]>>`. `Display` renders them lossily. Snapshots store
-  them as the same length-prefixed bytes as before, now without requiring
-  UTF-8, so the format and existing saves are unchanged.
-- `HostCallbacks::on_print(&mut self, source: Option<&[u8]>, line: u32,
-  message: &[u8])`: the host receives the printed bytes and chunk name
-  exactly. `DefaultCallbacks` and the CLI write the bytes unchanged.
-- Typed errors. `ErrorKind::ScriptError { value: ErrorValue, prefix }`
-  replaces `message: String`: `ErrorValue` is `Nil`, `Boolean`, `Number`,
-  `String(Vec<u8>)` (exact bytes) or `Object { value_type, rendering }` for
-  tables and functions, whose rendering is their `tostring` bytes.
-  `error()` with no argument raises `Nil`, as `error(nil)` does, instead of
-  the invented message "(error raised with no message)"; it renders as
-  `nil`. Library failures are
-  `ErrorKind::LibraryError(LibraryError)` instead of a rendered
-  `RuntimeError(String)` plus `Error::library_error()`, which is removed.
-  `RuntimeError(String)` is gone; `ErrorKind::HostError(Box<dyn
-  std::error::Error + Send + Sync>)` is the kind for a `RustFunc`'s own
-  failure (`"text".into()` builds one), recoverable through
-  `Error::source` and the now-public `Error::into_kind`; `Error` implements
-  `std::error::Error`. `ErrorKind::InternalError` wraps an opaque
-  `InternalError` that only dellingr constructs, so it always means a
-  dellingr bug; a host passing `ArgCount::Dynamic` to `call` or
-  `call_anchor`, previously reported as an internal error, is the new
-  `ErrorKind::DynamicArgumentsUnsupported { api: HostCallApi }`, whose text
-  drops the `internal error: ` prefix. `SyntaxError::ExpectedToken` holds
-  `expected: TokenKind` (the new public token vocabulary) and `found:
-  Vec<u8>` (the token's source bytes); the never-constructed
-  `SyntaxError::UnexpectedTok` is removed; a stray non-UTF-8 byte in source
-  is the new `SyntaxError::InvalidByte`. `LibraryError`'s format
-  `directive` fields are `Vec<u8>`.
-- `State::bytes_with_tostring_meta` is renamed `State::tostring_bytes`.
-- **Replay-visible:** invalid UTF-8 in printed text and in error values now
-  reaches the host as the script's bytes instead of U+FFFD. `print` and
-  `error` no longer check a threefold lossy expansion against the string
-  cap: a `print` whose raw output fits the cap but whose U+FFFD expansion did
-  not now prints, and such an `error` now raises its value instead of
-  `StringSizeExceeded`. The CLI's `print` output is byte-exact, as reference
-  Lua's is. Costs are unchanged.
-- Error text changes from the byte-exact boundary are limited to: `error()`
-  renders `nil` (above); `ArgCount::Dynamic` refusals lose the `internal
-  error: ` prefix; and the CLI's `--analyze` names the chunk (file path or
-  `stdin`) in a parse error, as running and `--dump-bytecode` already did,
-  because it compiles through the same `Program::compile` call. The
-  corrected diagnostics below and the typed-reasons entry list the rest.
-- Diagnostics that mislead are corrected. Costs are unchanged.
-  - Method calls number arguments as the script wrote them, as reference Lua
-    does: `s:sub(1.5)` is now `bad argument #1 to 'sub' (number has no integer
-    representation)` (was `#2`), and a bad receiver, as in
-    `local t = {sub = string.sub}; t:sub(1)`, is now `calling 'sub' on bad
-    self (string expected, got table)` (was `bad argument #1 to 'sub' (string
-    expected, got table)`). This applies to every library function called
-    with `:`. The call instruction carries the mark.
-    `ArgError::arg_number` still reports the callee's own position;
-    `ArgError::is_method_call` says whether the rendering shifted it.
-  - Tracebacks call only the main chunk `main chunk`. An unnamed function is
-    now `in function <source:line>` with the line it was defined on (was `in
-    main chunk`). `StackFrame` gains `defined_line` (0 for a main chunk).
-    Snapshots store each function's definition line (a u32 beside its name,
-    still format version 10), so a restored function's traceback labels match
-    the original run.
-  - `table.move`'s `too many elements to move` is now `bad argument #3 to
-    'move' (too many elements to move)`. It is `ErrorKind::ArgError` with
-    the new `ArgDetail::TooManyElementsToMove`; `LibraryError::TooManyMoveElements`
-    is removed. Likewise `destination wrap around` is now `bad argument #4
-    to 'move' (destination wrap around)`, as in Lua 5.4: `ArgError` with the
-    new `ArgDetail::DestinationWrapAround`, and
-    `LibraryError::MoveDestinationWrapAround` is removed.
-  - `error(v)` adds the `chunk:line:` position only to a string value, as Lua
-    5.4 does; `error()` records `PrefixLocation::Suppressed` for any other
-    value. Before and after: `error(42)` was `t:1: 42`, now `42`;
-    `error(true)` was `t:1: true`, now `true`; `error(nil)` was `t:1: nil`,
-    now `nil`, and so is `error()` (see above); `error({})` was `t:1: table: 0x1`, now
-    `table: 0x1` (likewise functions and `__tostring` renderings). Strings
-    are unchanged. Lua 5.2 still prefixes numbers; docs/compatibility.md
-    records the choice.
-  - Syntax errors use reference Lua's wording instead of naming a token the
-    grammar never required. New `SyntaxError` variants `UnexpectedSymbol`,
-    `MalformedStatement`, `ForSeparatorExpected` and
-    `FunctionArgumentsExpected`, each with the offending token's `found`
-    bytes. The statement parser now stops only at a block end (`end`,
-    `else`, `elseif`, `until`, end of input), and an empty `return` only
-    before one or `;`, as reference Lua does. Before and after (columns
-    omitted):
-    - `local x = )`: `'nil' expected near ')'` is now `unexpected symbol near
-      ')'`; the same for any token that cannot start an expression.
-    - `x = 1 )` and `= 1` at top level: `'<eof>' expected near ')'` / `near
-      '='` are now `unexpected symbol near ...`; inside a block, `if x then )
-      end`: `'end' expected near ')'` is now `unexpected symbol near ')'`.
-    - `return )`: `'<eof>' expected near ')'` (or `'end' expected` in a
-      block) is now `unexpected symbol near ')'`.
-    - `a, ) = 1, 2` and `a, 1 = 1, 2`: `'<name>' expected near ...` is now
-      `unexpected symbol near ...`.
-    - `(x) = 1` and `a, f() = 1, 2`: `'=' expected near '='` is now `syntax
-      error near '='`; `f() = 1`: `'<eof>' expected near '='` is now `syntax
-      error near '='`; a bare expression such as `x;`, `x + 1` or `x do end`:
-      `'=' expected near ...` is now `syntax error near ...`.
-    - `for i do end`: `'=' expected near 'do'` is now `'=' or 'in' expected
-      near 'do'`.
-    - `a:b z`: `'(' expected near 'z'` is now `function arguments expected
-      near 'z'`.
-    - Expected names, literals and end of input are no longer quoted:
-      `'<name>' expected near '1'` is now `<name> expected near '1'`, and
-      `'<eof>' expected near 'end'` is now `<eof> expected near 'end'`.
-    Where the parser reaches the end of the source needing a token, the
-    error is still `unexpected <eof>` and still recoverable. No program that compiled before is rejected, and no
-    rejected one now compiles.
-- No error type carries text that describes what went wrong; every such
-  reason is an enum a host can match on. Strings that remain are data
-  (function names and ids, environment tokens, chunk names, rendered value
-  paths).
-  - `LibraryFunction::Other(String)` is removed (nothing constructed it);
-    `LibraryFunction` is `Copy` and `Error::library_function` returns it by
-    value.
-  - `ErrorKind::DynamicArgumentsUnsupported::api` is a `HostCallApi` (`Call`,
-    `CallAnchor`), rendering `call` / `call_anchor` as before.
-  - `SyntaxError::ExpectedToken::expected` is an `error::TokenKind`.
-  - Snapshot errors (`dellingr::snapshot`, a new module that also holds the
-    six types still exported at the root): `SnapshotError::DecodeError` is
-    `{ offset, reason: DecodeReason }` (an invalid bool or tag carries the
-    byte); `CorruptArena::reason` is a `CorruptionReason` (out-of-range
-    references, duplicates with the `KeyForm` that collided, nil and NaN
-    keys, and `Table`, `Environment` and `Gmatch` families);
-    `InvalidTable` is `{ location, step: TableRestoreStep, failure:
-    TableRestoreFailure }`; `InvalidBytecode::reason` is an
-    `InvalidBytecodeReason`, whose `Validation` variant carries the
-    verifier's now-public `ValidationReason` (with `BytecodeOperand`,
-    `BytecodePool` and `CacheFamily`); `FieldSizeExceeded::kind` becomes
-    `field: SnapshotField`; `SaveError::Internal` wraps an opaque
-    `SaveInternalError`; `SaveError::TooLarge` is `{ collection:
-    SaveCollection, count, limit }`. Every load error renders its previous
-    text.
-  - A save-side byte field over its limit, including a function id over
-    `MAX_SAVE_IDENTIFIER_BYTES` passed to `register_rust_fn`, is the new
-    `SaveError::FieldSizeExceeded { field, size, limit }` instead of
-    `TooLarge`, because its size is a byte length, not a count: `save function
-    id count 4097 exceeds the supported limit` is now `save function id size
-    4097 exceeds limit 4096`. A collection too long for its length prefix
-    names itself instead of `vector`: `save vector count N exceeds the
-    supported limit` is now, for example, `save table entries count N exceeds
-    the supported limit`.
-
-- Snapshot format version 10. Every bytecode inline-cache operand
-  (`GET_GLOBAL`, `SET_GLOBAL`, `GET_FIELD`, `SET_FIELD` and the generic-for
-  `pairs` cursor) now uses one encoding: biased by one, 0 meaning uncached;
-  `GET_GLOBAL`, `GET_FIELD` and `SET_FIELD` used 255 for uncached before.
-  Each saved function also stores its `pairs`-cursor count beside the other
-  cache counts instead of the loader recomputing it from the code. Capacity
-  is unchanged at 255 cached sites per cache family per function.
-  **Replay-visible:** saves from earlier format versions are refused with
-  `UnsupportedVersion`; there is no migration. Execution, costs and `pairs`
-  order are unchanged.
-- Cost model version 6: `string.gmatch` compiles a pattern's leading `^` as
-  a literal byte instead of rewriting the pattern to `%^`, so such an
-  iterator's first matching call charges the pattern's actual length, one
-  unit less than before. **Replay-visible:** `cost_used` drops by one per such
-  iterator, and a saved gmatch iterator stores its pattern as written (`^x`,
-  not `%^x`). A leading-`^` gmatch pattern of exactly the maximum string size
-  is no longer rejected at iterator creation; the rewrite made it one byte too
-  long. Results are unchanged.
-- Lua-to-Lua calls no longer recurse on the native stack: each dispatch-loop
-  invocation runs over a frame stack of its own and continues in the callee,
-  so `MAX_CALL_DEPTH` (1000) is reached without native stack per level in
-  every build profile and on any thread. What still runs on the native stack
-  is every call made from Rust - host `call`/`call_anchor`,
-  `__index`/`__newindex`/`__len`/`__tostring` handlers, generic-for
-  iterator functions, `table.sort` comparators, `string.gsub` replacement
-  functions - and those are now bounded by the new
-  `limits::MAX_NATIVE_CALL_DEPTH` (150; reference Lua's `LUAI_MAXCCALLS` is
-  200), raising the new `ErrorKind::NativeCallDepthExceeded`. The value is
-  what lets every recursion limit at once fit a 2 MiB thread in an
-  unoptimized build; docs/limits.md, "Native stack", states the envelope.
-  Recursion through such calls used to be bounded only by `MAX_CALL_DEPTH`
-  (Lua frames) or not at all (a callback calling Rust functions through
-  `State::call`).
-  **Replay-visible:** a script that recursed between 150 and 1000 levels
-  deep through such calls (a recursive `table.sort` comparator, a recursive
-  `gsub` replacement function, a recursive iterator) now fails with
-  `NativeCallDepthExceeded` at 150 nested calls from Rust, the host's own
-  call included, instead of running or failing at `MAX_CALL_DEPTH`; a
-  recursive `__index` or `__newindex` function stops there too, instead of
-  at the `MetamethodDepthExceeded` it raised at 200.
-- `Error` is one pointer wide (its fields live behind a `Box`), which shrinks
-  every `Result` on the native stack; in the dev profile a Lua call level
-  needed about 43 KB of native stack before and 6 KB after, before the call
-  flattening above removed that cost altogether.
-- `Anchor` is an owned handle: no longer `Copy` or `Clone`, and dropping it
-  releases the anchored value (the State reclaims the slot at its next
-  collection or anchor creation). `release_anchor(Anchor)` consumes the
-  handle and releases at once; `push_anchor`, `call_anchor` and
-  `anchor_type` take `&Anchor`. A released or stale handle can no longer
-  exist, so `ErrorKind::InvalidAnchor` now means only a handle from another
-  State, and its message says so. `anchor_count` counts live handles.
-  **Replay-visible:** a value whose handle is dropped becomes collectable,
-  where it used to stay rooted until `release_anchor`, so collections can
-  free more, which can change rendered `tostring`/`%p` identities and
-  snapshot contents. Drops on another thread take effect at whichever
-  collection follows them; synchronize them when that boundary matters to a
-  replay.
-- Snapshot `FORMAT_VERSION` is 9; older saves are rejected. The payload
-  records whether the globals were sealed. A table saves its logical array
-  length (now 64-bit) and only the slots from its first live array key to
-  its last, instead of every slot back to key 1, so two tables holding the
-  same contents save the same bytes whatever their history.
-  **Replay-visible (snapshot contents):** loading now rebuilds the globals in
-  saved order instead of
-  keeping the setup's order and appending saved-only names, so a State whose
-  host set globals in a different order than its load setup now reloads to
-  byte-identical saves.
-- `LoadError<E>` now has three variants: `Setup(E)`, `StatePoisoned`, and
-  `Snapshot(SnapshotError)`. Every other former `LoadError` variant moved,
-  unchanged, to the new exported `SnapshotError` (so `LoadError::BadMagic`
-  becomes `LoadError::Snapshot(SnapshotError::BadMagic)`);
-  `LoadError::snapshot()` returns it, and `Error::source` exposes it. Display
-  text is unchanged.
-- `error::StackFrame::source` and `function_name`, and
-  `error::VmFault::function_name`, are `Option<Arc<str>>` instead of
-  `Option<String>`: they share the chunk's own allocations rather than
-  copying the names per frame per error. `as_deref()` reads them as before.
-- `limits::GMATCH_PATTERN_CACHE_ENTRIES` and `limits::GMATCH_PATTERN_CACHE_BYTES`
-  are renamed `limits::PATTERN_CACHE_ENTRIES` and `limits::PATTERN_CACHE_BYTES`
-  (same values): the per-State compiled-pattern cache they bound now also
-  serves `string.find`, `string.match` and `string.gsub`, not only
-  `string.gmatch`. Costs, results and errors are unchanged.
-- A panic that unwinds through a State's execution (a panicking `RustFunc`
-  or `on_error`, a panic inside `with_restricted_env`, or a VM-internal
-  panic) now poisons the State. Every later `Result`-returning public method
-  refuses with the new `ErrorKind::StatePoisoned` (`SaveError::StatePoisoned`
-  from `save_state` and function registration, `LoadError::StatePoisoned`
-  when a `load_state` setup closure returns success after catching a panic);
-  `gc_collect` becomes a no-op and `State::is_poisoned` reports the flag.
-  Reusing a State after catching a panic was never sound, despite the old
-  `with_restricted_env` documentation. A callback that catches a panic and
-  returns normally has its enclosing execution abandoned, and the host call
-  returns `StatePoisoned`.
-- `State::with_restricted_env` returns `Result<R>`, refusing a poisoned State
-  without running the closure.
-- A `RustFunc` that returns `Ok(n)` with fewer than `n` values in its frame
-  now fails the call with the new `ErrorKind::ResultCountExceedsStack`
-  instead of having the missing results padded with nil. This applies to
-  host `State::call`, Lua calls and generic-`for` iterators alike. Callers
-  that request more results than a callback returns are still padded with
-  nil as before.
-- `ErrorKind::InvalidJump` is removed. Verified bytecode execution reports
-  internal dispatch failures as `InternalError`, with instruction context
-  available through `Error::vm_fault()`.
-- `LoadError::InvalidTable` reasons no longer carry a leading `0:0: `
-  location prefix.
-- `HostCallbacks::on_print` has no default body; every implementation must
-  define it. `DefaultCallbacks` writes to stdout and drops write errors instead
-  of panicking.
-- `Error`'s `Display` no longer ends with a newline after the traceback.
-- Snapshot loading rejects gmatch iterator state that lacks its cached pattern
-  key, has a non-`true` compile flag, or an out-of-range `lastmatch`.
-- `State::gc_set_threshold` installs a fixed threshold that collections no
-  longer recompute. Use `gc_set_auto_threshold` to resume adaptive collection.
-- Source names over `limits::MAX_SOURCE_NAME_BYTES` are rejected with
-  `ErrorKind::SourceNameSizeExceeded` before parsing, and `register_rust_fn`
-  rejects ids over `limits::MAX_SAVE_IDENTIFIER_BYTES` before changing
-  either registry. Diagnostic function names longer than
-  `limits::MAX_CHUNK_NAME_BYTES` are truncated, so such chunks still save.
-- `Error` and `ArgError` fields are private. Read them through
-  `Error::kind`, `stack_trace`, `line_num` and `column`, and
-  `ArgError::arg_number`, `func_name`, `detail`, `expected` and `received`.
-  `Error::new`, `line_num` and `column` use `u32` locations.
-- `ArgDetail::Custom` and `ArgDetail::OutOfBounds` are removed, and
-  `ArgDetail` equality compares variants exactly.
-- `ErrorKind`, `ArgDetail`, `LibraryError`, `LibraryFunction`,
-  `PatternErrorDetail`, `MalformedPatternDetail`, `SyntaxError`, `TypeError`,
-  `SaveError` and `LoadError` are `#[non_exhaustive]`; matches on them outside
-  the crate need a wildcard arm.
-- Snapshot loading rejects cost counters the runtime cannot produce: an
-  unbudgeted meter whose remaining or limit is not `i64::MAX`, or a budgeted
-  one whose remaining is not its limit minus the cost used.
-- `HostCallbacks::on_error` takes only the error; the reporting frame's source
-  is available as `Error::source_name`.
-- `ScopeCost` category counts are methods (`arithmetic_ops()`, `negations()`,
-  `table_creations()`, `table_writes()`, `array_elements()`,
-  `function_calls()`), so `ScopeCost` can no longer be built with a struct
-  literal outside the crate.
-- Binary operators, unary operators and concatenation record the line of
-  their operator token, so runtime errors and tracebacks in multi-line
-  expressions name the operator's line. Other instructions take the line of
-  the last token consumed before they are emitted, where they previously took
-  the line of their statement's first token or of the last token the parser
-  explicitly expected. Bytecode line metadata, and with it snapshot bytes for
-  multi-line chunks, changes accordingly.
-- `LibraryError` gains `InvalidNextKey`, `PositionOutOfBounds`, `ArrayTooBig`,
-  `TostringMustReturnString` and `FormatPointerIdentitySpaceExhausted`; those
-  runtime errors keep their message text.
-- `Error::library_function` answers for every typed library failure that
-  names a function, not only `table.sort`'s default comparison: it is the new
-  `LibraryError::function()` for an `ErrorKind::LibraryError`
-  (`WrongNumberOfArguments`, `IntegerKeyRangeExceeded`,
-  `ObjectLengthNotInteger`, `InvalidConcatValue` and `ArrayTooBig`), so the
-  variant is its one source. `LibraryError::ObjectLengthNotInteger` gains a
-  `function` field naming the caller of `__len` (`concat`, `unpack`,
-  `insert`, `remove` or `sort`), and `LibraryFunction::Sort` now means
-  `table.sort` in general. Message text is unchanged.
-- The root re-export `dellingr::MAX_STRING_BYTES` is removed; use
-  `dellingr::limits::MAX_STRING_BYTES`. Likewise `dellingr::error::MAX_RESULTS`
-  is removed in favour of `dellingr::limits::MAX_RESULTS`.
-- Snapshot loading reports a saved table whose entries the runtime table
-  rejects as `LoadError::InvalidTable`, naming the table and the underlying
-  failure, where it previously reported `LoadError::CorruptArena`.
-- `LoadError::CorruptArena` gains a `location: TableLoadLocation` field naming
-  the arena or nested collection its `index` refers to, and its message reads
-  `corrupt save <location> at index ...` instead of `corrupt save arena at
-  index ...`. `TableLoadLocation` gains `Strings`, `Objects`, `Bytecode`,
-  `Upvalues`, `Globals`, `PointerIds`, `TableEntries`, `EnvironmentDeltas`,
-  `EnvironmentDeleted`, `EnvironmentUpserts`, `EnvironmentOrder`,
-  `EnvironmentArray` and `EnvironmentMetatable`. A non-object metatable value
-  now reports its owner's index (the saved table's object index, or the
-  environment delta's index) rather than 0.
+  `State::current_source` return `Option<&[u8]>`. `HostCallbacks::on_print`
+  receives `source: Option<&[u8]>` and `message: &[u8]` exactly, and has no
+  default body. `HostCallbacks::on_error` takes only the error.
+  `StackFrame::source` is `Option<Arc<[u8]>>` and function names are
+  `Option<Arc<str>>`. Source names over `limits::MAX_SOURCE_NAME_BYTES` are
+  rejected; long diagnostic function names are truncated.
+- Rust functions are State-owned table entries, never code addresses.
+  `add_rust_fn` and `register_rust_fn` return a State-bound `RustFnHandle`
+  that `push_rust_fn` takes; `push_named_rust_fn` is removed;
+  `registered_rust_fn` looks a handle up by id. Registering an id the State
+  already has always fails.
+- `register_rust_fn` and `set_global_named_rust_fn` return the crate's
+  `Result`: a duplicate id is `ErrorKind::DuplicateFunctionRegistration`, an
+  over-long id the new `FunctionIdSizeExceeded`, a full table
+  `RustFunctionLimit`.
+- `Anchor` is an owned handle: not `Copy`/`Clone`, released on drop;
+  `release_anchor` consumes it, and `push_anchor`, `call_anchor` and
+  `anchor_type` take `&Anchor`.
+- `State::with_restricted_env` returns `Result<R>`.
+- `State::bytes_with_tostring_meta` is renamed `tostring_bytes`.
+- `State::gc_set_threshold` installs a fixed threshold; `gc_set_auto_threshold`
+  resumes adaptive collection.
+- `State::open_libs` inside `with_restricted_env` is refused
+  (`ErrorKind::OpenLibsInRestrictedEnv`).
+- `State::gmatch_pattern_compilations` is removed.
+- `ScopeCost` category counts are methods.
+- The root re-export `MAX_STRING_BYTES` and `error::MAX_RESULTS` are removed;
+  use `dellingr::limits`. `limits::GMATCH_PATTERN_CACHE_*` are renamed
+  `limits::PATTERN_CACHE_*`.
 - The `debug_parser`, `debug_vm` and `debug_gc` cargo features are removed.
-  They printed straight to stdout, bypassing `HostCallbacks`. Use the CLI's
-  `--dump-bytecode` or `Program::disassemble` to inspect compiled bytecode.
-- **Replay-visible (cost):** `COST_MODEL_VERSION` is 8. `rawset` charges a
-  flat 1, like a table-write opcode, where it was free, and `string.gsub`
-  rejects an invalid replacement argument before charging for its subject
-  and pattern.
-- **Replay-visible (snapshot contents, GC timing):** snapshot
-  `FORMAT_VERSION` is 12; older saves are rejected. A cleared hash key now
-  stays a valid `next` control until insertion compacts its slot: the
-  collector keeps a tombstone's key alive, and saves record each table's
-  hash-slot history (dead keys, vacant positions and storage kind), for
-  ordinary tables and environment-table deltas alike, so a traversal that
-  clears keys as it goes resumes identically after a collection or a load.
-  Keys of cleared entries can therefore outlive their last reference until
-  compaction, which moves when collections reclaim them. In a loaded
-  environment table, keys that setup added and the save lacks now follow the
-  saved keys in `pairs` order.
-- **Replay-visible (lines):** a `function` statement (`function f()`,
-  `function t.f()`, `function t:m()`, `local function f()`) records the line
-  of its `function` keyword for the closure and the store, and `...` records
-  its own line, where they could take a later line such as that of the
-  function's closing `end`. Error
-  locations, tracebacks and snapshot bytes for multi-line declarations change.
-- A Lua-to-Lua call whose callee frame cannot be reserved now reports its
-  `StackOverflow` at the caller's call instruction; the never-entered callee
-  no longer appears in the traceback.
-- A non-numeric numeric `for` control raises the new
-  `TypeError::NumericForInitialValue`, `NumericForLimit` or `NumericForStep`
-  (`numeric for loop step must be a number, got nil`) instead of
-  `TypeError::Arithmetic`.
-- A host `set_metatable_of` with a metatable that is neither a table nor nil
-  raises the new `TypeError::InvalidMetatable` ("metatable must be a table or
-  nil") instead of `TypeError::TableIndex`.
-- `State::open_libs` inside `State::with_restricted_env` is refused with the
-  new `ErrorKind::OpenLibsInRestrictedEnv`, before any state changes.
-- Every variable use of `_ENV` (read, assignment, local, parameter, loop
-  variable, function name) is the new syntax error
-  `SyntaxError::UnsupportedEnvironmentName` ("the special name '_ENV' is not
-  supported"). Field names such as `t._ENV` are unaffected.
-- `SyntaxError::AssignmentOffsetTooLarge` is removed; the assignment target
-  cap rejects every list it could.
-- `State::gmatch_pattern_compilations` is removed; the compiled-pattern
-  counter is test-only instrumentation.
-- **Replay-visible (lines):** an anonymous `function ... end` expression
-  records its `function` keyword's line, as function statements do. Error
-  locations, tracebacks and snapshot bytes change.
-- **Replay-visible:** `table.insert` and `table.remove` through sequence
-  metamethods refuse a shift of `limits::TABLE_SORT_MAX_LEN` elements or more
-  with the new `LibraryError::SequenceShiftTooLarge` ("sequence shift too
-  large in 'insert'"), before any handler runs. `LibraryError::function()`
-  names `Insert` or `Remove`.
-- **Replay-visible (snapshot contents):** the `%p` and `tostring` identities
-  of environment objects, and of values reachable only from them, survive a
-  load, also when a global shadows the builtin. Saves carry those ids.
-- **Replay-visible (snapshot contents):** an environment-table delta saves its
-  array part as the logical length plus the span from the first live array
-  key to the last, as ordinary tables do, instead of every slot up to the
-  logical length (`FORMAT_VERSION` stays 12). On load the saved shape is
-  authoritative: nil slots setup left beyond it are no longer merged in, so a
-  load whose setup differs from the saving State's can place later integer
-  writes differently.
-- **Replay-visible (lines):** an error raised through a `string.gmatch`
-  iterator, such as a malformed pattern found on its first call, is located
-  at the script line that called the iterator, and the internal shim frame is
-  left out of the traceback. A user chunk named `string.gmatch` keeps its own
-  locations, and an iterator restored from a snapshot is located the same way.
-  The same holds for an error inside `string.gmatch` while it builds the
-  iterator, such as budget exhaustion: it is located at the calling line, not
-  `string.gmatch:<n>:`.
-- `_G` is the global table itself, no longer an empty proxy whose handlers
-  forwarded to a separate store. `pairs(_G)` and `next(_G)` enumerate the
-  globals, `rawget(_G, "print")` is `print`, and `rawset(_G, "x", 1)` defines
-  the global `x`; before, a raw write created a second `x` that `_G.x` read
-  and `x` did not. Every key type is a global table key; non-UTF-8 and other
-  non-string keys written inside `with_restricted_env` no longer outlive the
-  restriction, which now swaps the table's contents, so every reference to
-  `_G` sees the environment in force. `State::raw` has a global table too,
-  without a `_G` binding. `getmetatable(_G)` stays `false` and
-  `setmetatable(_G, ...)` still errors; the metatable no longer has
-  `__index`/`__newindex` handlers. Reopening the libraries keeps the same
-  `_G` object. Global access, `_G` field access and costs are otherwise
-  unchanged.
-  - **Replay-visible (`pairs` order):** `pairs(_G)` now yields the globals,
-    in binding order (a cleared and redefined global keeps its place).
-  - **Replay-visible (snapshot contents):** `FORMAT_VERSION` 13. The global
-    table is saved whole with its pins, in place of the named bindings and
-    the proxy's environment delta; older saves are refused. Load setup now
-    contributes only string-keyed globals the save does not mention, and a
-    sealed load keeps a pinned deletion even through a setup that no longer
-    installs the name.
-  - **Replay-visible (sealed globals):** after sealing, tombstones of names
-    written during initialization compact like any other (the pins remember
-    them for a load), so the globals compact at different points than before.
-  - Error messages that name a callback by its global use the first binding
-    in table order whose key is a UTF-8 string.
+
+### Changed (breaking): errors and diagnostics
+
+- Errors are typed throughout; no error carries text describing what went
+  wrong.
+  - `ErrorKind::ScriptError { value: ErrorValue, prefix }` carries the raised
+    value (exact string bytes, or a table's or function's rendering).
+  - Library failures are `ErrorKind::LibraryError(LibraryError)`;
+    `RuntimeError(String)` is gone. `ErrorKind::HostError(Box<dyn Error>)` is a
+    `RustFunc`'s own failure, and `Error` implements `std::error::Error`.
+  - `ErrorKind::InternalError` always means a dellingr bug; `ArgCount::Dynamic`
+    passed to `call` is `DynamicArgumentsUnsupported`.
+  - Snapshot errors live in the new `dellingr::snapshot` module with typed
+    reasons; `LoadError` is `Setup`, `StatePoisoned` or
+    `Snapshot(SnapshotError)`. `CorruptArena` names its location; other load
+    messages are unchanged.
+  - `Error` and `ArgError` fields are private, read through accessors, and the
+    error enums are `#[non_exhaustive]`.
+  - Removed: `ErrorKind::InvalidJump`, `ArgDetail::Custom` and `OutOfBounds`,
+    `SyntaxError::UnexpectedTok` and `AssignmentOffsetTooLarge`,
+    `LibraryFunction::Other`.
+- `error(v)` adds the `chunk:line:` prefix only to strings, as Lua 5.4 does,
+  and `error()` raises nil.
+- Method calls number arguments as written: `s:sub(1.5)` is `bad argument #1`,
+  and a bad receiver is `calling 'sub' on bad self`.
+- Syntax errors use reference Lua's wording: `unexpected symbol near ')'`,
+  `syntax error near '='`, `'=' or 'in' expected`, `function arguments
+  expected`. No program changes between accepted and rejected.
+- Tracebacks name an unnamed function `function <source:line>`;
+  `StackFrame::defined_line` is new.
+- `table.move` limit errors are argument errors (`bad argument #3 to 'move'`).
+- A non-numeric numeric-`for` control and a bad metatable raise their own
+  `TypeError` variants.
+- A call whose callee frame cannot be reserved reports `StackOverflow` at the
+  caller.
+- `Error`'s `Display` no longer ends with a newline.
 
 ### Added
 
-- `State::seal_globals` and `State::globals_sealed`. Sealing ends global
-  initialization: from then on globals set to nil are reclaimed as in any
-  table, so a script writing computed names through `_G` no longer grows the
-  globals without bound. An unsealed State keeps every global's slot, as
-  before. With the `snapshot` feature, sealing records the names written
-  until then as pins, the save records the phase and the pins, and a load
-  restores both; a sealed load's setup must replay the saving State's
-  initialization (`docs/save-state.md`).
-- `Program::disassemble`, returning a displayable `Disassembly` listing of the
-  finalized bytecode, and the CLI flag `--dump-bytecode`, which prints that
-  listing without executing the script. The listing format is diagnostic and
-  may change between versions.
-- `LoadError::InvalidTable` and its `TableLoadLocation` (`#[non_exhaustive]`),
-  exported beside `LoadError`.
+- `State::seal_globals` and `globals_sealed`: after sealing, globals set to nil
+  are reclaimed, so computed names written through `_G` stay bounded. Saves
+  record the phase and pins (docs/save-state.md).
+- `Program::disassemble` and the CLI flag `--dump-bytecode`.
 - Per-State GC policy: `State::with_gc_policy`,
-  `State::with_callbacks_and_gc_policy`, `gc_set_policy` and
-  `gc_set_auto_threshold`.
+  `with_callbacks_and_gc_policy`, `gc_set_policy`, `gc_set_auto_threshold`.
 - `State::try_to_boolean`, `try_typ` and `try_raw_equal` report an invalid
-  stack index; the existing forms keep reading it as `nil`.
-- The snapshot byte limits are public in `limits`.
-- Reference-pinned library limits are public in `limits`: `MAXCCALLS`,
-  `LUA_MAXCAPTURES`, `MAX_FORMAT_LEN`, `MAX_FORMAT_FIELD_DIGITS`,
-  `TONUMBER_BASE_MIN`, `TONUMBER_BASE_MAX` and `TABLE_SORT_MAX_LEN`. Values
-  and error paths are unchanged.
-- Typed library error context: `LibraryError` (the payload of
-  `ErrorKind::LibraryError`), `LibraryFunction` and `StringPatternFunction`,
-  read through `Error::library_function` and `Error::pattern_function`.
-- `CostAnalysis::caveat()` and a `dellingr::cli` module with the analysis
-  warning prefix. The `--analyze` warning now prints that caveat, with new
-  wording.
-- The CLI reads the script from stdin when the input is `-`, as reference Lua
-  does, under the chunk name `stdin`. It used to open a file named `-`; that
-  file is now run as `./-`.
+  stack index.
+- Snapshot byte limits and reference-pinned library limits are public in
+  `limits`.
+- `Error::library_function` and `Error::pattern_function` name the failing
+  library function.
+- The CLI reads the script from stdin when the input is `-`.
 
 ### Changed
 
-- The `hotpath-alloc` cargo feature now enables this crate's `hotpath`
-  feature, so every instrumentation guard keyed on `hotpath` also applies to
-  allocation-tracking builds.
-- The `hotpath` profiler is now an optional dependency, enabled only by this
-  crate's `hotpath` feature, so a default build no longer compiles the
-  profiler or its runtime crates. Recursive parser functions are no longer
-  measured under `hotpath`, so allocation tracking no longer exhausts the
-  profiler's nested guards on deeply nested sources.
-- The crate exports a `#[doc(hidden)]` `native_call!` macro, which wraps each
-  internal call that can re-enter Lua so a debug-only test feature can trace
-  it. Outside that feature it expands to the wrapped call unchanged; it is not
-  part of the supported API.
-- The test-only `fault-injection` cargo feature now fails to compile without
-  debug assertions, so a dependency that enables it cannot reach a host's
-  release build.
-- The published package is an allowlist: the runtime sources, `docs/`,
-  `reference/`, the README, license and lockfile, and the `hotpath` harness
-  example. The integration tests, the Lua example corpus and the fixture
-  regeneration tools are no longer shipped; they need the repository's
-  scripts and gates and never ran from the package.
-- **Replay-visible:** `math.sin`, `cos`, `tan`, `asin`, `acos`, `atan`,
-  `atan2`, `exp`, `log` and the `^` operator no longer call the platform libm.
-  They are in-crate ports of the CORE-MATH correctly rounded binary64
-  functions (`src/crmath`, MIT, notices in `src/crmath/LICENSE-CORE-MATH`),
-  with fused multiply-adds done by the hardware instruction or an in-crate
-  software FMA that agrees with it bit for bit. Results are now the same on
-  every supported host instead of depending on the host's libm, so they can
-  differ in the last place from what the same script produced before on any
-  given host, and from reference Lua. `math.log(x, b)` keeps the Lua 5.2
-  formula (`log10` for base 10, otherwise `ln(x) / ln(b)`). Cost charges are
-  unchanged and `^` is still not constant-folded. Supported hosts are those
-  with IEEE binary64 arithmetic in the default floating-point environment;
-  x87-only 32-bit x86 is not. `docs/determinism.md` has the details.
-- **Replay-visible:** the metamethod event names (`__index`, `__newindex`,
-  `__call`, `__len`, `__tostring`, `__metatable`) are interned once when a
-  State is built and stay live for its lifetime, instead of being interned at
-  each metatable lookup. Lookups no longer allocate, so collections can run at
-  different points than before (GC timing is not a cross-version contract;
-  see `docs/determinism.md`), and a `%p` id given to one of these names no
-  longer changes when the string would previously have been collected and
-  rebuilt. Snapshots carry such an id even when no saved value reaches the
-  name; the snapshot format is unchanged. `State::string_count` counts the
-  six names from construction on, and they count toward the adaptive GC
-  threshold.
-- **Replay-visible (snapshot contents only):** the compiler no longer emits
-  upvalue-close instructions for block and loop scopes whose locals no closure
-  captures, so the same source compiles to fewer instructions in functions
-  that create closures, and snapshots of such states contain that shorter
-  bytecode. Results and cost charges are unchanged, the snapshot format is
-  unchanged, and older saved bytecode still loads and runs.
-- Metatable lookups for `__index`, `__newindex` and string `__index` no
-  longer reserve temporary stack slots, so near `MAX_STACK_SIZE` an access
-  that used to fail with a stack overflow may now succeed.
-- An assignment takes at most `limits::MAX_ASSIGNMENT_TARGETS` (255)
-  targets; one more is the syntax error `TooManyAssignmentTargets`. A function
-  that needs more registers than bytecode can name now fails with the syntax
-  error `TooManyRegisters` (both carry the observed count and the limit), where
-  it reported an internal compiler error, or with enough targets a verifier
-  rejection that panicked debug builds. Assignments of 256 to 65534 targets
-  that used to compile are now rejected.
-- Bytecode verification names the actual defect for a frame size of
-  `OPEN_COUNT` (`ValidationReason::FrameSizeUnencodable`) and for a
-  `TFOR_CALL` result count above 255 (`TforCallResultCountExceeded`).
-- `CostAnalysis::caveat()` and the `--analyze` warning now say that every
-  native library charge, flat or data-dependent, is left out.
-- The cost analysis labels a scope with no static cost `cost 0 (static)`
-  instead of `cost 0 (free)`: a generic `for` can still call a costed
-  iterator at runtime.
-- The CLI reports a parse error the same way for a run, `--analyze` and
-  `--dump-bytecode` (`Error: parsing source: ...`).
-- The disassembly header names the non-parameter local count
-  `non_param_locals` instead of `local_slots`.
-- `TooManyRegisters` reports the line of the construct that ran out of
-  registers, `local` statements and expressions included, instead of the
-  function's last line.
-- Reading a global through `_G`, or writing one that is already bound, no
-  longer allocates a host string per access.
-- `string.gsub`'s bad replacement capture names it: `invalid capture index
-  %2` (was `invalid capture index`).
-- Snapshot errors in an environment delta's hash slots name the new
-  `TableLoadLocation::EnvironmentHashSlots`.
-- docs/save-state.md states that values a `load_state` setup leaves on the
-  value stack are discarded.
-- Method-call inline caches no longer revalidate on every global rebind or
-  restricted-environment swap. Results are unchanged.
-- `ipairs` pushes its registered iterator directly instead of registering it
-  again on every call.
-- Pattern escape classes (`%a`, `%d`, ...) come from a constant table instead
-  of a 256-byte scan per escape.
+- The `hotpath` profiler is an optional dependency, so a default build no
+  longer compiles it.
+- The published package ships the runtime sources, docs, README, license and
+  lockfile only.
+- `string.gsub`'s bad capture names it: `invalid capture index %2`.
+- `--analyze` and `CostAnalysis::caveat()` say that native library charges are
+  left out, and label a scope with no static cost `cost 0 (static)`.
 
 ### Fixed
 
-- A short string broken off by a newline reports `unfinished string` at the
-  end of the line it broke off on (the newline's first byte, where the closing
-  quote is missing), the same column the end-of-source case reports. It used
-  to report the start of the next line after a bare CR or LF, and the column
-  after the newline's first byte after CRLF or LFCR.
-- A reachable `ipairs` iterator can be saved (registered as `ipairs.iter`).
-- `table.move` charges and copies identically with and without a budget; a
-  budget that runs out mid-move keeps the prefix it paid for.
-- `table.move` accepts an exact singleton key above 2^53, like the other table
-  functions.
-- The CLI exits quietly with status 0 when stdout is a closed pipe instead of
-  panicking with exit 101.
-- **Replay-visible:** a string literal reachable only through a saved
-  closure's code keeps its `%p` id across save and load, instead of rendering
-  a fresh id after load. Snapshots of such states carry the literal's id; the
-  snapshot format is unchanged.
-- A table used as a FIFO (`q[tail] = v; q[head] = nil`) no longer grows with
-  its history. The array part is now a logical length plus a stored window
-  of it: an append drops the window's dead prefix once it is half the
-  window, an all-dead window restarts at the next write, so storage, `pairs`
-  and `next` starts, and snapshot size track the live span instead of every
-  key ever pushed. Which keys are array keys, `#`, `pairs` order and where
-  later writes land are unchanged, so script behaviour and cost are
-  identical. A table that keeps one old key alive while the rest of a long
-  array dies still stores the span between them. On a 32-bit host, growing
-  an array past 2^31 - 2 keys now fails with `table growth failed` rather
-  than exhausting memory.
-- A field read, field write or method lookup could return or overwrite the
-  wrong field of a table after very long table churn. Inline caches remember
-  a table by its heap handle, and only the handle's 32-bit generation told a
-  freed table from a new one in the same heap slot; after about 2^31 reuses
-  of one slot, a site whose cache entry had sat untouched all that time could
-  match the new table at the same shape version and use the old table's slot
-  layout. Reaching it takes a long-running State that frees and reallocates
-  tables on the order of billions of times, and replays reproduced the wrong
-  result. Every collection now drops the cache entries naming what it freed,
-  so no entry outlives its object. Results, `cost_used` and snapshots are
-  unchanged; collections do a little more work, proportional to the inline
-  caches of the live code.
-- **Replay-visible:** saves are byte-stable when several saved functions
-  carry string literals that `%p` rendered. Those literals got their string
-  ids in the order the functions' bytecode happened to sit in memory, so a
-  loaded State, a different allocator or another host could save the same
-  logical state with different bytes. They now take ids in the save's own
-  function order. Affected saves change bytes once; the snapshot format and
-  `FORMAT_VERSION` are unchanged, and older saves still load.
-- An explicit nil optional argument takes its default: `error(msg, nil)`
-  raises `msg` at level 1 instead of an argument error, and
-  `math.atan(y, nil)` and `math.log(x, nil)` act as the one-argument forms.
-- `table.concat` accepts a number separator and converts it to a string, as
-  reference Lua does.
-- `string.gsub` checks its subject and pattern before the replacement, so
-  `string.gsub()` and `string.gsub("x", {})` blame argument 1 or 2 instead of 3.
-- **Replay-visible:** `x ^ y` with `|y| >= 2^1014` returns the overflowed or
-  underflowed result directly. For rare inputs the old path carried an
-  out-of-range intermediate into later phases, which could panic a debug
-  build and left the release result to chance.
-- Snapshot decoding caps a vector's initial reservation by its size in bytes,
-  not by element count, so a forged length prefix can no longer reserve many
-  times the input size.
-- Host `get_table` keeps its key on the stack when a function-valued
-  `__index` handler is refused before it runs (its frame does not fit, or a
-  call-depth limit is reached), as it does for other refusals.
-- An open `...` that is refused for lack of stack space leaves the
-  function's live registers untouched instead of truncating them first.
-- Table array growth that cannot be reserved (a logical length past the
-  array limit, as an edited save can demand, or an allocator refusal) raises
-  the new `ErrorKind::TableGrowthFailed` ("table growth failed"), which kills
-  the callback and leaves the table unchanged, instead of panicking or
-  aborting. A load that hits it reports `TableRestoreFailure::GrowthFailed`.
-- **Replay-visible:** a `string.gmatch` iterator whose result push is refused
-  no longer skips the match or tears its saved position; the next call
-  returns that match.
-- A table array whose live slots were cleared in any order, not only from the
-  front, now releases its stored window at the next append or array write
-  outside it. Storage only: results, `pairs` order and cost are unchanged,
-  and a write whose growth reservation used to fail may now succeed.
-- `table.sort` whose sequence copy cannot be allocated (an edited save's
-  impossible gap) raises `table growth failed` instead of aborting.
-- **Replay-visible (`%p` ids):** identities a `load_state` setup rendered are
-  merged with the saved ones instead of being dropped. A value the save
-  records takes its saved identity; any other value setup rendered that
-  survives the load, such as an anchored table, keeps its setup id, or gets a
-  fresh id above the saved counter when a saved value holds that id. A setup
-  that replays the saving State's initialization now continues with the same
-  ids as the saving State; before, such a value took a new id when next
-  rendered (`docs/save-state.md`).
-- `HostCallbacks::on_error` fires for every execution error before host code
-  can see it, at any depth. A Rust callback that called `State::call` (or
-  `call_anchor`, `get_table`, `tostring_bytes`) and handled the error instead
-  of returning it used to leave `on_error` silent unless the failure came out
-  of a Lua frame: calling a non-callable value, a `__call` chain hitting its
-  depth or argument limit, a Rust function returning `Err`, result padding
-  overflowing the stack and the native call depth limit were never reported.
-  They now notify once, with the same location, traceback and source name as
-  the error the callback receives; an error that propagates instead is
-  reported exactly as before. Host `get_table` and `tostring_bytes` now also
-  notify for failures that never reached a call: a receiver that cannot be
-  indexed, a non-function `__index` handler, an `__index` chain at the
-  metamethod depth limit, a `__tostring` result that is not a string or
-  number, and running out of `%p` identities. Operand misuse (invalid
-  index, missing key) still does not notify. The `on_error` doc states the
-  rule.
-- Loading a save into a build that folds two rendered Rust functions the
-  saving build kept apart no longer fails as a duplicate: the folded function
-  keeps the smaller of the two identities. Two such functions used as keys of
-  one table still reject the load, now documented.
-- **Replay-visible:** whether an `__index` lookup succeeds at the
-  metamethod depth limit or the stack cap no longer depends on the lookup
-  site's history or on how the lookup is written. A field-read site that
-  had once resolved an inherited method, a function `__index` or a miss
-  sent every later receiver down the general path for good, so the same
-  `obj.k` at the depth limit or the stack cap succeeded on a fresh State,
-  after a snapshot load or a collection, and failed on a State that had run
-  longer; `obj["k"]` and string receivers counted the one-level step
-  differently again. The rule is now one for every route: an `__index`
-  table that answers from its own contents takes no depth unit, a table
-  that continues to its own `__index` takes one, and a function or string
-  handler takes one (`docs/limits.md`). Compared with before, one-level
-  `__index` reads at the limit now succeed on every route; a string
-  receiver whose library table continues to another `__index` takes one
-  more unit; a handler that is neither a table nor callable reports its
-  type error without taking a unit; and an `__index` chain of tables needs no
-  value-stack slot per table and no native stack per step. Inherited method
-  calls through one site that serves several classes no longer slow the
-  others down. Results and `cost_used` are otherwise unchanged.
-- **Replay-visible at the metamethod depth limit:** `__newindex` now counts
-  depth by the same rule as `__index`. A handler table that takes the store
-  into its own contents (it holds the key, or has no `__newindex` of its
-  own) takes no depth unit; a table that continues to its own `__newindex`
-  and a function handler each take one. Every handler dispatch used to take
-  one, so at `MAX_METAMETHOD_DEPTH` `obj.k` through a one-level `__index`
-  table succeeded while `obj.k = v` through a one-level `__newindex` table
-  raised `MetamethodDepthExceeded`. Compared with before, a store through a
-  chain of tables needs one unit fewer, on `t.k = v`, `t["k"] = v` and
-  table-library writes alike; a `__newindex` handler that is neither a table
-  nor callable reports its type error at the limit instead of the depth
-  error; and an error from the terminal table's raw insert (a NaN key, for
-  instance) is no longer masked by the depth error there. Results and
-  `cost_used` are otherwise unchanged.
+- `on_error` fires for every execution error before host code sees it, also
+  inside a Rust callback that handles the error itself.
+- A table used as a FIFO no longer grows with its history, and an array
+  cleared in any order releases its storage.
+- Inline caches could return or overwrite the wrong field after billions of
+  reuses of one heap slot.
+- Array growth or a `table.sort` copy that cannot be reserved raises
+  `ErrorKind::TableGrowthFailed` instead of panicking or aborting.
+- An explicit nil optional argument takes its default (`error(msg, nil)`,
+  `math.atan(y, nil)`, `math.log(x, nil)`).
+- `table.concat` accepts a number separator.
+- `string.gsub` checks subject and pattern before the replacement.
+- `table.move` charges identically with and without a budget, and accepts an
+  exact singleton key above 2^53.
+- A reachable `ipairs` iterator can be saved.
+- Host `get_table` keeps its key when an `__index` handler is refused before
+  it runs; a refused `...` leaves live registers untouched.
+- An unfinished short string reports the end of the line it broke off on.
+- Snapshot decoding caps reservations by input size, and rejects impossible
+  cost counters and malformed `gmatch` state.
+- The CLI exits quietly when stdout is a closed pipe.
 
 ## [0.5.0] - 2026-10-14
 
