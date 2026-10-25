@@ -190,10 +190,9 @@ new format version. Compiler output, engine metadata and cost-model changes
 can change save bytes without changing the format.
 
 The released-format list in `tests/integration/snapshot/save_golden.rs` records
-formats 6 and 7. The 0.4.0 and 0.5.0 changelog sections, checked against the
-release trees at 3170f83 and 6c795d1, establish that list; earlier releases
-predate the snapshot feature. Their original binary fixtures are archived
-with fingerprints. They are historical evidence, not supported load formats.
+every released format, each with the release tree that establishes it (named
+in the comment above the list); releases before 0.4.0 predate the snapshot
+feature. Their original binary fixtures are archived with fingerprints. They are historical evidence, not supported load formats.
 At every release, archive the current golden for each new
 (format version, cost-model version) pair and add its file name, both version
 words and fingerprint to that list. Use `save_released_v<format>_cost<cost>.bin`

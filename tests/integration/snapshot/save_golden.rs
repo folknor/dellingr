@@ -135,7 +135,8 @@ fn golden_fixture_round_trips() {
 
 // Release sections and their release trees establish these versions:
 // 0.4.0: 3170f83 (save_state.rs FORMAT_VERSION = 6),
-// 0.5.0: 6c795d1 (save_state.rs FORMAT_VERSION = 7).
+// 0.5.0: 6c795d1 (save_state.rs FORMAT_VERSION = 7),
+// 0.6.0: the commit tagged v0.6.0 (snapshot_format.rs FORMAT_VERSION = 13).
 // Earlier releases predate the snapshot feature. Preserve these files and pins;
 // on release, regenerate the current binary at the release commit, archive it
 // under its format and cost-model pair and add both words and its fingerprint
@@ -159,6 +160,12 @@ const RELEASED_FORMATS: &[ReleasedArchive] = &[
         cost_model: 5,
         file: "save_released_v7.bin",
         fingerprint: 0xcee0_80b7_9e3e_662b,
+    },
+    ReleasedArchive {
+        format: 13,
+        cost_model: 8,
+        file: "save_released_v13_cost8.bin",
+        fingerprint: 0xc528_d367_4b7d_10cb,
     },
 ];
 

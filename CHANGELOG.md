@@ -4,7 +4,7 @@ All notable changes to dellingr are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 [Semantic Versioning](https://semver.org/) once 1.0 lands.
 
-## [Unreleased]
+## [0.6.0] - 2026-10-25
 
 Saves and replays from 0.5.0 do not carry over: snapshot `FORMAT_VERSION` is
 13 (was 7), with no migration, and `COST_MODEL_VERSION` is 8 (was 5).

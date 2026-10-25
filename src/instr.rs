@@ -1246,6 +1246,12 @@ mod tests {
                 include_str!("../tests/fixtures/opcode_released_v7.txt"),
                 0x98cd_eb55_805a_66e1_u64,
             ),
+            (
+                13,
+                8,
+                include_str!("../tests/fixtures/opcode_released_v13_cost8.txt"),
+                0x5017_1cec_1e4c_3883_u64,
+            ),
         ];
         for (format, cost, archived, fingerprint) in released {
             assert_eq!(
