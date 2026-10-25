@@ -11,7 +11,7 @@ Ground rules that are easy to get wrong (the `docs/` pages have the detail):
 - **Determinism is a product requirement**, not a style preference - game replays depend on it.
 - Lua written for tests and examples has no `assert`; use `if not cond then error(...) end`.
 
-The crate ships a library (`State`, `HostCallbacks`, `RustFunc`, `analyze_cost`, `ArgCount`, `RetCount`) and a thin CLI binary (`src/main.rs`). The public API is pre-1.0 and not stable. MSRV is the `rust-version` in `Cargo.toml`; edition 2024.
+The crate ships a library (`Program`, `State`, `HostCallbacks`, `RustFunc`, `Program::analyze_cost`, `ArgCount`, `RetCount`) and a thin CLI binary (`src/main.rs`). The public API is pre-1.0 and not stable. MSRV is the `rust-version` in `Cargo.toml`; edition 2024.
 
 ## Rules
 

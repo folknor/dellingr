@@ -4,6 +4,16 @@ All notable changes to dellingr are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 [Semantic Versioning](https://semver.org/) once 1.0 lands.
 
+## [Unreleased]
+
+`COST_MODEL_VERSION` is 8 (unchanged).
+
+### Changed
+
+- Bumped the dev-only `object` dependency (the libm symbol test's ELF reader)
+  0.37 to 0.40. The lockfile also moves the optional `hotpath` profiler 0.29.0
+  to 0.29.1. Neither touches a default build.
+
 ## [0.6.0] - 2026-10-25
 
 Saves and replays from 0.5.0 do not carry over: snapshot `FORMAT_VERSION` is

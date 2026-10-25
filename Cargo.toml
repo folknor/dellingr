@@ -117,7 +117,7 @@ libbeef = "0.1.1"
 # Reads the linked CLI's ELF symbol tables for the libm symbol test
 # (tests/common/libm_symbols.rs). Dev-only: it must never become a normal
 # dependency.
-object = { version = "0.37", default-features = false, features = ["read_core", "elf"] }
+object = { version = "0.40.0", default-features = false, features = ["read_core", "elf"] }
 toml = "1.1.8"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
