@@ -20,16 +20,11 @@ get deleted as they ship or stop being worth tracking.
 
 ### Housekeeping left from the `_G`-as-real-table change (2026-10-23)
 
-- The README's `globals/write` ratio row predates the change and may be stale.
 - Several `bench/` verdict headers (arithmetic, pairs, fill, queue, mixed,
   patterns, literal_find, closure, record_tables) still say "see that file
   for the probe rationale", while their `examples/` partners are now
   `-- Workload:`. Rewording them re-pins the verdict files and cuts their
   stored history; do it the next time those workloads are re-pinned anyway.
-- The README `benchmark` ratio row (every column, lua-rs included) timed the
-  deleted `examples/benchmark.lua`; `scripts/bench.sh` and
-  `research/bench_luars.sh` now time `examples/composite/benchmark.lua`. The
-  row needs a fresh capture; the footnote explains the mismatch until then.
 - The compiler verifier still requires GET/SET_GLOBAL names to be UTF-8,
   although the runtime keys the global table with the interned literal and no
   longer needs it. Either drop the check or say why it stays.

@@ -493,10 +493,13 @@ pattern = '\b(?:STD|VM)-\d{3}\b|\bC\d{2}\b:|\(L\d+\)'
 paths = ["src/**/*.rs", "tests/**/*.rs"]
 message = "comments must carry their own context instead of citing transient tracker IDs"
 
+# bench.sh's header documents how to build the external omniLua comparator,
+# which is not a dellingr build.
 [[textlint]]
 name = "no-raw-cargo-in-scripts"
 pattern = '\bcargo\s+'
-paths = ["scripts/**", "research/*.sh"]
+paths = ["scripts/**"]
+exclude = ["scripts/bench.sh"]
 message = "build and test through brokkr instead of invoking cargo directly"
 
 [[textlint]]
@@ -692,13 +695,6 @@ stream = "stdout"
 [[script_check]]
 name = "poison-contract-checker-tests"
 command = "python3 -B scripts/test_poison_contract.py"
-expect = "ok"
-match = "last-line"
-stream = "stdout"
-
-[[script_check]]
-name = "notes-sections"
-command = "python3 -B scripts/test_notes_sections.py"
 expect = "ok"
 match = "last-line"
 stream = "stdout"

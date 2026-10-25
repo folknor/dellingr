@@ -7,8 +7,8 @@ tool is named before anything compiles. Prints one line per problem, then
 
 This covers the gate's own requirements and nothing else (brokkr itself, and
 the `sh` its script checks run under, are brokkr's). Scripts outside brokkr's
-pipelines - `scripts/diff_test.sh`, `scripts/bench.sh`,
-`research/bench_luars.sh` - check their own tools when they run.
+pipelines - `scripts/diff_test.sh`, `scripts/bench.sh` - check their own
+tools when they run.
 
 - python3 3.11 or newer: the script checks, including
   `scripts/crmath_tables.py --check-pins` (3.11 for `tomllib`).

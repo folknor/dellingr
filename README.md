@@ -11,31 +11,41 @@ Built with LLMs. See [LLM.md](LLM.md).
 
 ## Performance
 
-It's slower than reference Lua, but not dramatically so: roughly 1.4-3.3x behind lua5.2 on representative workloads. LuaJIT is obviously in its own league. dellingr is fast enough for continuous bounded execution of a few kilobytes of Lua code to let a game run at several thousand FPS.
+It's slower than reference Lua, but not dramatically so: roughly 1.3-2.2x behind lua5.2 and 1.2-3x behind lua5.4 on the workloads below. LuaJIT is obviously in its own league. dellingr is fast enough for continuous bounded execution of a few kilobytes of Lua code to let a game run at several thousand FPS.
 
-Run `./scripts/bench.sh` to reproduce on your own host. Sample run on AMD Ryzen 9 5900X / Linux 7.0:
+Run `./scripts/bench.sh` to reproduce on your own host. Each ratio is dellingr's time divided by the other implementation's, so below 1 means dellingr is faster. [omniLua](https://github.com/ianm199/omnilua) is a pure-Rust Lua, run in its default 5.4 mode. Sample run on AMD Ryzen 9 5900X / Linux 7.3:
 
-| bench                    | dellingr |  lua-rs | vs lua5.5 | vs lua5.4 | vs lua5.2 | vs luajit |
-|--------------------------|---------:|--------:|----------:|----------:|----------:|----------:|
-| `benchmark`              |    139ms |   104ms |     3.42x |     3.35x |     2.29x |    19.65x |
-| `numerics/arithmetic`    |     92ms |    60ms |     3.63x |     3.53x |     2.59x |    21.30x |
-| `numerics/constants` *   |     64ms |       - |     6.50x |     6.48x |     5.64x |    23.15x |
-| `iter/pairs`             |     61ms |   169ms |     1.49x |     1.40x |     1.38x |    11.41x |
-| `tables/fill`            |    102ms |    64ms |     4.10x |     3.46x |     2.62x |     7.07x |
-| `strings/mixed`          |     34ms |    65ms |     2.77x |     3.02x |     1.97x |     2.95x |
-| `strings/patterns`       |     60ms |    22ms |     3.48x |     3.45x |     3.34x |     5.27x |
-| `strings/literal_find`   |     21ms |       - |     3.31x |     3.41x |     2.42x |     6.23x |
-| `fields/same_obj_read` * |    169ms |    61ms |     6.01x |     7.16x |     3.81x |    46.27x |
-| `globals/write` *        |     32ms |       - |     1.62x |     2.04x |     1.10x |    27.12x |
-| `calls/many_literals` *  |     57ms |       - |     4.40x |     4.39x |     2.70x |    61.03x |
-| `alloc/closure`          |     81ms |   126ms |     2.20x |     2.21x |     1.83x |     2.80x |
-| `alloc/record_tables`    |    266ms |       - |     3.47x |     3.23x |     2.11x |    91.94x |
-| `alloc/gc_churn` *       |     20ms |       - |     1.31x |     1.26x |     1.10x |     1.77x |
-| `parse/large_source` *   |      8ms |       - |     2.28x |     2.30x |     2.04x |     3.19x |
+| bench                           | dellingr | vs omniLua | vs lua5.5 | vs lua5.4 | vs lua5.2 | vs luajit |
+|---------------------------------|---------:|-----------:|----------:|----------:|----------:|----------:|
+| `composite/benchmark`           |     48ms |      1.44x |     2.91x |     2.99x |     2.14x |    15.08x |
+| `numerics/arithmetic`           |     82ms |      1.59x |     3.65x |     3.04x |     2.23x |    17.74x |
+| `numerics/math`                 |     45ms |      1.31x |       n/a |     2.42x |     1.87x |     8.77x |
+| `iter/pairs`                    |     57ms |      0.86x |     1.34x |     1.31x |     1.26x |    10.16x |
+| `tables/fill`                   |     54ms |      1.11x |     2.05x |     1.78x |     1.36x |     3.67x |
+| `tables/queue`                  |     10ms |      0.46x |     2.07x |     2.32x |     1.66x |     3.04x |
+| `tables/sort`                   |     23ms |      0.64x |     1.18x |     1.22x |     1.36x |     1.44x |
+| `strings/mixed`                 |     30ms |      0.53x |     2.29x |     2.61x |     1.74x |     2.52x |
+| `strings/patterns`              |     29ms |      1.37x |     1.58x |     1.59x |     1.54x |     2.49x |
+| `strings/literal_find`          |     19ms |      1.28x |     2.66x |     2.96x |     2.10x |     5.21x |
+| `alloc/closure`                 |     82ms |      0.94x |     2.15x |     2.27x |     1.85x |     2.76x |
+| `alloc/record_tables`           |    202ms |      0.93x |     2.55x |     2.43x |     1.59x |    64.39x |
+| `calls/rust_boundary`           |      5ms |      1.13x |     2.41x |     2.34x |       n/a |       n/a |
+| `numerics/constants` *          |     26ms |      1.64x |     2.58x |     2.54x |     2.24x |     8.66x |
+| `fields/same_obj_read` *        |    104ms |      1.82x |     3.64x |     4.39x |     2.29x |    26.50x |
+| `calls/method` *                |     54ms |      1.23x |     3.09x |     3.45x |     2.27x |    58.31x |
+| `calls/method_chain` *          |     49ms |      1.21x |     3.06x |     3.38x |     2.31x |    56.84x |
+| `calls/method_polymorphic` *    |     40ms |      1.38x |     3.20x |     3.19x |     2.30x |     7.75x |
+| `globals/write` *               |     33ms |      0.86x |     1.61x |     2.02x |     1.11x |    24.80x |
+| `calls/global` *                |     96ms |      1.73x |     3.33x |     3.94x |     2.57x |    60.47x |
+| `calls/many_literals` *         |     54ms |      1.91x |     3.44x |     4.04x |     2.51x |    50.53x |
+| `calls/loop_beside_closure` *   |     17ms |      1.41x |     2.52x |     2.60x |     1.89x |    12.54x |
+| `alloc/list_literals` *         |    220ms |      0.73x |     2.22x |     2.50x |     1.40x |     4.43x |
+| `alloc/gc_churn` *              |     22ms |      0.71x |     1.41x |     1.37x |     1.18x |     1.84x |
+| `parse/large_source` *          |     10ms |      1.53x |     2.58x |     2.65x |     2.33x |     3.66x |
 
-<sub>Rows marked `*` are diagnostic probes, not representative workloads. Each one deliberately isolates a single path that was unoptimized when the probe was written, so its ratio tracks one specific optimization target rather than what typical scripts see. Several of those paths have since been optimized, which is why some probes now sit among the cheaper rows. `calls/many_literals` calls a function carrying 32 string constants that returns from its first branch, concentrating its runtime in per-call literal handling. `parse/large_source` is a parse and codegen probe on generated source; its timing is a parse/codegen diagnostic rather than an execution benchmark.</sub>
+<sub>Rows marked `*` are diagnostic probes, not representative workloads. Each one deliberately isolates a single path, so its ratio tracks one specific optimization target rather than what typical scripts see; some of those paths have since been optimized. `parse/large_source` times parsing and code generation of a generated source rather than execution. `n/a`: Lua 5.5 has no `math.atan2`, and Lua 5.2 and LuaJIT reject a callable table as a `__call` handler. Rows of about 10ms or less are dominated by process startup.</sub>
 
-<sub>The `lua-rs` column was captured 2026-06-02 against [ianm199/lua-rs](https://github.com/ianm199/lua-rs) at commit [`98bd6bd`](https://github.com/ianm199/lua-rs/commit/98bd6bd); rows added since carry no `lua-rs` figure. The `benchmark` row in every column timed `examples/benchmark.lua`, since retired; its successor `examples/composite/benchmark.lua` is a different file and has not been captured here. Every column other than `lua-rs` was captured 2026-07-27 at commit `abf7c7b` on host `plantasjen`, with the release profile the repository set then (fat LTO, one codegen unit). The repository now builds Cargo's default release profile, which is a few percent to about 12% slower on some workloads (see [reference/performance.md](reference/performance.md)), so these figures do not compare with runs of the current tree.</sub>
+<sub>Captured 2026-10-25 on host `plantasjen` at dellingr commit `20b9088`, built with Cargo's default release profile, against omniLua commit [`90dcf85`](https://github.com/ianm199/omnilua/commit/90dcf85) (v0.7.1 plus four commits), with hyperfine 2.0 (mean of at least 10 runs after 2 warmups).</sub>
 
 Note that recorded results always track the latest git head and may not match the released version.
 

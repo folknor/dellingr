@@ -512,7 +512,7 @@ fn bench_scripts_parse_and_follow_the_standalone_footer_contract() {
     // `--hotpath` and `--alloc` the examples/ footer (calibrated per file,
     // 20 to 2500 calls, not 30) supplies most of the profiled events, against
     // only a few warm iterations. The standalone run is also what
-    // scripts/bench.sh and research/bench_luars.sh time under hyperfine.
+    // scripts/bench.sh times under hyperfine.
     // Shrinking the footer for the tests would change those measurements.
     let bench_function = hotpath_bench_function();
     let expected_loop = format!("for i = 1, 30 do {bench_function}() end");

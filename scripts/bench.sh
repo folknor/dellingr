@@ -1,11 +1,20 @@
 #!/usr/bin/env bash
-# Bench-vs-Lua: wall-clock comparison against reference Lua 5.2 / 5.4 / 5.5
-# and LuaJIT, run on request to regenerate the README's comparison table (it is
-# not how dellingr's own performance is measured; that goes through
-# `brokkr dellingr`). Each run records host, commit and dirty state in its
-# banner and in provenance.txt beside the JSON. Requires hyperfine, lua5.2, lua5.4, lua5.5, luajit, jq on PATH.
-# Builds dellingr release binary before running. Wraps hyperfine to extract
-# one-line summaries instead of dumping its full verbose tables.
+# Bench-vs-Lua: wall-clock comparison against omniLua (a pure-Rust Lua,
+# https://github.com/ianm199/omnilua, in its default 5.4 mode), reference Lua
+# 5.5 / 5.4 / 5.2 and LuaJIT, run on request to regenerate the README's
+# comparison table (it is not how dellingr's own performance is measured; that
+# goes through `brokkr dellingr`). Each run records host, commits and dirty
+# state in its banner and in provenance.txt beside the JSON. Requires
+# hyperfine, lua5.2, lua5.4, lua5.5, luajit, jq on PATH, plus an omniLua
+# release binary (path in OMNILUA below) built from a local clone in the
+# gitignored research/lua-rs:
+#   cargo build --release -p omnilua-cli --manifest-path research/lua-rs/Cargo.toml
+# The README footnote names the omniLua commit of its capture, so update the
+# clone and the footnote together. Builds
+# dellingr release binary before running. Wraps hyperfine to extract one-line
+# summaries instead of dumping its full verbose tables. A comparator that
+# cannot run a script (one launch, nonzero exit) is left out of that script's
+# hyperfine run and shown as n/a.
 #
 # Usage: ./scripts/bench.sh                  # runs the curated default set
 #        ./scripts/bench.sh script1.lua ...  # runs the given scripts
@@ -26,7 +35,11 @@ then
     DRY_RUN=1
 fi
 
+OMNILUA="research/lua-rs/target/release/omnilua"
 reference_luas=(lua5.5 lua5.4 lua5.2 luajit)
+# Comparator names (hyperfine command names and column order) and commands.
+comparators=(omnilua "${reference_luas[@]}")
+comparator_commands=("$OMNILUA" "${reference_luas[@]}")
 
 if [ $# -gt 0 ]
 then
@@ -55,6 +68,7 @@ do
         errors+=("missing tool: $tool")
     fi
 done
+[ -x "$OMNILUA" ] || errors+=("missing omniLua binary: $OMNILUA")
 for script in "${scripts[@]}"
 do
     if [ ! -f "$script" ]
@@ -71,7 +85,7 @@ fi
 if [ "$DRY_RUN" = "1" ]
 then
     printf 'dry-run OK: %d script(s), %d Lua implementations, all tools present\n' \
-        "${#scripts[@]}" "$(( ${#reference_luas[@]} + 1 ))"
+        "${#scripts[@]}" "$(( ${#comparators[@]} + 1 ))"
     exit 0
 fi
 
@@ -90,16 +104,17 @@ echo "  date:   $(date '+%Y-%m-%dT%H:%M:%S%z')"
 echo "  commit: $(git rev-parse HEAD 2>/dev/null)"
 echo "  branch: $(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
 echo "  dirty:  $(git status --porcelain 2>/dev/null | wc -l) file(s)"
+echo "  omnilua: $(git -C research/lua-rs rev-parse HEAD 2>/dev/null)"
 echo "====================="
 echo ""
 printf '%-42s %10s' "bench" "dellingr"
-for reference_lua in "${reference_luas[@]}"
+for comparator in "${comparators[@]}"
 do
-    printf ' %10s' "vs $reference_lua"
+    printf ' %10s' "vs $comparator"
 done
 printf '\n'
 printf '%-42s %10s' "-----" "--------"
-for reference_lua in "${reference_luas[@]}"
+for comparator in "${comparators[@]}"
 do
     printf ' %10s' "---------"
 done
@@ -123,6 +138,7 @@ fi
     echo "date:   $(date '+%Y-%m-%dT%H:%M:%S%z')"
     echo "commit: $(git rev-parse HEAD 2>/dev/null)"
     echo "dirty:  $(git status --porcelain 2>/dev/null | wc -l) file(s)"
+    echo "omnilua: $(git -C research/lua-rs rev-parse HEAD 2>/dev/null)"
 } > "$results_dir/provenance.txt"
 
 # Benchmark run files are scratch output; retain only the ten newest runs.
@@ -162,10 +178,20 @@ do
     error_file="$results_dir/$run_index.err"
     printf '%s\t%s\n' "$run_index" "$script" >> "$results_dir/scripts.tsv"
     SCRIPT_COMMAND="$(shell_quote "$script")"
-    benchmark_commands=(-n dellingr "$DELLINGR_COMMAND $SCRIPT_COMMAND")
-    for reference_lua in "${reference_luas[@]}"
+    benchmark_commands=("$DELLINGR_COMMAND $SCRIPT_COMMAND")
+    # A comparator that cannot run this script (a feature it lacks) is left
+    # out of the timing and shown as n/a. hyperfine's JSON lists results in
+    # command order, so `positions` maps each comparator to its result index.
+    positions=()
+    for index in "${!comparators[@]}"
     do
-        benchmark_commands+=(-n "$reference_lua" "$reference_lua $SCRIPT_COMMAND")
+        if "${comparator_commands[$index]}" "$script" >/dev/null 2>&1
+        then
+            positions+=("${#benchmark_commands[@]}")
+            benchmark_commands+=("$(shell_quote "${comparator_commands[$index]}") $SCRIPT_COMMAND")
+        else
+            positions+=("")
+        fi
     done
     if ! hyperfine --warmup "$HYPERFINE_WARMUP_COUNT" -N \
         --export-json "$json_file" \
@@ -175,7 +201,7 @@ do
         failures+=("$script")
         failure_indices+=("$run_index")
         printf '%-42s %10s' "$script" "FAIL"
-        for reference_lua in "${reference_luas[@]}"
+        for comparator in "${comparators[@]}"
         do
             printf ' %10s' "-"
         done
@@ -183,33 +209,22 @@ do
         continue
     fi
 
-    summary=$(jq -r '
-        ([.results[] | select(.command == "dellingr").mean] | first) as $d |
-        [
-            ((($d * 1000 + 0.5) | floor | tostring) + "ms"),
-            (.results[] | select(.command != "dellingr") |
-                (((($d / .mean) * 100 + 0.5) | floor / 100 | tostring) + "x"))
-        ] | join(" ")
-    ' "$json_file")
-    values=()
-    read -r -a values <<< "$summary"
-    if [ "${#values[@]}" -ne "$(( ${#reference_luas[@]} + 1 ))" ]
-    then
-        failures+=("$script")
-        failure_indices+=("$run_index")
-        printf 'hyperfine JSON did not contain the expected result columns: %s\n' "$json_file" > "$error_file"
-        printf '%-42s %10s' "$script" "FAIL"
-        for reference_lua in "${reference_luas[@]}"
-        do
-            printf ' %10s' "-"
-        done
-        printf '\n'
-        continue
-    fi
-    printf '%-42s %10s' "$script" "${values[0]}"
-    for index in "${!reference_luas[@]}"
+    # hyperfine 2's JSON (schema_version 2) keeps the mean wall time under
+    # each result's summary.
+    dellingr_ms=$(jq -r '.results[0].summary.time_wall_clock.mean * 1000 + 0.5 | floor | tostring + "ms"' "$json_file")
+    printf '%-42s %10s' "$script" "$dellingr_ms"
+    for position in "${positions[@]}"
     do
-        printf ' %10s' "${values[$((index + 1))]}"
+        if [ -z "$position" ]
+        then
+            printf ' %10s' "n/a"
+            continue
+        fi
+        ratio=$(jq -r --argjson i "$position" '
+            (.results[0].summary.time_wall_clock.mean / .results[$i].summary.time_wall_clock.mean)
+                * 100 + 0.5 | floor / 100 | tostring + "x"
+        ' "$json_file")
+        printf ' %10s' "$ratio"
     done
     printf '\n'
 done
