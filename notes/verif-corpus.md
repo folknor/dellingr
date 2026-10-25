@@ -72,29 +72,3 @@ Enforceable: yes. In `run_examples.rs`, require every DIFF/SKIP-DIFF file to
 print at least one line matching `: (true|false)$` or call `error(`, unless it
 is on an explicit smoke-test allowlist; or require every DIFF file to have an
 `.expected` sibling.
-
-## VC-019 - Tests that spawn tools rather than the product
-
-Reported by: check-machinery, corpus-harness.
-
-The `test-processes-through-support` textlint rules in `brokkr.toml` keep
-every process a Rust test starts in `tests/integration/support/process.rs`
-(the CLI and the reference Luas), except two `python3` spawns that carry a
-`process-spawn-exception:` marker: `tests/common/libm_symbols.rs` runs
-`scripts/libm_symbols.py` (which runs `nm`) on a linked CLI binary, and
-`src/crmath/tests/golden.rs` runs `scripts/crmath_tables.py --check-pins` (and
-`--check` under `crmath-sweeps`). Undecided: keep them as test-time spawns,
-port them to Rust, or move them to script checks (the libm one needs the
-binary of the sweep that built it, which is why it is a test). When decided,
-drop the marker and the rule's exception with them.
-
-Decision (2026-10-25): no Rust code spawns anything but dellingr and the
-reference Luas.
-- Port the libm symbol check to Rust: read the ELF symbol table with the
-  `object` crate as a dev-dependency, port `scripts/test_libm_symbols.py`'s
-  fixtures, and drop `nm` from `scripts/check_tools.py`.
-- `crmath_tables.py --check-pins` becomes a pre-clippy `[[script_check]]`.
-- `--check` becomes a documented manual command run when regenerating
-  tables, not a feature-gated test.
-- Delete the `process-spawn-exception:` marker and the rule's two
-  allowances.

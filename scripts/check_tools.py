@@ -10,16 +10,14 @@ the `sh` its script checks run under, are brokkr's). Scripts outside brokkr's
 pipelines - `scripts/diff_test.sh`, `scripts/bench.sh`,
 `research/bench_luars.sh` - check their own tools when they run.
 
-- python3 3.11 or newer: the script checks, and the tests that run
-  `scripts/libm_symbols.py` and `scripts/crmath_tables.py --check-pins`
-  (3.11 for `tomllib`).
+- python3 3.11 or newer: the script checks, including
+  `scripts/crmath_tables.py --check-pins` (3.11 for `tomllib`).
 - lua5.2 and lua5.4: the example corpus tests compare every unmarked example
   with both. Their output decides that verdict, so the release and the
   compatibility flags they were built with are pinned: a host whose reference
   prints differently fails here rather than as a corpus mismatch.
 - git: `fixtures/lint-policy/check_policy.py` lists the tree with
   `git ls-files`.
-- nm: `scripts/libm_symbols.py` lists a linked CLI binary's symbols.
 """
 
 import shutil
@@ -118,7 +116,6 @@ def problems():
             "fixtures/lint-policy/check_policy.py lists the tree",
         )
     )
-    found.extend(check_command(["nm", "--version"], "scripts/libm_symbols.py reads binary symbols"))
     return found
 
 

@@ -109,8 +109,7 @@ clippy passes, and relinks the lib test binary that carries the oracle.
 
 Fix: a `dellingr-crmath` workspace crate with its own tests, tables and libbeef
 dev-dependency. Its compile is cached across VM edits, its tests run once, it
-gets a clean target for a release check (see the cross-build entry in
-verif-goldens.md), and "crmath depends on nothing in the VM" becomes a
+gets a clean target for a release check, and "crmath depends on nothing in the VM" becomes a
 dependency rule. Independently: `[profile.dev.package.libbeef] opt-level = 3`,
 a one-line measurable win; optionally have the generator emit
 `f64::from_bits(0x...)` with the hex spelling in a comment, checking exact

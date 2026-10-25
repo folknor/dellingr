@@ -1,6 +1,15 @@
 //! Conventions for the test tree itself, checked lexically over its sources.
 //! Each check is an inventory of the constructs it names, not a proof about
 //! every way Rust can spell the same thing.
+//!
+//! These checks only read files, yet they compile and run as integration tests
+//! once per dev sweep, so a broken convention is reported after clippy and a
+//! full build rather than before them. That is accepted on purpose: they take
+//! milliseconds, fire only when a convention is broken, and the build is warm
+//! by then, while porting this file's roughly 900 lines to textlint rules or a
+//! Python script check would cost more than it saves. (Conventions that are
+//! cheap to state as one pattern already have a pre-clippy home in
+//! `brokkr.toml`'s textlint rules.)
 
 use std::collections::BTreeSet;
 use std::fs;

@@ -7,9 +7,10 @@ calls the platform libm for these, and `clippy.toml` bans the `f64`/`f32`
 transcendental methods, `powi` and `mul_add` so new code cannot slip back.
 
 The lints see only this crate's source, not dependencies or the libcalls LLVM
-emits, so `scripts/libm_symbols.py` checks the linked binary for platform libm
-transcendental symbols (`fmod`, `sqrt` and the other exact operations are
-allowed). `brokkr check` runs it, through the integration test
+emits, so `tests/common/libm_symbols.rs` reads the linked binary's static and
+dynamic ELF symbol tables (with the `object` crate, a dev-dependency) for
+platform libm transcendental symbols (`fmod`, `sqrt` and the other exact
+operations are allowed). `brokkr check` runs it, through the integration test
 `corpus::libm_symbols`, on the dev-profile CLI binary of the default and
 `snapshot` sweeps. The dedicated `libm_symbols` test target also checks the
 release binaries in `release-native-stack` and
@@ -97,12 +98,13 @@ NaN's bits), and the VM never lets a script observe them.
   representable.
 - The constant tables in `src/crmath/tables/` are generated from the upstream
   C sources by `scripts/crmath_tables.py` and are not edited by hand. Run
-  `python3 scripts/crmath_tables.py --check` to verify the pinned upstream
-  commit and source files, the table registry, and every generated table byte
-  for byte; `--generate` rewrites the tables from that same pinned checkout.
+  `python3 scripts/crmath_tables.py --check` after regenerating, to verify the
+  pinned upstream commit and source files, the table registry, and every
+  generated table byte for byte (a manual command, not part of `brokkr
+  check`); `--generate` rewrites the tables from that same pinned checkout.
   `reference/core-math-pin.toml` single-sources the commit, clone URL and
   reviewed table SHA-256 digests. The ordinary, checkout-free
-  `core_math_table_digests_match_pin` test runs
+  `crmath-table-pins` pre-clippy script check runs
   `python3 scripts/crmath_tables.py --check-pins` (Python 3.11 or later).
   An intentional table update must review and update those digests alongside
   regeneration; the generator does not rewrite the manifest.

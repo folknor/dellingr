@@ -40,6 +40,14 @@ are hosts and are exempt.
   every exception masked), which is also what Rust assumes. x87-only targets
   (32-bit x86 without SSE2) are not supported. See "Floating-point
   environment" below for how this is enforced.
+- Verification covers the developer's own machines, which are x86_64: every
+  sweep and golden runs on that one target, optimized and unoptimized.
+  The aarch64 code (the hardware FMA instance, each kernel's aarch64 arm and
+  the `FPCR` reader) follows the same contract but is not compiled, linted or
+  run by the gate, and counts as unverified. musl, 32-bit targets with SSE2 and
+  emulated runs are checked only if a player platform needs them. The library
+  itself has no Unix dependency; only the repository's test suite and the
+  `hotpath` example harness are Unix-only, so they do not build on Windows.
 - The compiler never constant-folds `^` (a folded literal would be free where
   a runtime `^` is charged), so bytecode carries no precomputed `^` results.
 

@@ -269,6 +269,22 @@ impl ScopeCost {
             ..Default::default()
         };
 
+        // The plain `+=` here, in `category_counts`, in `total_cost` below and
+        // in `accumulate` cannot overflow `u64`, in debug (panic) or release
+        // (wrap) alike. A `Program` comes only from `Program::compile`, whose
+        // source is at most `limits::MAX_SOURCE_BYTES` bytes. Code generation
+        // walks the syntax tree, whose nodes each consume at least one source
+        // byte, and every loop in it iterates a list of tree nodes, so a node
+        // emits a small constant number of instructions: the instruction
+        // count, across all nested chunks together, is a small multiple of the
+        // source size. `static_units` is 1 for each arithmetic, negation,
+        // table-creation and table-write instruction and 0 for the rest, plus
+        // a SET_LIST's element count (at most `limits::MAX_TABLE_BATCH_SIZE`
+        // per instruction and at most the source's element count over all of
+        // them); the category counters add 1 per instruction or that same
+        // element count. Every sum is therefore a small multiple of the source
+        // size, which holds as long as `MAX_SOURCE_BYTES` stays many orders of
+        // magnitude below 2^64.
         for inst in &chunk.code {
             scope.instructions += 1;
             scope.own_cost += inst.static_units();

@@ -81,14 +81,16 @@ expect = "ok"
 match = "last-line"
 stream = "stdout"
 
-# corpus::libm_symbols checks ordinary sweep binaries; the libm_symbols target
-# also checks each release sweep's own binary through CARGO_BIN_EXE_dellingr.
+# The reviewed digests of the generated crmath tables, checked without the
+# upstream checkout. The checkout-dependent `--check` is a manual command run
+# when regenerating tables (AGENTS.md).
 [[script_check]]
-name = "platform-libm-symbol-checker-tests"
-command = "python3 -B scripts/test_libm_symbols.py"
-expect = "ok"
+name = "crmath-table-pins"
+command = "python3 -B scripts/crmath_tables.py --check-pins"
+expect = "generated table digests match reference/core-math-pin.toml"
 match = "last-line"
 stream = "stdout"
+stage = "pre-clippy"
 
 # `brokkr check` runs each [[check]] entry as its own (clippy + test) pass with
 # the named feature shape. We sweep both feature configurations because
@@ -245,7 +247,8 @@ tests = ["native_stack", "libm_symbols"]
 # budget sweeps and accounting pins), the opcode-encoding fixture, the crmath
 # golden through its forced FMA backends (`crmath::tests::golden::`, the
 # library's test build) and through the shipped math library and `^`
-# (`library::crmath_golden::`), and the save golden: saved Rust functions are
+# (`library::crmath_golden::`), the `%` and `math.fmod` edge-case golden
+# (`library::replay_goldens::`), and the save golden: saved Rust functions are
 # function table ids, not code addresses, so the linker folding identical
 # functions (base `unpack` and `table.unpack`) must not change the pinned
 # payload. Snapshot features, since the save golden needs them; the
@@ -261,6 +264,8 @@ only = [
     "crmath::tests::golden::",
     "instr::tests::persisted_encodings_match_fixture",
     "library::crmath_golden::",
+    "library::replay_goldens::remainder",
+    "library::replay_goldens::folded_remainder",
     "snapshot::save_golden::",
 ]
 
@@ -572,12 +577,8 @@ message = "tests must use the artifacts Cargo already built instead of spawning 
 # The gate owns the processes it starts: the Cargo-built CLI and the reference
 # Luas, both constructed in tests/integration/support/process.rs, which bounds
 # and contains them. Any other `Command` construction under src/ or tests/
-# (production code spawns nothing either) is refused, shell tools included.
-# Two python3 spawns are allowed by their `process-spawn-exception:` marker
-# and are the only sites that may carry it: tests/common/libm_symbols.rs
-# (scripts/libm_symbols.py on a linked binary) and src/crmath/tests/golden.rs
-# (scripts/crmath_tables.py --check-pins). Whether they stay test-time spawns
-# is undecided. These are lexical guards: a call wrapped across lines or
+# (production code spawns nothing either) is refused, shell tools included,
+# with no exceptions. These are lexical guards: a call wrapped across lines or
 # built inside a macro is not seen.
 [[textlint]]
 name = "test-processes-through-support"
@@ -585,8 +586,6 @@ pattern = '\bCommand\s*::\s*new\b'
 paths = ["src/**/*.rs", "tests/**/*.rs"]
 exclude = ["tests/integration/support/process.rs"]
 region = "code"
-allow_marker = "process-spawn-exception:"
-allow_marker_above = 2
 must_scan = ["tests/common/libm_symbols.rs", "src/crmath/tests/golden.rs"]
 message = "start processes through tests/integration/support/process.rs"
 
