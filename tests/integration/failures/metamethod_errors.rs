@@ -64,7 +64,8 @@ fn protected_metatables_hide_and_prevent_replacement() {
     let value = support::eval_number(
         r#"
         local t = setmetatable({}, { __metatable = false })
-        return getmetatable(t) == false and 1 or 0
+        if getmetatable(t) ~= false then error("a protected metatable did not read as false") end
+        return 1
     "#,
     );
     assert_eq!(value, 1.0);
@@ -85,7 +86,8 @@ fn setmetatable_ignores_extra_arguments() {
         r#"
         local mt = {}
         local t = setmetatable({}, mt, 42)
-        return getmetatable(t) == mt and 1 or 0
+        if getmetatable(t) ~= mt then error("the extra argument replaced the metatable") end
+        return 1
     "#,
     );
     assert_eq!(value, 1.0);
@@ -97,10 +99,11 @@ fn unprotected_metatables_remain_visible_and_replaceable() {
         r#"
         local mt = { __metatable = nil }
         local t = setmetatable({}, mt)
-        local visible = getmetatable(t) == mt
+        if getmetatable(t) ~= mt then error("the unprotected metatable is not visible") end
         local replacement = {}
         setmetatable(t, replacement)
-        return visible and getmetatable(t) == replacement and 1 or 0
+        if getmetatable(t) ~= replacement then error("the unprotected metatable was not replaced") end
+        return 1
     "#,
     );
     assert_eq!(value, 1.0);

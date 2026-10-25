@@ -66,10 +66,35 @@ fn render(state: &mut State) -> dellingr::Result<u8> {
     Ok(1)
 }
 
+/// The globals a case needs beyond the shared callbacks, declared by the case
+/// rather than inferred from its source text.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Setup {
+    /// Nothing extra.
+    Plain,
+    /// The global `large`: a string just over half the string byte limit, so
+    /// two of it exceed the limit.
+    LargeString,
+}
+
+impl Setup {
+    pub(crate) fn install(self, state: &mut State) {
+        match self {
+            Setup::Plain => {}
+            Setup::LargeString => {
+                state
+                    .push_bytes(vec![b'x'; dellingr::limits::MAX_STRING_BYTES / 2 + 1])
+                    .unwrap();
+                state.set_global("large").unwrap();
+            }
+        }
+    }
+}
+
 /// Cases that fail on their own, with no budget or injected refusal. The
 /// count-limit cases reach exactly one past their limit: the called object
 /// that `__call` prepends, or the leading fixed value, is the extra one.
-pub(crate) fn natural() -> Vec<(&'static str, String)> {
+pub(crate) fn natural() -> Vec<(&'static str, String, Setup)> {
     let max_arguments = dellingr::limits::MAX_ARGUMENTS;
     let max_results = dellingr::limits::MAX_RESULTS;
     let mut cases = vec![
@@ -78,41 +103,53 @@ pub(crate) fn natural() -> Vec<(&'static str, String)> {
             format!(
                 "local t = setmetatable({{}}, {{__call = function() end}}) return t(unpack({{}}, 1, {max_arguments}))"
             ),
+            Setup::Plain,
         ),
         (
             "dynamic_arguments",
             format!("local function f() end f(1, unpack({{}}, 1, {max_arguments}))"),
+            Setup::Plain,
         ),
         (
             "results",
             format!(
                 "local function f(...) return 0, ... end return f(unpack({{}}, 1, {max_results}))"
             ),
+            Setup::Plain,
         ),
     ];
     cases.extend(
         NATURAL_FIXED
             .iter()
-            .map(|&(name, source)| (name, source.to_owned())),
+            .map(|&(name, source, setup)| (name, source.to_owned(), setup)),
     );
     cases
 }
 
-const NATURAL_FIXED: &[(&str, &str)] = &[
-    ("callback", "return fail()"),
-    ("overreport", "return overreport()"),
-    ("type", "return nil + 1"),
-    ("argument", "return table.insert(false, 1)"),
-    ("pattern", "return string.find('x', '%')"),
-    ("library", "return next({}, 'missing')"),
-    ("concat_size", "return large .. large"),
-    ("format_size", "return string.format('%s%s', large, large)"),
-    ("gsub_literal_size", "return string.gsub('aa', 'a', large)"),
+const NATURAL_FIXED: &[(&str, &str, Setup)] = &[
+    ("callback", "return fail()", Setup::Plain),
+    ("overreport", "return overreport()", Setup::Plain),
+    ("type", "return nil + 1", Setup::Plain),
+    ("argument", "return table.insert(false, 1)", Setup::Plain),
+    ("pattern", "return string.find('x', '%')", Setup::Plain),
+    ("library", "return next({}, 'missing')", Setup::Plain),
+    ("concat_size", "return large .. large", Setup::LargeString),
+    (
+        "format_size",
+        "return string.format('%s%s', large, large)",
+        Setup::LargeString,
+    ),
+    (
+        "gsub_literal_size",
+        "return string.gsub('aa', 'a', large)",
+        Setup::LargeString,
+    ),
     (
         "gsub_function_size",
         "return string.gsub('aa', 'a', function() return large end)",
+        Setup::LargeString,
     ),
-    ("push_size", "return oversized()"),
+    ("push_size", "return oversized()", Setup::Plain),
 ];
 
 pub(crate) fn overreport(_: &mut State) -> dellingr::Result<u8> {
@@ -140,9 +177,20 @@ fn primitive(state: &State, index: isize) -> String {
     }
 }
 
+/// Runs a case that needs no setup beyond the shared callbacks.
 pub(crate) fn run(
     name: &str,
     source: &str,
+    budget: Option<i64>,
+    fault: Option<Option<u32>>,
+) -> Outcome {
+    run_with(name, source, Setup::Plain, budget, fault)
+}
+
+pub(crate) fn run_with(
+    name: &str,
+    source: &str,
+    setup: Setup,
     budget: Option<i64>,
     fault: Option<Option<u32>>,
 ) -> Outcome {
@@ -158,12 +206,7 @@ pub(crate) fn run(
         state.push_rust_fn(callback).unwrap();
         state.set_global(name).unwrap();
     }
-    if source.contains("large") {
-        state
-            .push_bytes(vec![b'x'; dellingr::limits::MAX_STRING_BYTES / 2 + 1])
-            .unwrap();
-        state.set_global("large").unwrap();
-    }
+    setup.install(&mut state);
     state.push_number(1234.0).unwrap();
     state.push_string("survivor").unwrap();
     let program = dellingr::Program::compile(source, Some(b"boundary-corpus")).unwrap();
@@ -295,9 +338,9 @@ pub(crate) fn boundary_transcript() -> String {
             );
         }
     }
-    for (name, source) in natural() {
+    for (name, source, setup) in natural() {
         transcript.push_str(&format!("{name} natural\n"));
-        transcript.push_str(&run(name, &source, None, None).transcript);
+        transcript.push_str(&run_with(name, &source, setup, None, None).transcript);
     }
     transcript
 }

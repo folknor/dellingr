@@ -537,6 +537,18 @@ test_code = "only"
 must_scan = ["src/compiler/parser/tests.rs", "tests/integration/cli/cli_arguments.rs"]
 message = "the Cargo-built CLI binary path belongs in tests/integration/support/mod.rs"
 
+# A Lua test script that collapses a check into `cond and 1 or 0` fails with
+# `0 != 1` and no hint of which check broke. Write
+# `if not cond then error("which check") end` instead.
+[[textlint]]
+name = "test-lua-no-boolean-collapse"
+pattern = 'and 1 or 0'
+paths = ["src/**/*.rs", "tests/**/*.rs"]
+region = "string"
+test_code = "only"
+must_scan = ["src/compiler/parser/tests.rs", "tests/integration/library/table_iteration.rs"]
+message = "name the failing check: use `if not cond then error(\"which check\") end` instead of `cond and 1 or 0`"
+
 [[textlint]]
 name = "test-no-target-paths"
 pattern = '(?:^|[/\\"])target[/\\]'

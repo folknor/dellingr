@@ -99,7 +99,9 @@ fn table_insert_rotation_preserves_order_across_storage_shapes() {
             for key, value in pairs(t) do
                 parts[#parts + 1] = key .. "=" .. tostring(value)
             end
-            return table.concat(parts, " ") == "{expected}" and 1 or 0
+            local got = table.concat(parts, " ")
+            if got ~= "{expected}" then error("walked " .. got) end
+            return 1
         "#
         ));
         assert_eq!(matched, 1.0, "expected {expected} from {code}");
@@ -274,14 +276,14 @@ fn table_position_boundaries_and_integer_errors() {
         r#"
         local t = {10, 20}
         table.insert(t, 3, 30)
-        local no_op = table.remove(t, 4) == nil
+        if table.remove(t, 4) ~= nil then error("removing one past the end returned a value") end
         local empty = {}
-        local e0 = table.remove(empty, 0) == nil
-        local e1 = table.remove(empty, 1) == nil
-        return #t * 100 + t[3] + (no_op and 1 or 0) + (e0 and 2 or 0) + (e1 and 4 or 0)
+        if table.remove(empty, 0) ~= nil then error("removing position 0 of an empty table returned a value") end
+        if table.remove(empty, 1) ~= nil then error("removing position 1 of an empty table returned a value") end
+        return #t * 100 + t[3]
     "#,
     );
-    assert_eq!(value, 337.0);
+    assert_eq!(value, 330.0);
     for code in [
         "table.insert({}, 0, 1)",
         "table.insert({}, 1.5, 1)",

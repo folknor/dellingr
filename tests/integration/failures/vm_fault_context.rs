@@ -1,7 +1,8 @@
 //! Internal instruction context is diagnostic metadata, not rendered Lua text.
 //! Only internal errors carry it; the in-crate unit test
 //! `internal_fault_keeps_innermost_instruction` covers that case, because only
-//! dellingr can construct an internal error.
+//! dellingr can construct an internal error. Naming the unit test is the
+//! intended pointer; if it is renamed, update this comment.
 
 use crate::support::PushNewRustFn;
 use dellingr::error::{Error, ErrorKind};

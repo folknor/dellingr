@@ -49,6 +49,16 @@ still open:
   `analyze_cost` uses plain `+=` on `u64`; the release cost tests exercise no
   input near the wrap.
 
+Decision (2026-10-25): close the entry with comments, no new checks.
+- aarch64: accepted as unverified, in line with VN-007 (verified on the
+  developer's machines); say so where the determinism contract lists its
+  targets.
+- musl, i686 and qemu stay "only if a player platform needs them".
+- Windows: no action; note that the library is unaffected and only the
+  dev-host test suite is Unix-only.
+- `analyze_cost`: a comment at the accumulation stating why it cannot
+  overflow, derived from the compiler's actual limits (verify the bound
+  before writing it; if it does not hold, report it instead).
 ## VD-019 - `%` and `math.fmod` lower to the platform `fmod` with no edge-case golden
 
 Reported by: library.
@@ -60,3 +70,9 @@ check in verif-gates.md would at least record `fmod` as the one permitted libm
 import.
 
 Enforceable: yes, by a golden.
+
+Decision (2026-10-25): a small bit-exact golden of remainder edge cases (signed
+zeros, subnormal divisors, huge quotients, infinities, NaN operands) through
+both `%` and `math.fmod`, beside the existing replay goldens, so it runs in the
+dev and release sweeps. It guards the in-crate floor-sign correction everywhere
+and the platform `fmod` on whatever host runs it.

@@ -45,36 +45,11 @@ measurements.
 
 Enforceable: editorial.
 
-Undecided.
+Decision (2026-10-25): split by durability. `reference/native-calls.md` keeps
+the guard documentation plus one current table of per-level native bytes,
+stated with commit, host and `rustc -V`. The dated measurement history moves to
+`reference/performance.md` as a dated log; superseded rows and rows for
+functions that no longer exist are dropped, not moved. The scenario count goes.
+`docs/limits.md`'s envelope section points at the current table instead of
+restating figures.
 
-## VN-009 - At-cap probes refill a million slots per attempt
-
-Reported by: native-stack-errors, runtime, library.
-
-`frame_reservation.rs::run_at_cap` and `index_depth_routes.rs::call_near_cap`
-find the highest admitting stack height by starting at `MAX_STACK_SIZE - 2` and
-lowering by one; every attempt does `set_top(fill)` from 0 (one million
-`Val::Nil` pushes, one at a time, in `State::set_top`) then `set_top(0)`. The
-attempt count is the probe's frame size plus `FRAME_HEADROOM`.
-`frame_reservation.rs` does this for 18 bodies plus three more;
-`index_depth_routes.rs` calls `call_near_cap` about a dozen times.
-`host_error_reporting.rs` (`execution_stack_preflights_notify_once`, four cases;
-`attempt_result_padding`, three modes) and `host_call_preflight.rs` fill the same
-million through public `push_nil`. In `src/vm/tests.rs`, `fill_to_one_below_cap`
-and its users, `host_table_api_atomicity.rs`'s `get_table_preserves_the_key_*`
-and `raw_reads_replace_the_key_even_at_the_stack_cap` (looped four times in one
-test), the `string_metatable_dispatch` stack-cap tests (`set_top(999_999)`), and
-`get_table_preserves_the_key_at_the_lua_call_depth_limit` (recursing to the real
-`MAX_CALL_DEPTH`) do the same at full scale. Estimated on the order of hundreds of
-million-slot fills per sweep in dev, both dev sweeps, likely seconds, plus a
-memory peak when libtest runs a dozen in parallel; not measured.
-
-Fix: fill once and lower the height by popping one slot per failed attempt (a
-failed host `call` leaves the filler as it was, which these tests already assert),
-or compute the exact height from the probe's `max_stack`, which
-`Program::disassemble` prints. Lateral: `set_top`'s growth arm could `resize`
-after its preflight instead of a push loop. The test-only `Limits` override in
-rewrites.md is the alternative the runtime and library hunters prefer; the
-native-stack hunter argues against it.
-
-Enforceable: no; it is a fixture shape.

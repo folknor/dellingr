@@ -27,7 +27,7 @@ fn string_find_keeps_the_reference_literal_close_parenthesis_case() {
     let mut state = State::new();
     support::eval(
         &mut state,
-        r#"local first, last = string.find("a)", ")"); return first == 2 and last == 2"#,
+        r#"local first, last = string.find("a)", ")"); if first ~= 2 then error("find start was " .. tostring(first)) end if last ~= 2 then error("find end was " .. tostring(last)) end return true"#,
         1,
     );
     assert!(state.to_boolean(-1));

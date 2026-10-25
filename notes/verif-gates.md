@@ -36,3 +36,9 @@ textlint rule.)
 Fix: textlint rules, or one pre-clippy `script_check`, for the conventions.
 
 Enforceable: yes.
+
+Decision (2026-10-25): no action. The tests take milliseconds and fire only
+when a convention is broken, so failing after a warm build is accepted; porting
+about 900 lines to a Python script check costs more than it saves. Owed before
+removal: a comment at the top of `tests/integration/corpus/test_conventions.rs`
+saying so.

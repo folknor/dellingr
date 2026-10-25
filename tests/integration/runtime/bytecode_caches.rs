@@ -22,15 +22,14 @@ fn factory_closures_share_caches_without_semantic_drift() {
             r2 = make_reader()
             t1 = { v = 1 }
             t2 = { v = 2 }
-            checks = 0
             for i = 1, 50 do
-                if r1(t1) == 1 and r2(t2) == 2 and r1(t2) == 2 and r2(t1) == 1 then
-                    checks = checks + 1
-                end
+                if r1(t1) ~= 1 then error("r1 on t1 at iteration " .. i) end
+                if r2(t2) ~= 2 then error("r2 on t2 at iteration " .. i) end
+                if r1(t2) ~= 2 then error("r1 on t2 at iteration " .. i) end
+                if r2(t1) ~= 1 then error("r2 on t1 at iteration " .. i) end
             end
         "#,
     );
-    assert_eq!(support::global_number(&mut state, "checks"), 50.0);
 
     state.gc_collect();
 
@@ -41,12 +40,12 @@ fn factory_closures_share_caches_without_semantic_drift() {
         r#"
             t1.w = 10
             t2.v = nil
-            drift_ok =
-                (r1(t1) == 1 and r2(t1) == 1 and r1(t2) == nil and r2(t2) == nil)
-                and 1 or 0
+            if r1(t1) ~= 1 then error("r1 on t1 served a stale entry after drift") end
+            if r2(t1) ~= 1 then error("r2 on t1 served a stale entry after drift") end
+            if r1(t2) ~= nil then error("r1 on t2 served a stale entry after drift") end
+            if r2(t2) ~= nil then error("r2 on t2 served a stale entry after drift") end
         "#,
     );
-    assert_eq!(support::global_number(&mut state, "drift_ok"), 1.0);
 
     state.gc_collect();
 
@@ -55,10 +54,10 @@ fn factory_closures_share_caches_without_semantic_drift() {
         &mut state,
         r#"
             t1 = { v = 7 }
-            rebind_ok = (r1(t1) == 7 and r2(t1) == 7) and 1 or 0
+            if r1(t1) ~= 7 then error("r1 missed the rebound table") end
+            if r2(t1) ~= 7 then error("r2 missed the rebound table") end
         "#,
     );
-    assert_eq!(support::global_number(&mut state, "rebind_ok"), 1.0);
 
     // Genuine globals_version transition: a global-reading closure warmed
     // before a restricted-env swap must miss inside the sandbox (its shared
@@ -88,8 +87,10 @@ fn factory_closures_share_caches_without_semantic_drift() {
         restricted_miss,
         "warmed global IC must not leak into the sandbox"
     );
-    support::run(&mut state, "swap_ok = (g1() == 5) and 1 or 0");
-    assert_eq!(support::global_number(&mut state, "swap_ok"), 1.0);
+    support::run(
+        &mut state,
+        "if g1() ~= 5 then error('the global cache did not revalidate after the restricted env') end",
+    );
 }
 
 /// Runtime entries are State-local and reclaimed by reachability: a State

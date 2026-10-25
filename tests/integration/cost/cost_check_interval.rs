@@ -101,10 +101,10 @@ fn corpus_cost_check_interval_differential() {
     fn execute(
         program: &Program,
         budget: i64,
-        natural: Option<&str>,
+        natural: Option<support::error_boundary_cases::Setup>,
     ) -> (Vec<Vec<u8>>, u64, Option<String>) {
         let (mut state, recorder) = support::Recorder::state();
-        if let Some(source) = natural {
+        if let Some(setup) = natural {
             // The natural cases' callbacks, as `error_boundary_cases::run`
             // registers them; that runner rejects non-budget errors under a
             // budget, so the natural rows execute here.
@@ -117,12 +117,7 @@ fn corpus_cost_check_interval_differential() {
                 state.push_new_rust_fn(callback).unwrap();
                 state.set_global(name).unwrap();
             }
-            if source.contains("large") {
-                state
-                    .push_bytes(vec![b'x'; dellingr::limits::MAX_STRING_BYTES / 2 + 1])
-                    .unwrap();
-                state.set_global("large").unwrap();
-            }
+            setup.install(&mut state);
         }
         state.load(program).unwrap();
         state.set_cost_budget(budget);
@@ -179,12 +174,12 @@ fn corpus_cost_check_interval_differential() {
             );
         }
     }
-    for (name, source) in support::error_boundary_cases::natural() {
+    for (name, source, setup) in support::error_boundary_cases::natural() {
         let program = Program::compile(&source, Some(b"interval-natural")).unwrap();
         // Include unbounded execution so each natural failure actually occurs;
         // small budgets also exercise the prefixes that stop before it.
         for budget in budgets.into_iter().chain([i64::MAX]) {
-            let run = || execute(&program, budget, Some(&source));
+            let run = || execute(&program, budget, Some(setup));
             assert_eq!(
                 with_cost_check_interval(1, run),
                 with_cost_check_interval(COST_CHECK_INTERVAL, run),

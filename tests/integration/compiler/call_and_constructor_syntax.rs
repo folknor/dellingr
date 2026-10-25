@@ -8,7 +8,9 @@ fn unparenthesized_string_call_is_supported() {
     let result = eval_number(
         r#"
         local function wrap(s) return s end
-        return wrap "a" .. "b" == "ab" and 1 or 0
+        local joined = wrap "a" .. "b"
+        if joined ~= "ab" then error("string call argument joined as " .. joined) end
+        return 1
     "#,
     );
     assert_eq!(result, 1.0);

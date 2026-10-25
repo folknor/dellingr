@@ -387,14 +387,20 @@ fn a_snapshot_round_trip_keeps_every_limit_edge() {
 /// lookup, from the cap downwards until admission accepts it.
 fn call_near_cap(state: &mut State, function: &str, receiver: &str, headroom: usize) -> Outcome {
     let mut fill = MAX_STACK_SIZE - 2;
+    // The filler is built once; a refused call leaves it as it was, so each
+    // failed attempt lowers the height by popping one slot.
+    state.set_top(0).expect("stack clears");
+    state.set_top(fill as isize).expect("filler fits");
     loop {
         state.push_boolean(false).expect("flag fits");
         state.set_global("entered").expect("flag set");
-        state.set_top(fill as isize).expect("filler fits");
+        assert_eq!(state.get_top(), fill, "the filler is intact");
         state.get_global(function).expect("probe function fits");
         state.get_global(receiver).expect("receiver fits");
         let entered = state.call(ArgCount::Fixed(1), RetCount::Fixed(1)).is_ok();
-        state.set_top(0).expect("stack clears");
+        state
+            .set_top(fill as isize)
+            .expect("results pop to the filler");
         if entered {
             state.get_global("entered").expect("flag fits");
             assert!(state.to_boolean(-1), "the unarmed probe ran its body");
@@ -402,12 +408,13 @@ fn call_near_cap(state: &mut State, function: &str, receiver: &str, headroom: us
             break;
         }
         fill -= 1;
+        state.pop(1).expect("filler pops");
     }
     state.push_boolean(true).expect("flag fits");
     state.set_global("ARMED").expect("armed");
     state
         .set_top((fill - headroom) as isize)
-        .expect("filler fits");
+        .expect("filler adjusts");
     state.get_global(function).expect("probe function fits");
     state.get_global(receiver).expect("receiver fits");
     let result = state.call(ArgCount::Fixed(1), RetCount::Fixed(1));

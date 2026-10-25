@@ -5,7 +5,9 @@ use dellingr::{ArgCount, LuaType, RetCount, State};
 
 use crate::support::PushNewRustFn;
 use crate::support::Recorder;
-use crate::support::error_boundary_cases::{CASES, boundary_transcript, fail, natural, run};
+use crate::support::error_boundary_cases::{
+    CASES, boundary_transcript, fail, natural, run, run_with,
+};
 
 #[test]
 fn error_boundary_budget_sweep() {
@@ -249,8 +251,8 @@ fn assert_full_chain_reuse(state: &mut State) {
 
 #[test]
 fn error_boundary_natural_failures() {
-    for (name, source) in natural() {
-        let outcome = run(name, &source, None, None);
+    for (name, source, setup) in natural() {
+        let outcome = run_with(name, &source, setup, None, None);
         let error = outcome
             .error
             .unwrap_or_else(|| panic!("{name}: natural case succeeded: {}", outcome.transcript));

@@ -817,9 +817,9 @@ fn environment_deltas_preserve_mutations_cycles_order_and_metatables() {
         &mut loaded,
         r#"
         floor_value = math.floor(9)
-        deleted = math.ceil == nil and 1 or 0
-        cycle = math.user.back == math and 1 or 0
-        meta = getmetatable(math) == math.user and 1 or 0
+        if math.ceil ~= nil then error("the deleted math.ceil came back") end
+        if math.user.back ~= math then error("the math cycle was not restored") end
+        if getmetatable(math) ~= math.user then error("math lost its metatable") end
         order = ""
         for key in pairs(math) do
             if key == "second" or key == "first" then order = order .. key .. "," end
@@ -827,9 +827,6 @@ fn environment_deltas_preserve_mutations_cycles_order_and_metatables() {
     "#,
     );
     assert_eq!(support::global_number(&mut loaded, "floor_value"), 42.0);
-    assert_eq!(support::global_number(&mut loaded, "deleted"), 1.0);
-    assert_eq!(support::global_number(&mut loaded, "cycle"), 1.0);
-    assert_eq!(support::global_number(&mut loaded, "meta"), 1.0);
     assert_eq!(
         support::global_string(&mut loaded, "order"),
         "second,first,"
@@ -987,13 +984,14 @@ fn ordered_environment_replay_preserves_setup_additions_and_metatable() {
     .expect("state loads with later environment additions");
     support::run(
         &mut loaded,
-        "floor = math.floor; future = math.future; setup_meta = getmetatable(math).setup and 1 or 0; order = ''; for key in pairs(math) do if key == 'floor' or key == 'future' then order = order .. key .. ',' end end",
+        "floor = math.floor; future = math.future; order = ''; for key in pairs(math) do if key == 'floor' or key == 'future' then order = order .. key .. ',' end end; \
+         if not getmetatable(math).setup then error('the metatable installed by setup was dropped') end",
     );
     assert_eq!(support::global_number(&mut loaded, "floor"), 7.0);
     // A key the save never saw survives replay instead of failing the load.
     assert_eq!(support::global_number(&mut loaded, "future"), 99.0);
-    // Rebuilding the entry list must not drop a metatable installed by setup.
-    assert_eq!(support::global_number(&mut loaded, "setup_meta"), 1.0);
+    // Rebuilding the entry list must not drop a metatable installed by setup;
+    // the script above raises if it did.
     // Saved keys keep their saved order; setup-only keys are appended after.
     assert_eq!(
         support::global_string(&mut loaded, "order"),
@@ -1392,14 +1390,15 @@ fn env_object_as_metatable_resolves_after_load() {
     let mut original = State::new();
     support::run(
         &mut original,
-        "t = {}\nsetmetatable(t, math)\nsame = getmetatable(t) == math and 1 or 0",
+        "t = {}\nsetmetatable(t, math)\nif getmetatable(t) ~= math then error('the metatable is not math before the save') end",
     );
-    assert_eq!(support::global_number(&mut original, "same"), 1.0);
 
     let mut loaded = support::reload(&original);
-    support::run(&mut loaded, "after = getmetatable(t) == math and 1 or 0");
     // The metatable resolves to the *rebuilt* env object, identical to `math`.
-    assert_eq!(support::global_number(&mut loaded, "after"), 1.0);
+    support::run(
+        &mut loaded,
+        "if getmetatable(t) ~= math then error('the metatable is not the rebuilt math') end",
+    );
 }
 
 #[test]
@@ -1413,9 +1412,8 @@ fn cyclic_metatable_round_trips() {
     let mut loaded = support::reload(&original);
     support::run(
         &mut loaded,
-        "self_mt = getmetatable(t) == t and 1 or 0\ndirect = t.x",
+        "if getmetatable(t) ~= t then error('the self metatable was not restored') end\ndirect = t.x",
     );
-    assert_eq!(support::global_number(&mut loaded, "self_mt"), 1.0);
     assert_eq!(support::global_number(&mut loaded, "direct"), 42.0);
 }
 
@@ -1799,12 +1797,10 @@ fn ordered_table_library_replay_restores_membership() {
     support::run(
         &mut loaded,
         "result = table.custom() \
-         insert_gone = (table.insert == nil) and 1 or 0 \
-         plain_miss = (({}).custom == nil) and 1 or 0",
+         if table.insert ~= nil then error('the deleted table.insert came back') end \
+         if ({}).custom ~= nil then error('table.custom leaked onto plain tables') end",
     );
     assert_eq!(support::global_number(&mut loaded, "result"), 31.0);
-    assert_eq!(support::global_number(&mut loaded, "insert_gone"), 1.0);
-    assert_eq!(support::global_number(&mut loaded, "plain_miss"), 1.0);
 }
 
 /// Array-part holes decide where later integer writes land and so the

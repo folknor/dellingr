@@ -257,11 +257,9 @@ fn execution_stack_preflights_notify_once() {
         }
         // Leave one slot for the callable. Removing it admits the call, but
         // frame setup / return padding / __call insertion must exceed the cap.
-        for _ in 0..dellingr::limits::MAX_STACK_SIZE - 1 {
-            state
-                .push_nil()
-                .expect("filler remains within the real limit");
-        }
+        state
+            .set_top((dellingr::limits::MAX_STACK_SIZE - 1) as isize)
+            .expect("filler remains within the real limit");
         state
             .get_global("target")
             .expect("callable fits at the cap");
@@ -521,6 +519,8 @@ fn attempt_rust_error(state: &mut State) -> dellingr::Result<()> {
 /// Fill the stack to one slot short of the cap and call a callback that
 /// returns nothing into two fixed results: the nil padding cannot fit.
 fn attempt_result_padding(state: &mut State) -> dellingr::Result<()> {
+    // Frames below this one already hold slots, so the fill runs until the
+    // global cap refuses rather than to an absolute height.
     while state.push_nil().is_ok() {}
     state.pop(1)?;
     state.push_new_rust_fn(return_nothing)?;

@@ -87,3 +87,14 @@ every process a Rust test starts in `tests/integration/support/process.rs`
 port them to Rust, or move them to script checks (the libm one needs the
 binary of the sweep that built it, which is why it is a test). When decided,
 drop the marker and the rule's exception with them.
+
+Decision (2026-10-25): no Rust code spawns anything but dellingr and the
+reference Luas.
+- Port the libm symbol check to Rust: read the ELF symbol table with the
+  `object` crate as a dev-dependency, port `scripts/test_libm_symbols.py`'s
+  fixtures, and drop `nm` from `scripts/check_tools.py`.
+- `crmath_tables.py --check-pins` becomes a pre-clippy `[[script_check]]`.
+- `--check` becomes a documented manual command run when regenerating
+  tables, not a feature-gated test.
+- Delete the `process-spawn-exception:` marker and the rule's two
+  allowances.

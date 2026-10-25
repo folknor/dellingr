@@ -52,9 +52,8 @@ impl State {
             Ordering::Equal => (),
             Ordering::Greater => {
                 self.check_stack_space(new_top - old_top)?;
-                for _ in old_top..new_top {
-                    self.push_unchecked(Val::Nil);
-                }
+                self.stack
+                    .resize(self.stack.len() + (new_top - old_top), Val::Nil);
             }
         }
         Ok(())

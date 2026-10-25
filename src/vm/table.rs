@@ -2284,6 +2284,33 @@ mod tests {
         Val::Num(x as f64)
     }
 
+    /// A table whose logical array length is `vlen` and whose array window
+    /// holds one live slot at `live_key` (or no window), set directly rather
+    /// than through the snapshot loader, so the growth-limit tests run in
+    /// every sweep.
+    fn window_table(vlen: usize, live_key: Option<usize>) -> Table {
+        let mut table = Table::default();
+        if let Some(key) = live_key {
+            table.array = vec![Val::Bool(true)];
+            table.base = key - 1;
+            table.array_live = 1;
+        }
+        table.vlen = vlen;
+        #[cfg(debug_assertions)]
+        table.debug_assert_invariants();
+        table
+    }
+
+    /// The array part's shape, to compare a refused growth against.
+    fn array_shape(table: &Table) -> (usize, usize, Vec<Val>, usize) {
+        (
+            table.vlen,
+            table.base,
+            table.array.clone(),
+            table.array_live,
+        )
+    }
+
     /// A number key that can never live in the array part.
     fn h(x: usize) -> Val {
         Val::Num(x as f64 + 0.5)
@@ -2899,15 +2926,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn sequence_copy_refuses_an_unallocatable_gap() {
+        let table = window_table(MAX_ARRAY_LEN, Some(MAX_ARRAY_LEN));
+        let before = array_shape(&table);
+        assert!(matches!(table.get_array(), Err(TableError::GrowthFailed)));
+        assert_eq!(array_shape(&table), before);
+    }
+
+    /// The same limit reached through the snapshot loader: a loaded table
+    /// refuses growth exactly as one built in place does.
     #[cfg(feature = "snapshot")]
     #[test]
-    fn sequence_copy_refuses_an_unallocatable_snapshot_gap() {
+    fn snapshot_load_reaches_the_growth_limit() {
         let mut table = Table::default();
         table
             .rebuild_from_snapshot(MAX_ARRAY_LEN, 1, vec![(n(MAX_ARRAY_LEN), Val::Bool(true))])
             .unwrap();
         let before = table.snapshot_entries();
         assert!(matches!(table.get_array(), Err(TableError::GrowthFailed)));
+        assert!(matches!(
+            table.array_insert(1, Val::Bool(false)),
+            Err(TableError::GrowthFailed)
+        ));
         assert_eq!(table.snapshot_entries(), before);
     }
 
@@ -3265,41 +3306,30 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "snapshot")]
     #[test]
-    fn snapshot_gap_growth_refuses_append_and_both_window_extensions() {
+    fn gap_growth_refuses_append_and_both_window_extensions() {
         let len = MAX_ARRAY_LEN / 2;
         for (live_key, write_key) in [(1, len + 1), (1, len), (len, 1)] {
-            let mut table = Table::default();
-            table
-                .rebuild_from_snapshot(len, 1, vec![(n(live_key), Val::Bool(true))])
-                .unwrap();
-            let before = table.snapshot_entries();
+            let mut table = window_table(len, Some(live_key));
+            let before = array_shape(&table);
             assert!(matches!(
                 table.insert(n(write_key), Val::Bool(false)),
                 Err(TableError::GrowthFailed)
             ));
-            assert_eq!(table.snapshot_entries(), before);
+            assert_eq!(array_shape(&table), before);
         }
     }
 
-    #[cfg(feature = "snapshot")]
     #[test]
-    fn snapshot_length_limit_refuses_append_insert_and_migration() {
-        let mut empty = Table::default();
-        empty
-            .rebuild_from_snapshot(MAX_ARRAY_LEN, 0, vec![])
-            .unwrap();
+    fn length_limit_refuses_append_insert_and_migration() {
+        let mut empty = window_table(MAX_ARRAY_LEN, None);
         assert!(matches!(
             empty.insert(n(MAX_ARRAY_LEN + 1), Val::Bool(true)),
             Err(TableError::GrowthFailed)
         ));
         assert_eq!(empty.vlen, MAX_ARRAY_LEN);
 
-        let mut table = Table::default();
-        table
-            .rebuild_from_snapshot(MAX_ARRAY_LEN, 1, vec![(n(MAX_ARRAY_LEN), Val::Bool(true))])
-            .unwrap();
+        let mut table = window_table(MAX_ARRAY_LEN, Some(MAX_ARRAY_LEN));
         assert!(matches!(
             table.array_insert(1, Val::Bool(false)),
             Err(TableError::GrowthFailed)
@@ -3310,13 +3340,9 @@ mod tests {
         ));
         assert_eq!(table.get(&n(MAX_ARRAY_LEN)), Val::Bool(true));
 
-        let mut migration = Table::default();
+        let mut migration = window_table(MAX_ARRAY_LEN - 1, None);
         migration
-            .rebuild_from_snapshot(
-                MAX_ARRAY_LEN - 1,
-                0,
-                vec![(n(MAX_ARRAY_LEN + 1), Val::Bool(true))],
-            )
+            .insert(n(MAX_ARRAY_LEN + 1), Val::Bool(true))
             .unwrap();
         assert!(matches!(
             migration.insert(n(MAX_ARRAY_LEN), Val::Bool(false)),
@@ -3326,7 +3352,6 @@ mod tests {
         assert_eq!(migration.get(&n(MAX_ARRAY_LEN + 1)), Val::Bool(true));
     }
 
-    #[cfg(feature = "snapshot")]
     #[test]
     fn host_insert_growth_failure_preserves_operands() {
         use crate::State;
@@ -3335,12 +3360,7 @@ mod tests {
         let mut state = State::new();
         state.new_table().unwrap();
         let ptr = state.stack[0].as_object_ptr().unwrap();
-        state
-            .heap
-            .as_table(ptr)
-            .unwrap()
-            .rebuild_from_snapshot(MAX_ARRAY_LEN, 1, vec![(n(MAX_ARRAY_LEN), Val::Bool(true))])
-            .unwrap();
+        *state.heap.as_table(ptr).unwrap() = window_table(MAX_ARRAY_LEN, Some(MAX_ARRAY_LEN));
         state.push_boolean(false).unwrap();
         let before = state.stack.clone();
         let error = state.table_insert_at(1, 1).unwrap_err();
@@ -3352,9 +3372,8 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "snapshot")]
     #[test]
-    fn snapshot_growth_failure_reaches_the_callback_as_an_ordinary_error() {
+    fn growth_failure_reaches_the_callback_as_an_ordinary_error() {
         use crate::error::ErrorKind;
         use crate::{ArgCount, Program, RetCount, State};
 
@@ -3376,9 +3395,7 @@ mod tests {
             } else {
                 (len, 1)
             };
-            table
-                .rebuild_from_snapshot(logical_len, 1, vec![(n(live_key), Val::Bool(true))])
-                .unwrap();
+            *table = window_table(logical_len, Some(live_key));
             let program = Program::compile(&source, None).unwrap();
             state.load(&program).unwrap();
             let error = state

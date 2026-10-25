@@ -77,8 +77,10 @@ fn run_at_cap(state: &mut State, body: &str) -> Outcome {
          end"
     );
     support::run(state, source);
+    // The filler is built once; a refused call leaves it as it was, so each
+    // failed attempt lowers the height by popping one slot.
     let call = |state: &mut State, fill: usize, armed: bool| {
-        state.set_top(fill as isize).expect("filler fits");
+        assert_eq!(state.get_top(), fill, "the filler is intact");
         state.get_global("probe").expect("probe fits");
         state.push_boolean(armed).expect("flag fits");
         let result = state.call(ArgCount::Fixed(1), RetCount::Fixed(1));
@@ -86,14 +88,21 @@ fn run_at_cap(state: &mut State, body: &str) -> Outcome {
             Ok(()) => Outcome::Returned(state.to_string(-1).expect("a string result")),
             Err(error) => Outcome::Failed(error.to_string()),
         };
-        state.set_top(0).expect("stack clears");
+        state
+            .set_top(fill as isize)
+            .expect("results pop to the filler");
         outcome
     };
+    state.set_top(0).expect("stack clears");
     let mut fill = MAX_STACK_SIZE - 2;
+    state.set_top(fill as isize).expect("filler fits");
     while matches!(call(state, fill, false), Outcome::Failed(_)) {
         fill -= 1;
+        state.pop(1).expect("filler pops");
     }
-    call(state, fill, true)
+    let outcome = call(state, fill, true);
+    state.set_top(0).expect("stack clears");
+    outcome
 }
 
 #[test]

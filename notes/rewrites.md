@@ -62,12 +62,13 @@ Reported by: runtime, library, native-stack-errors (dissenting).
 All runtime limits are crate constants (`limits::MAX_STACK_SIZE`,
 `MAX_CALL_DEPTH`, `MAX_NATIVE_CALL_DEPTH`, `MAX_METAMETHOD_DEPTH`,
 `TABLE_SORT_MAX_LEN`, `MAX_ARRAY_LEN`, `MAX_STRING_BYTES`). Every boundary
-test must drive the real value: million-slot stack fills (see the at-cap
-entry in verif-native-stack.md), 8-16 MiB strings in
-`print_bounds_the_raw_joined_output_by_the_cap` and
+test must drive the real value: million-slot stack fills (the at-cap probes
+fill once and pop a slot per attempt, but still fill the real cap), 8-16 MiB
+strings in `print_bounds_the_raw_joined_output_by_the_cap` and
 `lossy_host_conversion_is_size_checked`, recursion to the real call depth, and
-the snapshot backdoor that is the only way to reach `MAX_ARRAY_LEN` (see the
-growth-limit entry in verif-assertions.md).
+`MAX_ARRAY_LEN`, which the growth-limit tests in `src/vm/table.rs` reach through
+a test-only table constructor that sets the logical length and window directly.
+If this rewrite is done, those tests move onto lowerable limits.
 
 Proposal (runtime, library): a `Limits` value held by `State`, defaulting to
 the constants, settable only through a `#[doc(hidden)]` or test-feature
@@ -84,6 +85,11 @@ test-only path production can reach.
 
 Enforceable: by type (production reads `self.limits`), plus a clippy
 `disallowed` path or textlint on direct `limits::MAX_*` reads in `src/vm/`.
+
+If this is done: the growth-limit unit tests in `src/vm/table.rs` reach
+`MAX_ARRAY_LEN` through a test-only constructor that fabricates a table at the
+edge (decided 2026-10-25, instead of the snapshot backdoor); with a lowerable
+`MAX_ARRAY_LEN` they would move to real scripts that grow a table to the cap.
 
 ## RW-006 - Make `src/crmath/` its own workspace crate
 
