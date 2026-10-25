@@ -1,7 +1,7 @@
 -- Comprehensive Lua feature test
 -- Tests standard Lua features to find what's missing in our VM
 -- Will error on first failure - run repeatedly to find all issues
--- DIFF: unpack_global - we provide global unpack (like lua5.2), lua5.4 only has table.unpack
+-- Global unpack, which Lua 5.4 lacks, is tested in unpack_global.lua.
 
 local function test(name, condition)
     if condition then
@@ -123,9 +123,6 @@ test("table.sort with comparator", t7[1] == 3)
 
 local a, b, c = table.unpack({1, 2, 3})
 test("table.unpack", a == 1 and b == 2 and c == 3)
-
-local ua, ub = unpack({1, 2, 3}, 2, 3)
-test("global unpack range", ua == 2 and ub == 3)
 
 local t8 = table.pack(1, 2, 3)
 test("table.pack", t8.n == 3 and t8[1] == 1)
@@ -383,9 +380,6 @@ test("tostring nil", tostring(nil) == "nil")
 local nt = {a = 1}
 local nk, nv = next(nt)
 test("next", nk == "a" and nv == 1)
-
-local ua, ub, uc = unpack({1, 2, 3})
-test("unpack", ua == 1 and ub == 2 and uc == 3)
 
 -- ============================================================================
 -- EDGE CASES

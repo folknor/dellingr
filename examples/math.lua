@@ -1,5 +1,6 @@
 -- Test math library
--- DIFF: number_format - no float subtype, so 5.4's "0.0"/"1.0" print as 5.2's "0"/"1"; math.random uses dellingr's own seeded generator
+-- Whole-valued floats print as Lua 5.2 does ("0", not 5.4's "0.0"). The
+-- random stream is dellingr's own, so only its ranges are checked here.
 
 print("=== Testing math library ===")
 
@@ -45,11 +46,17 @@ print("math.ceil(-3.2) =", math.ceil(-3.2))
 
 -- Test math.random
 print("\n=== Random ===")
-print("math.random() =", math.random())
-print("math.random() =", math.random())
-print("math.random(10) =", math.random(10))
-print("math.random(10) =", math.random(10))
-print("math.random(5, 10) =", math.random(5, 10))
-print("math.random(5, 10) =", math.random(5, 10))
+local unit_ok, upper_ok, range_ok = true, true, true
+for _ = 1, 200 do
+    local u = math.random()
+    if not (u >= 0 and u < 1) then unit_ok = false end
+    local n = math.random(10)
+    if not (n >= 1 and n <= 10 and n == math.floor(n)) then upper_ok = false end
+    local r = math.random(5, 10)
+    if not (r >= 5 and r <= 10 and r == math.floor(r)) then range_ok = false end
+end
+print("math.random() is in [0, 1): " .. tostring(unit_ok))
+print("math.random(10) is an integer in [1, 10]: " .. tostring(upper_ok))
+print("math.random(5, 10) is an integer in [5, 10]: " .. tostring(range_ok))
 
 print("\n=== All tests completed ===")

@@ -1,4 +1,3 @@
--- SKIP-DIFF: table stress test; still run by the example runner.
 -- Stress test: many table creations/destructions
 print("Starting table stress test...")
 

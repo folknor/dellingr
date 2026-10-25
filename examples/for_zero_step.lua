@@ -2,6 +2,12 @@
 -- directions. Lua 5.4 raises "'for' step is zero"; Lua 5.2 skips an ascending
 -- range but runs a descending one forever (the break guard below bounds it).
 -- See docs/compatibility.md.
+-- EXPECT: ascending literal zero step skips: true
+-- EXPECT: descending literal zero step skips: true
+-- EXPECT: equal bounds zero step skips: true
+-- EXPECT: float zero step skips: true
+-- EXPECT: negative zero step skips: true
+-- EXPECT: inline zero step body never runs: true
 
 local function count(start, limit, step)
     local n = 0

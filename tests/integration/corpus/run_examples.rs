@@ -2,10 +2,22 @@
 //! from the checked-in list `tests/common/examples.rs`. Each example runs
 //! through the CLI once and must pass the example conventions
 //! (`check_cli_run`), and the `Cost used: N` it reports must match the corpus
-//! cost golden (`check_corpus_cost`); an example not marked `-- SKIP-DIFF:` is then run by
+//! cost golden (`check_corpus_cost`). Every example then has one oracle
+//! independent of its own run (`Oracle`): an unmarked example is run by
 //! reference Lua 5.2 and 5.4 and compared with the CLI's output in memory
-//! (`compare_with_references`). `brokkr test standalone::calls_global` runs
-//! one example.
+//! (`compare_with_references`), and a `-- DIFF:` example, which by
+//! definition no reference can judge, must print exactly the transcript its
+//! `-- EXPECT:` lines spell (`check_transcript`). `brokkr test
+//! standalone::calls_global` runs one example.
+//!
+//! A DIFF marker may declare only a divergence the pinned reference releases
+//! themselves determine (a parse rejection, a missing or extra library
+//! function, a raised error); `scripts/check_tools.py` pins those releases,
+//! which is what makes the stale-marker check sound. Host-dependent behaviour,
+//! such as C Lua's NaN sign or the last bit of a libm result, is a dellingr
+//! contract tested in Rust, not in the corpus. There is no way to exempt an
+//! example from both oracles: an example that cannot run under the references
+//! at all (a limit test, a resource probe) belongs in a Rust test.
 //!
 //! `brokkr check` runs the standalone tests in their own lane per feature
 //! shape: the default and snapshot sweeps skip them, and a sibling sweep of
@@ -154,64 +166,177 @@ pub(super) fn defines_global_bench(source: &str) -> bool {
     })
 }
 
-/// How an example takes part in the reference comparison, from its marker
-/// lines: `-- DIFF: <reason>` declares a deliberate divergence, and
-/// `-- SKIP-DIFF: <reason>` keeps the file out of the comparison.
-#[derive(Clone, Copy)]
-enum Comparison {
+/// The oracle an example is judged by, beyond the pass rules, read from its
+/// marker lines.
+enum Oracle {
     /// Unmarked: the output must match at least one reference.
-    Compared,
-    /// `-- DIFF:`: the output must match neither reference; a match means
-    /// the marker is stale.
-    Diverges,
-    /// `-- SKIP-DIFF:`: not compared.
-    Skipped,
+    References,
+    /// `-- DIFF: <reason>`: stdout must equal this transcript, and the output
+    /// must match neither reference (a match means the marker is stale).
+    Transcript(Vec<u8>),
 }
 
-/// Reads the markers of `source`. Every marker needs a reason; whitespace is
-/// `str::trim_ascii`'s set, the same one the `diff-marker-needs-reason`
-/// textlint rule in `brokkr.toml` uses, which reports the same mistake before
-/// anything compiles. A file may not carry both kinds.
-fn comparison(source: &str) -> Result<Comparison, String> {
+/// The marker that spells one line of a DIFF example's expected stdout.
+const EXPECT_MARKER: &str = "-- EXPECT:";
+
+/// Reads the oracle of `source`.
+///
+/// Every DIFF marker needs a reason; whitespace is `str::trim_ascii`'s set,
+/// the same one the `diff-marker-needs-reason` textlint rule in `brokkr.toml`
+/// uses, which reports the same mistake before anything compiles.
+///
+/// The transcript is the file's `-- EXPECT:` lines, which must form one
+/// contiguous run inside the leading comment header (the lines before the
+/// first one that does not start with `--`, a block comment's `--[` ending
+/// it too), so a marker-shaped line in a string or block comment is refused
+/// rather than read. `-- EXPECT:` alone is an empty output line;
+/// `-- EXPECT: ` drops exactly that one space and keeps the rest byte for
+/// byte, trailing whitespace included, and is read once, never recursively.
+/// Source lines end in LF or CRLF; the transcript joins its lines with LF
+/// and ends in LF, so it cannot spell output without a final newline, nor
+/// empty output. A DIFF file must have a transcript, and an unmarked file
+/// may not: each example has exactly one oracle.
+fn oracle(source: &str) -> Result<Oracle, String> {
+    let lines: Vec<&str> = source
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+        .collect();
+    let header_len = lines
+        .iter()
+        .position(|line| !line.starts_with("--") || line.starts_with("--["))
+        .unwrap_or(lines.len());
+
     let mut diverges = false;
-    let mut skipped = false;
     let mut without_reason = Vec::new();
-    for (index, line) in source.lines().enumerate() {
-        let reason = if let Some(reason) = line.strip_prefix("-- DIFF:") {
+    let mut expect_lines = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        if let Some(reason) = line.strip_prefix("-- DIFF:") {
             diverges = true;
-            reason
-        } else if let Some(reason) = line.strip_prefix("-- SKIP-DIFF:") {
-            skipped = true;
-            reason
-        } else {
-            continue;
-        };
-        if reason.trim_ascii().is_empty() {
-            without_reason.push((index + 1).to_string());
+            if reason.trim_ascii().is_empty() {
+                without_reason.push((index + 1).to_string());
+            }
+        }
+        if line.trim_start().starts_with("-- EXPECT") {
+            expect_lines.push(index);
         }
     }
     if !without_reason.is_empty() {
         return Err(format!(
-            "DIFF and SKIP-DIFF markers need a reason (line {})",
+            "DIFF markers need a reason (line {})",
             without_reason.join(", ")
         ));
     }
-    match (diverges, skipped) {
-        (true, true) => Err("carries both a DIFF and a SKIP-DIFF marker".to_string()),
-        (true, false) => Ok(Comparison::Diverges),
-        (false, true) => Ok(Comparison::Skipped),
-        (false, false) => Ok(Comparison::Compared),
+
+    let mut transcript = Vec::new();
+    for (position, &index) in expect_lines.iter().enumerate() {
+        let line_number = index + 1;
+        if index >= header_len {
+            return Err(format!(
+                "line {line_number}: {EXPECT_MARKER} lines belong in the leading comment header"
+            ));
+        }
+        if position > 0 && expect_lines[position - 1] + 1 != index {
+            return Err(format!(
+                "line {line_number}: {EXPECT_MARKER} lines must form one contiguous run"
+            ));
+        }
+        let line = lines[index];
+        let payload = if line == EXPECT_MARKER {
+            ""
+        } else if let Some(payload) = line
+            .strip_prefix(EXPECT_MARKER)
+            .and_then(|rest| rest.strip_prefix(' '))
+        {
+            payload
+        } else {
+            return Err(format!(
+                "line {line_number}: an expected line is `{EXPECT_MARKER}` alone or \
+                 `{EXPECT_MARKER} ` followed by the output line"
+            ));
+        };
+        transcript.extend_from_slice(payload.as_bytes());
+        transcript.push(b'\n');
+    }
+
+    match (diverges, expect_lines.is_empty()) {
+        (true, false) => Ok(Oracle::Transcript(transcript)),
+        (true, true) => Err(format!(
+            "a DIFF example needs its expected stdout as {EXPECT_MARKER} lines, since no \
+             reference can judge it"
+        )),
+        (false, false) => Err(format!(
+            "{EXPECT_MARKER} lines are only for DIFF examples; an unmarked example is judged \
+             by the references"
+        )),
+        (false, true) => Ok(Oracle::References),
     }
 }
 
-/// Runs one example through the CLI and, unless it is marked SKIP-DIFF,
-/// through both references, and judges it. `display` is its
-/// repository-relative path. Every process is started only while the
-/// deadline has not passed.
+/// A DIFF example prints exactly its transcript, compared as bytes. This runs
+/// in every build, the `hotpath` ones included: it is the example's only
+/// oracle.
+fn check_transcript(display: &str, oracle: &Oracle, stdout: &[u8]) -> Result<(), String> {
+    match oracle {
+        Oracle::Transcript(expected) if stdout != expected.as_slice() => Err(format!(
+            "{display}: stdout differs from its {EXPECT_MARKER} transcript{}",
+            first_difference("expected", stdout, expected)
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// The transcript format: one space dropped and the rest kept byte for byte,
+/// a bare marker as an empty line, LF and CRLF source alike, a payload that
+/// itself spells the marker read once, and every misplaced or malformed
+/// marker refused.
+#[test]
+fn diff_transcripts_parse_exactly() {
+    let transcript = |source: &str| match oracle(source) {
+        Ok(Oracle::Transcript(bytes)) => String::from_utf8(bytes).expect("ASCII fixture"),
+        Ok(Oracle::References) => panic!("expected a transcript for {source:?}"),
+        Err(error) => panic!("expected a transcript for {source:?}: {error}"),
+    };
+    assert_eq!(
+        transcript(
+            "-- DIFF: r\n-- EXPECT: a: true \t\n-- EXPECT:\n-- EXPECT: -- EXPECT: b\nprint()\n"
+        ),
+        "a: true \t\n\n-- EXPECT: b\n"
+    );
+    assert_eq!(
+        transcript("-- DIFF: r\r\n-- EXPECT: a\r\n-- EXPECT: b\r\n"),
+        "a\nb\n"
+    );
+    assert!(matches!(oracle("print(1)\n"), Ok(Oracle::References)));
+
+    let refused = |source: &str, needle: &str| match oracle(source) {
+        Err(error) => assert!(error.contains(needle), "{source:?}: {error}"),
+        Ok(_) => panic!("{source:?} should be refused"),
+    };
+    refused("-- DIFF: r\nprint(1)\n", "needs its expected stdout");
+    refused("-- EXPECT: a\nprint(1)\n", "only for DIFF examples");
+    refused("-- DIFF:\n-- EXPECT: a\n", "need a reason");
+    refused("-- DIFF: r\n-- EXPECT:a\n", "alone or");
+    refused(
+        "-- DIFF: r\n-- EXPECT: a\n-- note\n-- EXPECT: b\n",
+        "contiguous",
+    );
+    refused(
+        "-- DIFF: r\n-- EXPECT: a\nlocal x = 1\n-- EXPECT: b\n",
+        "leading comment header",
+    );
+    refused(
+        "-- DIFF: r\n--[[\n-- EXPECT: a\n]]\n",
+        "leading comment header",
+    );
+}
+
+/// Runs one example through the CLI and through both references, and judges
+/// it. `display` is its repository-relative path. Every process is started
+/// only while the deadline has not passed.
 fn check_example(display: &str, path: &Path, deadline: Deadline) -> Result<(), String> {
     let source = fs::read_to_string(path)
         .map_err(|error| format!("{display}: could not read source: {error}"))?;
-    let comparison = comparison(&source).map_err(|error| format!("{display}: {error}"))?;
+    let oracle = oracle(&source).map_err(|error| format!("{display}: {error}"))?;
     let defines_bench = defines_global_bench(&source);
 
     // `capture` starts nothing once the deadline has passed. Without `--quiet`
@@ -230,7 +355,8 @@ fn check_example(display: &str, path: &Path, deadline: Deadline) -> Result<(), S
     })?;
     let cost = check_cli_run(display, &run, defines_bench)?;
     check_corpus_cost(display, source.as_bytes(), cost)?;
-    compare_with_references(path, display, comparison, &run.stdout, deadline)
+    check_transcript(display, &oracle, &run.stdout)?;
+    compare_with_references(path, display, &oracle, &run.stdout, deadline)
 }
 
 /// The example conventions for the CLI run: it exits 0 and writes nothing to
@@ -402,17 +528,27 @@ fn cut_failure(display: &str, program: &str, cut: &Cut, run: &process::Captured)
 /// two), and where they disagree, which one dellingr follows is a per-feature
 /// decision rather than a global one. A file where both agree cannot hide a
 /// regression, and a deliberate divergence is marked with `-- DIFF:`.
+///
+/// The references run live rather than being replaced by checked-in expected
+/// output for every example. A per-example transcript would drop the
+/// reference Luas from the gate's requirements and save repeating identical
+/// reference runs in each corpus lane, but every changed example would need
+/// its transcript refreshed through the references anyway, and the live run
+/// keeps each check an actual comparison with reference Lua. Only DIFF
+/// examples, which no reference can judge, carry a transcript (`Oracle`).
+///
+/// For a DIFF example any reference mismatch counts as divergence, including
+/// one from an unrelated reference-only error, so a marker can outlive its
+/// divergence unnoticed. That leaves a stale declaration, never a wrong
+/// result: the example's transcript alone judges dellingr's output.
 #[cfg(not(feature = "hotpath"))]
 fn compare_with_references(
     path: &Path,
     display: &str,
-    comparison: Comparison,
+    oracle: &Oracle,
     ours: &[u8],
     deadline: Deadline,
 ) -> Result<(), String> {
-    if matches!(comparison, Comparison::Skipped) {
-        return Ok(());
-    }
     let mut matched = Vec::new();
     let mut mismatches = Vec::new();
     for lua in ReferenceLua::ALL {
@@ -445,12 +581,12 @@ fn compare_with_references(
             mismatches.push(describe_mismatch(lua.label(), code, &run, ours));
         }
     }
-    match comparison {
-        Comparison::Compared if matched.is_empty() => Err(format!(
+    match oracle {
+        Oracle::References if matched.is_empty() => Err(format!(
             "{display}: output matches neither reference\n{}",
             mismatches.join("\n")
         )),
-        Comparison::Diverges if !matched.is_empty() => Err(format!(
+        Oracle::Transcript(_) if !matched.is_empty() => Err(format!(
             "{display}: stale DIFF marker; output matches {}",
             matched.join(" and ")
         )),
@@ -458,12 +594,13 @@ fn compare_with_references(
     }
 }
 
-/// Without the comparison (see the module comment), the pass rules decide.
+/// Without the comparison (see the module comment), the pass rules and a DIFF
+/// example's transcript decide.
 #[cfg(feature = "hotpath")]
 fn compare_with_references(
     _path: &Path,
     _display: &str,
-    _comparison: Comparison,
+    _oracle: &Oracle,
     _ours: &[u8],
     _deadline: Deadline,
 ) -> Result<(), String> {
@@ -482,25 +619,31 @@ fn describe_mismatch(label: &str, code: i32, run: &process::Captured, ours: &[u8
         ));
     }
     if run.stdout != ours {
-        let ours: Vec<&[u8]> = ours.split(|byte| *byte == b'\n').collect();
-        let theirs: Vec<&[u8]> = run.stdout.split(|byte| *byte == b'\n').collect();
-        let line = (0..ours.len().max(theirs.len()))
-            .find(|&index| ours.get(index) != theirs.get(index))
-            .unwrap_or(0);
-        let show = |lines: &[&[u8]]| {
-            lines.get(line).map_or_else(
-                || "<end of output>".to_string(),
-                |text| format!("{:?}", String::from_utf8_lossy(text)),
-            )
-        };
-        text.push_str(&format!(
-            "\n    first difference at stdout line {}\n    dellingr: {}\n    {label}: {}",
-            line + 1,
-            show(&ours),
-            show(&theirs)
-        ));
+        text.push_str(&first_difference(label, ours, &run.stdout));
     }
     text
+}
+
+/// The first stdout line at which `ours` (dellingr's) and `theirs` differ,
+/// rendered for a failure message; bytes are decoded only for display.
+fn first_difference(label: &str, ours: &[u8], theirs: &[u8]) -> String {
+    let ours: Vec<&[u8]> = ours.split(|byte| *byte == b'\n').collect();
+    let theirs: Vec<&[u8]> = theirs.split(|byte| *byte == b'\n').collect();
+    let line = (0..ours.len().max(theirs.len()))
+        .find(|&index| ours.get(index) != theirs.get(index))
+        .unwrap_or(0);
+    let show = |lines: &[&[u8]]| {
+        lines.get(line).map_or_else(
+            || "<end of output>".to_string(),
+            |text| format!("{:?}", String::from_utf8_lossy(text)),
+        )
+    };
+    format!(
+        "\n    first difference at stdout line {}\n    dellingr: {}\n    {label}: {}",
+        line + 1,
+        show(&ours),
+        show(&theirs)
+    )
 }
 
 /// A string list in a `[[check]]` entry, if the key is present.

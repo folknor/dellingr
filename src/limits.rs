@@ -14,7 +14,11 @@
 //! Fixed limits have no per-State injection point. Scripts must behave
 //! identically for every embedder and across save/restore, so changing a
 //! script-visible limit changes the replay and snapshot contract. The snapshot
-//! format and verifier validate against these values directly. Internal
+//! format and verifier validate against these values directly. That includes
+//! a test-only or doc-hidden override: a lowerable cap would be a path
+//! production code could reach and a replay hazard, so boundary tests drive
+//! the real values and keep their cost down through fixture shape (fill
+//! once, compute heights) instead. Internal
 //! batching, cache, GC-default, and allocation-capacity tuning lives in the
 //! crate-private `tuning` module. The existing public paths for its cost-batch
 //! interval and pattern-cache capacities remain as forwarding constants below.

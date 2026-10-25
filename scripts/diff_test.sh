@@ -14,8 +14,10 @@
 # runtimes. A file passes when
 # its dellingr output matches either reference. Files tagged with -- DIFF:
 # <reason> are expected to differ from both references; matching either one
-# reports a stale marker after dellingr exits successfully. Files tagged with
-# -- SKIP-DIFF: <reason> are not compared.
+# reports a stale marker after dellingr exits successfully. A DIFF file is
+# judged by its -- EXPECT: transcript instead: dellingr's stdout must equal it
+# byte for byte, with empty stderr, by the rules run_examples.rs documents
+# (one contiguous run of EXPECT lines inside the leading comment header).
 #
 # Accepting either reference is deliberate: dellingr is a Lua 5.2/5.4 hybrid
 # (the README's "Won't implement" list removes most of what separates the two),
@@ -136,7 +138,15 @@ LUA54_OUT="$(mktemp "$SCRATCH_DIR/dellingr-diff-lua54.XXXXXX")" || {
     rm -f "$OUR_OUT" "$LUA52_OUT"
     exit 1
 }
-trap 'rm -f "$OUR_OUT" "$LUA52_OUT" "$LUA54_OUT"' EXIT
+OUR_ERR="$(mktemp "$SCRATCH_DIR/dellingr-diff-our-err.XXXXXX")" || {
+    rm -f "$OUR_OUT" "$LUA52_OUT" "$LUA54_OUT"
+    exit 1
+}
+EXPECTED_OUT="$(mktemp "$SCRATCH_DIR/dellingr-diff-expected.XXXXXX")" || {
+    rm -f "$OUR_OUT" "$LUA52_OUT" "$LUA54_OUT" "$OUR_ERR"
+    exit 1
+}
+trap 'rm -f "$OUR_OUT" "$LUA52_OUT" "$LUA54_OUT" "$OUR_ERR" "$EXPECTED_OUT"' EXIT
 
 if [ "$#" -gt 0 ]; then
     scripts=()
@@ -181,6 +191,55 @@ run_lua() {
     fi
 }
 
+# Writes the -- EXPECT: transcript of DIFF file $1 to $2 by run_examples.rs's
+# rules: the lines form one contiguous run inside the leading comment header
+# (which the first line not starting with --, or starting with --[, ends);
+# `-- EXPECT:` alone is an empty line and `-- EXPECT: ` drops exactly that one
+# space. Source lines may end in CRLF; the transcript uses LF. Prints why and
+# returns 1 when the transcript is missing or malformed.
+write_transcript() {
+    local file="$1"
+    local out="$2"
+    local line trimmed payload
+    local in_header=1
+    local run=none
+    : > "$out"
+    while IFS= read -r line || [ -n "$line" ]
+    do
+        line="${line%$'\r'}"
+        if [ "$in_header" = 1 ] && { [[ "$line" != --* ]] || [[ "$line" == --\[* ]]; }; then
+            in_header=0
+        fi
+        trimmed="${line#"${line%%[![:space:]]*}"}"
+        if [[ "$trimmed" == "-- EXPECT"* ]]; then
+            if [ "$in_header" = 0 ]; then
+                echo "-- EXPECT: lines belong in the leading comment header"
+                return 1
+            fi
+            if [ "$run" = ended ]; then
+                echo "-- EXPECT: lines must form one contiguous run"
+                return 1
+            fi
+            if [ "$line" = "-- EXPECT:" ]; then
+                payload=""
+            elif [[ "$line" == "-- EXPECT: "* ]]; then
+                payload="${line#"-- EXPECT: "}"
+            else
+                echo "malformed -- EXPECT: line"
+                return 1
+            fi
+            printf '%s\n' "$payload" >> "$out"
+            run=open
+        elif [ "$run" = open ]; then
+            run=ended
+        fi
+    done < "$file"
+    if [ "$run" = none ]; then
+        echo "a DIFF example needs its expected stdout as -- EXPECT: lines"
+        return 1
+    fi
+}
+
 report_capture() {
     local label="$1"
     local capture="$2"
@@ -198,21 +257,30 @@ do
         *) name="$f" ;;
     esac
 
-    if grep -Eq '^-- (DIFF|SKIP-DIFF):[[:space:]]*$' "$f"; then
+    if grep -Eq '^-- DIFF:[[:space:]]*$' "$f"; then
         failures+=("FAIL: $name (diff marker requires a reason)")
-        continue
-    fi
-
-    if grep -q '^-- SKIP-DIFF:' "$f"; then
         continue
     fi
 
     has_diff=0
     if grep -q '^-- DIFF:' "$f"; then
         has_diff=1
+        if ! problem="$(write_transcript "$f" "$EXPECTED_OUT")"; then
+            failures+=("FAIL: $name ($problem)")
+            continue
+        fi
+    elif grep -Eq '^[[:space:]]*-- EXPECT' "$f"; then
+        failures+=("FAIL: $name (-- EXPECT: lines are only for DIFF examples)")
+        continue
     fi
 
-    run_lua "$OUR_LUA" --quiet "$f" > "$OUR_OUT" 2>&1
+    # A DIFF file's transcript is stdout alone, so its streams stay apart;
+    # every other file is compared with stdout and stderr together.
+    if [ "$has_diff" = "1" ]; then
+        run_lua "$OUR_LUA" --quiet "$f" > "$OUR_OUT" 2> "$OUR_ERR"
+    else
+        run_lua "$OUR_LUA" --quiet "$f" > "$OUR_OUT" 2>&1
+    fi
     our_status=$?
     # 124 is timeout(1)'s "timed out" status. The CLI's handled paths use 0 or
     # 1; unhandled panics and aborts are also failures, but do not use 124.
@@ -224,7 +292,22 @@ do
     if [ "$our_status" -ne 0 ]; then
         failures+=("FAIL: $name (dellingr exited $our_status)")
         report_capture "dellingr" "$OUR_OUT"
+        if [ "$has_diff" = "1" ]; then
+            report_capture "dellingr stderr" "$OUR_ERR"
+        fi
         continue
+    fi
+    if [ "$has_diff" = "1" ]; then
+        if [ -s "$OUR_ERR" ]; then
+            failures+=("FAIL: $name (dellingr wrote to stderr)")
+            report_capture "dellingr stderr" "$OUR_ERR"
+            continue
+        fi
+        if ! cmp -s "$OUR_OUT" "$EXPECTED_OUT"; then
+            failures+=("FAIL: $name (stdout differs from its -- EXPECT: transcript)")
+            diff -u --label expected --label dellingr "$EXPECTED_OUT" "$OUR_OUT" >&2 || :
+            continue
+        fi
     fi
 
     if [ "$references_checked" -eq 0 ]; then

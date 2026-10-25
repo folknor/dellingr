@@ -4,10 +4,12 @@ Every deliberate divergence from Lua 5.2 and 5.4. A difference not listed
 here is a bug. Features that are absent altogether are listed in the README
 under "Won't implement".
 
-`brokkr check` compares the output of every example not marked
-`-- SKIP-DIFF:` with Lua 5.2 and 5.4 (the example corpus tests in
-`tests/integration/corpus/run_examples.rs`); intentional differences carry a
-`-- DIFF:` comment in the example.
+`brokkr check` compares the output of every example with Lua 5.2 and 5.4
+(the example corpus tests in `tests/integration/corpus/run_examples.rs`). An
+example showing an intentional difference carries a `-- DIFF:` comment and
+its exact expected output as `-- EXPECT:` lines, since no reference can judge
+it. Only differences the reference releases themselves determine go there;
+host-dependent ones, such as NaN rendering below, are pinned by Rust tests.
 
 ## Numbers
 

@@ -33,6 +33,11 @@
 //! refuses to compile for them. NaN sign and payload bits are not part of the
 //! contract: they never affect a non-NaN result, and the VM never lets a
 //! script observe them.
+//!
+//! This stays a module of the crate rather than a workspace crate of its own.
+//! A split was proposed so its tables would compile once across VM edits and
+//! its tests would run once instead of per check shape; nothing measured makes
+//! that worth a second crate.
 
 // Exact floating-point comparisons are the algorithms here: rounding tests
 // compare two bounds for bit equality and special-case dispatch matches exact

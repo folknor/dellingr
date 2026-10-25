@@ -1,7 +1,8 @@
 -- Extended Lua feature test
 -- Tests features not covered in feature_test.lua
 -- Will error on first failure
--- DIFF: semicolon_syntax - lua5.4 rejects semicolons in some places we allow
+-- Lone-separator constructors, which reference Lua rejects, are tested in
+-- lone_separators.lua.
 
 local function test(name, condition)
     if condition then
@@ -66,12 +67,6 @@ test("mixed separators", t3[1] == 1 and t3[4] == 4)
 
 local t4 = {}  -- empty table
 test("empty table", #t4 == 0)
-
-local t5 = {;}  -- empty table with semicolon
-test("empty table with semicolon", #t5 == 0)
-
-local t5b = {,}  -- empty table with comma
-test("empty table with comma", #t5b == 0)
 
 local key = "dynamic"
 local t6 = {[key] = 42, ["literal"] = 100, [1+1] = 200}

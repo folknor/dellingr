@@ -36,8 +36,8 @@ All notable changes to dellingr are documented here. The format follows
 
 - The example runner and the differential gate are one Rust test per
   example, `corpus::run_examples::standalone::<name>`: each example runs
-  through the CLI once, and every file not marked `-- SKIP-DIFF:` is compared
-  with `lua5.2` and `lua5.4`, spawned from Rust, in memory. A reference now
+  through the CLI once and is compared with `lua5.2` and `lua5.4`, spawned
+  from Rust, in memory. A reference now
   matches only when it exits 0 with empty stderr and the same stdout, rather
   than on combined output with its exit status ignored. The references run
   under `LC_ALL=C`, `-E`, the address-space cap and a zero process limit, so a
@@ -64,8 +64,17 @@ All notable changes to dellingr are documented here. The format follows
   requirements, and the `.scratch/` wipe no longer needs `rm`.
 - Textlint rules keep every process a Rust test starts in
   `tests/integration/support/process.rs` (two marked `python3` spawns
-  excepted) and report a DIFF or SKIP-DIFF marker without a reason before
-  anything compiles.
+  excepted) and report a DIFF marker without a reason before anything
+  compiles.
+- Every example has an oracle independent of its own run. A `-- DIFF:`
+  example, which no reference can judge, must print exactly the transcript
+  its `-- EXPECT:` lines spell, and may declare only a divergence the pinned
+  reference releases determine. `-- SKIP-DIFF:` is gone. The examples that
+  carried a marker for one divergent statement lost it: `edge_cases.lua`'s
+  NaN line (pinned by a library test), `math.lua`'s random values (now range
+  checks) and `feature_test*.lua`'s global `unpack` and lone separators, now
+  `unpack_global.lua` (compared) and `lone_separators.lua` (DIFF). The four
+  stress examples are compared again.
 
 - The integration tests are one crate, `tests/integration`, instead of one
   binary per file: each former file is a module, grouped by subject (`cli`,

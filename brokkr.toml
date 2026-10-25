@@ -600,15 +600,15 @@ join_wrapped_use = true
 must_scan = ["tests/integration/support/mod.rs"]
 message = "import std::process::Command only in tests/integration/support/process.rs"
 
-# Every DIFF and SKIP-DIFF marker in the example corpus carries a reason. The
-# corpus test refuses an empty one too; this reports it before anything
-# compiles. The whitespace set matches the test's `str::trim_ascii`.
+# Every DIFF marker in the example corpus carries a reason. The corpus test
+# refuses an empty one too; this reports it before anything compiles. The
+# whitespace set matches the test's `str::trim_ascii`.
 [[textlint]]
 name = "diff-marker-needs-reason"
-pattern = '^-- (?:SKIP-)?DIFF:[\t\n\x0C\r ]*$'
+pattern = '^-- DIFF:[\t\n\x0C\r ]*$'
 paths = ["examples/**/*.lua"]
-must_scan = ["examples/math.lua"]
-message = "a -- DIFF: or -- SKIP-DIFF: marker needs a reason after the colon"
+must_scan = ["examples/for_zero_step.lua"]
+message = "a -- DIFF: marker needs a reason after the colon"
 
 # No Rust code enumerates the example corpus itself: tests/common/examples.rs
 # is its only list, kept equal to the files on disk by the `example-list`

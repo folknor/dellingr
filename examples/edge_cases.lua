@@ -1,6 +1,7 @@
 -- Edge Case Tests
 -- Tests for various edge cases and correct Lua semantics
--- DIFF: nan_format - dellingr prints every NaN as unsigned "nan" on every host; C Lua prints "-nan" for 0/0 on x86-64
+-- NaN rendering is host-dependent in C Lua, so it is pinned by a library test
+-- (number_format_g14.rs), not printed here.
 
 print("=== Edge Case Tests ===")
 print("")
@@ -22,7 +23,6 @@ print("")
 print("3. Division edge cases")
 print("1/0 = " .. tostring(1/0))    -- inf
 print("-1/0 = " .. tostring(-1/0))  -- -inf
-print("0/0 = " .. tostring(0/0))    -- NaN
 print("")
 
 -- 4. ipairs with false values
