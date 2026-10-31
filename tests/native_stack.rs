@@ -1029,7 +1029,7 @@ fn set_number(state: &mut State, name: &str, value: u32) -> dellingr::Result<()>
 /// A State with the callbacks and the leaf's pattern inputs, automatic
 /// collection off so the only collection is the one the leaf arms.
 fn test_state() -> dellingr::Result<State> {
-    let mut state = State::with_callbacks(Box::new(Quiet));
+    let mut state = State::builder().callbacks(Box::new(Quiet)).build();
     state.gc_disable_auto();
     state.set_user_data(Harness::default());
     for &(name, f) in CALLBACKS {

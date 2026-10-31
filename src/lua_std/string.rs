@@ -1400,10 +1400,12 @@ mod tests {
             for budget in 0..=total + 1 {
                 let mut fast_state = State::new();
                 fast_state
-                    .set_cost_budget(i64::try_from(budget).expect("test scan budgets fit in i64"));
+                    .set_cost_budget(i64::try_from(budget).expect("test scan budgets fit in i64"))
+                    .expect("the State is metered");
                 let mut slow_state = State::new();
                 slow_state
-                    .set_cost_budget(i64::try_from(budget).expect("test scan budgets fit in i64"));
+                    .set_cost_budget(i64::try_from(budget).expect("test scan budgets fit in i64"))
+                    .expect("the State is metered");
                 let fast = find_subslice(&mut fast_state, Charge::StringFind, haystack, needle);
                 let slow = naive_find(&mut slow_state, haystack, needle);
                 match (&fast, &slow) {

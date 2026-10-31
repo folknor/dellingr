@@ -6,7 +6,51 @@ All notable changes to dellingr are documented here. The format follows
 
 ## [Unreleased]
 
-`COST_MODEL_VERSION` is 8 (unchanged).
+`COST_MODEL_VERSION` is 8 (unchanged). Default costs are unchanged; the
+version's meaning is wider (see below).
+
+### Added
+
+- Configurable costs. Every costed operation is a `Charge` (each costed
+  operator opcode, each array element a constructor stores, and each costed
+  library function), and a `CostModel` gives each one an integer weight. A
+  charge site measures the same units as before and charges units times the
+  weight, saturating; weight 0 makes it free. `CostModel::default()` weighs
+  everything 1 and reproduces the existing costs; `CostModel::zero()` makes
+  every registered charge free while host charges and budgets still apply.
+  `Charge::ALL`, `Charge::name` and `CostModel::iter` expose the registry.
+- `Costing`, chosen when the State is built: `Costing::Metered(model)` or
+  `Costing::Off`, which admits every charge (including `consume_cost`) without
+  counting it, leaves `cost_used` at 0 and `cost_remaining` at `i64::MAX`, and
+  refuses a budget. `State::costing` reports it.
+- `State::builder()` with `StateBuilder::costing`, `callbacks`, `gc_policy` and
+  `raw`.
+- `ErrorKind::CostingOff`, returned by `set_cost_budget` under `Costing::Off`.
+- `Program::analyze_cost_with(&model)`: static analysis under a model.
+  `analyze_cost` is the default model.
+- Snapshots save and restore the costing.
+
+### Changed (breaking): cost configuration
+
+- `State::set_cost_budget` returns `Result<()>`: it is refused under
+  `Costing::Off`, and, like every other fallible entry point, on a poisoned
+  State. Callers that ignore the result now get an unused-result warning.
+- The snapshot format is version 14: the payload carries the costing. Saves
+  written by earlier formats do not load.
+- The State constructors that took callbacks or a GC policy are replaced by
+  `State::builder()`. `State::new` and `State::raw` remain.
+- `COST_MODEL_VERSION` now covers the units each charge measures, which charge
+  work is attributed to and how a charge is admitted against a budget, for
+  every model, not only the default costs: moving work from one charge to
+  another needs a bump even when default costs are unchanged. A cost
+  fingerprint is the version plus the costing (`CostModel::iter`). The costing
+  is replay-visible, because it changes where a callback fails: record it with
+  replays.
+- A library function's weight covers everything it charges, including its
+  pattern-matcher and substring-scan work. Per-unit charges keep their
+  admission under any weight: `table.move` copies exactly the elements it paid
+  for, and scans and matcher steps stop at the first unit that starts with no
+  budget left.
 
 ### Changed
 

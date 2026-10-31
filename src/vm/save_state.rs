@@ -1,8 +1,8 @@
 //! Snapshot / restore of a quiescent VM (the `snapshot` feature).
 //!
 //! [`State::save_state`] serializes the persistent script world - user globals,
-//! the reachable table/closure/upvalue/string graph, the RNG stream, and cost
-//! counters - to a versioned deterministic binary blob; [`State::load_state`]
+//! the reachable table/closure/upvalue/string graph, the RNG stream, and the
+//! costing with its counters - to a versioned deterministic binary blob; [`State::load_state`]
 //! rebuilds an equivalent [`State`] in the same binary. It is a *data snapshot,
 //! not a continuation*: a save is only valid while the VM is quiescent (no Lua
 //! or Rust call in flight), so there is no call stack, program counter, open
@@ -69,6 +69,7 @@ use super::{ObjectPtr, PointerIdKey, State, Val};
 use crate::COST_MODEL_VERSION;
 use crate::compiler::{Bytecode, UpvalueDesc};
 use crate::cost_meter::CostState;
+use crate::cost_model::{Charge, CostModel, Costing};
 use crate::host::HostCallbacks;
 use crate::instr::Instr;
 use crate::instr::snapshot_format::FORMAT_VERSION;
@@ -848,7 +849,7 @@ impl<'a> SaveBuilder<'a> {
         Ok(SavePayload {
             has_standard_environment: !self.state.env_tokens.is_empty(),
             rng_state: self.state.rng.state(),
-            cost: self.state.cost,
+            cost: self.state.cost.clone(),
             strings: self.strings,
             bytecode: self.bytecode,
             upvalues,
@@ -1557,12 +1558,18 @@ impl State {
         let _engine_version = decoder.read_bytes(SnapshotField::EngineVersion)?;
         let decoded = SavePayload::decode(&mut decoder)?;
         decoder.finish()?;
+        // Taken before verification consumes the payload: the State is built
+        // under the saved costing, so setup runs under the saved price list.
+        // Its counters start fresh with no budget; materialization restores
+        // the saved counters last.
+        let costing = decoded.cost.costing().clone();
         let payload = verify::verify_payload(decoded)?;
 
+        let builder = State::builder().callbacks(callbacks).costing(costing);
         let mut state = if payload.has_standard_environment() {
-            State::with_callbacks(callbacks)
+            builder.build()
         } else {
-            State::raw_with_callbacks(callbacks)
+            builder.raw().build()
         };
         // Anchors created by setup are deliberately retained and participate
         // in the final collection.
@@ -2170,6 +2177,9 @@ fn materialize_payload(
         &ctx,
     )?;
     state.rng = VmRng::from_state(payload.rng_state);
+    // Discards whatever setup charged or budgeted. The saved costing equals
+    // the one the State was built with, so only the counters change.
+    debug_assert_eq!(payload.cost.costing(), state.cost.costing());
     state.cost = payload.cost;
     state.next_format_pointer_id = payload.next_format_pointer_id;
     let mut seen_pointer_values = BTreeSet::new();
@@ -2972,10 +2982,40 @@ impl<'a> Decoder<'a> {
     }
 }
 
+/// Costing mode tags. For `Metered`, one u32 weight per charge follows, in
+/// `Charge` discriminant order; the count is fixed by `COST_MODEL_VERSION`,
+/// which the header checks for an exact match.
+const COSTING_METERED: u8 = 0;
+const COSTING_OFF: u8 = 1;
+
+fn read_costing(input: &mut Decoder<'_>) -> Result<Costing, SnapshotError> {
+    let offset = input.pos;
+    match input.read_u8()? {
+        COSTING_METERED => {
+            let mut weights = [0u32; Charge::COUNT];
+            for weight in &mut weights {
+                *weight = input.read_u32()?;
+            }
+            Ok(Costing::Metered(CostModel::from_weights(weights)))
+        }
+        COSTING_OFF => Ok(Costing::Off),
+        tag => Err(input.decode_error_at(offset, DecodeReason::InvalidCostingTag(tag))),
+    }
+}
+
 impl SavePayload {
     fn encode(&self, out: &mut Encoder) -> Result<(), SaveError> {
         out.write_u8(u8::from(self.has_standard_environment));
         out.write_u64(self.rng_state);
+        match self.cost.costing() {
+            Costing::Metered(model) => {
+                out.write_u8(COSTING_METERED);
+                for (_, weight) in model.iter() {
+                    out.write_u32(weight);
+                }
+            }
+            Costing::Off => out.write_u8(COSTING_OFF),
+        }
         let (remaining, limit, configured, used) = self.cost.snapshot_fields();
         out.write_i64(remaining);
         out.write_i64(limit);
@@ -3029,8 +3069,10 @@ impl SavePayload {
             has_standard_environment: input.read_bool()?,
             rng_state: input.read_u64()?,
             cost: {
+                let costing = read_costing(input)?;
                 let offset = input.pos;
                 CostState::from_snapshot(
+                    costing,
                     input.read_i64()?,
                     input.read_i64()?,
                     input.read_bool()?,
@@ -3585,6 +3627,22 @@ mod tests {
         }};
     }
 
+    /// The environment flag, the RNG word and a metered costing with every
+    /// weight 1, ready for counter fields.
+    fn metered_head() -> Encoder {
+        let mut encoder = Encoder::new();
+        encoder.write_bool(false);
+        encoder.write_u64(0);
+        encoder.write_u8(COSTING_METERED);
+        for _ in 0..Charge::COUNT {
+            encoder.write_u32(1);
+        }
+        encoder
+    }
+
+    /// Offset of the counter fields after `metered_head`.
+    const METERED_COUNTERS_OFFSET: usize = 9 + 1 + 4 * Charge::COUNT;
+
     #[test]
     fn decode_rejects_inconsistent_legacy_meter_fields() {
         for (remaining, limit, configured, used) in [
@@ -3593,9 +3651,7 @@ mod tests {
             (9, 10, true, 0),
             (-1, 0, true, 1),
         ] {
-            let mut encoder = Encoder::new();
-            encoder.write_bool(false);
-            encoder.write_u64(0);
+            let mut encoder = metered_head();
             encoder.write_i64(remaining);
             encoder.write_i64(limit);
             encoder.write_bool(configured);
@@ -3603,14 +3659,76 @@ mod tests {
             let mut decoder = Decoder::new(&encoder.bytes);
             match SavePayload::decode(&mut decoder) {
                 Err(error @ SnapshotError::DecodeError { offset, reason }) => {
-                    // The meter fields start after the environment flag and RNG.
-                    assert_eq!((offset, reason), (9, DecodeReason::InconsistentCostMeter));
+                    assert_eq!(
+                        (offset, reason),
+                        (METERED_COUNTERS_OFFSET, DecodeReason::InconsistentCostMeter)
+                    );
                     assert_eq!(
                         error.to_string(),
-                        "save decode error: at byte 9: inconsistent cost meter"
+                        format!(
+                            "save decode error: at byte {METERED_COUNTERS_OFFSET}: \
+                             inconsistent cost meter"
+                        )
                     );
                 }
                 _ => panic!("inconsistent meter must fail before decoding the arena"),
+            }
+        }
+    }
+
+    #[test]
+    fn decode_rejects_unknown_costing_tag() {
+        let mut encoder = Encoder::new();
+        encoder.write_bool(false);
+        encoder.write_u64(0);
+        encoder.write_u8(2);
+        let mut decoder = Decoder::new(&encoder.bytes);
+        match SavePayload::decode(&mut decoder) {
+            Err(SnapshotError::DecodeError { offset, reason }) => {
+                assert_eq!((offset, reason), (9, DecodeReason::InvalidCostingTag(2)));
+            }
+            _ => panic!("an unknown costing tag must be rejected"),
+        }
+    }
+
+    #[test]
+    fn decode_rejects_truncated_weight_list() {
+        let mut encoder = Encoder::new();
+        encoder.write_bool(false);
+        encoder.write_u64(0);
+        encoder.write_u8(COSTING_METERED);
+        for _ in 0..Charge::COUNT - 1 {
+            encoder.write_u32(1);
+        }
+        let end = encoder.bytes.len();
+        let mut decoder = Decoder::new(&encoder.bytes);
+        match SavePayload::decode(&mut decoder) {
+            Err(SnapshotError::DecodeError { offset, reason }) => {
+                assert_eq!((offset, reason), (end, DecodeReason::TruncatedPayload));
+            }
+            _ => panic!("a short weight list must be rejected"),
+        }
+    }
+
+    #[test]
+    fn decode_rejects_off_costing_with_use_or_budget() {
+        for (remaining, limit, configured, used) in
+            [(i64::MAX, i64::MAX, false, 1), (10, 10, true, 0)]
+        {
+            let mut encoder = Encoder::new();
+            encoder.write_bool(false);
+            encoder.write_u64(0);
+            encoder.write_u8(COSTING_OFF);
+            encoder.write_i64(remaining);
+            encoder.write_i64(limit);
+            encoder.write_bool(configured);
+            encoder.write_u64(used);
+            let mut decoder = Decoder::new(&encoder.bytes);
+            match SavePayload::decode(&mut decoder) {
+                Err(SnapshotError::DecodeError { offset, reason }) => {
+                    assert_eq!((offset, reason), (10, DecodeReason::InconsistentCostMeter));
+                }
+                _ => panic!("an Off save with use or a budget must be rejected"),
             }
         }
     }

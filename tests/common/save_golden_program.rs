@@ -86,6 +86,19 @@ pub(crate) fn golden_text(bytes: &[u8]) -> String {
     let mut lines = Vec::new();
     lines.push(format!("standard_environment={}", reader.flag()));
     lines.push(format!("rng={:016x}", reader.number(8)));
+    // Costing tag: 0 is metered, followed by one u32 weight per charge in
+    // discriminant order; 1 is off, with nothing after it.
+    match reader.number(1) {
+        0 => {
+            let weights: Vec<String> = dellingr::Charge::ALL
+                .iter()
+                .map(|_| reader.number(4).to_string())
+                .collect();
+            lines.push(format!("costing=metered weights={}", weights.join(",")));
+        }
+        1 => lines.push("costing=off".to_string()),
+        _ => panic!("unknown costing tag in fixture"),
+    }
     // Wire order is remaining, limit, configured, used; both counters are i64.
     lines.push(format!(
         "cost: remaining={} limit={} configured={} used={}",

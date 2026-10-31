@@ -55,7 +55,7 @@ use super::Instr;
 use super::Result;
 use super::compiler::Bytecode;
 use super::cost_meter::{CostMeter, CostState};
-use super::cost_model::{Charge, CostModel};
+use super::cost_model::{Charge, Costing};
 use super::error::Error;
 use super::error::ErrorKind;
 use super::error::StackFrame;
@@ -260,7 +260,7 @@ pub struct State {
     /// the shared string metatable; the global table's token is permanent and
     /// not kept here) captured after each successful open_libs,
     /// each mapped to its save token. The public `open_libs` refreshes this map,
-    /// and with_callbacks uses that same helper.
+    /// and building a State with the standard library uses that same helper.
     /// Keyed on the objects `open_libs` built, so user shadowing of a builtin
     /// slot (`math = {}`) cannot make the save classifier mistake a user table
     /// for an environment object. See `vm/save_state.rs`.
@@ -296,82 +296,114 @@ pub(super) struct EnvBaseline {
 // stack which belongs to the current frame. Note that Rust functions access
 // the stack using 1-based indexing, but Lua code uses 0-based indexing.
 
+/// Builds a [`State`]: host callbacks, garbage-collection policy, whether the
+/// standard library is opened, and how cost is accounted. Every setting has
+/// a default, so `State::builder().build()` is [`State::new`].
+///
+/// # Example
+///
+/// ```
+/// use dellingr::{Charge, CostModel, Costing, HostCallbacks, State};
+///
+/// struct MyCallbacks {
+///     output: Vec<Vec<u8>>,
+/// }
+/// impl HostCallbacks for MyCallbacks {
+///     fn on_print(&mut self, _source: Option<&[u8]>, _line: u32, message: &[u8]) {
+///         self.output.push(message.to_vec());
+///     }
+/// }
+///
+/// let state = State::builder()
+///     .callbacks(Box::new(MyCallbacks { output: vec![] }))
+///     .costing(Costing::Metered(CostModel::default().with(Charge::Pow, 5)))
+///     .build();
+/// assert_eq!(state.cost_used(), 0);
+/// ```
+#[must_use]
+pub struct StateBuilder {
+    callbacks: Option<Box<dyn HostCallbacks>>,
+    gc_policy: GcPolicy,
+    standard_library: bool,
+    costing: Costing,
+}
+
+impl StateBuilder {
+    fn new() -> Self {
+        Self {
+            callbacks: None,
+            gc_policy: GcPolicy::default(),
+            standard_library: true,
+            costing: Costing::default(),
+        }
+    }
+
+    /// Host callbacks. The default prints to stdout ([`DefaultCallbacks`]).
+    pub fn callbacks(mut self, callbacks: Box<dyn HostCallbacks>) -> Self {
+        self.callbacks = Some(callbacks);
+        self
+    }
+
+    /// A host-selected garbage collection policy.
+    ///
+    /// The initial threshold is active while the standard library is opened.
+    /// After an automatic collection, the next threshold is
+    /// `max(live_allocations * growth_factor, minimum_threshold)`. These values
+    /// are runtime policy and are not written to snapshots.
+    ///
+    /// `usize::MAX` as `initial_threshold` disables automatic collection until
+    /// the threshold is changed. A zero threshold triggers collection before
+    /// each allocation. The default policy is `(20, 20, 2)`.
+    pub fn gc_policy(
+        mut self,
+        initial_threshold: usize,
+        minimum_threshold: usize,
+        growth_factor: usize,
+    ) -> Self {
+        self.gc_policy = GcPolicy::new(initial_threshold, minimum_threshold, growth_factor);
+        self
+    }
+
+    /// Build without opening the standard library (see [`State::raw`]).
+    pub fn raw(mut self) -> Self {
+        self.standard_library = false;
+        self
+    }
+
+    /// How the State accounts for cost: metered by a [`crate::CostModel`] (the
+    /// default model by default) or [`Costing::Off`]. Fixed for the State's
+    /// whole life.
+    pub fn costing(mut self, costing: Costing) -> Self {
+        self.costing = costing;
+        self
+    }
+
+    /// Builds the State. Opening the standard library charges nothing under
+    /// any costing.
+    #[must_use]
+    pub fn build(self) -> State {
+        let callbacks = self.callbacks.unwrap_or_else(|| Box::new(DefaultCallbacks));
+        let mut state = State::build_raw(callbacks, self.gc_policy, self.costing);
+        if self.standard_library {
+            state
+                .open_libs_unchecked()
+                .expect("standard library initialization starts with an empty value stack");
+        }
+        state
+    }
+}
+
 impl State {
-    /// Creates a new, independent state with default callbacks (stdout).
+    /// Creates a new, independent state with default callbacks (stdout), the
+    /// standard library and the default cost model. See [`State::builder`]
+    /// for the other settings.
     pub fn new() -> Self {
-        Self::with_callbacks(Box::new(DefaultCallbacks))
+        Self::builder().build()
     }
 
-    /// Creates a new state with custom host callbacks.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use dellingr::{HostCallbacks, State};
-    ///
-    /// struct MyCallbacks {
-    ///     output: Vec<Vec<u8>>,
-    /// }
-    /// impl HostCallbacks for MyCallbacks {
-    ///     fn on_print(&mut self, _source: Option<&[u8]>, _line: u32, message: &[u8]) {
-    ///         self.output.push(message.to_vec());
-    ///     }
-    /// }
-    ///
-    /// let state = State::with_callbacks(Box::new(MyCallbacks { output: vec![] }));
-    /// ```
-    pub fn with_callbacks(callbacks: Box<dyn HostCallbacks>) -> Self {
-        Self::with_callbacks_and_policy(callbacks, GcPolicy::default())
-    }
-
-    /// Creates a state with a host-selected garbage collection policy.
-    ///
-    /// The initial threshold is active while the standard library is opened.
-    /// After an automatic collection, the next threshold is
-    /// `max(live_allocations * growth_factor, minimum_threshold)`. These values
-    /// are runtime policy and are not written to snapshots.
-    ///
-    /// `usize::MAX` as `initial_threshold` disables automatic collection until
-    /// the threshold is changed. A zero threshold triggers collection before
-    /// each allocation. The default policy is `(20, 20, 2)`.
-    pub fn with_gc_policy(
-        initial_threshold: usize,
-        minimum_threshold: usize,
-        growth_factor: usize,
-    ) -> Self {
-        Self::with_callbacks_and_policy(
-            Box::new(DefaultCallbacks),
-            GcPolicy::new(initial_threshold, minimum_threshold, growth_factor),
-        )
-    }
-
-    /// Creates a state with custom callbacks and a host-selected GC policy.
-    ///
-    /// The initial threshold is active while the standard library is opened.
-    /// After an automatic collection, the next threshold is
-    /// `max(live_allocations * growth_factor, minimum_threshold)`. These values
-    /// are runtime policy and are not written to snapshots.
-    ///
-    /// `usize::MAX` as `initial_threshold` disables automatic collection until
-    /// the threshold is changed. A zero threshold triggers collection before
-    /// each allocation. The default policy is `(20, 20, 2)`.
-    pub fn with_callbacks_and_gc_policy(
-        callbacks: Box<dyn HostCallbacks>,
-        initial_threshold: usize,
-        minimum_threshold: usize,
-        growth_factor: usize,
-    ) -> Self {
-        Self::with_callbacks_and_policy(
-            callbacks,
-            GcPolicy::new(initial_threshold, minimum_threshold, growth_factor),
-        )
-    }
-
-    fn with_callbacks_and_policy(callbacks: Box<dyn HostCallbacks>, policy: GcPolicy) -> Self {
-        let mut me = Self::raw_with_callbacks_and_gc_policy(callbacks, policy);
-        me.open_libs_unchecked()
-            .expect("standard library initialization starts with an empty value stack");
-        me
+    /// A builder for a State with non-default settings.
+    pub fn builder() -> StateBuilder {
+        StateBuilder::new()
     }
 
     /// Record the canonical environment objects right after `open_libs`, before
@@ -427,19 +459,14 @@ impl State {
     /// Creates a raw state, without opening any of the standard libraries:
     /// its global namespace is entirely empty, as with `lua_newstate` in the
     /// reference C API. [`State::open_libs`] installs them later if wanted.
+    /// [`StateBuilder::raw`] builds one with other settings.
     pub fn raw() -> Self {
-        Self::raw_with_callbacks(Box::new(DefaultCallbacks))
+        Self::builder().raw().build()
     }
 
-    /// Creates a raw state (see [`State::raw`]) with custom host callbacks.
-    pub fn raw_with_callbacks(callbacks: Box<dyn HostCallbacks>) -> Self {
-        Self::raw_with_callbacks_and_gc_policy(callbacks, GcPolicy::default())
-    }
-
-    fn raw_with_callbacks_and_gc_policy(
-        callbacks: Box<dyn HostCallbacks>,
-        gc_policy: GcPolicy,
-    ) -> Self {
+    /// The State every constructor starts from: the GC policy is active from
+    /// the first allocation, the costing is fixed, and nothing is opened.
+    fn build_raw(callbacks: Box<dyn HostCallbacks>, gc_policy: GcPolicy, costing: Costing) -> Self {
         let state_id = anchor::next_state_id();
         let mut heap = GcHeap::with_policy(gc_policy);
         let meta_names = MetaNames::intern(&mut heap);
@@ -455,7 +482,7 @@ impl State {
             bytecode_caches: IndexMap::default(),
             suspended_envs: Vec::new(),
             upvalue_pool: UpvaluePool::new(),
-            cost: CostState::default(),
+            cost: CostState::new(costing),
             patterns: IndexMap::default(),
             pattern_bytes: 0,
             #[cfg(test)]
@@ -504,20 +531,39 @@ impl State {
     /// always flushed before any call leaves the dispatch loop, so the reset
     /// sees a complete meter and `cost_used` afterwards counts only work done
     /// after the reset, independent of the batching interval.
-    pub fn set_cost_budget(&mut self, budget: i64) {
-        self.cost.set_budget(budget);
+    ///
+    /// # Errors
+    ///
+    /// [`ErrorKind::CostingOff`] when the State was built with
+    /// [`Costing::Off`], and the usual refusal of a poisoned State; nothing
+    /// changes.
+    pub fn set_cost_budget(&mut self, budget: i64) -> Result<()> {
+        self.check_usable()?;
+        if self.cost.set_budget(budget) {
+            Ok(())
+        } else {
+            Err(self.error(ErrorKind::CostingOff))
+        }
     }
 
-    /// Returns the total cost consumed since the last budget reset.
+    /// Returns the total cost consumed since the last budget reset. Always 0
+    /// when costing is off.
     pub fn cost_used(&self) -> u64 {
         self.cost.used()
     }
 
     /// Returns the cost remaining in the budget.
     /// Can be negative if the last action pushed over budget.
-    /// Without a configured budget, returns the unbounded sentinel `i64::MAX`.
+    /// Without a configured budget, and when costing is off, returns the
+    /// unbounded sentinel `i64::MAX`.
     pub fn cost_remaining(&self) -> i64 {
         self.cost.remaining()
+    }
+
+    /// How this State accounts for cost, fixed when it was built (see
+    /// [`StateBuilder::costing`]).
+    pub fn costing(&self) -> &Costing {
+        self.cost.costing()
     }
 
     /// Test instrumentation for the compiled-pattern cache.
@@ -530,7 +576,9 @@ impl State {
     /// and cost > 0. The action that pushes you over budget completes before
     /// stopping (checked at the START of each operation).
     ///
-    /// Use this in RustFuncs to charge for expensive operations.
+    /// Use this in RustFuncs to charge for expensive operations. The cost is
+    /// raw: the State's [`crate::CostModel`] does not weigh it. When costing is off
+    /// it is admitted without being counted.
     #[inline(always)]
     pub fn consume_cost(&mut self, cost: u64) -> Result<()> {
         self.check_usable()?;
@@ -559,7 +607,7 @@ impl State {
     /// [`State::consume_cost`] with the weighted cost, so the charge that
     /// crosses the budget completes.
     pub(crate) fn charge(&mut self, charge: Charge, units: u64) -> Result<()> {
-        self.consume_cost(CostModel::DEFAULT.cost(charge, units))
+        self.consume_cost(self.cost.cost(charge, units))
     }
 
     /// Charge `units` units of `charge` one unit at a time (see
@@ -576,9 +624,7 @@ impl State {
     /// A meter whose unit costs the weight of `charge`, for work that charges
     /// as it runs without VM state (the pattern matcher).
     pub(crate) fn charge_meter(&mut self, charge: Charge) -> CostMeter<'_> {
-        self.cost
-            .meter()
-            .with_unit(CostModel::DEFAULT.weight(charge))
+        self.cost.charge_meter(charge)
     }
 
     /// Flush before batching would hide exhaustion of a configured budget.
@@ -660,10 +706,11 @@ impl State {
         let subject = stack[subject_idx]
             .as_string(heap)
             .expect("expect_string_at validated the subject's string type");
-        let meter = cost
-            .meter()
-            .with_unit(CostModel::DEFAULT.weight(Charge::StringGmatch));
-        Ok(operation(subject, &mut matcher, meter))
+        Ok(operation(
+            subject,
+            &mut matcher,
+            cost.charge_meter(Charge::StringGmatch),
+        ))
     }
 
     pub(crate) fn budget_exceeded_error(&self) -> Error {

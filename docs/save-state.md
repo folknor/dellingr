@@ -6,7 +6,8 @@ in the module doc of `src/vm/save_state.rs`.
 ## What is saved
 
 - User globals, with the reachable tables, closures, upvalues and strings.
-- The RNG stream and the cost counters.
+- The RNG stream, the State's costing and the cost counters. The costing is
+  either metered, with the weight of every charge in `Charge` order, or off.
 - State-local object identities that `tostring` and `%p` have rendered,
   including those of the environment objects `open_libs` rebuilds on load.
 - Standard-library tables as deltas against the pristine environment.
@@ -147,8 +148,19 @@ returns; the loaded State starts with an empty stack.
 - A format version other than `FORMAT_VERSION` is rejected while reading the
   header, before payload decoding.
 - The cost model version must match `COST_MODEL_VERSION` exactly.
-- Loading restores the saved cost counters. Hosts must call `set_cost_budget`
-  afterwards.
+- The loaded State is built under the saved costing, so setup runs under the
+  saved price list. A State's costing never changes, and a load takes it from
+  the save, not from the host. Setup starts with fresh counters and no budget;
+  when the save is metered it may set a temporary budget of its own (under
+  `Costing::Off`, `set_cost_budget` is refused, here as everywhere). After a
+  successful load the saved counters replace whatever setup charged or
+  budgeted, so a budget that was configured at save time is still enforced.
+  Hosts that saved without a budget must call `set_cost_budget` afterwards.
+- The payload stores a costing tag, then for a metered save one u32 weight per
+  charge in `Charge` discriminant order. The count follows
+  `COST_MODEL_VERSION`, which the header matches exactly. An off save stores
+  only the tag. Decoding is strict: an unknown tag, a truncated weight list,
+  and an off save with use or a budget are rejected as decode errors.
 - Allocation during snapshot materialization never runs GC. Its collection
   happens after all globals, deltas and setup anchors are in place. The setup
   callback runs before materialization and may trigger automatic or explicit GC.

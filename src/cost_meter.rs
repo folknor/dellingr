@@ -1,11 +1,19 @@
 //! Runtime cost accounting independent of VM state.
 
+use crate::cost_model::{Charge, CostModel, Costing};
+
 /// Version of the cost model: what `cost_used` a given source produces.
 ///
-/// The version covers everything that decides the cost of identical source -
-/// per-opcode charges, native library charges, and compiler emission (which
-/// opcodes a source compiles to). Hosts may key stored cost fingerprints on
-/// it; snapshots require an exact match. `tests/integration/cost/cost_golden.rs` checks a
+/// The version covers everything that decides the cost of identical source
+/// under any [`CostModel`]: the units each charge site measures, which charge
+/// a piece of work is attributed to, how a charge is admitted against a budget
+/// (atomic, or per unit), the default weights, and compiler emission (which
+/// opcodes a source compiles to). Moving work from one charge to another
+/// needs a bump even when the default costs do not change, because a
+/// non-default model prices the two charges differently. A cost fingerprint
+/// is this version plus the State's costing (`CostModel::iter` for a metered
+/// one); hosts may key stored fingerprints on it. Snapshots require an exact
+/// match. `tests/integration/cost/cost_golden.rs` checks a
 /// versioned source and native-call fixture against an append-only
 /// (version, fingerprint) history, so changing a pinned cost requires a bump.
 ///
@@ -93,10 +101,17 @@ pub(crate) mod interval_test {
     }
 }
 
-/// Owned runtime accounting, with one representation of an optional budget.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// Owned runtime accounting: the State's fixed costing, and its counters with
+/// one representation of an optional budget.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CostState {
+    costing: Costing,
+    /// The weights charge sites read: the metered model's, or every weight 0
+    /// when costing is off, so a dispatch arm skips its charge either way.
+    effective: CostModel,
+    /// Always `None` when costing is off.
     budget: Option<Budget>,
+    /// Always 0 when costing is off.
     used: u64,
 }
 
@@ -106,13 +121,61 @@ struct Budget {
     remaining: i64,
 }
 
+impl Default for CostState {
+    fn default() -> Self {
+        Self::new(Costing::default())
+    }
+}
+
 impl CostState {
-    pub(crate) fn set_budget(&mut self, limit: i64) {
+    /// Fresh counters with no budget, under `costing`.
+    pub(crate) fn new(costing: Costing) -> Self {
+        let effective = match &costing {
+            Costing::Metered(model) => model.clone(),
+            Costing::Off => CostModel::zero(),
+        };
+        Self {
+            costing,
+            effective,
+            budget: None,
+            used: 0,
+        }
+    }
+
+    pub(crate) fn costing(&self) -> &Costing {
+        &self.costing
+    }
+
+    /// The weight charge sites apply to one unit of `charge`: 0 when off.
+    #[inline(always)]
+    pub(crate) fn weight(&self, charge: Charge) -> u64 {
+        u64::from(self.effective.weight(charge))
+    }
+
+    /// The cost of `units` units of `charge`, saturating: 0 when off.
+    #[inline(always)]
+    pub(crate) fn cost(&self, charge: Charge, units: u64) -> u64 {
+        self.effective.cost(charge, units)
+    }
+
+    /// A meter whose unit costs the weight of `charge`.
+    pub(crate) fn charge_meter(&mut self, charge: Charge) -> CostMeter<'_> {
+        let unit = self.weight(charge);
+        self.meter().with_unit(unit)
+    }
+
+    /// Sets a finite budget and zeroes `used`. Refused, changing nothing,
+    /// when costing is off.
+    pub(crate) fn set_budget(&mut self, limit: i64) -> bool {
+        if matches!(self.costing, Costing::Off) {
+            return false;
+        }
         self.budget = Some(Budget {
             limit,
             remaining: limit,
         });
         self.used = 0;
+        true
     }
 
     pub(crate) fn used(&self) -> u64 {
@@ -132,7 +195,11 @@ impl CostState {
             .is_some_and(|budget| budget.remaining.saturating_sub_unsigned(pending) <= 0)
     }
 
+    /// A meter charging raw cost (unit cost 1).
     pub(crate) fn meter(&mut self) -> CostMeter<'_> {
+        if matches!(self.costing, Costing::Off) {
+            return CostMeter::Off;
+        }
         match &mut self.budget {
             Some(budget) => CostMeter::finite_budget(&mut budget.remaining, &mut self.used),
             None => CostMeter::count_only(&mut self.used),
@@ -150,13 +217,15 @@ impl CostState {
         )
     }
 
-    /// Rebuild counters from snapshot fields, rejecting any combination the
-    /// runtime cannot reach: an unconfigured meter must carry the unbounded
-    /// sentinels, and a configured one must satisfy
-    /// `remaining == limit - used` (saturating), with no use against a
-    /// budget that started exhausted.
+    /// Rebuild the accounting from snapshot fields, rejecting any combination
+    /// the runtime cannot reach: an unconfigured meter must carry the
+    /// unbounded sentinels, a configured one must satisfy
+    /// `remaining == limit - used` (saturating) with no use against a budget
+    /// that started exhausted, and costing that is off has neither a budget
+    /// nor any use.
     #[cfg(feature = "snapshot")]
     pub(crate) fn from_snapshot(
+        costing: Costing,
         remaining: i64,
         limit: i64,
         configured: bool,
@@ -173,7 +242,13 @@ impl CostState {
             }
             None
         };
-        Some(Self { budget, used })
+        if matches!(costing, Costing::Off) && (budget.is_some() || used != 0) {
+            return None;
+        }
+        let mut state = Self::new(costing);
+        state.budget = budget;
+        state.used = used;
+        Some(state)
     }
 }
 
@@ -187,6 +262,8 @@ impl CostState {
 /// the weight of the charge the meter was made for (see
 /// [`crate::cost_model`]). [`CostMeter::consume`] charges raw cost and ignores it.
 pub(crate) enum CostMeter<'a> {
+    /// Costing is off: admits everything and counts nothing.
+    Off,
     /// Counts work while no budget has been configured.
     CountOnly { used: &'a mut u64, unit: u64 },
     /// Counts work and checks it against a configured budget.
@@ -219,6 +296,7 @@ impl<'a> CostMeter<'a> {
             Self::CountOnly { unit: slot, .. } | Self::FiniteBudget { unit: slot, .. } => {
                 *slot = unit;
             }
+            Self::Off => {}
         }
         self
     }
@@ -240,6 +318,7 @@ impl<'a> CostMeter<'a> {
     #[inline]
     pub(crate) fn consume_units_admitted(&mut self, n: u64) -> u64 {
         match self {
+            Self::Off => n,
             Self::CountOnly { used, unit } => {
                 **used = (**used).saturating_add(n.saturating_mul(*unit));
                 n
@@ -273,6 +352,7 @@ impl<'a> CostMeter<'a> {
     #[inline(always)]
     pub(crate) fn consume(&mut self, cost: u64) -> bool {
         match self {
+            Self::Off => true,
             Self::CountOnly { used, .. } => {
                 **used = (**used).saturating_add(cost);
                 true
@@ -293,12 +373,41 @@ impl<'a> CostMeter<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::CostMeter;
+    use super::{CostMeter, CostState};
+    use crate::cost_model::{Charge, CostModel, Costing};
+
+    #[test]
+    fn off_admits_everything_and_counts_nothing() {
+        let mut cost = CostState::new(Costing::Off);
+        assert!(!cost.set_budget(10));
+        assert!(cost.meter().consume(u64::MAX));
+        assert_eq!(
+            cost.charge_meter(Charge::TableMove)
+                .consume_units_admitted(9),
+            9
+        );
+        assert_eq!(cost.cost(Charge::Add, 5), 0);
+        assert_eq!(cost.used(), 0);
+        assert_eq!(cost.remaining(), i64::MAX);
+    }
+
+    #[test]
+    fn metered_charge_meter_uses_the_model_weight() {
+        let model = CostModel::default().with(Charge::StringFind, 3);
+        let mut cost = CostState::new(Costing::Metered(model));
+        assert!(cost.set_budget(7));
+        assert_eq!(
+            cost.charge_meter(Charge::StringFind)
+                .consume_units_admitted(5),
+            3
+        );
+        assert_eq!(cost.used(), 9);
+        assert_eq!(cost.remaining(), -2);
+    }
 
     #[cfg(feature = "snapshot")]
     #[test]
     fn snapshot_meter_rejects_unreachable_counters() {
-        use super::CostState;
         for fields in [
             (0, 0, false, 0),
             (i64::MAX, 0, false, 0),
@@ -309,14 +418,30 @@ mod tests {
             (-2, -1, true, 1),
             (-1, 0, true, 1),
         ] {
-            assert!(CostState::from_snapshot(fields.0, fields.1, fields.2, fields.3).is_none());
+            assert!(
+                CostState::from_snapshot(
+                    Costing::default(),
+                    fields.0,
+                    fields.1,
+                    fields.2,
+                    fields.3
+                )
+                .is_none()
+            );
         }
+        // Costing that is off has neither a budget nor any use.
+        for fields in [(5, 5, true, 0), (i64::MAX, i64::MAX, false, 1)] {
+            assert!(
+                CostState::from_snapshot(Costing::Off, fields.0, fields.1, fields.2, fields.3)
+                    .is_none()
+            );
+        }
+        assert!(CostState::from_snapshot(Costing::Off, i64::MAX, i64::MAX, false, 0).is_some());
     }
 
     #[cfg(feature = "snapshot")]
     #[test]
     fn snapshot_meter_roundtrips_crossing_reset_and_saturation() {
-        use super::CostState;
         for limit in [
             None,
             Some(i64::MIN),
@@ -327,13 +452,19 @@ mod tests {
         ] {
             let mut cost = CostState::default();
             if let Some(limit) = limit {
-                cost.set_budget(limit);
+                assert!(cost.set_budget(limit));
             }
             for charge in [0, 3, 0, u64::MAX, 1] {
                 let accepted = cost.meter().consume(charge);
                 let fields = cost.snapshot_fields();
-                let mut restored = CostState::from_snapshot(fields.0, fields.1, fields.2, fields.3)
-                    .expect("runtime counters must be restorable");
+                let mut restored = CostState::from_snapshot(
+                    Costing::default(),
+                    fields.0,
+                    fields.1,
+                    fields.2,
+                    fields.3,
+                )
+                .expect("runtime counters must be restorable");
                 assert_eq!(restored.snapshot_fields(), fields);
                 assert_eq!(restored.meter().consume(1), cost.meter().consume(1));
                 assert_eq!(restored.snapshot_fields(), cost.snapshot_fields());
@@ -341,7 +472,7 @@ mod tests {
                     assert!(cost.remaining() <= 0);
                 }
             }
-            cost.set_budget(7);
+            assert!(cost.set_budget(7));
             assert_eq!(cost.snapshot_fields(), (7, 7, true, 0));
         }
     }

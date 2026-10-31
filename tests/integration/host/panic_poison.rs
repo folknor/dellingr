@@ -296,7 +296,9 @@ fn panicking_on_error_from_a_host_tostring_poisons_the_state() {
     // The callback returns an error normally; the panic comes from on_error,
     // raised after the callback's own unwind guard, so only the public
     // boundary of tostring_bytes can mark it.
-    let mut state = State::with_callbacks(Box::new(PanickingOnError));
+    let mut state = State::builder()
+        .callbacks(Box::new(PanickingOnError))
+        .build();
     state
         .push_new_rust_fn(failing_fn)
         .expect("room for a function");

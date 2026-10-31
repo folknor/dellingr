@@ -13,6 +13,7 @@ use super::Result;
 use super::State;
 use super::Val;
 use super::object::UpvalueRef;
+use crate::cost_model::Charge;
 use crate::instr::{ArgCount, CompareOp, RetCount};
 #[cfg(not(feature = "cost-check-interval"))]
 use crate::limits::tuning;
@@ -145,8 +146,9 @@ impl Frame {
     /// failing instruction for the caller to unwind
     /// (`State::unwind_invocation`).
     ///
-    /// Fixed opcode charges come from `Instr::fixed_units`. SET_LIST charges
-    /// its live element count (the analyzer only knows its encoded count).
+    /// Fixed opcode charges are one unit of `Instr::fixed_charge` at the
+    /// State's weight. SET_LIST charges its live element count (the analyzer
+    /// only knows its encoded count).
     /// Calls and access helpers can additionally charge native work, including
     /// strings, patterns, table traversal and metamethod callbacks.
     pub(super) fn run(frames: &mut Vec<Frame>, state: &mut State) -> Result<(usize, usize)> {
@@ -261,24 +263,35 @@ impl Frame {
             }};
         }
 
-        // Keep the fixed charge in each arm a compile-time constant. In
-        // particular, a free opcode must not run add_cost!(0): its budget
-        // check could reject structural work. Range arms retain their shared
-        // body and require all members to have the same fixed charge.
+        // Which charge an arm makes is a compile-time constant; its weight is
+        // the State's, fixed when the State was built. A free opcode, or a
+        // charge weighted 0 (every charge, when costing is off), must not run
+        // add_cost!(0): its budget check could reject structural work. Range
+        // arms retain their shared body and require all members to have the
+        // same fixed charge.
         macro_rules! fixed_cost {
             ($first:expr $(, $last:expr)?) => {{
-                const UNITS: u64 = Instr::fixed_units($first);
+                const CHARGE: Option<Charge> = Instr::fixed_charge($first);
                 $(
                     const _: () = {
+                        const fn key(charge: Option<Charge>) -> i32 {
+                            match charge {
+                                Some(charge) => charge as i32,
+                                None => -1,
+                            }
+                        }
                         let mut opcode = $first as usize;
                         while opcode <= $last as usize {
-                            assert!(Instr::fixed_units(opcode as u8) == UNITS);
+                            assert!(key(Instr::fixed_charge(opcode as u8)) == key(CHARGE));
                             opcode += 1;
                         }
                     };
                 )?
-                if UNITS != 0 {
-                    add_cost!(UNITS);
+                if let Some(charge) = CHARGE {
+                    let units = state.cost.weight(charge);
+                    if units != 0 {
+                        add_cost!(units);
+                    }
                 }
             }};
         }
@@ -482,7 +495,10 @@ impl Frame {
                         Some(count) => usize::from(count),
                         None => state.stack.len() - (ra + 1),
                     };
-                    add_cost!(Instr::array_element_cost(count as u64));
+                    let units = state.cost.cost(Charge::ArrayElement, count as u64);
+                    if units != 0 {
+                        add_cost!(units);
+                    }
                     state.reg_set_list(ra, count, inst.c())?;
                     if inst.set_list_count().is_none() {
                         state.stack.resize(frame.top, Val::Nil);
@@ -825,7 +841,8 @@ mod tests {
     }
 
     #[test]
-    fn documented_opcode_charges_match_static_units() {
+    fn documented_opcode_charges_match_static_costs() {
+        use crate::cost_model::CostModel;
         let docs = include_str!("../../docs/budget.md");
         let section = docs
             .split_once("## Static opcode charges")
@@ -853,14 +870,16 @@ mod tests {
                 .nth(2)
                 .expect("opcode charge row has a units column")
                 .trim();
+            let model = CostModel::default();
             if class_name == "ArrayElements" {
                 assert_eq!(documented_units, "encoded count");
-                assert_eq!(Instr::set_list(0, Some(7), 0).static_units(), 7);
+                assert_eq!(Instr::set_list(0, Some(7), 0).static_cost(&model), 7);
             } else {
                 let documented_units = documented_units
                     .parse::<u64>()
                     .expect("fixed opcode charge is a unit count");
-                assert_eq!(Instr::fixed_units(opcode), documented_units, "{class_name}");
+                let fixed = Instr::fixed_charge(opcode).map_or(0, |charge| model.cost(charge, 1));
+                assert_eq!(fixed, documented_units, "{class_name}");
             }
         }
 
@@ -870,6 +889,9 @@ mod tests {
             .count();
         // The extra row is the Markdown table header, not an opcode class.
         assert_eq!(documented_rows, classes.len() + 1);
-        assert_eq!(Instr::set_list(0, None, 0).static_units(), 0);
+        assert_eq!(
+            Instr::set_list(0, None, 0).static_cost(&CostModel::default()),
+            0
+        );
     }
 }

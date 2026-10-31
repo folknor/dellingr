@@ -55,7 +55,9 @@ fn bounded_corruption_sweep_exercises_loaded_data() {
                 .finish()
                 .expect("admitted data captures");
             if standard && admitted.bytecode.is_empty() {
-                loaded.set_cost_budget(1000);
+                // A mutated costing tag may admit an Off State, which
+                // refuses a budget; the probe then runs unmetered.
+                let _budgeted = loaded.set_cost_budget(1000);
                 loaded
                     .load(&probe)
                     .expect("probe loads into admitted state");

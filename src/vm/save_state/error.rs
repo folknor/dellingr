@@ -537,6 +537,8 @@ pub enum DecodeReason {
     StringNotUtf8,
     /// The cost counters describe no state the runtime can produce.
     InconsistentCostMeter,
+    /// The costing mode byte is unknown.
+    InvalidCostingTag(u8),
     /// An environment delta's metatable mode byte is unknown.
     InvalidEnvironmentMetatableMode(u8),
     /// A value's tag byte is unknown.
@@ -556,6 +558,7 @@ impl fmt::Display for DecodeReason {
             Self::InvalidBool(_) => "invalid bool",
             Self::StringNotUtf8 => "string is not UTF-8",
             Self::InconsistentCostMeter => "inconsistent cost meter",
+            Self::InvalidCostingTag(_) => "invalid costing tag",
             Self::InvalidEnvironmentMetatableMode(_) => "invalid environment metatable mode",
             Self::InvalidValueTag(_) => "invalid value tag",
             Self::InvalidObjectTag(_) => "invalid object tag",
@@ -1475,6 +1478,7 @@ mod tests {
                 DecodeReason::InconsistentCostMeter,
                 "inconsistent cost meter",
             ),
+            (DecodeReason::InvalidCostingTag(9), "invalid costing tag"),
             (
                 DecodeReason::InvalidEnvironmentMetatableMode(9),
                 "invalid environment metatable mode",

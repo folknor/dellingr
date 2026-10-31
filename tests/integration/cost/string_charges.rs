@@ -8,7 +8,7 @@ use crate::support;
 
 fn run_with_budget(source: &str, budget: i64) -> (State, Error) {
     let mut state = State::new();
-    state.set_cost_budget(budget);
+    state.set_cost_budget(budget).expect("the State is metered");
     support::load(&mut state, source);
     let error = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
@@ -95,7 +95,7 @@ fn gsub_rejects_an_invalid_replacement_before_charging() {
         "return string.gsub('subject', 'pattern', false)",
     ] {
         let mut state = State::new();
-        state.set_cost_budget(0);
+        state.set_cost_budget(0).expect("the State is metered");
         support::load(&mut state, source);
         let error = state
             .call(ArgCount::Fixed(0), RetCount::Fixed(1))
@@ -165,7 +165,7 @@ fn empty_find_and_match_charge_only_their_up_front_units() {
 fn matcher_refusal_is_a_budget_error_at_the_exact_budget() {
     let mut state = State::new();
     support::run(&mut state, "iter = string.gmatch('aaaaaaaa', 'a*a*a*a*b')");
-    state.set_cost_budget(17);
+    state.set_cost_budget(17).expect("the State is metered");
     support::load(&mut state, "return iter()");
     let error = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
@@ -190,14 +190,14 @@ fn gsub_does_not_return_a_partial_result_and_keeps_callback_effects() {
 fn gmatch_refusal_does_not_advance_the_iterator() {
     let mut state = State::new();
     support::run(&mut state, "iter = string.gmatch('one two', '%a+')");
-    state.set_cost_budget(0);
+    state.set_cost_budget(0).expect("the State is metered");
     support::load(&mut state, "return iter()");
     let error = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
         .expect_err("iterator refuses before a match");
     assert!(matches!(error.kind(), ErrorKind::BudgetExceeded { .. }));
 
-    state.set_cost_budget(1_000);
+    state.set_cost_budget(1_000).expect("the State is metered");
     support::eval(&mut state, "return iter()", 1);
     assert_eq!(
         state.to_string(-1).expect("iterator returns a string"),
@@ -214,21 +214,27 @@ fn gmatch_capture_refusal_does_not_advance_the_iterator() {
     support::eval(&mut state, "return iter()", 1);
 
     support::run(&mut state, &setup);
-    state.set_cost_budget(1_000_000);
+    state
+        .set_cost_budget(1_000_000)
+        .expect("the State is metered");
     support::eval(&mut state, "return iter()", 1);
     let successful_cost = state.cost_used();
 
     support::run(&mut state, &setup);
-    state.set_cost_budget(
-        i64::try_from(successful_cost - subject.len() as u64).expect("cost fits in a budget"),
-    );
+    state
+        .set_cost_budget(
+            i64::try_from(successful_cost - subject.len() as u64).expect("cost fits in a budget"),
+        )
+        .expect("the State is metered");
     support::load(&mut state, "return iter()");
     let error = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
         .expect_err("capture materialization refuses after matching");
     assert!(matches!(error.kind(), ErrorKind::BudgetExceeded { .. }));
 
-    state.set_cost_budget(1_000_000);
+    state
+        .set_cost_budget(1_000_000)
+        .expect("the State is metered");
     support::eval(&mut state, "return iter()", 1);
     assert_eq!(
         state.to_string(-1).expect("iterator returns a string"),
@@ -276,7 +282,7 @@ fn gsub_keeps_its_pattern_across_collections_in_its_replacement() {
 fn state_is_reusable_after_a_native_refusal() {
     let (mut state, error) = run_with_budget("return string.upper('abcdef')", 0);
     assert!(matches!(error.kind(), ErrorKind::BudgetExceeded { .. }));
-    state.set_cost_budget(100);
+    state.set_cost_budget(100).expect("the State is metered");
     support::eval(&mut state, "return string.upper('ok')", 1);
     assert_eq!(state.to_string(-1).expect("retry result is string"), "OK");
 }
@@ -293,7 +299,9 @@ fn refusal_leaves_snapshot_state_quiescent() {
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect("warm iterator call runs");
     support::run(&mut matcher_state, "iter = string.gmatch('aaaa', 'a+')");
-    matcher_state.set_cost_budget(0);
+    matcher_state
+        .set_cost_budget(0)
+        .expect("the State is metered");
     support::load(&mut matcher_state, "return iter()");
     let matcher_error = matcher_state
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
@@ -329,7 +337,7 @@ fn table_concat_cost_is_identical_with_or_without_a_budget() {
         for budget in [None, Some(1_000_000)] {
             let mut state = State::new();
             if let Some(budget) = budget {
-                state.set_cost_budget(budget);
+                state.set_cost_budget(budget).expect("the State is metered");
             }
             support::load(&mut state, source);
             let result = state.call(ArgCount::Fixed(0), RetCount::Fixed(1));

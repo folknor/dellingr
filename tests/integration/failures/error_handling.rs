@@ -223,7 +223,7 @@ fn type_error_on_table_key_nil() {
 #[test]
 fn budget_exceeded_error() {
     let mut state = State::new();
-    state.set_cost_budget(10);
+    state.set_cost_budget(10).expect("the State is metered");
     support::load(
         &mut state,
         r#"
@@ -245,7 +245,7 @@ fn budget_exceeded_error() {
 fn budget_stops_at_the_first_operation_after_exhaustion() {
     for budget in [1, 63, 65] {
         let mut state = State::new();
-        state.set_cost_budget(budget);
+        state.set_cost_budget(budget).expect("the State is metered");
         let increments = budget + 2;
         support::load(
             &mut state,
@@ -270,7 +270,7 @@ fn budget_stops_at_the_first_operation_after_exhaustion() {
 #[test]
 fn budget_flushes_pending_caller_cost_before_nested_call() {
     let mut state = State::new();
-    state.set_cost_budget(1);
+    state.set_cost_budget(1).expect("the State is metered");
     support::load(
         &mut state,
         "x = 0\nlocal function f() x = x + 1 end\nx = x + 1\nf()\nx = x + 1",
@@ -356,7 +356,7 @@ fn error_msg_type_error_index() {
 #[test]
 fn error_msg_budget_exceeded_shows_amounts() {
     let mut state = State::new();
-    state.set_cost_budget(10);
+    state.set_cost_budget(10).expect("the State is metered");
     support::load(&mut state, "local s = 0\nfor i = 1, 10000 do s = s + i end");
     let err = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))

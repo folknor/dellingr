@@ -60,7 +60,7 @@ fn opcode_cost_interval_matches_immediate_flush_across_budgets() {
         for budget in -1..=max_budget {
             let (should_complete, expected_used) = immediate_flush_reference(budget, additions);
             let mut state = State::new();
-            state.set_cost_budget(budget);
+            state.set_cost_budget(budget).expect("the State is metered");
             support::load(&mut state, &source);
 
             let call = state.call(ArgCount::Fixed(0), RetCount::Fixed(1));
@@ -120,7 +120,7 @@ fn corpus_cost_check_interval_differential() {
             setup.install(&mut state);
         }
         state.load(program).unwrap();
-        state.set_cost_budget(budget);
+        state.set_cost_budget(budget).expect("the State is metered");
         let error = state
             .call(ArgCount::Fixed(0), RetCount::Fixed(0))
             .err()

@@ -14,13 +14,15 @@ fn table_sort_charges_before_mutating() {
     let mut state = State::new();
     support::eval(&mut state, "return {3, 1, 2}", 1);
 
-    state.set_cost_budget(0);
+    state.set_cost_budget(0).expect("the State is metered");
     let err = host_table_sort(&mut state).expect_err("exhausted budget must block the sort");
     assert!(matches!(err.kind(), ErrorKind::BudgetExceeded { .. }));
     assert_eq!(state.get_top(), 1);
 
     // Restore budget and confirm the table is untouched: still {3, 1, 2}.
-    state.set_cost_budget(i64::MAX);
+    state
+        .set_cost_budget(i64::MAX)
+        .expect("the State is metered");
     state.push_number(1.0).unwrap();
     state.get_table(1).unwrap();
     assert_eq!(state.to_number(-1).unwrap(), 3.0);
@@ -39,7 +41,7 @@ fn table_move_costs_empty_and_each_moved_element() {
     }
 
     let mut state = State::new();
-    state.set_cost_budget(0);
+    state.set_cost_budget(0).expect("the State is metered");
     // Call the native function directly so bytecode dispatch cannot consume
     // the exhausted budget before table.move reaches its empty-range charge.
     state.get_global("table").unwrap();
@@ -59,7 +61,7 @@ fn table_move_costs_empty_and_each_moved_element() {
 fn table_after_budgeted_move(budget: i64) -> (dellingr::error::Error, Vec<f64>) {
     let mut state = State::new();
     support::run(&mut state, "t = {1, 2, 3, 4, 5}");
-    state.set_cost_budget(budget);
+    state.set_cost_budget(budget).expect("the State is metered");
     support::load(&mut state, "table.move(t, 1, 4, 2)");
     let error = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))

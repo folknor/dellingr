@@ -16,7 +16,7 @@
 //! }
 //!
 //! let program = Program::compile("print('Hello!')", Some(b"hello.lua".as_slice())).unwrap();
-//! let mut state = State::with_callbacks(Box::new(GameCallbacks));
+//! let mut state = State::builder().callbacks(Box::new(GameCallbacks)).build();
 //! state.load(&program).unwrap();
 //! state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
 //! ```

@@ -212,7 +212,7 @@ pub(crate) fn run_with(
     let program = dellingr::Program::compile(source, Some(b"boundary-corpus")).unwrap();
     state.load(&program).unwrap();
     if let Some(budget) = budget {
-        state.set_cost_budget(budget);
+        state.set_cost_budget(budget).expect("the State is metered");
     }
     #[cfg(feature = "fault-injection")]
     if let Some(target) = fault {
@@ -297,7 +297,9 @@ pub(crate) fn run_with(
         );
     }
     state.set_top(0).unwrap();
-    state.set_cost_budget(i64::MAX);
+    state
+        .set_cost_budget(i64::MAX)
+        .expect("the State is metered");
     #[cfg(feature = "snapshot")]
     {
         state.push_nil().unwrap();

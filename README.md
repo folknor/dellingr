@@ -176,9 +176,14 @@ legible refactor should not make a script more expensive, because the budget is
 a game-design instrument rather than a CPU meter. Per-function charges are
 listed in [docs/budget.md](docs/budget.md).
 
-Every change to what identical source costs bumps `COST_MODEL_VERSION`,
-exported from the crate root and named in the changelog. When it changes,
-re-measure tick budgets and re-record replays.
+Embedders can set the weight of every costed operation with a `CostModel`, or
+turn accounting off with `Costing::Off`, through `State::builder().costing(..)`.
+The costing is fixed when the State is built and is replay-visible: record it
+with replays. See "Configuring costs" in [docs/budget.md](docs/budget.md).
+
+Every change to what identical source costs, or to which charge work belongs
+to, bumps `COST_MODEL_VERSION`, exported from the crate root and named in the
+changelog. When it changes, re-measure tick budgets and re-record replays.
 
 ## Compatibility divergences
 
@@ -254,8 +259,8 @@ point.
   chunk name are bytes, kept exactly. Compile once, load into many states with
   `state.load(&program)`.
 - `State` (`Send`) - VM instance with cost-bounded execution. `State::new`
-  opens the standard library, `State::raw` starts with empty globals; both have
-  `_with_callbacks` variants. Movable across threads; pair with `Mutex<State>`
+  opens the standard library, `State::raw` starts with empty globals;
+  `State::builder()` sets callbacks, GC policy, the raw option and the costing. Movable across threads; pair with `Mutex<State>`
   if you need to share one.
 - `Anchor` (`Send + Sync + 'static`) - owned handle that retains a Lua value
   (function, table, etc.) across host calls without using globals. Dropping it
@@ -281,7 +286,9 @@ point.
   listing.
 - Cost budget - `State::set_cost_budget` sets the budget and resets
   `cost_used()`; the operation that crosses it completes and the next costed
-  operation fails.
+  operation fails. It returns an error on a State built with `Costing::Off`.
+  `State::builder().costing(..)` chooses the `CostModel` or Off;
+  `program.analyze_cost_with(&model)` analyzes under a model.
 - Environment control - `State::seal_globals` ends the setup phase so globals
   a script deletes are reclaimed; `State::with_restricted_env` runs a closure
   against a whitelist of globals and restores the full environment afterwards.

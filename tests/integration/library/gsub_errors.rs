@@ -40,7 +40,7 @@ fn gsub_function_error_is_propagated() {
 #[test]
 fn gsub_function_budget_error_is_propagated() {
     let mut state = State::new();
-    state.set_cost_budget(50);
+    state.set_cost_budget(50).expect("the State is metered");
     support::load(
         &mut state,
         r#"

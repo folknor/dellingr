@@ -1,5 +1,6 @@
 standard_environment=true
 rng=0000000000000000
+costing=metered weights=1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
 cost: remaining=9223372036854775807 limit=9223372036854775807 configured=false used=258
 string[0]="ipairs"
 string[1]="next"

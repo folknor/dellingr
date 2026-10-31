@@ -21,7 +21,10 @@ impl Recorder {
     /// A standard State reporting to a new recorder.
     pub(crate) fn state() -> (State, Self) {
         let recorder = Self::default();
-        (State::with_callbacks(Box::new(recorder.clone())), recorder)
+        let state = State::builder()
+            .callbacks(Box::new(recorder.clone()))
+            .build();
+        (state, recorder)
     }
 
     fn recorded(&self) -> MutexGuard<'_, Recorded> {

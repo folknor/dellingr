@@ -7,6 +7,7 @@
 mod corpus_roundtrip;
 mod ipairs_save_state;
 mod open_libs_registry;
+mod save_costing;
 mod save_golden;
 mod save_state;
 mod save_state_builtin_alias;

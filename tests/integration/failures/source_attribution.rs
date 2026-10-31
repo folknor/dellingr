@@ -42,7 +42,9 @@ fn load_and_run(state: &mut State, source: &str, name: &[u8]) {
 #[test]
 fn nested_chunks_restore_source_and_attribute_error_to_running_frame() {
     let events = Arc::new(Mutex::new(Events::default()));
-    let mut state = State::with_callbacks(Box::new(Recorder(Arc::clone(&events))));
+    let mut state = State::builder()
+        .callbacks(Box::new(Recorder(Arc::clone(&events))))
+        .build();
     load_and_run(
         &mut state,
         "function a()\n print('a')\n b()\n print('again')\n error('failure')\nend",
@@ -80,7 +82,9 @@ fn nested_chunks_restore_source_and_attribute_error_to_running_frame() {
 #[test]
 fn print_as_a_handler_reports_the_instruction_line() {
     let events = Arc::new(Mutex::new(Events::default()));
-    let mut state = State::with_callbacks(Box::new(Recorder(Arc::clone(&events))));
+    let mut state = State::builder()
+        .callbacks(Box::new(Recorder(Arc::clone(&events))))
+        .build();
     let program = Program::compile(
         "local value = setmetatable({}, {__index = print, __newindex = print, __len = print})\n\
          print('start')\n\
@@ -170,7 +174,9 @@ fn trace_frames_share_the_function_name() {
 #[test]
 fn chunk_names_and_printed_bytes_reach_the_host_exactly() {
     let events = Arc::new(Mutex::new(Events::default()));
-    let mut state = State::with_callbacks(Box::new(Recorder(Arc::clone(&events))));
+    let mut state = State::builder()
+        .callbacks(Box::new(Recorder(Arc::clone(&events))))
+        .build();
     // A non-UTF-8 chunk name and a non-UTF-8 source byte in a literal.
     let name: &[u8] = b"scripts/\xffbad.lua";
     let program = Program::compile(b"print('a\xfe', 1)\nerror('x')", Some(name))
@@ -213,7 +219,9 @@ fn named_function_stores_report_the_declaration_line() {
 #[test]
 fn named_function_newindex_handler_reports_the_declaration_line() {
     let events = Arc::new(Mutex::new(Events::default()));
-    let mut state = State::with_callbacks(Box::new(Recorder(Arc::clone(&events))));
+    let mut state = State::builder()
+        .callbacks(Box::new(Recorder(Arc::clone(&events))))
+        .build();
     load_and_run(
         &mut state,
         "local t = setmetatable({}, {__newindex = print})\nprint('previous')\nfunction t.field()\nend\nfunction t:method()\nend",
@@ -231,7 +239,9 @@ fn gmatch_pattern_errors_point_at_the_script_caller() {
         "local s = 'a'\nfor value in s:gmatch('(') do end",
     ] {
         let events = Arc::new(Mutex::new(Events::default()));
-        let mut state = State::with_callbacks(Box::new(Recorder(Arc::clone(&events))));
+        let mut state = State::builder()
+            .callbacks(Box::new(Recorder(Arc::clone(&events))))
+            .build();
         let program =
             Program::compile(source, Some(b"iterator-caller".as_slice())).expect("caller compiles");
         state.load(&program).expect("caller loads");
@@ -252,7 +262,9 @@ fn gmatch_pattern_errors_point_at_the_script_caller() {
 #[test]
 fn gmatch_pattern_errors_from_an_unnamed_caller_carry_no_shim_name() {
     let events = Arc::new(Mutex::new(Events::default()));
-    let mut state = State::with_callbacks(Box::new(Recorder(Arc::clone(&events))));
+    let mut state = State::builder()
+        .callbacks(Box::new(Recorder(Arc::clone(&events))))
+        .build();
     let program = Program::compile("local s = 'a'\nfor value in s:gmatch('(') do end", None)
         .expect("caller compiles");
     state.load(&program).expect("caller loads");

@@ -360,9 +360,11 @@ fn main() {
         return;
     }
 
-    let mut state = State::with_callbacks(Box::new(CliCallbacks));
+    let mut state = State::builder().callbacks(Box::new(CliCallbacks)).build();
     if let Some(limit) = args.limit {
-        state.set_cost_budget(limit);
+        state
+            .set_cost_budget(limit)
+            .expect("the CLI State is metered, so a budget is accepted");
     }
 
     let result = state.load(&program).and_then(|()| {

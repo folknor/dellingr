@@ -142,8 +142,8 @@ After an automatic collection, the next threshold is
 multiplication.
 
 Embedders can provide per-State values with
-`State::with_gc_policy(initial_threshold, minimum_threshold, growth_factor)`
-or `State::with_callbacks_and_gc_policy`. The initial threshold is in force
+`State::builder().gc_policy(initial_threshold, minimum_threshold, growth_factor)`
+(combinable with `.callbacks(...)`) followed by `.build()`. The initial threshold is in force
 while `open_libs` initializes the standard library. `gc_set_policy` replaces
 the policy and restarts automatic mode at its initial threshold.
 

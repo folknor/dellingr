@@ -51,7 +51,7 @@ fn cost_of(example: &corpus::Example) -> u64 {
         .unwrap_or_else(|error| panic!("{} should be readable: {error}", example.relative));
     let program = Program::compile(&source, Some(example.path.as_bytes()))
         .unwrap_or_else(|error| panic!("{}: {error}", example.relative));
-    let mut state = State::with_callbacks(Box::new(Discard));
+    let mut state = State::builder().callbacks(Box::new(Discard)).build();
     state
         .load(&program)
         .and_then(|()| state.call(ArgCount::Fixed(0), RetCount::Fixed(0)))

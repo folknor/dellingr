@@ -5,7 +5,9 @@ fn custom_gc_policy_sets_initial_and_recomputed_thresholds() {
     let initial_threshold = 1_000_000;
     let minimum_threshold = 7;
     let growth_factor = 3;
-    let mut state = State::with_gc_policy(initial_threshold, minimum_threshold, growth_factor);
+    let mut state = State::builder()
+        .gc_policy(initial_threshold, minimum_threshold, growth_factor)
+        .build();
 
     assert_eq!(state.gc_threshold(), initial_threshold);
     assert!(!state.gc_should_run());
@@ -43,7 +45,9 @@ fn host_threshold_survives_collection_and_auto_mode_can_resume() {
     let initial_threshold = 1_000_000;
     let minimum_threshold = 11;
     let growth_factor = 4;
-    let mut state = State::with_gc_policy(initial_threshold, minimum_threshold, growth_factor);
+    let mut state = State::builder()
+        .gc_policy(initial_threshold, minimum_threshold, growth_factor)
+        .build();
 
     let host_threshold = 2_000_000;
     state.gc_set_threshold(host_threshold);

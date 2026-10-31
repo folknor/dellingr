@@ -83,7 +83,7 @@ fn cost_used_after_runtime_error_matches_golden_corpus() {
         for budget in [None, Some(exact_budget), Some(1_000)] {
             let mut state = State::new();
             if let Some(budget) = budget {
-                state.set_cost_budget(budget);
+                state.set_cost_budget(budget).expect("the State is metered");
             }
             support::load(&mut state, source);
             let error = state
@@ -391,7 +391,7 @@ fn mid_run_budget_reset_sees_a_flushed_meter() {
             state.cost_remaining(),
             1_000_000 - i64::try_from(expected).map_or(i64::MAX, i64::from)
         );
-        state.set_cost_budget(1_000_000);
+        state.set_cost_budget(1_000_000)?;
         Ok(0)
     }
 
@@ -435,7 +435,9 @@ fn mid_run_budget_reset_sees_a_flushed_meter() {
     ] {
         for prefix in [0, 1, 7, interval - 1, interval, interval + 1, 20_000] {
             let mut state = State::new();
-            state.set_cost_budget(1_000_000);
+            state
+                .set_cost_budget(1_000_000)
+                .expect("the State is metered");
             state.set_user_data(prefix + setup_cost);
             state.push_new_rust_fn(reset).unwrap();
             state.set_global("reset").unwrap();

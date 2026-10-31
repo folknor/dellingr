@@ -5,6 +5,18 @@ given build. The library reads no host state: no environment, clock, process
 arguments, unseeded RNG or randomized hashing. The CLI and the bench harness
 are hosts and are exempt.
 
+## Cost
+
+The costing a State was built with is part of what determines a run. Cost
+weights decide `cost_used` and, under a budget, where a callback fails, so a
+different `CostModel` (or `Costing::Off`) is a replay-visible difference like a
+different seed. A replay or stored result must record the
+costing along with `COST_MODEL_VERSION`: the version plus the costing
+(`CostModel::iter`) is the cost fingerprint, and the same script, inputs,
+fingerprint and budget give the same cost and the same failure point. Replaying
+under another costing is not a faithful replay. Snapshots save the costing and
+restore it. See `budget.md`.
+
 ## Math
 
 - `math.random` draws from the in-crate `VmRng` (SplitMix64), seeded by

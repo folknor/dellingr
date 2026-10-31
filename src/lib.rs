@@ -140,6 +140,7 @@ pub use cost_meter::COST_MODEL_VERSION;
 #[cfg(feature = "cost-check-interval")]
 #[doc(hidden)]
 pub use cost_meter::interval_test::with_cost_check_interval;
+pub use cost_model::{Charge, CostModel, Costing};
 pub use disassemble::Disassembly;
 pub use host::{DefaultCallbacks, HostCallbacks};
 pub use instr::{ArgCount, RetCount};
@@ -151,6 +152,7 @@ pub use vm::LuaType;
 pub use vm::RustFnHandle;
 pub use vm::RustFunc;
 pub use vm::State;
+pub use vm::StateBuilder;
 #[cfg(feature = "fault-injection")]
 #[doc(hidden)]
 pub use vm::{FaultEvent, FaultSite};
@@ -264,31 +266,30 @@ impl ScopeCost {
             .map_or(0, |index| self.category_counts[index])
     }
 
-    pub(crate) fn analyze_chunk(chunk: &Bytecode, name: String) -> Self {
+    pub(crate) fn analyze_chunk(chunk: &Bytecode, name: String, model: &CostModel) -> Self {
         let mut scope = ScopeCost {
             name,
             ..Default::default()
         };
 
-        // The plain `+=` here, in `category_counts`, in `total_cost` below and
-        // in `accumulate` cannot overflow `u64`, in debug (panic) or release
+        // The plain `+=` on `instructions` and `category_counts` here, and in
+        // `accumulate`, cannot overflow `u64`, in debug (panic) or release
         // (wrap) alike. A `Program` comes only from `Program::compile`, whose
         // source is at most `limits::MAX_SOURCE_BYTES` bytes. Code generation
         // walks the syntax tree, whose nodes each consume at least one source
         // byte, and every loop in it iterates a list of tree nodes, so a node
         // emits a small constant number of instructions: the instruction
         // count, across all nested chunks together, is a small multiple of the
-        // source size. `static_units` is 1 for each arithmetic, negation,
-        // table-creation and table-write instruction and 0 for the rest, plus
-        // a SET_LIST's element count (at most `limits::MAX_TABLE_BATCH_SIZE`
-        // per instruction and at most the source's element count over all of
-        // them); the category counters add 1 per instruction or that same
-        // element count. Every sum is therefore a small multiple of the source
+        // source size. The category counters add 1 per instruction or a
+        // SET_LIST's element count (at most `limits::MAX_TABLE_BATCH_SIZE` per
+        // instruction and at most the source's element count over all of
+        // them). Every such sum is therefore a small multiple of the source
         // size, which holds as long as `MAX_SOURCE_BYTES` stays many orders of
-        // magnitude below 2^64.
+        // magnitude below 2^64. Costs are those counts times model weights of
+        // up to `u32::MAX`, so `own_cost` and `total_cost` saturate instead.
         for inst in &chunk.code {
             scope.instructions += 1;
-            scope.own_cost += inst.static_units();
+            scope.own_cost = scope.own_cost.saturating_add(inst.static_cost(model));
             let category = Instr::cost_class(inst.opcode());
             if let Some(index) = category.counter_index() {
                 let count = match category {
@@ -311,12 +312,14 @@ impl ScopeCost {
                     format!("anonymous #{anonymous_count}")
                 }
             };
-            let nested_scope = Self::analyze_chunk(nested_chunk, nested_name);
+            let nested_scope = Self::analyze_chunk(nested_chunk, nested_name, model);
             scope.nested.push(nested_scope);
         }
 
         // Calculate total cost (own + all nested)
-        scope.total_cost = scope.own_cost + scope.nested.iter().map(|n| n.total_cost).sum::<u64>();
+        scope.total_cost = scope.nested.iter().fold(scope.own_cost, |total, nested| {
+            total.saturating_add(nested.total_cost)
+        });
 
         scope
     }
@@ -521,9 +524,18 @@ impl Program {
     /// runtime cost depends on control flow and loop iterations.
     /// [`CostAnalysis::caveat`] returns the standard explanation of the
     /// estimate's limits for display in a host application.
+    ///
+    /// Costs are under the default [`CostModel`]; see
+    /// [`Program::analyze_cost_with`].
     pub fn analyze_cost(&self) -> CostAnalysis {
+        self.analyze_cost_with(&CostModel::default())
+    }
+
+    /// [`Program::analyze_cost`] under `model`. Operation counts do not
+    /// depend on the model; costs do, and saturate.
+    pub fn analyze_cost_with(&self, model: &CostModel) -> CostAnalysis {
         CostAnalysis {
-            root: ScopeCost::analyze_chunk(&self.0, "main".to_string()),
+            root: ScopeCost::analyze_chunk(&self.0, "main".to_string(), model),
         }
     }
 

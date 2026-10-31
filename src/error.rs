@@ -460,6 +460,10 @@ pub enum ErrorKind {
         /// The budget that was set.
         budget: i64,
     },
+    /// [`State::set_cost_budget`](crate::State::set_cost_budget) on a State
+    /// built with [`Costing::Off`](crate::Costing::Off): there is no
+    /// accounting to budget. Nothing changed.
+    CostingOff,
     /// Metamethod chain (`__index` / `__newindex`, or a `__call` chain whose
     /// handler is itself a non-function callable) exceeded maximum depth.
     MetamethodDepthExceeded {
@@ -1692,6 +1696,7 @@ impl fmt::Display for ErrorKind {
                     "budget exceeded: used {used} cost with budget of {budget}"
                 )
             }
+            CostingOff => f.write_str("cannot set a cost budget: costing is off for this state"),
             MetamethodDepthExceeded { depth, limit } => {
                 write!(
                     f,

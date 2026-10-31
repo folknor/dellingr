@@ -144,7 +144,10 @@ fn global_environment_preserves_non_utf8_keys_across_save_load() {
 fn new_capture_state() -> (State, Arc<Mutex<Vec<String>>>) {
     let callbacks = Capture::default();
     let lines = Arc::clone(&callbacks.lines);
-    (State::with_callbacks(Box::new(callbacks)), lines)
+    (
+        State::builder().callbacks(Box::new(callbacks)).build(),
+        lines,
+    )
 }
 
 #[test]
@@ -381,7 +384,7 @@ fn byte_stability_state(with_slotmap_history: bool) -> State {
     "#,
     );
     state.gc_collect();
-    state.set_cost_budget(i64::MAX);
+    state.set_cost_budget(i64::MAX).unwrap();
     state
 }
 
@@ -679,7 +682,7 @@ fn dynamic_table_constructor_round_trips_after_completion() {
 fn rng_and_cost_continue_after_load() {
     let (mut control, control_lines) = new_capture_state();
     control.set_rng_seed(99);
-    control.set_cost_budget(10);
+    control.set_cost_budget(10).unwrap();
     control.consume_cost(3).unwrap();
     support::run(&mut control, "math.random(); math.random()");
     support::run(
@@ -692,7 +695,7 @@ fn rng_and_cost_continue_after_load() {
 
     let (mut original, _) = new_capture_state();
     original.set_rng_seed(99);
-    original.set_cost_budget(10);
+    original.set_cost_budget(10).unwrap();
     original.consume_cost(3).unwrap();
     support::run(&mut original, "math.random(); math.random()");
     let save = original.save_state().unwrap();
@@ -721,7 +724,7 @@ fn rng_and_cost_continue_after_load() {
 fn configured_budget_remains_enforced_after_load() {
     let mut original = State::new();
     support::run(&mut original, "t = {1, 2, 3, 4, 5}");
-    original.set_cost_budget(2);
+    original.set_cost_budget(2).unwrap();
     let save = original.save_state().expect("state saves");
 
     let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), support::no_setup)

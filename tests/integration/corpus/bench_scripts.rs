@@ -230,7 +230,9 @@ fn run_bench_once(script_path: &Path, source: &str, bench_function: &str) -> Res
         .map_err(|error| format!("{display_path} does not parse: {error}"))?;
 
     let mut state = State::new();
-    state.set_cost_budget(BENCH_SETUP_COST_BUDGET);
+    state
+        .set_cost_budget(BENCH_SETUP_COST_BUDGET)
+        .map_err(|error| format!("{display_path} setup budget refused: {error}"))?;
     state
         .load(&program)
         .map_err(|error| format!("{display_path} does not load: {error}"))?;
@@ -258,7 +260,9 @@ fn run_bench_once(script_path: &Path, source: &str, bench_function: &str) -> Res
         ));
     }
 
-    state.set_cost_budget(BENCH_KERNEL_COST_BUDGET);
+    state
+        .set_cost_budget(BENCH_KERNEL_COST_BUDGET)
+        .map_err(|error| format!("{display_path} kernel budget refused: {error}"))?;
     state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .map_err(|error| format!("{display_path} {function_to_call} failed: {error}"))

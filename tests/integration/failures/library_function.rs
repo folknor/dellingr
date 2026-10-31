@@ -165,8 +165,9 @@ fn sort_attribution_follows_the_comparison_that_failed() {
     ];
     for (code, expected) in cases {
         let notifications = Arc::new(Mutex::new(Vec::new()));
-        let mut state =
-            State::with_callbacks(Box::new(AttributionRecorder(Arc::clone(&notifications))));
+        let mut state = State::builder()
+            .callbacks(Box::new(AttributionRecorder(Arc::clone(&notifications))))
+            .build();
         support::load(&mut state, &code);
         let error = state
             .call(ArgCount::Fixed(0), RetCount::Fixed(0))

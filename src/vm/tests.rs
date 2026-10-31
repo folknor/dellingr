@@ -58,7 +58,9 @@ fn consume_cost_saturates_large_host_charges() {
         (u64::MAX, i64::MIN),
     ] {
         let mut state = State::new();
-        state.set_cost_budget(i64::MAX);
+        state
+            .set_cost_budget(i64::MAX)
+            .expect("the State is metered");
         state
             .consume_cost(cost)
             .expect("first charge may cross the budget");
@@ -67,7 +69,7 @@ fn consume_cost_saturates_large_host_charges() {
     }
 
     let mut state = State::new();
-    state.set_cost_budget(1);
+    state.set_cost_budget(1).expect("the State is metered");
     state
         .consume_cost(u64::MAX)
         .expect("first charge may cross the budget");
@@ -1277,7 +1279,9 @@ fn exhausted_format_pointer_rendering_notifies_once() {
     }
 
     let count = Arc::new(AtomicUsize::new(0));
-    let mut state = State::with_callbacks(Box::new(Count(Arc::clone(&count))));
+    let mut state = State::builder()
+        .callbacks(Box::new(Count(Arc::clone(&count))))
+        .build();
     state.new_table().unwrap();
     state.next_format_pointer_id = u64::MAX;
     let error = state

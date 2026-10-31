@@ -19,7 +19,9 @@ operand literals also stay in the chunk's literal pool as unused entries.
 ## Mechanics
 
 - `cost_used` counts everything charged. `set_cost_budget` sets a finite
-  budget; without one, cost is counted only.
+  budget; without one, cost is counted only. `set_cost_budget` returns
+  `ErrorKind::CostingOff`, changing nothing, on a State whose costing is off
+  (see "Configuring costs").
 - The counter is signed. The operation that crosses the budget completes; the
   next costed operation fails.
 - Opcode charges are batched in the dispatch loop and checked every
@@ -110,9 +112,56 @@ each costed operator opcode (`+ - * / % ^`, unary `-`, table creation, table
 write, and each array element a constructor stores) and each costed library
 function. A charge site measures its work in the units listed above (one per
 call, per byte, per element or per matcher step) and charges units times the
-charge's weight. A library function's weight also covers the matcher and
-substring-scan work it runs. The default model weighs every charge 1, which
-gives the charges this page lists. Free operations have no registry entry.
+charge's weight, saturating. A library function's weight also covers the
+matcher and substring-scan work it runs. The default model weighs every charge
+1, which gives the charges this page lists. Free operations have no registry
+entry, so no model can make them cost anything. `Charge::ALL` lists the
+registry and `Charge::name` names each entry.
+
+## Configuring costs
+
+A State's costing is chosen when it is built and never changes:
+
+```rust
+use dellingr::{Charge, CostModel, Costing, State};
+
+let model = CostModel::default()
+    .with(Charge::Pow, 10)
+    .with(Charge::StringFormat, 0);
+let state = State::builder().costing(Costing::Metered(model)).build();
+```
+
+`State::new` is the default model. `State::costing` reports what a State was
+built with.
+
+- **Weights.** A `CostModel` holds one integer weight per `Charge`. Weight 1
+  is the default; to make one operation relatively cheaper, raise the others.
+  Weights are not fractions.
+- **Zero weight.** A charge with weight 0 is free, exactly like an operation
+  with no registry entry: a zero-weight opcode skips the budget check, so it
+  runs even when the budget is spent. `CostModel::zero()` makes every
+  registered charge free. Host charges through `consume_cost` and budgets still
+  apply under it.
+- **Off.** `Costing::Off` turns accounting off entirely. Every charge,
+  including host `consume_cost`, is admitted without being counted;
+  `cost_used` stays 0, `cost_remaining` is `i64::MAX`, and `set_cost_budget`
+  is refused with `ErrorKind::CostingOff`, changing nothing. There is no
+  budget to exhaust, so a script can run unbounded.
+- **Host charges are raw.** `consume_cost` is never weighted.
+- **Admission is unchanged by weights.** Each site keeps the granularity it
+  has at weight 1. An atomic charge (an opcode, a flat library charge, a
+  sort's up-front charge) completes when it crosses the budget, and the next
+  one fails. A per-unit charge stops at the first unit that starts with no
+  budget left: `table.move` copies exactly the elements it paid for, and a
+  scan or pattern match stops part way. A unit that starts with budget left
+  completes at its full weight, so the budget can be overshot by less than one
+  unit's weight.
+- **Static analysis.** `Program::analyze_cost_with(&model)` is
+  `analyze_cost` under a model. Operation counts do not depend on the model;
+  costs do.
+
+Snapshots save and restore the costing along with the counters (see
+`save-state.md`).
 
 ## Flat charges are deliberate
 
@@ -123,12 +172,18 @@ or a default weight, including making a free function charge, changes
 
 ## `COST_MODEL_VERSION`
 
-Identifies the `cost_used` that a given source produces: opcode charges,
-native charges and compiler emission together.
+Identifies the costs a source produces under any model: the units each charge
+site measures, which charge the work is attributed to, how each charge is
+admitted against a budget (atomic or per unit), the default weights, and
+compiler emission.
 
-- It moves whenever `cost_used` for identical source changes.
-- It is a valid key for stored cost fingerprints.
-- Snapshots load only under an exact match.
+- It moves whenever `cost_used` for identical source changes under the default
+  model, and also when work moves from one charge to another or a charge's
+  units or admission change, even if default costs stay the same: a
+  non-default model prices the two charges differently.
+- A cost fingerprint is the version plus the costing (`CostModel::iter` for a
+  metered State, or Off). It is a valid key for stored cost fingerprints.
+- Snapshots load only under an exact version match.
 - The doc comment on the constant carries the per-version history.
 
 `tests/fixtures/cost_golden.txt` pins source costs and fixed-input native

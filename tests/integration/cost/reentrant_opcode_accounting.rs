@@ -143,7 +143,9 @@ fn reentering_opcodes_preserve_call_sites_and_cost_prefixes() {
         // The first addition leaves one cost unit pending. Table writes add a
         // second unit before their callback; budgets leave two further units
         // for the callback so the flush at the re-entry boundary is exercised.
-        state.set_cost_budget(case.budget);
+        state
+            .set_cost_budget(case.budget)
+            .expect("the State is metered");
         dellingr::Program::compile(case.source, Some(b"reentry".as_slice()))
             .and_then(|program| state.load(&program))
             .expect("reentry source compiles");

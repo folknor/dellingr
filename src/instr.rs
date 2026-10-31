@@ -653,44 +653,32 @@ impl Instr {
         }
     }
 
-    /// The fixed charge of an opcode: its registry weight for the costed
-    /// classes, 0 otherwise. `SET_LIST`'s per-element charge is not fixed and
-    /// counts 0 here (see [`Instr::array_element_cost`]).
-    pub(crate) const fn fixed_units(opcode: u8) -> u64 {
-        match (Self::cost_class(opcode), Self::charge(opcode)) {
-            (
-                OpcodeCost::Arithmetic
-                | OpcodeCost::Negation
-                | OpcodeCost::TableCreation
-                | OpcodeCost::TableWrite,
-                Some(charge),
-            ) => CostModel::DEFAULT.weight(charge),
-            _ => 0,
-        }
-    }
-
-    /// The cost of a `SET_LIST` storing `count` elements.
-    pub(crate) const fn array_element_cost(count: u64) -> u64 {
-        CostModel::DEFAULT.cost(Charge::ArrayElement, count)
-    }
-
-    /// Fixed opcode units, or the encoded list length's cost for static
-    /// analysis. An open SET_LIST counts zero statically; execution charges
-    /// the live list length instead. Native charges are not included.
-    pub(crate) const fn static_units(self) -> u64 {
-        match Self::cost_class(self.opcode()) {
+    /// The charge an opcode makes once per execution, one unit of its
+    /// registry charge, or `None` when it has no fixed charge. `SET_LIST`
+    /// charges per element instead and has none.
+    pub(crate) const fn fixed_charge(opcode: u8) -> Option<Charge> {
+        match Self::cost_class(opcode) {
             OpcodeCost::Arithmetic
             | OpcodeCost::Negation
             | OpcodeCost::TableCreation
-            | OpcodeCost::TableWrite => Self::fixed_units(self.opcode()),
-            OpcodeCost::ArrayElements => {
-                if self.b() == OPEN_COUNT {
-                    0
-                } else {
-                    Self::array_element_cost(self.b() as u64)
-                }
+            | OpcodeCost::TableWrite => Self::charge(opcode),
+            OpcodeCost::ArrayElements | OpcodeCost::Free | OpcodeCost::Call => None,
+        }
+    }
+
+    /// The static cost of this instruction under `model`: one unit of its
+    /// fixed charge, or the encoded list length in array elements. An open
+    /// SET_LIST counts zero statically; execution charges the live list
+    /// length instead. Native charges are not included.
+    pub(crate) const fn static_cost(self, model: &CostModel) -> u64 {
+        if let Some(charge) = Self::fixed_charge(self.opcode()) {
+            return model.cost(charge, 1);
+        }
+        match Self::cost_class(self.opcode()) {
+            OpcodeCost::ArrayElements if self.b() != OPEN_COUNT => {
+                model.cost(Charge::ArrayElement, self.b() as u64)
             }
-            OpcodeCost::Free | OpcodeCost::Call => 0,
+            _ => 0,
         }
     }
 }
@@ -1260,6 +1248,7 @@ mod tests {
     use super::{
         ArgCount, ArithOp, ArithOperands, Builtin, CompareOp, Instr, OPEN_COUNT, RetCount,
     };
+    use crate::cost_model::{Charge, CostModel};
 
     // The hand-maintained fixture records the opcode rows' replay-visible
     // number, operand layout and cost class, plus builtin slots and persisted
@@ -1530,9 +1519,10 @@ mod tests {
     }
 
     #[test]
-    fn set_list_static_units_count_fixed_batches_only() {
-        assert_eq!(Instr::set_list(0, Some(7), 0).static_units(), 7);
-        assert_eq!(Instr::set_list(0, None, 0).static_units(), 0);
+    fn set_list_static_cost_counts_fixed_batches_only() {
+        let model = CostModel::default().with(Charge::ArrayElement, 3);
+        assert_eq!(Instr::set_list(0, Some(7), 0).static_cost(&model), 21);
+        assert_eq!(Instr::set_list(0, None, 0).static_cost(&model), 0);
     }
 
     #[test]

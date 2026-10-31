@@ -7,6 +7,8 @@
 /// do not. The release procedure and frozen-format checks are in
 /// `docs/save-state.md`.
 // Version 13: the global table is saved whole, with its pins, in place of the
-// named bindings and the environment delta for `_G`.
+// named bindings and the environment delta for `_G`. Version 14: the payload
+// carries the State's costing (mode, and a metered model's weights) before
+// the meter counters.
 #[cfg_attr(not(feature = "snapshot"), allow(dead_code))]
-pub(crate) const FORMAT_VERSION: u16 = 13;
+pub(crate) const FORMAT_VERSION: u16 = 14;

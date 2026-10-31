@@ -62,7 +62,9 @@ fn documented_free_base_calls_and_iterators_charge_nothing() {
         .into_iter()
         .filter(|row| matches!(row.kind, "free" | "free_error"))
     {
-        let mut state = State::with_callbacks(Box::new(support::Recorder::default()));
+        let mut state = State::builder()
+            .callbacks(Box::new(support::Recorder::default()))
+            .build();
         support::load(&mut state, row.input);
         // Supplying the table from Rust keeps opcode allocation out of the
         // native-call probe. The ipairs row also invokes its returned iterator.

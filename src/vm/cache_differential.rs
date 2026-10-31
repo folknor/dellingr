@@ -45,8 +45,10 @@ const MIN_COMPLETED_EXAMPLES: usize = 40;
 fn execute(program: &Program, enabled: bool) -> (Vec<Vec<u8>>, u64, Option<String>) {
     let _mode = HitMode::new(enabled);
     let output = Output::default();
-    let mut state = State::with_callbacks(Box::new(output.clone()));
-    state.set_cost_budget(COST_BUDGET);
+    let mut state = State::builder().callbacks(Box::new(output.clone())).build();
+    state
+        .set_cost_budget(COST_BUDGET)
+        .expect("the State is metered");
     let result = state
         .load(program)
         .and_then(|()| state.call(ArgCount::Fixed(0), RetCount::Fixed(0)));

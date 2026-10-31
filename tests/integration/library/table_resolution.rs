@@ -18,7 +18,7 @@ fn budget_exhaustion_mid_move_keeps_the_paid_prefix() {
 
     let call = format!("table.move(src, 1, {ELEMENTS}, 1, dst)");
     support::load(&mut state, call.as_bytes());
-    state.set_cost_budget(BUDGET);
+    state.set_cost_budget(BUDGET).expect("the State is metered");
     let error = state
         .call(ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("the move cannot fit the configured budget");
@@ -32,7 +32,9 @@ fn budget_exhaustion_mid_move_keeps_the_paid_prefix() {
         usize::try_from(budget_units - CALL_SETUP_COST).expect("the paid prefix fits usize");
     assert!(expected_prefix < ELEMENTS, "the budget must stop mid-move");
 
-    state.set_cost_budget(i64::MAX);
+    state
+        .set_cost_budget(i64::MAX)
+        .expect("the State is metered");
     state.get_global("dst").expect("dst is a global");
     let copied = state.raw_len(-1).expect("dst is a table");
     assert_eq!(

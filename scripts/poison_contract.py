@@ -18,7 +18,7 @@ import native_calls as rust
 # These methods cannot return StatePoisoned. They expose host configuration,
 # counters or deliberately safe observations, rather than executing Lua.
 SAFE_INFALLIBLE = {
-    "set_rng_seed", "set_cost_budget", "cost_used", "cost_remaining",
+    "set_rng_seed", "cost_used", "cost_remaining", "costing",
     "set_user_data", "user_data", "user_data_mut", "clear_user_data",
     "callbacks_mut", "replace_callbacks", "object_count", "string_count",
     "heap_size", "gc_should_run", "gc_threshold", "gc_set_threshold",

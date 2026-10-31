@@ -103,7 +103,9 @@ fn gmatch_resume_cost_ignores_fifo_cache_eviction() {
 fn gmatch_snapshot_preserves_first_use_and_resume_charges() {
     for warm in [false, true] {
         let mut original = State::new();
-        original.set_cost_budget(10_000);
+        original
+            .set_cost_budget(10_000)
+            .expect("the State is metered");
         run(&mut original, "iter = string.gmatch('one two', '%a+')");
         if warm {
             call_iterator(&mut original, "iter");
