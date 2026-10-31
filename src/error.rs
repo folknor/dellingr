@@ -912,6 +912,10 @@ pub struct ArgError {
     /// decided `method_call`, so an outer call that merely propagates the
     /// error cannot reinterpret it.
     settled: bool,
+    /// The field of a table argument that failed, for errors raised by
+    /// [`State::raw_field`](crate::State::raw_field). `expected` and
+    /// `received` then describe the field, not the argument.
+    field: Option<String>,
 }
 
 use crate::limits::MAX_RESULTS;
@@ -958,6 +962,10 @@ pub enum ArgDetail {
     /// `table.move`'s destination range would run past the largest integer;
     /// the argument is the destination start.
     DestinationWrapAround,
+    /// An integer is outside the range of the type it is read into.
+    ValueOutOfRange,
+    /// A string is not valid UTF-8 where text is required.
+    InvalidUtf8,
 }
 
 impl ArgDetail {
@@ -975,6 +983,8 @@ impl ArgDetail {
             Self::PositionOutOfBounds => Some("position out of bounds"),
             Self::TooManyElementsToMove => Some("too many elements to move"),
             Self::DestinationWrapAround => Some("destination wrap around"),
+            Self::ValueOutOfRange => Some("value out of range"),
+            Self::InvalidUtf8 => Some("invalid UTF-8"),
             Self::TypeMismatch => None,
         }
     }
@@ -1470,6 +1480,7 @@ impl ErrorKind {
             received: None,
             method_call: false,
             settled: false,
+            field: None,
         })
     }
 
@@ -1519,6 +1530,13 @@ impl ArgError {
         self.method_call
     }
 
+    /// The field of a table argument that failed, for errors raised by
+    /// [`State::raw_field`](crate::State::raw_field). When present,
+    /// [`Self::expected`] and [`Self::received`] describe the field.
+    pub fn field(&self) -> Option<&str> {
+        self.field.as_deref()
+    }
+
     /// Build an error for a required argument without an expected type.
     pub(crate) fn required(arg_number: isize, func_name: Option<&str>) -> Self {
         Self {
@@ -1529,6 +1547,28 @@ impl ArgError {
             received: None,
             method_call: false,
             settled: false,
+            field: None,
+        }
+    }
+
+    /// An error about `field` of the table at argument `arg_number`.
+    pub(crate) fn field_error(
+        arg_number: isize,
+        func_name: Option<&str>,
+        field: &str,
+        detail: ArgDetail,
+        expected: Option<LuaType>,
+        received: LuaType,
+    ) -> Self {
+        Self {
+            arg_number,
+            func_name: func_name.map(str::to_owned),
+            detail,
+            expected,
+            received: Some(received),
+            method_call: false,
+            settled: false,
+            field: Some(field.to_owned()),
         }
     }
 
@@ -1547,6 +1587,7 @@ impl ArgError {
             received,
             method_call: false,
             settled: false,
+            field: None,
         }
     }
 }
@@ -1793,6 +1834,10 @@ impl fmt::Display for ArgError {
                 .rendered_detail()
                 .expect("every non-type argument detail has rendered wording")
                 .to_owned(),
+        };
+        let extra = match &self.field {
+            Some(field) => format!("field '{field}': {extra}"),
+            None => extra,
         };
 
         if self.method_call && self.arg_number > 0 {

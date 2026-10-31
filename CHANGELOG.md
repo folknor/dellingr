@@ -11,6 +11,17 @@ version's meaning is wider (see below).
 
 ### Added
 
+- `State::raw_field::<T>(table_arg, name)`: host functions read a typed field
+  of an options table argument such as `game.spawn{player = 1, x = 2}`. It is a
+  raw read (a field supplied by `__index` reads as absent), runs no Lua, leaves
+  the stack unchanged and charges no cost. `T` is `f64`, any of `i8` to `i64`
+  and `u8` to `u64` (a finite integral number in range), `bool` (a Lua boolean
+  only), `String` (valid UTF-8), `Vec<u8>` or `Option<_>` of those, where a
+  missing and a nil field are `None`. Failures are argument errors on the
+  table argument: `ArgError::field` names the field, rendered as
+  `bad argument #1 to 'spawn' (field 'x': number expected, got string)`. New
+  `ArgDetail::ValueOutOfRange` and `ArgDetail::InvalidUtf8`; `RawField` is the
+  sealed trait bound.
 - Configurable costs. Every costed operation is a `Charge` (each costed
   operator opcode, each array element a constructor stores, and each costed
   library function), and a `CostModel` gives each one an integer weight. A

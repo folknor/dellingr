@@ -66,6 +66,44 @@ counts zero for it; at runtime it charges the live number of elements.
   `next`, `pairs`, `ipairs` and its iterator, `getmetatable`, `setmetatable`,
   and `error`.
 
+## Runaway loops are not the VM's problem
+
+Structural code is free, so a loop that does only free work never exhausts a
+budget: `while true do end`, a busy-wait such as `while unit.hp > 0 do end`, or
+a loop whose increment was forgotten runs until the host process is stopped.
+This is deliberate. dellingr has no instruction-count limit, no time limit, no
+watchdog and no interrupt, and will not get one.
+
+The games dellingr serves are played the way the old programming games were:
+authors write scripts, publish them, and other players download them and run
+them in a harness on their own machine. A script that hangs only hangs the
+harness of the player who loaded it. That player restarts once and never loads
+that script again. Its author gains nothing from releasing it, because a script
+that hangs never plays and never wins, and the author would have seen it hang
+the first time they ran it. There is no shared server whose tick a hanging
+script could stall for other players.
+
+The arguments for a limit, and why they don't hold here:
+
+- *"The budget should bound running time."* It bounds the work a script does,
+  as a game-design instrument (see the top of this page). It was never a
+  running-time bound, and making loops cost something to turn it into one
+  would break the rule that structural code is free.
+- *"Costed work in the loop would end it anyway."* It does, and loops that only
+  read, compare and call cost nothing by design. That changes nothing above:
+  such a loop is a bug its author finds while testing.
+- *"A hanging script is an attack on other players."* Only on a shared server.
+  Here it is run locally by the player who chose to load it.
+- *"Stock Lua can stop it with `lua_sethook`."* Matching reference Lua is not a
+  goal in itself, and dellingr has no debug hooks at all. The hook exists for
+  hosts that run untrusted code in a shared process, which these games don't.
+- *"A clean error naming the line would help authors debug."* It would, but
+  convenience while developing doesn't justify a limit in the dispatch loop and
+  its contract.
+
+Configurable costs (`Costing`) do not change this: loops stay free under every
+model.
+
 ## Native charges
 
 Base library: `rawset` charges a flat 1, like a `TableWrite` opcode.

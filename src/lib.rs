@@ -149,6 +149,7 @@ pub use instr::{ArgCount, RetCount};
 pub use native_call_trace::{active_path, is_observing, with_native_call_trace};
 pub use vm::Anchor;
 pub use vm::LuaType;
+pub use vm::RawField;
 pub use vm::RustFnHandle;
 pub use vm::RustFunc;
 pub use vm::State;

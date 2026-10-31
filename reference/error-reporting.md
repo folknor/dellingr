@@ -65,6 +65,15 @@ does. `ArgError::arg_number` keeps the callee's own position. The innermost
 callback that returns the error decides, so an outer method call that merely
 propagates an error from a nested callback does not renumber it.
 
+An error raised by `State::raw_field` is an `ArgError` on the table argument
+whose `ArgError::field` is the failing field name. The display prefixes the
+detail with `field 'name': ` inside the usual parentheses (`bad argument #1 to
+'spawn' (field 'x': number expected, got string)`, or `calling 'spawn' on bad
+self (field 'x': ...)` for a method call), and `expected` and `received`
+describe the field, not the argument. `ArgDetail::ValueOutOfRange` and
+`ArgDetail::InvalidUtf8` cover an integral number outside the target integer
+type and a string that is not valid UTF-8.
+
 The host-facing `State::check_any` and `State::check_type` helpers set the
 function name only when validation fails. They ask the active Rust callback for
 its name while that callback is running. `check_optional_type` uses the same
