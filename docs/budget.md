@@ -35,8 +35,9 @@ operand literals also stay in the chunk's literal pool as unused entries.
 
 ## Static opcode charges
 
-These rows describe the units returned by `Instr::static_units()`. The table
-is checked against every declared opcode by a unit test in `vm/frame.rs`.
+These rows describe the units returned by `Instr::static_units()` under the
+default cost model. The table is checked against every declared opcode by a
+unit test in `vm/frame.rs`.
 
 | `OpcodeCost` | Units from `static_units()` |
 | --- | --- |
@@ -102,11 +103,22 @@ Table library:
   comparator runs. A Lua comparator also incurs its normal execution cost, as
   do sequence-library metamethod handlers.
 
+## The cost registry
+
+Every costed operation is registered in `src/cost_model.rs` as a `Charge`:
+each costed operator opcode (`+ - * / % ^`, unary `-`, table creation, table
+write, and each array element a constructor stores) and each costed library
+function. A charge site measures its work in the units listed above (one per
+call, per byte, per element or per matcher step) and charges units times the
+charge's weight. A library function's weight also covers the matcher and
+substring-scan work it runs. The default model weighs every charge 1, which
+gives the charges this page lists. Free operations have no registry entry.
+
 ## Flat charges are deliberate
 
-Native costs are per-function literals, not a rule table. The numbers are part
-of the cost model. Changing any of them, including making a free function
-charge, changes `cost_used` for existing scripts and replays, so it needs a
+The units each site measures are part of the cost model. Changing any of them
+or a default weight, including making a free function charge, changes
+`cost_used` for existing scripts and replays, so it needs a
 `COST_MODEL_VERSION` bump. Do not "fix" a flat charge to be proportional.
 
 ## `COST_MODEL_VERSION`

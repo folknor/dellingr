@@ -482,7 +482,7 @@ impl Frame {
                         Some(count) => usize::from(count),
                         None => state.stack.len() - (ra + 1),
                     };
-                    add_cost!(count as u64);
+                    add_cost!(Instr::array_element_cost(count as u64));
                     state.reg_set_list(ra, count, inst.c())?;
                     if inst.set_list_count().is_none() {
                         state.stack.resize(frame.top, Val::Nil);

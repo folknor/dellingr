@@ -7,6 +7,7 @@ use super::RustFnId;
 use super::lua_val::{PointerIdKey, Val};
 use super::table::{TableError, TableNext};
 use super::{Result, State, TypeError};
+use crate::cost_model::Charge;
 use crate::error::{Error, ErrorKind, ErrorValue, InternalFault, LibraryError, LibraryFunction};
 use crate::instr::{ArgCount, RetCount};
 
@@ -673,7 +674,7 @@ impl State {
         // exhausted budget blocks the sort rather than letting it complete and
         // only then failing the charge. `arr` is a detached copy here, so
         // nothing has been mutated yet. Empty sorts still cost 1.
-        self.consume_cost(n.max(1) as u64)?;
+        self.charge(Charge::TableSort, n.max(1) as u64)?;
 
         if arr.is_empty() {
             return Ok(0);

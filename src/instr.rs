@@ -6,6 +6,7 @@
 //! are 16-bit operands; a constant operand is its own opcode, never a flag
 //! bit. Each instruction is stored in one `u64`.
 
+use crate::cost_model::{Charge, CostModel};
 use crate::limits::{MAX_ARGUMENTS, MAX_FIXED_ARGS, MAX_FIXED_RESULTS, MAX_RESULTS};
 use crate::numeral::{lua_add, lua_div, lua_modulo, lua_mul, lua_sub};
 
@@ -349,6 +350,17 @@ mod opcode_cost_tests {
         assert_eq!(OpcodeCost::Free.counter_index(), None);
         assert_eq!(OPCODE_COST_LABELS.len(), OpcodeCost::COUNT);
     }
+
+    #[test]
+    fn exactly_the_costed_opcodes_have_a_registry_charge() {
+        for &(opcode, name) in Instr::OPCODE_NAMES {
+            let costed = !matches!(
+                Instr::cost_class(opcode),
+                OpcodeCost::Free | OpcodeCost::Call
+            );
+            assert_eq!(Instr::charge(opcode).is_some(), costed, "{name}");
+        }
+    }
 }
 
 /// The operand layout of an opcode, which fixes the reserved bits and the
@@ -416,6 +428,7 @@ enum PoolField {
 struct OpcodeMetadata {
     layout: Layout,
     cost: OpcodeCost,
+    charge: Option<Charge>,
     arithmetic: Option<fn(f64, f64) -> f64>,
     foldable: bool,
     pool: Option<(OperandPool, PoolField)>,
@@ -430,6 +443,15 @@ macro_rules! opcode_pool {
     };
 }
 
+macro_rules! opcode_charge {
+    () => {
+        None
+    };
+    ($charge:ident) => {
+        Some(Charge::$charge)
+    };
+}
+
 macro_rules! opcode_arithmetic {
     () => {
         (None, false)
@@ -441,7 +463,8 @@ macro_rules! opcode_arithmetic {
 }
 
 // Explicit numbers are snapshot data. Every opcode declares its operand
-// layout (which fixes its reserved bits), static charge, and, for the
+// layout (which fixes its reserved bits), static charge class and, when
+// costed, its cost-registry charge, and, for the
 // arithmetic forms, the function the constant folder and the dispatch share.
 // Pool descriptors also drive verification and disassembly without changing encoding.
 macro_rules! opcode_rows {
@@ -459,37 +482,37 @@ macro_rules! opcode_rows {
             OP_SET_GLOBAL = 9, Abd, Free {String, B};
             OP_GET_BUILTIN = 10, Ab, Free;
             OP_SET_BUILTIN = 11, Ab, Free;
-            OP_NEW_TABLE = 12, A, TableCreation;
-            OP_NEW_TABLE_PRESIZED = 13, Ab, TableCreation;
-            OP_NEW_TABLE_TEMPLATE = 14, Ab, TableCreation {Template, B};
+            OP_NEW_TABLE = 12, A, TableCreation(NewTable);
+            OP_NEW_TABLE_PRESIZED = 13, Ab, TableCreation(NewTable);
+            OP_NEW_TABLE_TEMPLATE = 14, Ab, TableCreation(NewTable) {Template, B};
             OP_GET_FIELD = 15, Abcd, Free {String, C};
             OP_GET_TABLE = 16, Abc, Free;
-            OP_SET_FIELD = 17, Abcd, TableWrite {String, B};
-            OP_SET_TABLE = 18, Abc, TableWrite;
-            OP_INIT_FIELD = 19, Abc, TableWrite {String, B};
-            OP_INIT_FIELD_PINNED = 20, Abcd, TableWrite {String, B};
-            OP_INIT_INDEX = 21, Abc, TableWrite;
-            OP_SET_LIST = 22, Abc, ArrayElements;
+            OP_SET_FIELD = 17, Abcd, TableWrite(TableWrite) {String, B};
+            OP_SET_TABLE = 18, Abc, TableWrite(TableWrite);
+            OP_INIT_FIELD = 19, Abc, TableWrite(TableWrite) {String, B};
+            OP_INIT_FIELD_PINNED = 20, Abcd, TableWrite(TableWrite) {String, B};
+            OP_INIT_INDEX = 21, Abc, TableWrite(TableWrite);
+            OP_SET_LIST = 22, Abc, ArrayElements(ArrayElement);
             OP_SELF = 23, Abcd, Free {String, C};
-            OP_ADD_RR = 24, Abc, Arithmetic [lua_add, true];
-            OP_ADD_RK = 25, Abc, Arithmetic [lua_add, true] {Number, C};
-            OP_ADD_KR = 26, Abc, Arithmetic [lua_add, true] {Number, B};
-            OP_SUB_RR = 27, Abc, Arithmetic [lua_sub, true];
-            OP_SUB_RK = 28, Abc, Arithmetic [lua_sub, true] {Number, C};
-            OP_SUB_KR = 29, Abc, Arithmetic [lua_sub, true] {Number, B};
-            OP_MUL_RR = 30, Abc, Arithmetic [lua_mul, true];
-            OP_MUL_RK = 31, Abc, Arithmetic [lua_mul, true] {Number, C};
-            OP_MUL_KR = 32, Abc, Arithmetic [lua_mul, true] {Number, B};
-            OP_DIV_RR = 33, Abc, Arithmetic [lua_div, true];
-            OP_DIV_RK = 34, Abc, Arithmetic [lua_div, true] {Number, C};
-            OP_DIV_KR = 35, Abc, Arithmetic [lua_div, true] {Number, B};
-            OP_MOD_RR = 36, Abc, Arithmetic [lua_modulo, true];
-            OP_MOD_RK = 37, Abc, Arithmetic [lua_modulo, true] {Number, C};
-            OP_MOD_KR = 38, Abc, Arithmetic [lua_modulo, true] {Number, B};
-            OP_POW_RR = 39, Abc, Arithmetic [crate::crmath::pow, false];
-            OP_POW_RK = 40, Abc, Arithmetic [crate::crmath::pow, false] {Number, C};
-            OP_POW_KR = 41, Abc, Arithmetic [crate::crmath::pow, false] {Number, B};
-            OP_UNM = 42, Ab, Negation;
+            OP_ADD_RR = 24, Abc, Arithmetic(Add) [lua_add, true];
+            OP_ADD_RK = 25, Abc, Arithmetic(Add) [lua_add, true] {Number, C};
+            OP_ADD_KR = 26, Abc, Arithmetic(Add) [lua_add, true] {Number, B};
+            OP_SUB_RR = 27, Abc, Arithmetic(Sub) [lua_sub, true];
+            OP_SUB_RK = 28, Abc, Arithmetic(Sub) [lua_sub, true] {Number, C};
+            OP_SUB_KR = 29, Abc, Arithmetic(Sub) [lua_sub, true] {Number, B};
+            OP_MUL_RR = 30, Abc, Arithmetic(Mul) [lua_mul, true];
+            OP_MUL_RK = 31, Abc, Arithmetic(Mul) [lua_mul, true] {Number, C};
+            OP_MUL_KR = 32, Abc, Arithmetic(Mul) [lua_mul, true] {Number, B};
+            OP_DIV_RR = 33, Abc, Arithmetic(Div) [lua_div, true];
+            OP_DIV_RK = 34, Abc, Arithmetic(Div) [lua_div, true] {Number, C};
+            OP_DIV_KR = 35, Abc, Arithmetic(Div) [lua_div, true] {Number, B};
+            OP_MOD_RR = 36, Abc, Arithmetic(Mod) [lua_modulo, true];
+            OP_MOD_RK = 37, Abc, Arithmetic(Mod) [lua_modulo, true] {Number, C};
+            OP_MOD_KR = 38, Abc, Arithmetic(Mod) [lua_modulo, true] {Number, B};
+            OP_POW_RR = 39, Abc, Arithmetic(Pow) [crate::crmath::pow, false];
+            OP_POW_RK = 40, Abc, Arithmetic(Pow) [crate::crmath::pow, false] {Number, C};
+            OP_POW_KR = 41, Abc, Arithmetic(Pow) [crate::crmath::pow, false] {Number, B};
+            OP_UNM = 42, Ab, Negation(Negate);
             OP_NOT = 43, Ab, Free;
             OP_LEN = 44, Ab, Free;
             OP_CONCAT = 45, Abc, Free;
@@ -523,7 +546,7 @@ macro_rules! opcode_rows {
 macro_rules! define_opcodes {
     (
         $(
-            $name:ident = $number:literal, $layout:ident, $cost:ident
+            $name:ident = $number:literal, $layout:ident, $cost:ident $(($charge:ident))?
                 $([$arithmetic:path, $foldable:literal])? $({$pool:ident, $field:ident})?;
         )+
     ) => {
@@ -539,6 +562,7 @@ macro_rules! define_opcodes {
                     entries[$number] = Some(OpcodeMetadata {
                         layout: Layout::$layout,
                         cost: OpcodeCost::$cost,
+                        charge: opcode_charge!($($charge)?),
                         arithmetic,
                         foldable,
                         pool: opcode_pool!($($pool, $field)?),
@@ -621,21 +645,38 @@ impl Instr {
         }
     }
 
-    /// The fixed charge of an opcode: 1 for the costed classes, 0 otherwise.
-    /// `SET_LIST`'s per-element charge is not fixed and counts 0 here.
-    pub(crate) const fn fixed_units(opcode: u8) -> u64 {
-        match Self::cost_class(opcode) {
-            OpcodeCost::Arithmetic
-            | OpcodeCost::Negation
-            | OpcodeCost::TableCreation
-            | OpcodeCost::TableWrite => 1,
-            OpcodeCost::ArrayElements | OpcodeCost::Free | OpcodeCost::Call => 0,
+    /// The cost-registry charge of a costed opcode, `None` for free opcodes.
+    pub(crate) const fn charge(opcode: u8) -> Option<Charge> {
+        match Self::OPCODES[opcode as usize] {
+            Some(metadata) => metadata.charge,
+            None => None,
         }
     }
 
-    /// Fixed opcode units, or the encoded list length for static analysis.
-    /// An open SET_LIST counts zero statically; execution charges the live
-    /// list length instead. Native charges are not included.
+    /// The fixed charge of an opcode: its registry weight for the costed
+    /// classes, 0 otherwise. `SET_LIST`'s per-element charge is not fixed and
+    /// counts 0 here (see [`Instr::array_element_cost`]).
+    pub(crate) const fn fixed_units(opcode: u8) -> u64 {
+        match (Self::cost_class(opcode), Self::charge(opcode)) {
+            (
+                OpcodeCost::Arithmetic
+                | OpcodeCost::Negation
+                | OpcodeCost::TableCreation
+                | OpcodeCost::TableWrite,
+                Some(charge),
+            ) => CostModel::DEFAULT.weight(charge),
+            _ => 0,
+        }
+    }
+
+    /// The cost of a `SET_LIST` storing `count` elements.
+    pub(crate) const fn array_element_cost(count: u64) -> u64 {
+        CostModel::DEFAULT.cost(Charge::ArrayElement, count)
+    }
+
+    /// Fixed opcode units, or the encoded list length's cost for static
+    /// analysis. An open SET_LIST counts zero statically; execution charges
+    /// the live list length instead. Native charges are not included.
     pub(crate) const fn static_units(self) -> u64 {
         match Self::cost_class(self.opcode()) {
             OpcodeCost::Arithmetic
@@ -646,7 +687,7 @@ impl Instr {
                 if self.b() == OPEN_COUNT {
                     0
                 } else {
-                    self.b() as u64
+                    Self::array_element_cost(self.b() as u64)
                 }
             }
             OpcodeCost::Free | OpcodeCost::Call => 0,

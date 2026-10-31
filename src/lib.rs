@@ -92,6 +92,7 @@ pub mod native_call_trace;
 
 mod compiler;
 mod cost_meter;
+mod cost_model;
 mod crmath;
 mod det_hash;
 mod disassemble;

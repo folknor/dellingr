@@ -1,6 +1,7 @@
 //! Lua 5.4-compatible `string.format`.
 
 use super::exact_integer_value;
+use crate::cost_model::Charge;
 use crate::error::{ArgDetail, ArgError, Error, ErrorKind, LibraryError};
 use crate::limits::{MAX_FORMAT_FIELD_DIGITS, MAX_FORMAT_LEN};
 use crate::numeral::{exact_i64, parse_lua_numeral};
@@ -62,7 +63,7 @@ pub(crate) fn format(state: &mut State) -> Result<u8> {
     } else {
         state.to_bytes(1)?.to_vec()
     };
-    state.consume_cost(format_bytes.len().max(1) as u64)?;
+    state.charge(Charge::StringFormat, format_bytes.len().max(1) as u64)?;
     let argument_count = state.get_top();
     let mut output = Vec::new();
     let mut argument = 1usize;
@@ -107,7 +108,7 @@ pub(crate) fn format(state: &mut State) -> Result<u8> {
 
 fn append_output(state: &mut State, output: &mut Vec<u8>, bytes: &[u8]) -> Result<()> {
     let next = crate::limits::checked_string_growth(output.len(), bytes.len())?;
-    state.consume_cost(bytes.len() as u64)?;
+    state.charge(Charge::StringFormat, bytes.len() as u64)?;
     output.reserve(next - output.len());
     output.extend_from_slice(bytes);
     Ok(())
@@ -357,7 +358,7 @@ fn format_argument(state: &mut State, argument: usize, directive: &Directive) ->
                 "format_argument->tostring_bytes_unguarded",
                 state.tostring_bytes_unguarded(idx)
             )?;
-            state.consume_cost(bytes.len() as u64)?;
+            state.charge(Charge::StringFormat, bytes.len() as u64)?;
             if directive.has_modifiers && bytes.contains(&0) {
                 return Err(format_arg_error(
                     state,
@@ -394,7 +395,7 @@ fn number_argument(state: &mut State, idx: isize, argument: usize) -> Result<f64
         LuaType::Number => state.to_number(idx),
         LuaType::String => {
             let bytes = state.to_bytes(idx)?.to_vec();
-            state.consume_cost(bytes.len() as u64)?;
+            state.charge(Charge::StringFormat, bytes.len() as u64)?;
             parse_lua_numeral(&bytes).ok_or_else(|| {
                 format_arg_type_error(state, argument, LuaType::Number, Some(LuaType::String))
             })
@@ -805,7 +806,7 @@ fn quote_argument(state: &mut State, idx: isize, argument: usize) -> Result<Vec<
     match state.typ(idx) {
         LuaType::String => {
             let bytes = state.to_bytes(idx)?.to_vec();
-            state.consume_cost(bytes.len() as u64)?;
+            state.charge(Charge::StringFormat, bytes.len() as u64)?;
             quote_string(&bytes)
         }
         LuaType::Number => {

@@ -541,8 +541,9 @@ impl<'data, 'meter, 'cost> MatchState<'data, 'meter, 'cost> {
             }; LUA_MAXCAPTURES],
         }
     }
+    /// Charge one matcher step, at the meter's unit cost.
     fn charge(&mut self) -> MatchResult<()> {
-        if self.meter.consume(1) {
+        if self.meter.consume_units(1) {
             Ok(())
         } else {
             Err(MatchError::BudgetExceeded)

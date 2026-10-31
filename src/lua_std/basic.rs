@@ -4,6 +4,7 @@ use super::{check_any_named, check_type_named};
 use crate::LuaType;
 use crate::Result;
 use crate::State;
+use crate::cost_model::Charge;
 use crate::error::{ArgDetail, ErrorKind, ErrorValue, LibraryError, PrefixLocation};
 use crate::limits::{TONUMBER_BASE_MAX, TONUMBER_BASE_MIN};
 use crate::numeral::parse_lua_numeral;
@@ -359,7 +360,7 @@ pub(super) const BASE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // Sets table[index] = value without invoking __newindex metamethod.
     // Returns the table.
     ("rawset", |state| {
-        state.consume_cost(1)?;
+        state.charge(Charge::Rawset, 1)?;
         check_type_named(state, 1, LuaType::Table, "rawset")?;
         check_any_named(state, 2, "rawset")?;
         check_any_named(state, 3, "rawset")?;

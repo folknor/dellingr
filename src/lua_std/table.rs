@@ -4,6 +4,7 @@ use super::{arg_integer, check_optional_type_named, check_type_named, opt_intege
 use crate::LuaType;
 use crate::Result;
 use crate::State;
+use crate::cost_model::Charge;
 use crate::error::{ArgDetail, LibraryError, LibraryFunction};
 use crate::instr::{ArgCount, RetCount};
 use crate::numeral::{MAX_EXACT_INTEGER, exact_i64, parse_lua_numeral};
@@ -38,7 +39,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // storage shift instead; the two paths are observably identical there and
     // charge the same.
     ("insert", |state| {
-        state.consume_cost(1)?;
+        state.charge(Charge::TableInsert, 1)?;
         check_type_named(state, 1, LuaType::Table, "insert")?;
         let num_args = state.get_top();
 
@@ -77,7 +78,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     //
     // Flat charge: see table.insert.
     ("remove", |state| {
-        state.consume_cost(1)?;
+        state.charge(Charge::TableRemove, 1)?;
         check_type_named(state, 1, LuaType::Table, "remove")?;
         if has_sequence_metamethods(state, 1)? {
             return crate::native_call!(
@@ -149,7 +150,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // (the budget is not a CPU meter), not an oversight: do not charge per
     // argument.
     ("pack", |state| {
-        state.consume_cost(1)?;
+        state.charge(Charge::TablePack, 1)?;
         let num_args = state.top_isize();
 
         // Create new table
@@ -199,7 +200,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
                 check_type_named(state, 2, LuaType::String, "concat")?;
                 state.to_bytes(2)?.to_vec()
             };
-            state.consume_cost(bytes.len() as u64)?;
+            state.charge(Charge::TableConcat, bytes.len() as u64)?;
             bytes
         };
 
@@ -210,7 +211,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
 
         if i > j {
             if sep.is_empty() {
-                state.consume_cost(1)?;
+                state.charge(Charge::TableConcat, 1)?;
             }
             state.set_top(0)?;
             state.push_bytes(b"")?;
@@ -225,11 +226,11 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         for idx in i..=j {
             if idx > i {
                 let next = crate::limits::checked_string_growth(result.len(), sep.len())?;
-                state.consume_cost(sep.len() as u64)?;
+                state.charge(Charge::TableConcat, sep.len() as u64)?;
                 result.reserve(next - result.len());
                 result.extend_from_slice(&sep);
             }
-            state.consume_cost(1)?;
+            state.charge(Charge::TableConcat, 1)?;
             state.push_number(idx as f64)?;
             crate::native_call!(
                 "lib:table.concat->get_table_unguarded",
@@ -240,7 +241,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
                 LuaType::String | LuaType::Number => {
                     let bytes = state.bytes_with_default_string_coercion(-1)?;
                     let next = crate::limits::checked_string_growth(result.len(), bytes.len())?;
-                    state.consume_cost(bytes.len() as u64)?;
+                    state.charge(Charge::TableConcat, bytes.len() as u64)?;
                     result.reserve(next - result.len());
                     result.extend_from_slice(&bytes);
                 }
@@ -324,13 +325,13 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         let same_table = count > 0 && state.raw_equal(1, dest_idx);
         let backwards = same_table && t > f && t <= e;
         if count == 0 {
-            state.consume_cost(1)?;
+            state.charge(Charge::TableMove, 1)?;
         } else if honour_meta {
             // A handler can fail during a read or write, so charge each
             // attempted metamethod copy immediately before dispatch.
             for step in 0..count {
                 let i = if backwards { count - 1 - step } else { step };
-                state.consume_cost(1)?;
+                state.charge(Charge::TableMove, 1)?;
                 crate::native_call!(
                     "lib:table.move->move_element:metamethods",
                     move_element(state, f + i, t + i, dest_idx, honour_meta)
@@ -338,22 +339,19 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
             }
         } else {
             // Charge raw copies in one batch for both finite and unlimited
-            // budgets, with the outcome of charging 1 per copy: a budget that
-            // runs out mid-range still copies the elements it paid for (in
-            // copy order) before failing, exactly as the per-element loop
-            // would. cost_used and the partial mutation therefore do not
-            // depend on whether a budget is configured, and the hot copy loop
-            // carries no budget checks.
-            let used_before = state.cost_used();
-            let paid_all = state
-                .cost_meter()
-                .consume_units(u64::try_from(count).expect("a nonempty move count is positive"));
-            let paid = if paid_all {
-                count
-            } else {
-                i64::try_from(state.cost_used() - used_before)
-                    .expect("a partial charge is below the i64 move count")
-            };
+            // budgets, with the outcome of charging one unit per copy: a
+            // budget that runs out mid-range still copies the elements it
+            // paid for (in copy order) before failing, exactly as the
+            // per-element loop would. cost_used and the partial mutation
+            // therefore do not depend on whether a budget is configured, and
+            // the hot copy loop carries no budget checks.
+            let admitted = state
+                .charge_meter(Charge::TableMove)
+                .consume_units_admitted(
+                    u64::try_from(count).expect("a nonempty move count is positive"),
+                );
+            let paid = i64::try_from(admitted).expect("admitted units never exceed the move count");
+            let paid_all = paid == count;
             if backwards {
                 for step in 0..paid {
                     let i = count - 1 - step;
@@ -640,7 +638,7 @@ fn sort_through_metamethods(state: &mut State, has_comp: bool) -> Result<u8> {
         sequence_len(state, 1, LibraryFunction::Sort)
     )?;
     let n = state.checked_table_sort_len(len)?;
-    state.consume_cost(len.max(1).cast_unsigned())?;
+    state.charge(Charge::TableSort, len.max(1).cast_unsigned())?;
     if len < 2 {
         state.set_top(0)?;
         return Ok(0);

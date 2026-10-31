@@ -55,6 +55,7 @@ use super::Instr;
 use super::Result;
 use super::compiler::Bytecode;
 use super::cost_meter::{CostMeter, CostState};
+use super::cost_model::{Charge, CostModel};
 use super::error::Error;
 use super::error::ErrorKind;
 use super::error::StackFrame;
@@ -547,9 +548,37 @@ impl State {
         }
     }
 
-    /// Returns a meter for runtime work that does not need VM state.
+    /// Returns a meter for runtime work that does not need VM state, charging
+    /// raw cost (unit cost 1). Library work charges through
+    /// [`State::charge_meter`] instead, so its registry weight applies.
     pub(crate) fn cost_meter(&mut self) -> CostMeter<'_> {
         self.cost.meter()
+    }
+
+    /// Charge `units` units of `charge` as one operation: like
+    /// [`State::consume_cost`] with the weighted cost, so the charge that
+    /// crosses the budget completes.
+    pub(crate) fn charge(&mut self, charge: Charge, units: u64) -> Result<()> {
+        self.consume_cost(CostModel::DEFAULT.cost(charge, units))
+    }
+
+    /// Charge `units` units of `charge` one unit at a time (see
+    /// [`CostMeter::consume_units`]): the charge stops at the first unit
+    /// that starts with no budget left, as the per-unit loop it batches would.
+    pub(crate) fn charge_units(&mut self, charge: Charge, units: u64) -> Result<()> {
+        if self.charge_meter(charge).consume_units(units) {
+            Ok(())
+        } else {
+            Err(self.budget_exceeded_error())
+        }
+    }
+
+    /// A meter whose unit costs the weight of `charge`, for work that charges
+    /// as it runs without VM state (the pattern matcher).
+    pub(crate) fn charge_meter(&mut self, charge: Charge) -> CostMeter<'_> {
+        self.cost
+            .meter()
+            .with_unit(CostModel::DEFAULT.weight(charge))
     }
 
     /// Flush before batching would hide exhaustion of a configured budget.
@@ -631,7 +660,10 @@ impl State {
         let subject = stack[subject_idx]
             .as_string(heap)
             .expect("expect_string_at validated the subject's string type");
-        Ok(operation(subject, &mut matcher, cost.meter()))
+        let meter = cost
+            .meter()
+            .with_unit(CostModel::DEFAULT.weight(Charge::StringGmatch));
+        Ok(operation(subject, &mut matcher, meter))
     }
 
     pub(crate) fn budget_exceeded_error(&self) -> Error {

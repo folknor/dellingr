@@ -182,51 +182,86 @@ impl CostState {
 /// The meter deliberately borrows only counters. This keeps data-dependent
 /// native work independent from [`crate::State`], so non-VM components can use
 /// it without depending on the VM module.
+///
+/// `unit` is the cost of one unit of work in [`CostMeter::consume_units`]:
+/// the weight of the charge the meter was made for (see
+/// [`crate::cost_model`]). [`CostMeter::consume`] charges raw cost and ignores it.
 pub(crate) enum CostMeter<'a> {
     /// Counts work while no budget has been configured.
-    CountOnly { used: &'a mut u64 },
+    CountOnly { used: &'a mut u64, unit: u64 },
     /// Counts work and checks it against a configured budget.
     FiniteBudget {
         remaining: &'a mut i64,
         used: &'a mut u64,
+        unit: u64,
     },
 }
 
 impl<'a> CostMeter<'a> {
-    /// Creates a meter that only records consumed cost.
+    /// Creates a meter that only records consumed cost, with unit cost 1.
     pub(crate) fn count_only(used: &'a mut u64) -> Self {
-        Self::CountOnly { used }
+        Self::CountOnly { used, unit: 1 }
     }
 
-    /// Creates a meter for an explicitly configured finite budget.
+    /// Creates a meter for an explicitly configured finite budget, with unit
+    /// cost 1.
     pub(crate) fn finite_budget(remaining: &'a mut i64, used: &'a mut u64) -> Self {
-        Self::FiniteBudget { remaining, used }
+        Self::FiniteBudget {
+            remaining,
+            used,
+            unit: 1,
+        }
     }
 
-    /// Charges `n` unit costs with the exact outcome of `n` consecutive
-    /// `consume(1)` calls: on a finite budget the charge stops at zero
-    /// remaining and reports blocked, leaving `used`/`remaining` exactly
-    /// where the unit-at-a-time loop would have left them. This lets scans
-    /// that charge per byte batch their accounting without becoming
-    /// observably different from the loop they replaced.
+    /// This meter with `unit` as the cost of one unit of work.
+    pub(crate) fn with_unit(mut self, unit: u64) -> Self {
+        match &mut self {
+            Self::CountOnly { unit: slot, .. } | Self::FiniteBudget { unit: slot, .. } => {
+                *slot = unit;
+            }
+        }
+        self
+    }
+
+    /// Charges `n` units with the exact outcome of `n` consecutive
+    /// `consume(unit)` calls: on a finite budget the charge stops at the
+    /// first unit that starts with nothing remaining and reports blocked,
+    /// leaving `used`/`remaining` exactly where the unit-at-a-time loop would
+    /// have left them. This lets scans that charge per byte batch their
+    /// accounting without becoming observably different from the loop they
+    /// replaced.
     #[inline]
     pub(crate) fn consume_units(&mut self, n: u64) -> bool {
+        self.consume_units_admitted(n) == n
+    }
+
+    /// [`CostMeter::consume_units`], returning how many of the `n` units
+    /// were admitted (all `n` unless the budget blocked one).
+    #[inline]
+    pub(crate) fn consume_units_admitted(&mut self, n: u64) -> u64 {
         match self {
-            Self::CountOnly { used } => {
-                **used = (**used).saturating_add(n);
-                true
+            Self::CountOnly { used, unit } => {
+                **used = (**used).saturating_add(n.saturating_mul(*unit));
+                n
             }
-            Self::FiniteBudget { remaining, used } => {
-                if n == 0 {
-                    return true;
+            Self::FiniteBudget {
+                remaining,
+                used,
+                unit,
+            } => {
+                if n == 0 || *unit == 0 {
+                    return n;
                 }
                 if **remaining <= 0 {
-                    return false;
+                    return 0;
                 }
-                let allowed = n.min(**remaining as u64);
-                **remaining = (**remaining).saturating_sub_unsigned(allowed);
-                **used = (**used).saturating_add(allowed);
-                allowed == n
+                // Units that start with budget left: ceil(remaining / unit).
+                let startable = (**remaining as u64).div_ceil(*unit);
+                let allowed = n.min(startable);
+                let cost = allowed.saturating_mul(*unit);
+                **remaining = (**remaining).saturating_sub_unsigned(cost);
+                **used = (**used).saturating_add(cost);
+                allowed
             }
         }
     }
@@ -238,11 +273,13 @@ impl<'a> CostMeter<'a> {
     #[inline(always)]
     pub(crate) fn consume(&mut self, cost: u64) -> bool {
         match self {
-            Self::CountOnly { used } => {
+            Self::CountOnly { used, .. } => {
                 **used = (**used).saturating_add(cost);
                 true
             }
-            Self::FiniteBudget { remaining, used } => {
+            Self::FiniteBudget {
+                remaining, used, ..
+            } => {
                 if cost > 0 && **remaining <= 0 {
                     return false;
                 }
@@ -310,26 +347,31 @@ mod tests {
     }
 
     /// Charge `n` units one at a time - the loop `consume_units` must match.
-    fn naive_units(remaining: &mut i64, used: &mut u64, n: u64) -> bool {
-        for _ in 0..n {
-            if !CostMeter::finite_budget(remaining, used).consume(1) {
-                return false;
+    fn naive_units(remaining: &mut i64, used: &mut u64, n: u64, unit: u64) -> u64 {
+        for admitted in 0..n {
+            if !CostMeter::finite_budget(remaining, used).consume(unit) {
+                return admitted;
             }
         }
-        true
+        n
     }
 
     #[test]
     fn consume_units_matches_the_unit_at_a_time_loop_exactly() {
-        for start in [-3i64, 0, 1, 4, 5, 6, 100] {
-            for n in [0u64, 1, 4, 5, 6, 50] {
-                let (mut rem_a, mut used_a) = (start, 7u64);
-                let (mut rem_b, mut used_b) = (start, 7u64);
-                let batched = CostMeter::finite_budget(&mut rem_a, &mut used_a).consume_units(n);
-                let looped = naive_units(&mut rem_b, &mut used_b, n);
-                assert_eq!(batched, looped, "blocked mismatch at start={start} n={n}");
-                assert_eq!(rem_a, rem_b, "remaining mismatch at start={start} n={n}");
-                assert_eq!(used_a, used_b, "used mismatch at start={start} n={n}");
+        for unit in [0u64, 1, 2, 3, 7] {
+            for start in [-3i64, 0, 1, 4, 5, 6, 100] {
+                for n in [0u64, 1, 4, 5, 6, 50] {
+                    let (mut rem_a, mut used_a) = (start, 7u64);
+                    let (mut rem_b, mut used_b) = (start, 7u64);
+                    let batched = CostMeter::finite_budget(&mut rem_a, &mut used_a)
+                        .with_unit(unit)
+                        .consume_units_admitted(n);
+                    let looped = naive_units(&mut rem_b, &mut used_b, n, unit);
+                    let at = format!("unit={unit} start={start} n={n}");
+                    assert_eq!(batched, looped, "admitted mismatch at {at}");
+                    assert_eq!(rem_a, rem_b, "remaining mismatch at {at}");
+                    assert_eq!(used_a, used_b, "used mismatch at {at}");
+                }
             }
         }
     }
@@ -352,5 +394,11 @@ mod tests {
         let mut used = 3u64;
         assert!(CostMeter::count_only(&mut used).consume_units(9));
         assert_eq!(used, 12);
+        assert!(
+            CostMeter::count_only(&mut used)
+                .with_unit(3)
+                .consume_units(2)
+        );
+        assert_eq!(used, 18);
     }
 }
