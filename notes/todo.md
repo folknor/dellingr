@@ -45,6 +45,56 @@ reporting, a scenario in `reference/native-calls.toml` and
 `tests/native_stack.rs` for the handler call, and the `__newindex` depth rule
 pinned by `tests/integration/runtime/newindex_depth_routes.rs`.
 
+### Left from the configurable-costs, raw_field and naming work (2026-11-01)
+
+Residuals that need a decision:
+
+- Budget exhaustion kills the callback. The user wants to revisit whether
+  running out of budget should do something else; not decided. (The separate
+  question of runaway free loops is settled: see `docs/budget.md`, "Runaway
+  loops are not the VM's problem".)
+- Every metered snapshot stores all `Charge` weights, `4 * Charge::COUNT`
+  bytes, even under the default model. A tag meaning "default model" would
+  shrink every default save, at the cost of another format bump.
+- The weighted library charge paths (`State::charge_meter`, `charge_units`,
+  the matcher's per-step `consume_units(1)`) were not benchmarked after the
+  change. The A/B pairs covered arithmetic, write, list_literals and
+  benchmark only; run pairs on `patterns` and `literal_find` against
+  `9b13569`.
+- `COST_MODEL_VERSION` stayed 8 while its documented meaning widened to
+  cover attribution and admission for every model. Judged right because
+  default costs and behaviour are unchanged; revisit if anyone keyed stored
+  fingerprints on the old meaning.
+
+Known laterals, pre-existing and deliberate (record, don't "fix" without a
+cost-model decision):
+
+- `string.format` charges a `%s` argument's bytes when it is consumed and
+  again when the result is appended; `%q` charges the argument, then the
+  longer quoted output. A code comment says the double charge is intended.
+- `string.find`, `match` and `gsub` charge the pattern bytes twice: inside
+  `max(1, subject + pattern)` and again as `max(1, pattern)`. `gmatch`
+  charges the sum at creation and the pattern again on the first iterator
+  call. An empty `gmatch` pattern charges nothing after creation.
+- `table.insert` and `table.remove` charge their flat 1 before validating
+  their arguments, so an argument error still costs 1.
+- `load_state` discards whatever setup charged or budgeted when it restores
+  the saved counters; a host that wants a budget after loading sets it again.
+- `State::raw_field` reads own fields only, so option tables built on an
+  `__index` defaults metatable read their inherited fields as absent. A
+  metamethod-honouring variant would be a separate operation with a
+  native-call inventory entry; add it only if an embedder needs it.
+- Argument errors from a plain Rust helper called directly by a callback
+  (not dispatched through the VM) are attributed to that callback.
+
+Cosmetic:
+
+- `notes/optimizations.md` still mentions `State::with_callbacks`, which the
+  builder replaced.
+- Tracker comments with quoting damage that `bz` cannot edit: dellingr#3
+  opens with "Won`t" and dellingr#6 writes `Send + static` for
+  `Send + 'static`.
+
 ## Deferred forward-looking ideas
 
 ### Observable GC and cache diagnostics
@@ -113,50 +163,6 @@ premature batch work.
 
 Signal that would promote it: active work starting on any candidate
 whose tracker is still examples/-only.
-
-### Configurable per-category cost weights
-
-What: let library consumers set their own cost per category rather than
-the fixed unit prices. Some embedders might want arithmetic to cost less
-than allocations, or native string work to cost more than bytecode.
-
-The cost model has two halves, and weights would have to cover both:
-
-- Bytecode: the eval loop charges 1 per arithmetic op, negation, table
-  creation, table write and array element, accumulated locally and
-  flushed to the state every `COST_CHECK_INTERVAL` units (or sooner when
-  the budget is nearly spent). Calls, reads, comparisons and control flow
-  are free. These are the costed categories `analyze_cost` enumerates;
-  its `function_calls` and `instructions` counters are informational and
-  carry no cost.
-- Native: the string, pattern, table and math
-  libraries charge data-dependent work - bytes examined or emitted,
-  matcher primitives, table elements visited - through `CostMeter` and
-  `State::consume_cost`, some per unit, some batched via
-  `consume_units`.
-
-Sketch: `State::set_cost_weights(weights: CostWeights)`, one field per
-category across both halves, default all 1 so current behaviour is
-unchanged. Bytecode weights can be folded into the per-op charge before
-it hits the local accumulator; native weights scale the unit count at
-each `CostMeter` call site. `consume_units`' contract (exactly the
-outcome of `n` unit charges) needs restating for weighted units.
-
-Weights change what a remaining budget means, so they are part of the
-cost model's identity. `save_state` writes `COST_MODEL_VERSION` and
-refuses a mismatch on load; a snapshot resumed under different weights
-would be the same hazard, so the weights (or a digest of them) have to
-be persisted and checked alongside the version.
-
-Why deferred: not user-requested by the current consumer; adds a
-multiply to every costed op on the eval-loop hot path and to every
-native charge site; complicates `cost_used` interpretation across
-configurations and snapshots. Worth doing once there's a concrete
-second consumer with different cost-budget needs.
-
-Signal that would promote it: a real embedder asking for non-uniform
-weights, or a benchmarking case where the uniform-cost model
-materially misrepresents the actual VM work.
 
 ### Typed `State<U>` for user-data
 

@@ -268,10 +268,12 @@ point.
   not silent corruption.
 - `HostCallbacks` trait (`: Send`) - embedders redirect `print` (the script's
   exact bytes), hook errors, etc.
-- `RustFunc` - expose Rust functions to Lua scripts. `State::add_rust_fn` (or,
-  with `snapshot`, `register_rust_fn` under a stable id) creates a function and
-  returns its State-scoped `RustFnHandle`, which `State::push_rust_fn` pushes.
-  Identity is that entry, never the code address, so `==` between host
+- `RustFunc` - expose Rust functions to Lua scripts. `State::add_rust_fn(name,
+  f)` (or, with `snapshot`, `register_rust_fn(id, name, f)` under a stable id)
+  creates a function and returns its State-scoped `RustFnHandle`, which
+  `State::push_rust_fn` pushes. The name is the function's diagnostic name:
+  argument errors raised while it runs name it (`game.spawn`), however the
+  script reaches it. Identity is that entry, never the code address, so `==` between host
   functions is the same in every build. `State::raw_field::<T>(arg, name)`
   reads a typed field of a table argument (an options table such as
   `spawn{x = 1}`), free of cost and without metamethods, and reports a bad
@@ -295,7 +297,7 @@ point.
 - Environment control - `State::seal_globals` ends the setup phase so globals
   a script deletes are reclaimed; `State::with_restricted_env` runs a closure
   against a whitelist of globals and restores the full environment afterwards.
-- GC tuning - `State::with_gc_policy` and `gc_set_policy` set the automatic
+- GC tuning - `StateBuilder::gc_policy` and `gc_set_policy` set the automatic
   collection threshold policy; `gc_set_threshold` fixes or disables it.
 - Poisoning - a panic that unwinds through a State's execution poisons it:
   `is_poisoned()` reports it, and every fallible operation afterwards returns

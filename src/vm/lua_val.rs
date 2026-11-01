@@ -370,8 +370,9 @@ mod tests {
     #[test]
     fn rust_function_identity_is_the_entry_not_the_function() {
         let mut state = State::raw();
-        let first = state.add_rust_fn(first_callback).unwrap();
-        let second = state.add_rust_fn(first_callback).unwrap();
+        // One name for both: a name is not identity either.
+        let first = state.add_rust_fn("same", first_callback).unwrap();
+        let second = state.add_rust_fn("same", first_callback).unwrap();
         state.push_rust_fn(first).unwrap();
         state.push_rust_fn(second).unwrap();
         state.push_rust_fn(first).unwrap();

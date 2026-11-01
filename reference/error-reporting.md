@@ -55,8 +55,9 @@ recorded policy, so a host that builds a `ScriptError` itself chooses its own.
 ## Argument error names
 
 `ArgError` stores an optional function name. Its display includes that name as
-`bad argument #N to 'name' (...)`; when no name was supplied or resolved, it
-prints `<anonymous>`.
+`bad argument #N to 'name' (...)`; when no name was supplied, it prints
+`<anonymous>`. An argument check made while no Rust function is running (from
+the host, outside any callback) has no name.
 
 When the failing callback was invoked by a method call (`obj:name()`, marked in
 the call instruction), the display counts arguments without the receiver and
@@ -80,25 +81,35 @@ its name while that callback is running. `check_optional_type` uses the same
 path when a present, non-nil value has the wrong type. Other errors returned
 directly by a callback are not given a function name automatically.
 
-The lookup uses the active Rust function's function-table entry in this order:
+The name is the active Rust function's own diagnostic name, a property of its
+function-table entry fixed when the entry was created:
 
-1. Scan current globals in their `IndexMap` order and return the first global
-   whose value is the same entry.
-2. With the `snapshot` feature, if no global matches, use the entry's
-   registered stable id. An entry has at most one id.
-3. If neither lookup finds a name, leave the argument error anonymous.
+- A host entry takes the name given to `State::add_rust_fn(name, f)` or
+  `State::register_rust_fn(id, name, f)`. `State::set_global_named_rust_fn`
+  uses the global name it installs.
+- A standard-library entry takes its catalog id (`print`, `string.find`,
+  `math.sin`), in every build.
 
-This is best-effort naming. Global aliases use the first matching global, and
-rebinding or removing globals can change the result. The snapshot registry is
-not present without the `snapshot` feature, so a callback held only in a table
-or otherwise registered by id can have a name in a snapshot build and no name
-in a build without that feature. The lookup compares entries, never code
-addresses, so the name does not depend on what the optimizer or linker merged.
+Nothing is discovered at error time. The name does not depend on which globals
+exist, on what the script calls the function, on whether it is held only in a
+table (`game.spawn`), or on the `snapshot` feature, so a function reached under
+several aliases renders one name, and a function never bound as a global is no
+longer anonymous. Names need not be unique: two entries with one name are still
+two distinct values. A name is not saved (a load takes names from the entries
+its setup registers, so a newer build can rename a function without breaking
+saves) and is never part of a function's identity or saveability. A snapshot id
+is not a fallback name. The lookup compares entries, never code addresses, so
+nothing depends on what the optimizer or linker merged.
+
+Attribution follows dispatch. An error raised inside a nested Rust callback
+names the inner function; validation in the outer callback after a nested
+`State::call` returns names the outer one. A plain Rust helper called directly
+by a callback, not dispatched through the VM, is attributed to that callback.
 
 The standard-library argument validators that use `check_any_named`,
 `check_type_named`, `check_optional_type_named`, or `argument_error` explicitly
-set their library function name. Those errors do not depend on the callback
-lookup above. This includes the current `math.*` validators.
+set their library function name (`sub`, not `string.sub`), which applies on top
+of the entry name. This includes the current `math.*` validators.
 
 ## Stack trace names
 

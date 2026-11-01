@@ -364,8 +364,9 @@ impl GlobalEnv {
         }
     }
 
-    /// Live global bindings in table order, for diagnostics that look a
-    /// value up by the name it is bound to. Only string keys name globals.
+    /// Live global bindings in table order, for tests. Only string keys name
+    /// globals.
+    #[cfg(test)]
     pub(super) fn live_string_bindings<'h>(
         &self,
         heap: &'h GcHeap,

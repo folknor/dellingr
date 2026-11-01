@@ -8,14 +8,28 @@ use dellingr::{ArgCount, RetCount, State};
 /// Test shorthand for a Rust function a test pushes once or a few times:
 /// create its entry and push it. Each call creates a new function identity
 /// (see `State::add_rust_fn`); a test that compares identities keeps the
-/// handle instead.
+/// handle instead. `push_new_rust_fn` gives the entry the diagnostic name
+/// `test_fn`; a test that pins a rendered name uses `push_named_rust_fn`.
 pub(crate) trait PushNewRustFn {
     fn push_new_rust_fn(&mut self, function: dellingr::RustFunc) -> dellingr::Result<()>;
+    fn push_named_rust_fn(
+        &mut self,
+        name: &str,
+        function: dellingr::RustFunc,
+    ) -> dellingr::Result<()>;
 }
 
 impl PushNewRustFn for State {
     fn push_new_rust_fn(&mut self, function: dellingr::RustFunc) -> dellingr::Result<()> {
-        let handle = self.add_rust_fn(function)?;
+        self.push_named_rust_fn("test_fn", function)
+    }
+
+    fn push_named_rust_fn(
+        &mut self,
+        name: &str,
+        function: dellingr::RustFunc,
+    ) -> dellingr::Result<()> {
+        let handle = self.add_rust_fn(name, function)?;
         self.push_rust_fn(handle)
     }
 }

@@ -63,6 +63,27 @@ version's meaning is wider (see below).
   for, and scans and matcher steps stop at the first unit that starts with no
   budget left.
 
+### Changed (breaking): host function names
+
+- `State::add_rust_fn` and, under `snapshot`, `State::register_rust_fn` take a
+  mandatory diagnostic name: `add_rust_fn(name, f)` and
+  `register_rust_fn(id, name, f)`. `set_global_named_rust_fn` uses the global
+  name. Callers must pass a name; the id of `register_rust_fn` stays the save
+  identity and is independent of the name.
+- Argument errors raised while a Rust function runs (`check_type`,
+  `check_any`, `raw_field`) now render the entry's name, fixed at creation.
+  Before, the name was discovered at error time from the first matching global
+  binding, then (under `snapshot`) from the snapshot id. Rendered names change
+  for any function reached under an alias, bound under a global that differs
+  from the name now given, or registered by id only. Standard-library entries
+  are named by catalog id in every build. Names are not saved and not unique.
+
+### Fixed
+
+- Host functions exposed only through tables (`game.spawn`, `game.after`) no
+  longer render as `<anonymous>` in argument errors: they show the name the
+  host gave (dellingr#5).
+
 ### Changed
 
 - Bumped the dev-only `object` dependency (the libm symbol test's ELF reader)

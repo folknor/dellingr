@@ -80,6 +80,11 @@ pub(crate) struct RustFnTable {
     /// The issuing State's process-unique id, the same one its anchors carry.
     state_id: NonZeroU64,
     functions: Vec<RustFunc>,
+    /// Each entry's diagnostic name, the one argument errors raised while it
+    /// runs carry: its catalog id for a standard-library entry, the name the
+    /// host gave for a host entry. Fixed at creation, not unique, not saved,
+    /// and never part of identity or saveability.
+    names: Vec<Box<str>>,
     /// Each entry's stable save id, if it has one. A catalog entry gets its
     /// id when `open_libs` binds the catalog, a host entry when it is
     /// registered.
@@ -96,11 +101,16 @@ impl RustFnTable {
     /// A table holding the standard-library catalog, unbound.
     pub(crate) fn new(state_id: NonZeroU64) -> Self {
         let functions: Vec<RustFunc> = crate::lua_std::catalog_functions().collect();
+        let names: Vec<Box<str>> = crate::lua_std::catalog_ids()
+            .map(|(_, id)| id.into_boxed_str())
+            .collect();
+        debug_assert_eq!(names.len(), functions.len());
         Self {
             state_id,
             #[cfg(feature = "snapshot")]
             ids: vec![None; functions.len()],
             functions,
+            names,
             #[cfg(feature = "snapshot")]
             by_id: BTreeMap::new(),
         }
@@ -121,10 +131,17 @@ impl RustFnTable {
         }
     }
 
-    /// Append an entry without an id. On exhaustion nothing changes.
-    pub(crate) fn add(&mut self, function: RustFunc) -> Option<RustFnHandle> {
+    /// The diagnostic name of an entry.
+    pub(crate) fn name(&self, id: RustFnId) -> &str {
+        &self.names[id.index()]
+    }
+
+    /// Append an entry named `name`, without an id. The caller has checked
+    /// the name's size; on exhaustion nothing changes.
+    pub(crate) fn add(&mut self, name: &str, function: RustFunc) -> Option<RustFnHandle> {
         let id = self.next_id()?;
         self.functions.push(function);
+        self.names.push(name.into());
         #[cfg(feature = "snapshot")]
         self.ids.push(None);
         Some(self.handle(id))
@@ -174,12 +191,19 @@ impl RustFnTable {
         self.handle(id)
     }
 
-    /// Append an entry under a new stable id. The caller has checked that
-    /// `id` is unbound and the id length; on exhaustion nothing changes.
-    pub(crate) fn register(&mut self, id: &str, function: RustFunc) -> Option<RustFnHandle> {
+    /// Append an entry named `name` under a new stable id. The caller has
+    /// checked that `id` is unbound and the id and name sizes; on exhaustion
+    /// nothing changes.
+    pub(crate) fn register(
+        &mut self,
+        id: &str,
+        name: &str,
+        function: RustFunc,
+    ) -> Option<RustFnHandle> {
         debug_assert!(!self.is_bound(id), "registration ids are checked unbound");
         let entry = self.next_id()?;
         self.functions.push(function);
+        self.names.push(name.into());
         self.ids.push(Some(id.into()));
         self.by_id.insert(id.into(), entry);
         Some(self.handle(entry))

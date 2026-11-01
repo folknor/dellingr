@@ -119,7 +119,9 @@ fn install(state: &mut State) {
         ("read_second", read_second),
     ];
     for (name, function) in functions {
-        state.push_new_rust_fn(function).expect("function fits");
+        state
+            .push_named_rust_fn(name, function)
+            .expect("function fits");
         state.set_global(name).expect("global is set");
     }
     state.push_new_rust_fn(neutral).expect("function fits");
@@ -529,4 +531,27 @@ fn reads_leave_the_stack_and_cost_unchanged() {
     let idle = cost_of("local r = nop{v = 3}\nlocal s = nop{v = 'abc'}");
     assert!(idle > 0);
     assert_eq!(reading, idle);
+}
+
+/// A field error from a host function stored in a table is located at the
+/// script line that called it, in that script's chunk.
+#[test]
+fn field_errors_report_the_calling_script_line() {
+    let mut state = State::new();
+    install(&mut state);
+    let program = dellingr::Program::compile(
+        "local game = {spawn = read_u8}\nlocal ok = 1\ngame.spawn{v = 'x'}",
+        Some(b"map.lua"),
+    )
+    .expect("the map compiles");
+    state.load(&program).expect("the map loads");
+    let error = state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect_err("the bad field fails");
+    assert_eq!(error.line_num(), 3);
+    assert_eq!(error.source_name(), Some(b"map.lua".as_slice()));
+    assert_eq!(
+        error.to_string().lines().next(),
+        Some("map.lua:3: bad argument #1 to 'read_u8' (field 'v': number expected, got string)")
+    );
 }

@@ -163,9 +163,9 @@ pub(crate) fn open_libs(state: &mut State) -> Result<()> {
 /// iterator by handle. Installation order is each `open_*` function's own,
 /// unchanged by the catalog order.
 struct CatalogSegment {
-    /// The library table whose name prefixes each stable save id, or `None`
-    /// for ids that are complete names.
-    #[cfg(feature = "snapshot")]
+    /// The library table whose name prefixes each id (the diagnostic name,
+    /// and the stable save id under `snapshot`), or `None` for ids that are
+    /// complete names.
     prefix: Option<&'static str>,
     functions: &'static [(&'static str, crate::RustFunc)],
 }
@@ -183,27 +183,22 @@ const RETURNED_CALLBACKS: &[(&str, crate::RustFunc)] = &[
 
 const CATALOG: &[CatalogSegment] = &[
     CatalogSegment {
-        #[cfg(feature = "snapshot")]
         prefix: None,
         functions: RETURNED_CALLBACKS,
     },
     CatalogSegment {
-        #[cfg(feature = "snapshot")]
         prefix: None,
         functions: basic::BASE_FUNCTIONS,
     },
     CatalogSegment {
-        #[cfg(feature = "snapshot")]
         prefix: Some("math"),
         functions: math::MATH_FUNCTIONS,
     },
     CatalogSegment {
-        #[cfg(feature = "snapshot")]
         prefix: Some("string"),
         functions: string::STRING_FUNCTIONS,
     },
     CatalogSegment {
-        #[cfg(feature = "snapshot")]
         prefix: Some("table"),
         functions: table::TABLE_FUNCTIONS,
     },
@@ -272,9 +267,9 @@ pub(crate) fn catalog_functions() -> impl Iterator<Item = crate::RustFunc> {
         .flat_map(|segment| segment.functions.iter().map(|&(_, function)| function))
 }
 
-/// Every catalog entry with its stable save id (`math.sin`, `print`,
-/// `ipairs.iter`, ...).
-#[cfg(feature = "snapshot")]
+/// Every catalog entry with its id (`math.sin`, `print`, `ipairs.iter`, ...):
+/// its diagnostic name in every build, and its stable save id under the
+/// `snapshot` feature.
 pub(crate) fn catalog_ids() -> impl Iterator<Item = (RustFnId, String)> {
     CATALOG
         .iter()
@@ -302,7 +297,8 @@ fn install_library_functions(state: &mut State, segment: usize) -> Result<()> {
 
 /// Adds the known standard-library function name to a generic argument error.
 ///
-/// Explicit library names override global aliases and snapshot registration ids.
+/// The explicit library name replaces the entry's catalog-id name, keeping
+/// each function's established wording.
 fn name_argument_error(error: Error, function_name: &str) -> Error {
     error.with_argument_function_name(function_name)
 }

@@ -22,7 +22,7 @@ fn conflicting_preregistered_id_leaves_state_untouched() {
     // "string.find" is registered by the string library, which opens after
     // base and math; without the preflight those would already be installed.
     let host = state
-        .register_rust_fn("string.find", host_print)
+        .register_rust_fn("string.find", "string.find", host_print)
         .expect("fresh registry");
     let top = state.get_top();
     let heap_size = state.heap_size();
@@ -40,7 +40,7 @@ fn conflicting_preregistered_id_leaves_state_untouched() {
     assert_eq!(global_type(&mut state, "_G"), LuaType::Nil);
     // Base registration would have happened before the conflicting string id.
     state
-        .register_rust_fn("print", host_print)
+        .register_rust_fn("print", "print", host_print)
         .expect("failed setup must not register earlier functions");
     assert_eq!(
         state.registered_rust_fn("string.find"),
@@ -53,7 +53,7 @@ fn conflicting_preregistered_id_leaves_state_untouched() {
 fn the_smallest_conflicting_id_is_reported() {
     let mut state = State::raw();
     for id in ["table.unpack", "ipairs.iter", "print"] {
-        state.register_rust_fn(id, host_print).unwrap();
+        state.register_rust_fn(id, id, host_print).unwrap();
     }
     let error = state.open_libs().expect_err("ids conflict");
     assert!(
@@ -68,7 +68,11 @@ fn conflicting_hidden_iterator_id_leaves_existing_environment_untouched() {
     state.set_global("print").unwrap();
     state.push_string("preserved stack value").unwrap();
     state
-        .register_rust_fn("string.gmatch.empty_iter", host_print)
+        .register_rust_fn(
+            "string.gmatch.empty_iter",
+            "string.gmatch.empty_iter",
+            host_print,
+        )
         .unwrap();
     let heap_size = state.heap_size();
     let error = state.open_libs().expect_err("hidden iterator id conflicts");
@@ -83,7 +87,7 @@ fn conflicting_hidden_iterator_id_leaves_existing_environment_untouched() {
     assert_eq!(state.to_number(-1).unwrap(), 42.0);
     state.pop(1).unwrap();
     state
-        .register_rust_fn("print", host_print)
+        .register_rust_fn("print", "print", host_print)
         .expect("earlier registrations must not leak");
 }
 
@@ -91,7 +95,7 @@ fn conflicting_hidden_iterator_id_leaves_existing_environment_untouched() {
 fn non_conflicting_preregistration_opens_normally() {
     let mut state = State::raw();
     state
-        .register_rust_fn("host.print", host_print)
+        .register_rust_fn("host.print", "host.print", host_print)
         .expect("fresh registry");
     state.open_libs().expect("no id overlaps the stdlib");
     assert_eq!(global_type(&mut state, "print"), LuaType::Function);

@@ -1256,9 +1256,9 @@ fn load_setup_registration_errors_are_returned_directly() {
     let save = state.save_state().unwrap();
 
     let error = match State::load_state(&save.bytes, Box::new(DefaultCallbacks), |state| {
-        state.register_rust_fn("game.host_fn", original_fn)?;
+        state.register_rust_fn("game.host_fn", "game.host_fn", original_fn)?;
         state
-            .register_rust_fn("game.host_fn", conflicting_fn)
+            .register_rust_fn("game.host_fn", "game.host_fn", conflicting_fn)
             .map(drop)
     }) {
         Ok(_) => panic!("conflicting setup registration must fail"),
@@ -1288,7 +1288,7 @@ fn one_function_under_two_ids_is_two_functions() {
     // Registers in `order`, installs `a_fn` then `z_fn` whatever the order.
     fn install(state: &mut State, order: [&str; 2]) -> Result<(), Box<dyn std::error::Error>> {
         for id in order {
-            state.register_rust_fn(id, host_fn)?;
+            state.register_rust_fn(id, id, host_fn)?;
         }
         for (global, id) in [("a_fn", "game.a"), ("z_fn", "game.z")] {
             let handle = state.registered_rust_fn(id).ok_or("registered above")?;

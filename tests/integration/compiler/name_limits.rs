@@ -55,7 +55,7 @@ fn registration_limits_are_checked_before_mutation() {
     let before = state.save_state().expect("initial state saves").bytes;
     let id = "f".repeat(dellingr::limits::MAX_SAVE_IDENTIFIER_BYTES);
     let error = state
-        .register_rust_fn(&format!("{id}f"), callback)
+        .register_rust_fn(&format!("{id}f"), "callback", callback)
         .expect_err("oversized function id is rejected");
     assert!(matches!(
         error.kind(),

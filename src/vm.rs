@@ -746,7 +746,7 @@ impl State {
     ///
     /// // A RustFunc is a plain function pointer, so the callback reaches the
     /// // collector through the State rather than by capturing it.
-    /// let turn = state.add_rust_fn(|state| {
+    /// let turn = state.add_rust_fn("turn", |state| {
     ///     let turn = state.to_number(1)?;
     ///     state
     ///         .user_data_mut::<CommandCollector>()
@@ -1167,25 +1167,12 @@ impl State {
     // Keep native context out of CallInfo: those entries represent Lua frames,
     // and widening them would add work and storage to every Lua call. Capture
     // only the function's handle at Rust dispatch; resolve names on errors
-    // only. Several global aliases of one handle use the first live binding to
-    // it in global table order whose key is a UTF-8 string; a callback no
-    // global names falls back to its snapshot id, or stays anonymous. Neither
-    // is a name inferred from the Lua caller.
+    // only. The name is the entry's own, fixed when it was created; it is not
+    // discovered from globals nor inferred from the Lua caller. `None` only
+    // when no Rust function is running.
     pub(crate) fn active_rust_function_name(&self) -> Option<String> {
         let function = self.in_flight.active_rust_fn?;
-        for (name, value) in self.global_env.live_string_bindings(&self.heap) {
-            if let Val::RustFn(candidate) = value
-                && candidate == function
-                && let Ok(name) = str::from_utf8(self.heap.get_string(name))
-            {
-                return Some(name.to_owned());
-            }
-        }
-        #[cfg(feature = "snapshot")]
-        if let Some(id) = self.rust_fns.save_id(function) {
-            return Some(id.to_owned());
-        }
-        None
+        Some(self.rust_fns.name(function).to_owned())
     }
 
     /// Install the catalog or host function `function` as global `name`.
@@ -1200,14 +1187,24 @@ impl State {
     /// Entries live as long as the State, so create a handle once, during
     /// setup, rather than per call.
     ///
+    /// `name` is the function's diagnostic name: argument errors raised while
+    /// it runs (through [`State::check_type`], [`State::check_any`] or
+    /// [`State::raw_field`]) name it, whatever the script calls it, so give
+    /// the name scripts know it by (`"game.spawn"`). It is fixed here, need
+    /// not be unique, and is neither saved nor part of the function's
+    /// identity.
+    ///
     /// The entry has no stable id, so a save that reaches it fails with
     /// `SaveError::UnregisteredFunction`; under the `snapshot` feature,
     /// `State::register_rust_fn` creates one that saves. Fails with
-    /// [`ErrorKind::RustFunctionLimit`] once the State holds
-    /// `u32::MAX` entries, changing nothing.
-    pub fn add_rust_fn(&mut self, function: RustFunc) -> Result<RustFnHandle> {
+    /// [`ErrorKind::StringSizeExceeded`] for a name over
+    /// [`crate::limits::MAX_STRING_BYTES`], and with
+    /// [`ErrorKind::RustFunctionLimit`] once the State holds `u32::MAX`
+    /// entries, changing nothing.
+    pub fn add_rust_fn(&mut self, name: &str, function: RustFunc) -> Result<RustFnHandle> {
         self.check_usable()?;
-        self.rust_fns.add(function).ok_or_else(|| {
+        check_string_size(name.len())?;
+        self.rust_fns.add(name, function).ok_or_else(|| {
             Error::without_location(ErrorKind::RustFunctionLimit {
                 limit: RustFnTable::CAPACITY,
             })
@@ -1215,7 +1212,8 @@ impl State {
     }
 
     /// Register a Rust function under a stable id and install it as global
-    /// `name`, returning its handle (see [`State::register_rust_fn`]).
+    /// `name`, returning its handle (see [`State::register_rust_fn`]). The
+    /// global name is also its diagnostic name.
     ///
     /// The id must be new to this State. To install one registered function
     /// under a second global name, push its handle and call
@@ -1234,7 +1232,7 @@ impl State {
     ) -> Result<RustFnHandle> {
         self.check_usable()?;
         check_string_size(name.len())?;
-        let handle = self.register_rust_fn(id, func)?;
+        let handle = self.register_rust_fn(id, name, func)?;
         let function = self
             .rust_fns
             .resolve(handle)
@@ -1258,15 +1256,28 @@ impl State {
     /// two functions that compare unequal from Lua and save under their own
     /// ids.
     ///
+    /// `name` is the diagnostic name, as for [`State::add_rust_fn`]. It is
+    /// independent of `id`: the id identifies the function across saves and
+    /// should survive renaming the API, while the name is what argument
+    /// errors show. A load takes names from the registrations its setup
+    /// makes, so a newer build can rename a function without breaking saves.
+    ///
     /// The id must be new to this State, including the standard library's ids
     /// once `open_libs` ran: an id that is already registered fails with
     /// [`ErrorKind::DuplicateFunctionRegistration`], whatever function it
     /// names. Ids exceeding [`crate::limits::MAX_SAVE_IDENTIFIER_BYTES`] fail
-    /// with [`ErrorKind::FunctionIdSizeExceeded`], and a full function table
-    /// with [`ErrorKind::RustFunctionLimit`]. A rejected registration changes
+    /// with [`ErrorKind::FunctionIdSizeExceeded`], names over
+    /// [`crate::limits::MAX_STRING_BYTES`] with
+    /// [`ErrorKind::StringSizeExceeded`], and a full function table with
+    /// [`ErrorKind::RustFunctionLimit`]. A rejected registration changes
     /// nothing.
     #[cfg(feature = "snapshot")]
-    pub fn register_rust_fn(&mut self, id: &str, func: RustFunc) -> Result<RustFnHandle> {
+    pub fn register_rust_fn(
+        &mut self,
+        id: &str,
+        name: &str,
+        func: RustFunc,
+    ) -> Result<RustFnHandle> {
         self.check_usable()?;
         if id.len() > crate::limits::MAX_SAVE_IDENTIFIER_BYTES {
             return Err(Error::without_location(ErrorKind::FunctionIdSizeExceeded {
@@ -1274,6 +1285,7 @@ impl State {
                 limit: crate::limits::MAX_SAVE_IDENTIFIER_BYTES,
             }));
         }
+        check_string_size(name.len())?;
         // An id names one function entry, so a second registration of an id
         // is refused without comparing function pointers: one Rust function
         // need not have one address.
@@ -1282,7 +1294,7 @@ impl State {
                 ErrorKind::DuplicateFunctionRegistration { id: id.to_string() },
             ));
         }
-        self.rust_fns.register(id, func).ok_or_else(|| {
+        self.rust_fns.register(id, name, func).ok_or_else(|| {
             Error::without_location(ErrorKind::RustFunctionLimit {
                 limit: RustFnTable::CAPACITY,
             })

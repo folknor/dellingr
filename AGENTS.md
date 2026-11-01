@@ -48,7 +48,7 @@ Pipeline: source bytes -> `compiler::compile` (the parser builds each function's
 
 - **`src/instr.rs`**: fixed-width 64-bit register instructions. Constant operands are separate opcodes (`ADD_RK`, ...), not an RK bit. `Builtin` gives well-known globals array-indexed access through a mirror instead of a hash lookup.
 - **`src/vm.rs` + `src/vm/`**: the runtime. `State` owns the global environment (`_G` is an ordinary heap table, `vm/global_env.rs`), one shared value stack for Lua and Rust frames, the mark-and-sweep heap with interned strings (`vm/object.rs`), the cost meter (`cost_meter.rs`; the operation that crosses the budget completes, the next costed op fails), the execution-lifetime state in `in_flight` (`vm/inventory.rs`), host callbacks and user data, the seeded RNG, and the append-only Rust function table (`vm/rust_fn.rs`: a `Val::RustFn` is an index, never a code address).
-- **`src/lua_std/`**: the standard library, opened by `open_libs` from `State::with_callbacks`. **`src/patterns/`**: the in-crate Lua-pattern matcher (callers pass the whole subject plus a start offset, never a re-slice, so `%f` keeps its left context).
+- **`src/lua_std/`**: the standard library, opened by `open_libs` when `StateBuilder::build` makes a non-raw State. **`src/patterns/`**: the in-crate Lua-pattern matcher (callers pass the whole subject plus a start offset, never a re-slice, so `%f` keeps its left context).
 - **Cost**: opcodes charge in `vm/eval.rs`'s dispatch; `analyze_cost` walks bytecode statically into a `ScopeCost` tree.
 
 Invariants that are easy to break:

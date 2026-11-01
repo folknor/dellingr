@@ -921,7 +921,7 @@ fn every_push_type_is_rejected_at_the_cap() {
     assert_eq!(state.get_top(), top);
     assert!(state.push_boolean(true).is_err());
     assert_eq!(state.get_top(), top);
-    let force_gc_handle = state.add_rust_fn(force_gc).unwrap();
+    let force_gc_handle = state.add_rust_fn("force_gc", force_gc).unwrap();
     assert!(state.push_rust_fn(force_gc_handle).is_err());
     assert_eq!(state.get_top(), top);
     assert!(state.push_string("x").is_err());
@@ -1094,10 +1094,12 @@ fn a_rejected_registration_changes_nothing() {
     }
 
     let mut state = State::new();
-    let first = state.register_rust_fn("host.fn", host_fn).unwrap();
+    let first = state
+        .register_rust_fn("host.fn", "host_fn", host_fn)
+        .unwrap();
     let entries = state.rust_fns.next_entry_for_test();
     let error = state
-        .register_rust_fn("host.fn", host_fn)
+        .register_rust_fn("host.fn", "host_fn", host_fn)
         .expect_err("duplicate id is refused");
     assert!(matches!(
         error.kind(),
@@ -1105,7 +1107,7 @@ fn a_rejected_registration_changes_nothing() {
     ));
     let long_id = "x".repeat(crate::limits::MAX_SAVE_IDENTIFIER_BYTES + 1);
     let error = state
-        .register_rust_fn(&long_id, host_fn)
+        .register_rust_fn(&long_id, "host_fn", host_fn)
         .expect_err("over-long id is refused");
     assert!(matches!(
         error.kind(),
@@ -1113,9 +1115,25 @@ fn a_rejected_registration_changes_nothing() {
             if *size == crate::limits::MAX_SAVE_IDENTIFIER_BYTES + 1
                 && *limit == crate::limits::MAX_SAVE_IDENTIFIER_BYTES
     ));
+    let long_name = "n".repeat(crate::limits::MAX_STRING_BYTES + 1);
+    let error = state
+        .register_rust_fn("host.other", &long_name, host_fn)
+        .expect_err("over-long name is refused");
+    assert!(matches!(
+        error.kind(),
+        crate::error::ErrorKind::StringSizeExceeded { .. }
+    ));
+    let error = state
+        .add_rust_fn(&long_name, host_fn)
+        .expect_err("over-long name is refused");
+    assert!(matches!(
+        error.kind(),
+        crate::error::ErrorKind::StringSizeExceeded { .. }
+    ));
     assert_eq!(state.rust_fns.next_entry_for_test(), entries);
     assert_eq!(state.registered_rust_fn("host.fn"), Some(first));
     assert_eq!(state.registered_rust_fn(&long_id), None);
+    assert_eq!(state.registered_rust_fn("host.other"), None);
 }
 
 /// A handle from another State is refused before the stack changes, even
@@ -1128,8 +1146,8 @@ fn a_wrong_state_rust_fn_handle_is_refused() {
 
     let mut issuer = State::raw();
     let mut other = State::raw();
-    let handle = issuer.add_rust_fn(host_fn).unwrap();
-    other.add_rust_fn(host_fn).unwrap();
+    let handle = issuer.add_rust_fn("host_fn", host_fn).unwrap();
+    other.add_rust_fn("host_fn", host_fn).unwrap();
     let error = other.push_rust_fn(handle).unwrap_err();
     assert!(matches!(
         error.kind(),

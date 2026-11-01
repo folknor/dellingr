@@ -180,10 +180,11 @@ impl State {
         Ok(())
     }
 
-    /// Test shorthand: create a new Rust function entry and push it.
+    /// Test shorthand: create a new Rust function entry named `test_fn` and
+    /// push it.
     #[cfg(test)]
     pub(crate) fn push_new_rust_fn(&mut self, function: super::RustFunc) -> Result<()> {
-        let handle = self.add_rust_fn(function)?;
+        let handle = self.add_rust_fn("test_fn", function)?;
         self.push_rust_fn(handle)
     }
 

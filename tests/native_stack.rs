@@ -1033,7 +1033,7 @@ fn test_state() -> dellingr::Result<State> {
     state.gc_disable_auto();
     state.set_user_data(Harness::default());
     for &(name, f) in CALLBACKS {
-        let f = state.add_rust_fn(f)?;
+        let f = state.add_rust_fn(name, f)?;
         state.push_rust_fn(f)?;
         state.set_global(name)?;
     }
@@ -1608,7 +1608,7 @@ fn native_bytes_per_level() {
         let mut state = test_state().expect("test State setup");
         let functions: [(&str, dellingr::RustFunc); 2] = [("record", record), ("report", report)];
         for (name, function) in functions {
-            let function = state.add_rust_fn(function).unwrap();
+            let function = state.add_rust_fn(name, function).unwrap();
             state.push_rust_fn(function).unwrap();
             state.set_global(name).unwrap();
         }

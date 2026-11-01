@@ -354,6 +354,7 @@ pub(super) struct SlotPolicy {
 /// Iterates occupied hash slots in insertion order, yielding only keys whose
 /// values are live. The index is the original physical slot, including any
 /// tombstones skipped before it.
+#[cfg(any(test, feature = "snapshot"))]
 enum LiveHashEntries<'a> {
     Inline {
         entries: &'a [(Val, Val)],
@@ -366,6 +367,7 @@ enum LiveHashEntries<'a> {
     },
 }
 
+#[cfg(any(test, feature = "snapshot"))]
 impl Iterator for LiveHashEntries<'_> {
     type Item = (usize, Val, Val);
 
@@ -884,6 +886,7 @@ impl Table {
 
     /// Iterate live hash entries in insertion order with their physical slots.
     /// Dead keys (tombstones and vacant slots) are never yielded.
+    #[cfg(any(test, feature = "snapshot"))]
     pub(super) fn live_hash_entries(&self) -> impl Iterator<Item = (usize, Val, Val)> + '_ {
         match &self.storage {
             TableStorage::Inline { entries, len } => LiveHashEntries::Inline {

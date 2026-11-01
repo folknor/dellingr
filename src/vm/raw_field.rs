@@ -198,7 +198,7 @@ impl State {
     /// }
     ///
     /// let mut state = State::new();
-    /// let handle = state.add_rust_fn(spawn)?;
+    /// let handle = state.add_rust_fn("spawn", spawn)?;
     /// state.push_rust_fn(handle)?;
     /// state.set_global("spawn")?;
     /// let program = Program::compile(r#"spawn{player = 1, x = 2.5, flags = "Structure"}"#, None)?;

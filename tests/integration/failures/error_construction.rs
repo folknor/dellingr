@@ -33,12 +33,12 @@ fn duplicate_registration_preserves_the_original_binding() {
 
     let mut state = dellingr::State::new();
     let original = state
-        .register_rust_fn("host.same", first)
+        .register_rust_fn("host.same", "host.same", first)
         .expect("first registration succeeds");
     let functions: [dellingr::RustFunc; 2] = [second, first];
     for function in functions {
         let error = state
-            .register_rust_fn("host.same", function)
+            .register_rust_fn("host.same", "host.same", function)
             .expect_err("id conflicts");
         assert!(matches!(
             error.kind(),

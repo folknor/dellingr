@@ -14,7 +14,9 @@ fn check_number(state: &mut State) -> dellingr::Result<u8> {
 }
 
 fn install_callback(state: &mut State) {
-    state.push_new_rust_fn(check_number).expect("callback fits");
+    state
+        .push_named_rust_fn("host_number", check_number)
+        .expect("callback fits");
     state.set_global("host_number").unwrap();
 }
 
@@ -73,7 +75,7 @@ fn nested_native_dispatch_restores_outer_argument_name() {
     let mut state = State::new();
     install_callback(&mut state);
     state
-        .push_new_rust_fn(nested_check_number)
+        .push_named_rust_fn("outer_number", nested_check_number)
         .expect("callback fits");
     state.set_global("outer_number").unwrap();
     state
@@ -91,10 +93,10 @@ fn nested_native_dispatch_restores_outer_argument_name() {
 
 #[cfg(feature = "snapshot")]
 #[test]
-fn snapshot_registered_callback_uses_its_id_without_a_global() {
+fn snapshot_registered_callback_uses_its_name_not_its_id() {
     let mut state = State::new();
     let callback = state
-        .register_rust_fn("host.number", check_number)
+        .register_rust_fn("host.number.v1", "host.number", check_number)
         .expect("the id is new");
     state
         .push_rust_fn(callback)

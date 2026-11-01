@@ -11,6 +11,7 @@ mod host_table_api_atomicity;
 mod panic_poison;
 mod raw_field;
 mod restricted_env_open_libs;
+mod rust_fn_names;
 mod rust_fn_result_count;
 mod rustfn_error;
 mod rustfn_identity;

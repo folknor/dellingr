@@ -37,11 +37,11 @@ operand literals also stay in the chunk's literal pool as unused entries.
 
 ## Static opcode charges
 
-These rows describe the units returned by `Instr::static_units()` under the
-default cost model. The table is checked against every declared opcode by a
-unit test in `vm/frame.rs`.
+These rows describe the cost `Instr::static_cost` returns under the default
+cost model, where every weight is 1. The table is checked against every
+declared opcode by a unit test in `vm/frame.rs`.
 
-| `OpcodeCost` | Units from `static_units()` |
+| `OpcodeCost` | Default static cost |
 | --- | --- |
 | `Free` | 0 |
 | `Call` | 0 |
