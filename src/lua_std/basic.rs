@@ -57,6 +57,7 @@ fn parse_integer_with_base(bytes: &[u8], base: u32) -> Option<f64> {
     // no integer subtype would turn `tonumber(("f"):rep(18), 16)` into `-1`:
     // a silently wrong number rather than a rounded one.
     let mut value = 0.0;
+    // bounded: one pass over the argument string's bytes.
     for byte in digits {
         let digit = digit_value(*byte)?;
         if digit >= base {
@@ -173,6 +174,8 @@ pub(super) const BASE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     ("print", |state| {
         let top = state.top_isize();
         let mut message = Vec::new();
+        // bounded: one step per argument, at most MAX_ARGUMENTS; a
+        // `__tostring` handler is a Lua call, polled at its admission.
         for stack_index in 1..=top {
             if stack_index != 1 {
                 crate::limits::checked_string_growth(message.len(), 1)?;
@@ -459,6 +462,7 @@ pub(super) const BASE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
 ];
 
 pub(crate) fn open_base(state: &mut State) -> Result<()> {
+    // bounded: library setup over a fixed registration list.
     for (index, &(name, _)) in BASE_FUNCTIONS.iter().enumerate() {
         state.set_global_rust_fn(name, super::library_fn(super::BASE_SEGMENT, index))?;
     }
@@ -476,6 +480,7 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
     // metatable, so `getmetatable(_G)` is nil there and false here (both
     // falsy), and `setmetatable(_G, mt)` - which reference allows - errors
     // loudly instead.
+    // bounded: a fixed list of protection fields.
     for &(name, value) in GLOBAL_ENV_PROTECTION_FIELDS {
         state.set_table_str_key_value(-1, name, Val::Bool(value))?;
     }

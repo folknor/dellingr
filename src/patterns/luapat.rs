@@ -83,6 +83,7 @@ impl ByteClass {
         self.0[3] |= other.0[3];
     }
     fn invert(&mut self) {
+        // bounded: four words.
         for word in &mut self.0 {
             *word = !*word;
         }
@@ -122,8 +123,10 @@ const fn table_match_class(ch: u8, class: u8) -> bool {
 const fn build_escape_classes() -> [ByteClass; ESCAPE_CLASS_LETTERS.len()] {
     let mut classes = [ByteClass::empty(); ESCAPE_CLASS_LETTERS.len()];
     let mut class_index = 0;
+    // bounded: compile-time table construction over fixed classes.
     while class_index < ESCAPE_CLASS_LETTERS.len() {
         let mut byte = u8::MIN;
+        // bounded: the 256 byte values.
         loop {
             if table_match_class(byte, ESCAPE_CLASS_LETTERS[class_index]) {
                 classes[class_index].insert(byte);
@@ -326,6 +329,7 @@ impl<'a> Compiler<'a> {
         let mut scan = self.pos;
         // The first `]` is consumed as a candidate. Without a following byte
         // the scan fails as a missing bracket, which also rejects `[]`/`[^]`.
+        // bounded: one pass over the pattern string's bytes.
         let close = loop {
             let Some(&byte) = self.pattern.get(scan) else {
                 return Err(PatternError::MalformedPattern(
@@ -352,6 +356,7 @@ impl<'a> Compiler<'a> {
         // matches nothing rather than `z`, `[%a-z]` is the alphabetic class
         // plus a literal `-`, and `[%--a]` is exactly `-` and `a`.
         let mut class = ByteClass::empty();
+        // bounded: one pass over the class's pattern bytes.
         while self.pos < close {
             let byte = self.pattern[self.pos];
             if byte == L_ESC && self.pos + 1 < close {
@@ -363,6 +368,7 @@ impl<'a> Compiler<'a> {
                 self.pos += 3;
                 // A descending range such as `[z-a]` is empty, and inserting
                 // nothing is what makes it match nothing.
+                // bounded: at most the 256 byte values per range item.
                 for candidate in byte..=end {
                     class.insert(candidate);
                 }
@@ -406,6 +412,7 @@ impl<'a> Compiler<'a> {
     /// the `Item::Fail` the caller appends sits exactly where the malformed
     /// item would have been.
     fn compile_items(&mut self) -> Result<()> {
+        // bounded: one pass over the pattern string's bytes.
         while self.pos < self.pattern.len() {
             let byte = self.pattern[self.pos];
             self.pos += 1;
@@ -573,6 +580,7 @@ impl<'data, 'meter, 'cost> MatchState<'data, 'meter, 'cost> {
         }
         let mut depth = 1;
         let mut cursor = pos + 1;
+        // safepoint: `self.charge()` polls once per byte.
         while let Some(&byte) = self.subject.get(cursor) {
             self.charge()?;
             if byte == close {
@@ -600,9 +608,11 @@ impl<'data, 'meter, 'cost> MatchState<'data, 'meter, 'cost> {
         // `+` pre-advances `pos` past its mandatory first byte, so every
         // expansion here may shrink all the way back to `pos`.
         let mut end = pos;
+        // safepoint: `singlematch` polls once per byte.
         while self.singlematch(end, class)? {
             end += 1;
         }
+        // safepoint: every backtrack enters `match_at`, which polls.
         loop {
             if let Some(result) = self.recurse(end, item + 1, depth)? {
                 return Ok(Some(result));
@@ -621,6 +631,7 @@ impl<'data, 'meter, 'cost> MatchState<'data, 'meter, 'cost> {
         class: ClassId,
         depth: usize,
     ) -> MatchResult<Option<usize>> {
+        // safepoint: every step enters `match_at` and `singlematch`, which poll.
         loop {
             if let Some(result) = self.recurse(pos, item + 1, depth)? {
                 return Ok(Some(result));
@@ -640,6 +651,7 @@ impl<'data, 'meter, 'cost> MatchState<'data, 'meter, 'cost> {
         if depth >= MAXCCALLS {
             return Err(PatternError::MatchDepthExceeded.into());
         }
+        // safepoint: `self.charge()` polls once per item step.
         loop {
             self.charge()?;
             let Some(current) = self.pattern.items.get(item).copied() else {
@@ -708,6 +720,7 @@ impl<'data, 'meter, 'cost> MatchState<'data, 'meter, 'cost> {
                             return Err(PatternError::InvalidCaptureIndex(slot as i8).into());
                         }
                     };
+                    // safepoint: `self.charge()` polls once per byte.
                     for offset in 0..len {
                         let Some(&byte) = self.subject.get(pos + offset) else {
                             return Ok(None);
@@ -769,6 +782,7 @@ impl<'data, 'meter, 'cost> MatchState<'data, 'meter, 'cost> {
     }
     fn captures(&self, start: usize, end: usize, out: &mut [LuaCapture; LUA_MAXMATCHES]) -> usize {
         out[0] = LuaCapture::Bytes { start, end };
+        // bounded: one step per capture, at most LUA_MAXCAPTURES.
         for index in 0..self.pattern.captures {
             out[index + 1] = match self.captures[index].len {
                 CapLen::Len(length) => LuaCapture::Bytes {
@@ -810,6 +824,7 @@ pub(super) fn str_match(
         return Ok(1);
     }
     let mut pos = init;
+    // safepoint: every start position enters `match_at`, which polls.
     loop {
         let mut state = MatchState::new(subject, pattern, meter, interrupt);
         if let Some(end) = state.match_at(pos, 0, 0)? {

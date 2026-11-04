@@ -99,6 +99,7 @@ fn table_sort_heap<A: TableSortAccess>(
     // Interrupt safepoints: every heapify root, sortdown step, sift level
     // and reversal swap. The default comparator calls no Lua, so without
     // them the O(n log n) comparisons would run uninterruptible.
+    // safepoint: `table_sort_sift_down` polls on entry and per level.
     for root in (0..n / 2).rev() {
         crate::native_call!(
             "table_sort_heap->table_sort_sift_down:heapify",

@@ -91,6 +91,7 @@ pub(super) const MATH_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         let n = state.top_isize();
         check_type_named(state, 1, LuaType::Number, "min")?;
         let mut result = state.to_number(1)?;
+        // bounded: one step per argument, at most MAX_ARGUMENTS.
         for i in 2..=n {
             check_type_named(state, i, LuaType::Number, "min")?;
             let v = state.to_number(i)?;
@@ -108,6 +109,7 @@ pub(super) const MATH_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         let n = state.top_isize();
         check_type_named(state, 1, LuaType::Number, "max")?;
         let mut result = state.to_number(1)?;
+        // bounded: one step per argument, at most MAX_ARGUMENTS.
         for i in 2..=n {
             check_type_named(state, i, LuaType::Number, "max")?;
             let v = state.to_number(i)?;
@@ -329,6 +331,7 @@ pub(crate) fn open_math(state: &mut State) -> Result<()> {
 
     super::install_library_functions(state, super::MATH_SEGMENT)?;
 
+    // bounded: a fixed list of constants.
     for &(name, value) in MATH_CONSTANTS {
         state.set_table_str_key_number(-1, name, value)?;
     }

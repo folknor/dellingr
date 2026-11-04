@@ -563,6 +563,27 @@ embedder asking.
 
 ## Stdlib / patterns
 
+### Matcher step charge after the weights (patterns +4.4%)
+
+022a10c (configurable costs) made `patterns` 4.4% slower against 9b13569
+in interleaved pairs on plantasjen (`reference/performance.md`, "weighted
+library charges"). Lead, unconfirmed: every matcher step charges through
+`CostMeter::consume_units(1)`, and `consume_units_admitted` now computes
+`remaining.div_ceil(unit)` for a finite budget, a 64-bit division per step.
+A single-unit fast path (admit when `remaining > 0`, subtract `unit`) has the
+same outcome as one `consume(unit)` and would skip the division. Measure
+with `--hotpath` on the patterns pair before changing anything.
+
+### Dev `Frame::run` frame after the weights (+2.4 KB per native level)
+
+022a10c grew the dev `Frame::run` frame from 5528 to 7976 bytes, every dev
+native level by the same (`reference/performance.md`, the cycle history).
+Release did not move. Presumably each dispatch arm's weight read and zero
+check expands into its own stack slots without optimization. Dev still fits
+its 4 MiB envelope, with less margin. Worth a look if the dev envelope gets
+tight: a shared helper for the fixed charge, or a layout that keeps the
+per-arm expansion out of the dev frame.
+
 ### Lua-pattern gsub keeps the matcher live across the replacement call
 
 What: `gsub_lua_pattern` calls `append_gsub_replacement` (and through it a

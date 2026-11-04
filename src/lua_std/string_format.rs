@@ -69,6 +69,9 @@ pub(crate) fn format(state: &mut State) -> Result<u8> {
     let mut argument = 1usize;
     let mut cursor = 0usize;
 
+    // bounded: one pass over the format string's bytes, each directive
+    // rendering one argument; a `__tostring` handler is a Lua call, polled
+    // at its admission.
     while cursor < format_bytes.len() {
         if format_bytes[cursor] != b'%' {
             append_output(state, &mut output, &format_bytes[cursor..=cursor])?;
@@ -117,6 +120,8 @@ fn append_output(state: &mut State, output: &mut Vec<u8>, bytes: &[u8]) -> Resul
 fn parse_directive(state: &State, bytes: &[u8], start: usize) -> Result<(Directive, usize)> {
     let mut cursor = start + 1;
     let mut flags = FormatFlags::default();
+    // bounded: a directive is at most MAX_FORMAT_LEN bytes
+    // (`check_directive_length`).
     while let Some(byte) = bytes.get(cursor) {
         let recognized = match byte {
             b'-' => {
@@ -149,6 +154,7 @@ fn parse_directive(state: &State, bytes: &[u8], start: usize) -> Result<(Directi
     }
 
     let width_start = cursor;
+    // bounded: a directive is at most MAX_FORMAT_LEN bytes.
     while bytes.get(cursor).is_some_and(u8::is_ascii_digit) {
         cursor += 1;
         check_directive_length(state, start, cursor)?;
@@ -162,6 +168,7 @@ fn parse_directive(state: &State, bytes: &[u8], start: usize) -> Result<(Directi
         cursor += 1;
         check_directive_length(state, start, cursor)?;
         let precision_start = cursor;
+        // bounded: a directive is at most MAX_FORMAT_LEN bytes.
         while bytes.get(cursor).is_some_and(u8::is_ascii_digit) {
             cursor += 1;
             check_directive_length(state, start, cursor)?;
@@ -644,6 +651,7 @@ fn strip_trailing_fraction_zeros(bytes: &mut Vec<u8>) {
         return;
     };
     let mut end = exponent;
+    // bounded: one pass over one rendered number.
     while end > dot + 1 && bytes[end - 1] == b'0' {
         end -= 1;
     }
@@ -742,6 +750,7 @@ fn format_hex_float(
             } else {
                 format!("{fraction:013x}")
             };
+            // bounded: at most the 13 hexadecimal fraction digits.
             while text.ends_with('0') {
                 text.pop();
             }
@@ -852,6 +861,7 @@ fn quote_string(bytes: &[u8]) -> Result<Vec<u8>> {
     let capacity = crate::limits::checked_string_growth(bytes.len(), 2)?;
     let mut output = Vec::with_capacity(capacity);
     output.push(b'"');
+    // bounded: one pass over the argument string's bytes.
     for (index, byte) in bytes.iter().copied().enumerate() {
         match byte {
             b'"' | b'\\' => {

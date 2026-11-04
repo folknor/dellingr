@@ -699,6 +699,22 @@ expect = "ok"
 match = "last-line"
 stream = "stdout"
 
+# Interrupt safepoints (src/vm/interrupt.rs): every loop in native library
+# code polls or says why it need not (`// bounded:` or `// safepoint:`).
+[[script_check]]
+name = "safepoint-loops"
+command = "python3 -B scripts/safepoint_loops.py"
+expect = "ok"
+match = "last-line"
+stream = "stdout"
+
+[[script_check]]
+name = "safepoint-loops-checker-tests"
+command = "python3 -B scripts/test_safepoint_loops.py"
+expect = "ok"
+match = "last-line"
+stream = "stdout"
+
 # The integration crate's convention tests police its module tree, so they
 # cannot report their own removal; this checks from outside that they still
 # compile and run.

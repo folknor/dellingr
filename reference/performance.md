@@ -81,8 +81,11 @@ Hosts: plantasjen from 4a722cf on; the 2026-10-23 rows name x86-64 Linux only.
 
 Every scenario's release cycle shrank under the default profile at 0779c08.
 The dev figure drifted from 13,552 (41ad774) to 13,680 (0779c08), and every
-dev cycle grew by about 2.5 KB between 33734f8 and 912c2d5 without a frame
-decision recorded here.
+dev cycle grew by about 2.5 KB between 33734f8 and 912c2d5. Dev builds of
+the bench harness on plantasjen place that growth in the dev `Frame::run`
+frame: 5512 bytes at 33734f8 and bd9f8d1, 5528 at 9b13569, 7976 at 022a10c
+(configurable costs, whose dispatch arms read each charge's weight from the
+State and skip a zero weight), 8008 at 912c2d5. Release frames did not move.
 
 ### 2026-11-04: interrupt safepoints
 
@@ -123,6 +126,17 @@ inside the 3783 to 3802 same-binary spread; arithmetic 3486 and 3465
 against 3474 and 3498. The dependent loads were not the cost, and the gate
 would have made every State's polls slower while any handle in the process
 stayed triggered.
+
+### 2026-11-04: weighted library charges
+
+022a10c (configurable costs) against 9b13569 on plantasjen, two interleaved
+pairs of `--bench` cells: patterns 2238 and 2220 ms against 2331 and 2327
+(+4.4%), literal_find 4594 and 4577 against 4486 and 4487 (-2.3%), the same
+sign in both pairs. The patterns loss is above the same-binary spreads
+measured the same day (0.5 to 1.2%). Unconfirmed lead: the matcher charges
+each step through `consume_units(1)`, which since the weights computes
+`remaining.div_ceil(unit)`, a 64-bit division, on every step under a finite
+budget.
 
 ### 2026-11-04: the host store's entry observer
 

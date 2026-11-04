@@ -260,6 +260,7 @@ fn push_captures(
         preflight_capture_bytes(state, charge, [pattern.capture(0)], function)?;
     }
     if n > 1 {
+        // bounded: one step per capture, at most LUA_MAXCAPTURES.
         for i in 1..n {
             push_capture_value(state, bytes, pattern.capture(i), function)?;
         }
@@ -286,6 +287,7 @@ fn preflight_capture_bytes(
     // Every caller pushes exactly the captures it preflights, so reject an
     // unclosed one before copying any capture bytes to the stack.
     let mut total = 0usize;
+    // bounded: one step per capture, at most LUA_MAXCAPTURES.
     for capture in captures {
         if capture == LuaCapture::Unfinished {
             return Err(unfinished_capture_error(state, function));
@@ -360,6 +362,7 @@ fn compile_replacement_template(repl: &[u8]) -> ReplTemplate {
     let mut segments = Vec::new();
     let mut literal = Vec::new();
     let mut i = 0usize;
+    // bounded: one pass over the replacement string's bytes.
     while i < repl.len() {
         if repl[i] == b'%' {
             match repl.get(i + 1) {
@@ -406,6 +409,7 @@ fn append_bytes_units(
     bytes: &[u8],
 ) -> Result<()> {
     let Ok(next) = crate::limits::checked_string_growth(out.len(), bytes.len()) else {
+        // bounded: one pass over a literal of the replacement string.
         for byte in bytes {
             append_bytes(state, charge, out, std::slice::from_ref(byte))?;
         }
@@ -428,12 +432,16 @@ fn append_templated_replacement(
     if !first_application {
         state.charge(Charge::StringGsub, template.repl_len as u64)?;
     }
+    // bounded: one pass over the compiled template, no longer than the
+    // replacement string. The gsub loops that apply it repeatedly poll once
+    // per application (`gsub_empty_pattern`, the matcher, `find_subslice`).
     for segment in &template.segments {
         match segment {
             ReplSegment::Literal(literal) if !first_application => {
                 append_bytes_units(state, Charge::StringGsub, out, literal)?;
             }
             ReplSegment::Literal(literal) => {
+                // bounded: one pass over a literal of the template.
                 for byte in literal {
                     append_bytes(state, Charge::StringGsub, out, std::slice::from_ref(byte))?;
                 }
@@ -476,6 +484,7 @@ fn append_function_replacement(
     )?;
     state.push_value(3)?;
     if captures.len() > 1 {
+        // bounded: one step per capture, at most LUA_MAXCAPTURES.
         for cap in &captures[1..] {
             push_capture_value(state, bytes, *cap, StringPatternFunction::Gsub)?;
         }
@@ -680,6 +689,7 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
                         StringPatternFunction::Find,
                     )?;
                     if n > 1 {
+                        // bounded: one step per capture, at most LUA_MAXCAPTURES.
                         for i in 1..n {
                             push_capture_value(
                                 state,
@@ -932,6 +942,8 @@ fn gsub_plain_pattern(
     let mut pos = 0usize;
     let mut count = 0usize;
 
+    // safepoint: every iteration searches with `find_subslice`, which polls
+    // once per candidate, and a match advances past a non-empty pattern.
     while pos < s.len() {
         if max_replacements.is_some_and(|max| count >= max) {
             break;
@@ -987,6 +999,8 @@ fn gsub_lua_pattern(
     // check the match it found.
     let mut lastmatch = None;
 
+    // safepoint: every iteration runs the matcher, whose first step polls
+    // (`MatchState::charge`).
     loop {
         if max_replacements.is_some_and(|max| count >= max) {
             break;
@@ -1262,6 +1276,8 @@ pub(super) fn gmatch_iter(state: &mut State) -> Result<u8> {
             // Only a match starting at `pos` can be rejected, so this retries at
             // most once.
             let mut search = pos;
+            // bounded: at most two matcher runs (one retry), each of which
+            // polls per step.
             let matched = loop {
                 match matcher.matches_bytes_from(subject, search, &mut meter, interrupt) {
                     Ok(true) => {
@@ -1305,6 +1321,7 @@ pub(super) fn gmatch_iter(state: &mut State) -> Result<u8> {
         )?;
         let num_returns =
             crate::error::results_count(returned.len()).map_err(|kind| state.error(kind))?;
+        // bounded: one step per capture, at most LUA_MAXCAPTURES.
         for capture in returned {
             push_gmatch_capture(state, *capture)?;
         }

@@ -158,6 +158,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         let table_idx = num_args + 1;
 
         // Insert all arguments into the table
+        // bounded: one step per argument, at most MAX_ARGUMENTS.
         for i in 1..=num_args {
             state.push_number(i as f64)?; // push the index (key)
             state.push_value(i)?; // push the argument (value)
@@ -466,6 +467,7 @@ fn has_sequence_metamethods(state: &mut State, idx: isize) -> Result<bool> {
         return Ok(false);
     }
     let mut found = false;
+    // bounded: three fixed events.
     for event in [MetaName::Len, MetaName::Index, MetaName::NewIndex] {
         state.push_meta_name(event)?;
         state.get_table_raw(-2)?;

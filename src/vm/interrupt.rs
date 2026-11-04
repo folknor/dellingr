@@ -28,7 +28,11 @@
 //!   the empty-pattern `string.gsub`).
 //!
 //! Between two safepoints the work is at most one linear pass over a string
-//! capped by `MAX_STRING_BYTES` or over a table's storage.
+//! capped by `MAX_STRING_BYTES` or over a table's storage. The
+//! `safepoint-loops` script check (`scripts/safepoint_loops.py`) holds every
+//! loop in the standard library, the pattern matcher and the table
+//! operations to that: each polls, or records why it is bounded or where it
+//! polls instead.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

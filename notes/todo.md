@@ -41,11 +41,6 @@ Residuals that need a decision:
 - Every metered snapshot stores all `Charge` weights, `4 * Charge::COUNT`
   bytes, even under the default model. A tag meaning "default model" would
   shrink every default save, at the cost of another format bump.
-- The weighted library charge paths (`State::charge_meter`, `charge_units`,
-  the matcher's per-step `consume_units(1)`) were not benchmarked after the
-  change. The A/B pairs covered arithmetic, write, list_literals and
-  benchmark only; run pairs on `patterns` and `literal_find` against
-  `9b13569`.
 - `COST_MODEL_VERSION` stayed 8 while its documented meaning widened to
   cover attribution and admission for every model. Judged right because
   default costs and behaviour are unchanged; revisit if anyone keyed stored
