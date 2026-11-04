@@ -498,15 +498,15 @@ fn analysis_applies_the_model_to_every_scope() {
     assert_eq!(
         program
             .analyze_cost_with(&CostModel::default())
-            .root
-            .total_cost,
-        default.root.total_cost
+            .root()
+            .total_cost(),
+        default.root().total_cost()
     );
     assert_eq!(
         program
             .analyze_cost_with(&CostModel::zero())
-            .root
-            .total_cost,
+            .root()
+            .total_cost(),
         0
     );
 
@@ -518,19 +518,32 @@ fn analysis_applies_the_model_to_every_scope() {
         .with(Charge::ArrayElement, 4);
     let weighted = program.analyze_cost_with(&model);
     // One add, a free multiply, a negation, a constructor with 3 elements.
-    assert_eq!(weighted.root.own_cost, 10 + 2 + 3 + 12);
-    assert_eq!(weighted.root.nested.len(), 1);
-    assert_eq!(weighted.root.nested[0].own_cost, 10);
-    assert_eq!(weighted.root.total_cost, 27 + 10);
+    assert_eq!(weighted.root().own_cost(), 10 + 2 + 3 + 12);
+    assert_eq!(weighted.root().nested().len(), 1);
+    assert_eq!(weighted.root().nested()[0].own_cost(), 10);
+    assert_eq!(weighted.root().total_cost(), 27 + 10);
 
-    // Counts describe the program, not the model.
+    // Counts describe the program, not the model, and each operator is
+    // counted under its own charge, so the free multiply is still visible.
+    for &charge in Charge::ALL {
+        assert_eq!(
+            weighted.root().units(charge),
+            default.root().units(charge),
+            "{}",
+            charge.name()
+        );
+    }
+    assert_eq!(weighted.root().units(Charge::Add), 1);
+    assert_eq!(weighted.root().units(Charge::Mul), 1);
+    assert_eq!(weighted.root().units(Charge::ArrayElement), 3);
     assert_eq!(
-        weighted.root.arithmetic_ops(),
-        default.root.arithmetic_ops()
+        weighted.root().instructions(),
+        default.root().instructions()
     );
-    assert_eq!(weighted.root.negations(), default.root.negations());
-    assert_eq!(weighted.root.array_elements(), 3);
-    assert_eq!(weighted.root.instructions, default.root.instructions);
+
+    // The analysis records the model that priced it.
+    assert_eq!(weighted.model(), &model);
+    assert_eq!(default.model(), &CostModel::default());
 }
 
 #[test]
@@ -545,19 +558,17 @@ fn zero_weights_keep_scope_operation_counts_visible() {
     )
     .expect("the program compiles");
     let analysis = program.analyze_cost_with(&CostModel::zero());
-    assert_eq!(analysis.root.own_cost, 0);
-    assert_eq!(analysis.root.arithmetic_ops(), 1);
-    assert_eq!(analysis.root.table_writes(), 3);
+    assert_eq!(analysis.root().own_cost(), 0);
+    assert_eq!(analysis.root().units(Charge::Add), 1);
+    assert_eq!(analysis.root().units(Charge::TableWrite), 3);
 
     let rendered = analysis.to_string();
     let (_, scopes) = rendered
         .split_once("--- Per-Scope Breakdown ---")
         .expect("the report has a per-scope section");
-    assert!(
-        scopes.contains("main: cost 0\n  arithmetic: 1\n"),
-        "{rendered}"
-    );
-    assert!(scopes.contains("table writes: 3"), "{rendered}");
+    assert!(scopes.contains("main: cost 0\n  +: 1\n"), "{rendered}");
+    assert!(scopes.contains("table write: 3"), "{rendered}");
+    assert!(rendered.contains("  +: 1 x 0 = 0\n"), "{rendered}");
     assert!(!scopes.contains("cost 0 (static)"), "{rendered}");
 }
 
@@ -576,16 +587,16 @@ fn scope_counts_cover_only_their_chunk_and_open_array_batches_count_zero() {
     )
     .expect("the program compiles");
     let analysis = program.analyze_cost();
-    let nested = &analysis.root.nested[0];
+    let nested = &analysis.root().nested()[0];
 
-    assert_eq!(analysis.root.array_elements(), 0);
-    assert_eq!(analysis.root.table_writes(), 3);
-    assert_eq!(analysis.root.arithmetic_ops(), 0);
-    assert_eq!(nested.arithmetic_ops(), 1);
-    assert_eq!(analysis.root.function_calls(), 1);
+    assert_eq!(analysis.root().units(Charge::ArrayElement), 0);
+    assert_eq!(analysis.root().units(Charge::TableWrite), 3);
+    assert_eq!(analysis.root().units(Charge::Add), 0);
+    assert_eq!(nested.units(Charge::Add), 1);
+    assert_eq!(analysis.root().function_calls(), 1);
     assert_eq!(nested.function_calls(), 0);
-    assert!(analysis.root.instructions > 0);
-    assert!(nested.instructions > 0);
+    assert!(analysis.root().instructions() > 0);
+    assert!(nested.instructions() > 0);
 
     let rendered = analysis.to_string();
     let total = rendered
@@ -594,7 +605,10 @@ fn scope_counts_cover_only_their_chunk_and_open_array_batches_count_zero() {
         .expect("the report includes the all-scope instruction total")
         .parse::<u64>()
         .expect("the instruction total is numeric");
-    assert_eq!(total, analysis.root.instructions + nested.instructions);
+    assert_eq!(
+        total,
+        analysis.root().instructions() + nested.instructions()
+    );
 }
 
 #[test]
@@ -611,7 +625,7 @@ fn analysis_agrees_with_a_straight_line_run() {
             .with(Charge::ArrayElement, 4),
     ] {
         assert_eq!(
-            program.analyze_cost_with(&model).root.total_cost,
+            program.analyze_cost_with(&model).root().total_cost(),
             cost_under(&model, source)
         );
     }

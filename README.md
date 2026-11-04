@@ -304,7 +304,8 @@ point.
   `cost_used()`; the operation that crosses it completes and the next costed
   operation fails. It returns an error on a State built with `Costing::Off`.
   `State::builder().costing(..)` chooses the `CostModel` or Off;
-  `program.analyze_cost_with(&model)` analyzes under a model.
+  `program.analyze_cost_with(&model)` analyzes under a model, counting units
+  per `Charge` and recording the model it priced them with.
 - Interrupts - an `Interrupt` handle (`State::interrupt`,
   `StateBuilder::interrupt`, `State::set_interrupt`) that the host triggers
   from any thread or a signal handler; running Lua fails with

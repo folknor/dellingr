@@ -2,7 +2,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use dellingr::{ArgCount, LuaType, Program, RetCount, ScopeCost, State};
+use dellingr::{ArgCount, Charge, LuaType, Program, RetCount, ScopeCost, State};
 use xxhash_rust::xxh3::xxh3_128;
 
 use crate::support;
@@ -54,11 +54,9 @@ fn bench_scripts(bench_dir: &Path) -> Vec<PathBuf> {
 #[derive(Debug, PartialEq, Eq)]
 struct CostFingerprint {
     own_cost: u64,
-    arithmetic_ops: u64,
-    negations: u64,
-    table_creations: u64,
-    table_writes: u64,
-    array_elements: u64,
+    // Units of every charge, so swapping one operator for another (`+` for
+    // `^`) changes the fingerprint.
+    units: Vec<(&'static str, u64)>,
     function_calls: u64,
     instructions: u64,
     nested: Vec<CostFingerprint>,
@@ -66,15 +64,14 @@ struct CostFingerprint {
 
 fn cost_fingerprint(scope: &ScopeCost) -> CostFingerprint {
     CostFingerprint {
-        own_cost: scope.own_cost,
-        arithmetic_ops: scope.arithmetic_ops(),
-        negations: scope.negations(),
-        table_creations: scope.table_creations(),
-        table_writes: scope.table_writes(),
-        array_elements: scope.array_elements(),
+        own_cost: scope.own_cost(),
+        units: Charge::ALL
+            .iter()
+            .map(|&charge| (charge.name(), scope.units(charge)))
+            .collect(),
         function_calls: scope.function_calls(),
-        instructions: scope.instructions,
-        nested: scope.nested.iter().map(cost_fingerprint).collect(),
+        instructions: scope.instructions(),
+        nested: scope.nested().iter().map(cost_fingerprint).collect(),
     }
 }
 
@@ -276,10 +273,10 @@ fn run_bench_scripts(scripts: &[(PathBuf, String)], bench_function: &str) -> Vec
 
 fn scope<'a>(analysis: &'a dellingr::CostAnalysis, name: &str) -> &'a ScopeCost {
     analysis
-        .root
-        .nested
+        .root()
+        .nested()
         .iter()
-        .find(|scope| scope.name == name)
+        .find(|scope| scope.name() == name)
         .unwrap_or_else(|| panic!("cost analysis has no top-level function {name}"))
 }
 
@@ -288,11 +285,11 @@ fn shared_helper_fingerprints(
     excluded_names: &[&str],
 ) -> std::collections::BTreeMap<String, CostFingerprint> {
     analysis
-        .root
-        .nested
+        .root()
+        .nested()
         .iter()
-        .filter(|scope| !excluded_names.contains(&scope.name.as_str()))
-        .map(|scope| (scope.name.clone(), cost_fingerprint(scope)))
+        .filter(|scope| !excluded_names.contains(&scope.name()))
+        .map(|scope| (scope.name().to_owned(), cost_fingerprint(scope)))
         .collect()
 }
 
@@ -354,11 +351,11 @@ fn kernel_listing(source: &str, function_index: usize) -> String {
 // by name, so a repeated name would silently compare the wrong bodies.
 fn top_level_function_index(analysis: &dellingr::CostAnalysis, name: &str) -> usize {
     let mut positions = analysis
-        .root
-        .nested
+        .root()
+        .nested()
         .iter()
         .enumerate()
-        .filter(|(_, scope)| scope.name == name)
+        .filter(|(_, scope)| scope.name() == name)
         .map(|(index, _)| index);
     let index = positions
         .next()
@@ -651,10 +648,10 @@ fn registered_workload_pairs_keep_kernel_cost_fingerprints_aligned() {
         // `_bench()`. A verdict file without a `kernel()` helper is compared
         // `_bench()` to `_bench()`, so prefer the helper only when it exists.
         let bench_kernel_name = if bench_analysis
-            .root
-            .nested
+            .root()
+            .nested()
             .iter()
-            .any(|scope| scope.name == "kernel")
+            .any(|scope| scope.name() == "kernel")
         {
             "kernel"
         } else {
@@ -677,18 +674,18 @@ fn registered_workload_pairs_keep_kernel_cost_fingerprints_aligned() {
             pair.hotpath_file
         );
         let bench_helper_names = bench_analysis
-            .root
-            .nested
+            .root()
+            .nested()
             .iter()
-            .filter(|scope| !["_bench", "kernel"].contains(&scope.name.as_str()))
-            .map(|scope| scope.name.clone())
+            .filter(|scope| !["_bench", "kernel"].contains(&scope.name()))
+            .map(|scope| scope.name().to_owned())
             .collect::<std::collections::BTreeSet<_>>();
         let hotpath_helper_names = hotpath_analysis
-            .root
-            .nested
+            .root()
+            .nested()
             .iter()
-            .filter(|scope| !["_bench", "kernel"].contains(&scope.name.as_str()))
-            .map(|scope| scope.name.clone())
+            .filter(|scope| !["_bench", "kernel"].contains(&scope.name()))
+            .map(|scope| scope.name().to_owned())
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(
             bench_helper_names, hotpath_helper_names,
@@ -696,23 +693,23 @@ fn registered_workload_pairs_keep_kernel_cost_fingerprints_aligned() {
             pair.name, pair.file, pair.hotpath_file
         );
         for helper in bench_analysis
-            .root
-            .nested
+            .root()
+            .nested()
             .iter()
-            .filter(|scope| !["_bench", "kernel"].contains(&scope.name.as_str()))
+            .filter(|scope| !["_bench", "kernel"].contains(&scope.name()))
         {
             assert_eq!(
                 kernel_listing(
                     &bench_source,
-                    top_level_function_index(&bench_analysis, &helper.name)
+                    top_level_function_index(&bench_analysis, helper.name())
                 ),
                 kernel_listing(
                     &hotpath_source,
-                    top_level_function_index(&hotpath_analysis, &helper.name)
+                    top_level_function_index(&hotpath_analysis, helper.name())
                 ),
                 "workload {} helper {} bytecode or literals differ between {} and {}",
                 pair.name,
-                helper.name,
+                helper.name(),
                 pair.file,
                 pair.hotpath_file
             );

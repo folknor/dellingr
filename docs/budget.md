@@ -37,22 +37,31 @@ operand literals also stay in the chunk's literal pool as unused entries.
 
 ## Static opcode charges
 
-These rows describe the cost `Instr::static_cost` returns under the default
-cost model, where every weight is 1. The table is checked against every
-declared opcode by a unit test in `vm/frame.rs`.
+Each opcode declares one charging rule in the opcode table (`OpcodeCharge` in
+`src/instr.rs`): free, one unit of a `Charge` per execution, or, for
+`SET_LIST` alone, one unit per element it stores. Dispatch and static analysis
+both read that declaration. These rows give each opcode charge's static cost
+under the default cost model, where every weight is 1; a row is a `Charge`,
+and "none" covers every free opcode, `CALL` included. The table is checked
+against every declared opcode by a unit test in `vm/frame.rs`.
 
-| `OpcodeCost` | Default static cost |
-| --- | --- |
-| `Free` | 0 |
-| `Call` | 0 |
-| `Arithmetic` | 1 |
-| `Negation` | 1 |
-| `TableCreation` | 1 |
-| `TableWrite` | 1 |
-| `ArrayElements` | encoded count |
+| Charge | Operation | Default static cost |
+| --- | --- | --- |
+| none | | 0 |
+| `Add` | `+` | 1 |
+| `Sub` | `-` | 1 |
+| `Mul` | `*` | 1 |
+| `Div` | `/` | 1 |
+| `Mod` | `%` | 1 |
+| `Pow` | `^` | 1 |
+| `Negate` | `unary -` | 1 |
+| `NewTable` | `table constructor` | 1 |
+| `TableWrite` | `table write` | 1 |
+| `ArrayElement` | `table constructor array element` | encoded count |
 
 A `SET_LIST` ending in a call or `...` has an open count, so static analysis
-counts zero for it; at runtime it charges the live number of elements.
+counts zero for it; at runtime it charges the live number of elements, all
+at once.
 
 ## Free by design
 
@@ -265,8 +274,9 @@ built with.
   completes at its full weight, so the budget can be overshot by less than one
   unit's weight.
 - **Static analysis.** `Program::analyze_cost_with(&model)` is
-  `analyze_cost` under a model. Operation counts do not depend on the model;
-  costs do.
+  `analyze_cost` under a model, which the analysis records
+  (`CostAnalysis::model`). Unit counts are kept per `Charge` and do not depend
+  on the model; costs are derived from them under it (see "Static analysis").
 
 Snapshots save and restore the costing along with the counters (see
 `save-state.md`).
@@ -325,6 +335,19 @@ estimate native-library cost.
 `CostAnalysis::caveat()` returns the same user-facing explanation printed by
 the CLI.
 
-The report labels call counts as `Call instructions` and shows them per scope
-even when the scope's cost is zero. Anonymous scopes are numbered among
-themselves, not among all sibling functions.
+Each scope records how many units of each `Charge` its opcodes make
+(`ScopeCost::units`), read from the same opcode declarations dispatch charges
+by, so every operator is counted separately: a model that weighs `^` above `+`
+shows where its cost comes from. The counts describe the program, not the
+model. A scope's cost is derived from them by one rule, the sum of units times
+weight over the charges, and the total adds the nested scopes' totals; every
+product and sum saturates at `u64::MAX`. The analysis is read-only, so its
+costs cannot drift from its counts and model.
+
+The report names the model that priced it: `COST_MODEL_VERSION` and either
+"every weight 1" or every weight that differs from 1. Its costed-operations
+rows print `units x weight = cost` per charge with nonzero units, by the same
+saturating rule, so a zero-weight charge still shows its units. The report
+labels call counts as `Call instructions` and shows them per scope even when
+the scope's cost is zero; calls are a statistic, not a charge. Anonymous
+scopes are numbered among themselves, not among all sibling functions.

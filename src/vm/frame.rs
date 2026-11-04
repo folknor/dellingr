@@ -164,8 +164,9 @@ impl Frame {
     /// (`State::unwind_invocation`).
     ///
     /// Fixed opcode charges are one unit of `Instr::fixed_charge` at the
-    /// State's weight. SET_LIST charges its live element count (the analyzer
-    /// only knows its encoded count).
+    /// State's weight. SET_LIST charges its live element count of
+    /// `Instr::SET_LIST_ELEMENT_CHARGE` at once (the analyzer only knows its
+    /// encoded count).
     /// Calls and access helpers can additionally charge native work, including
     /// strings, patterns, table traversal and metamethod callbacks.
     pub(super) fn run(frames: &mut Vec<Frame>, state: &mut State) -> Result<(usize, usize)> {
@@ -512,7 +513,9 @@ impl Frame {
                         Some(count) => usize::from(count),
                         None => state.stack.len() - (ra + 1),
                     };
-                    let units = state.cost.cost(Charge::ArrayElement, count as u64);
+                    let units = state
+                        .cost
+                        .cost(Instr::SET_LIST_ELEMENT_CHARGE, count as u64);
                     if units != 0 {
                         add_cost!(units);
                     }
@@ -946,55 +949,69 @@ mod tests {
     #[test]
     fn documented_opcode_charges_match_static_costs() {
         use crate::cost_model::CostModel;
+        use crate::instr::OpcodeCharge;
         let docs = include_str!("../../docs/budget.md");
         let section = docs
             .split_once("## Static opcode charges")
             .map(|(_, rest)| rest)
+            .and_then(|rest| rest.split_once("\n## ").map(|(section, _)| section))
             .expect("budget documentation contains the opcode charge table");
-        let mut classes = Vec::new();
+        let mut keys = Vec::new();
+        let model = CostModel::default();
 
         for opcode in u8::MIN..=u8::MAX {
             if !Instr::known_opcode(opcode) {
                 continue;
             }
 
-            let class_name = format!("{:?}", Instr::cost_class(opcode));
-            let row_prefix = format!("| `{class_name}` |");
+            let charging = Instr::charging(opcode);
+            let (key, operation) = match charging {
+                OpcodeCharge::Free => ("none".to_string(), String::new()),
+                OpcodeCharge::Once(charge) | OpcodeCharge::PerElement(charge) => {
+                    (format!("`{charge:?}`"), format!("`{}`", charge.name()))
+                }
+            };
+            let row_prefix = format!("| {key} |");
             let row = section
                 .lines()
                 .find(|line| line.starts_with(&row_prefix))
-                .expect("each opcode cost class has a documented row");
-            if !classes.contains(&class_name) {
-                classes.push(class_name.clone());
+                .expect("each opcode charge has a documented row");
+            if !keys.contains(&key) {
+                keys.push(key.clone());
             }
 
-            let documented_units = row
-                .split('|')
-                .nth(2)
-                .expect("opcode charge row has a units column")
-                .trim();
-            let model = CostModel::default();
-            if class_name == "ArrayElements" {
-                assert_eq!(documented_units, "encoded count");
-                assert_eq!(Instr::set_list(0, Some(7), 0).static_cost(&model), 7);
-            } else {
-                let documented_units = documented_units
-                    .parse::<u64>()
-                    .expect("fixed opcode charge is a unit count");
-                let fixed = Instr::fixed_charge(opcode).map_or(0, |charge| model.cost(charge, 1));
-                assert_eq!(fixed, documented_units, "{class_name}");
+            let columns: Vec<&str> = row.split('|').map(str::trim).collect();
+            assert_eq!(columns[2], operation, "{key}");
+            let documented_units = columns[3];
+            match charging {
+                OpcodeCharge::PerElement(charge) => {
+                    assert_eq!(documented_units, "encoded count");
+                    assert_eq!(opcode, Instr::OP_SET_LIST);
+                    let units = Instr::set_list(0, Some(7), 0).static_units();
+                    assert_eq!(units, Some((charge, 7)));
+                    assert_eq!(model.cost(charge, 7), 7);
+                }
+                OpcodeCharge::Once(_) | OpcodeCharge::Free => {
+                    let documented_units = documented_units
+                        .parse::<u64>()
+                        .expect("fixed opcode charge is a unit count");
+                    let fixed =
+                        Instr::fixed_charge(opcode).map_or(0, |charge| model.cost(charge, 1));
+                    assert_eq!(fixed, documented_units, "{key}");
+                }
             }
         }
 
+        // Every table row except the header and the separator is a charge.
         let documented_rows = section
             .lines()
-            .filter(|line| line.starts_with("| `"))
+            .filter(|line| line.starts_with("| ") && !line.starts_with("| Charge |"))
+            .filter(|line| !line.starts_with("| ---"))
             .count();
-        // The extra row is the Markdown table header, not an opcode class.
-        assert_eq!(documented_rows, classes.len() + 1);
+        assert_eq!(documented_rows, keys.len());
         assert_eq!(
-            Instr::set_list(0, None, 0).static_cost(&CostModel::default()),
-            0
+            Instr::set_list(0, None, 0).static_units(),
+            Some((Instr::SET_LIST_ELEMENT_CHARGE, 0))
         );
     }
 }

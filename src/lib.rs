@@ -91,6 +91,7 @@ macro_rules! native_call {
 pub mod native_call_trace;
 
 mod compiler;
+mod cost_analysis;
 mod cost_meter;
 mod cost_model;
 mod crmath;
@@ -136,6 +137,7 @@ mod example_list {
 /// Error types returned by the VM and parser. Surfaced through [`Result`].
 pub mod error;
 
+pub use cost_analysis::{CostAnalysis, ScopeCost};
 pub use cost_meter::COST_MODEL_VERSION;
 #[cfg(feature = "cost-check-interval")]
 #[doc(hidden)]
@@ -210,287 +212,6 @@ pub mod cli {
     pub const ANALYSIS_WARNING_PREFIX: &str = "Warning: ";
 }
 
-/// Cost breakdown for a single scope (function or main chunk).
-/// Instruction and category counts cover this scope's chunk only; nested
-/// function bodies have their own `ScopeCost` entries.
-#[derive(Debug, Default, Clone)]
-pub struct ScopeCost {
-    /// Name of this scope
-    pub name: String,
-    /// Static cost of this scope's own opcodes, each counted once at its
-    /// occurrence in the bytecode.
-    pub own_cost: u64,
-    /// `own_cost` plus the `total_cost` of every nested function body, each
-    /// counted once regardless of whether that function is invoked.
-    pub total_cost: u64,
-    // Category counters intentionally use one private array; use the accessors
-    // below. This keeps analysis, aggregation, and rendering on the same index.
-    category_counts: [u64; instr::OpcodeCost::COUNT],
-    /// Instruction count in this scope's chunk, excluding nested functions.
-    pub instructions: u64,
-    /// Nested scopes (functions defined in this scope)
-    pub nested: Vec<ScopeCost>,
-}
-
-impl ScopeCost {
-    /// Number of arithmetic operations (+, -, *, /, %, ^) in this scope's chunk.
-    pub fn arithmetic_ops(&self) -> u64 {
-        self.category_count(instr::OpcodeCost::Arithmetic)
-    }
-
-    /// Number of unary negation operations in this scope's chunk.
-    pub fn negations(&self) -> u64 {
-        self.category_count(instr::OpcodeCost::Negation)
-    }
-
-    /// Number of table creations ({}) in this scope's chunk.
-    pub fn table_creations(&self) -> u64 {
-        self.category_count(instr::OpcodeCost::TableCreation)
-    }
-
-    /// Number of table writes in this scope's chunk, including assignments
-    /// and keyed fields in table constructors.
-    pub fn table_writes(&self) -> u64 {
-        self.category_count(instr::OpcodeCost::TableWrite)
-    }
-
-    /// Number of array elements in closed `SET_LIST` batches in this scope's
-    /// chunk. An open batch is counted as zero.
-    pub fn array_elements(&self) -> u64 {
-        self.category_count(instr::OpcodeCost::ArrayElements)
-    }
-
-    /// Number of `OP_CALL` instructions in this scope's chunk. Generic-`for`
-    /// iterator calls and metamethod-driven calls are not call instructions
-    /// and are not counted.
-    pub fn function_calls(&self) -> u64 {
-        self.category_count(instr::OpcodeCost::Call)
-    }
-
-    fn category_count(&self, category: instr::OpcodeCost) -> u64 {
-        category
-            .counter_index()
-            .map_or(0, |index| self.category_counts[index])
-    }
-
-    fn has_category_counts(&self) -> bool {
-        self.category_counts.iter().any(|&count| count > 0)
-    }
-
-    pub(crate) fn analyze_chunk(chunk: &Bytecode, name: String, model: &CostModel) -> Self {
-        let mut scope = ScopeCost {
-            name,
-            ..Default::default()
-        };
-
-        // The plain `+=` on `instructions` and `category_counts` here, and in
-        // `accumulate`, cannot overflow `u64`, in debug (panic) or release
-        // (wrap) alike. A `Program` comes only from `Program::compile`, whose
-        // source is at most `limits::MAX_SOURCE_BYTES` bytes. Code generation
-        // walks the syntax tree, whose nodes each consume at least one source
-        // byte, and every loop in it iterates a list of tree nodes, so a node
-        // emits a small constant number of instructions: the instruction
-        // count, across all nested chunks together, is a small multiple of the
-        // source size. The category counters add 1 per instruction or a
-        // SET_LIST's element count (at most `limits::MAX_TABLE_BATCH_SIZE` per
-        // instruction and at most the source's element count over all of
-        // them). Every such sum is therefore a small multiple of the source
-        // size, which holds as long as `MAX_SOURCE_BYTES` stays many orders of
-        // magnitude below 2^64. Costs are those counts times model weights of
-        // up to `u32::MAX`, so `own_cost` and `total_cost` saturate instead.
-        for inst in &chunk.code {
-            scope.instructions += 1;
-            scope.own_cost = scope.own_cost.saturating_add(inst.static_cost(model));
-            let category = Instr::cost_class(inst.opcode());
-            if let Some(index) = category.counter_index() {
-                let count = match category {
-                    instr::OpcodeCost::ArrayElements => inst.set_list_count().map_or(0, u64::from),
-                    _ => 1,
-                };
-                scope.category_counts[index] += count;
-            }
-        }
-
-        // Recursively analyze nested functions
-        // Anonymous functions are numbered among themselves, so a named
-        // function between two anonymous ones does not skew the numbering.
-        let mut anonymous_count = 0usize;
-        for nested_chunk in &chunk.nested {
-            let nested_name = match &nested_chunk.name {
-                Some(name) => name.to_string(),
-                None => {
-                    anonymous_count += 1;
-                    format!("anonymous #{anonymous_count}")
-                }
-            };
-            let nested_scope = Self::analyze_chunk(nested_chunk, nested_name, model);
-            scope.nested.push(nested_scope);
-        }
-
-        // Calculate total cost (own + all nested)
-        scope.total_cost = scope.nested.iter().fold(scope.own_cost, |total, nested| {
-            total.saturating_add(nested.total_cost)
-        });
-
-        scope
-    }
-
-    fn fmt_indent(&self, f: &mut std::fmt::Formatter<'_>, indent: usize) -> std::fmt::Result {
-        let pad = "  ".repeat(indent);
-
-        // Category counts do not depend on the model's weights, so a zero-cost
-        // scope can still have operations to show in its breakdown.
-        if self.own_cost == 0 && self.nested.is_empty() && !self.has_category_counts() {
-            // Keep the marker on this zero-cost short form: TFOR_CALL is not
-            // an OP_CALL but can invoke a costed iterator, so zero here does
-            // not mean the scope has no runtime cost. Other scope costs are
-            // already under the static-cost report heading.
-            writeln!(f, "{}{}: cost 0 (static)", pad, self.name)?;
-            return Ok(());
-        }
-
-        // Header with cost
-        if self.nested.is_empty() {
-            writeln!(f, "{}{}: cost {}", pad, self.name, self.own_cost)?;
-        } else {
-            writeln!(
-                f,
-                "{}{}: cost {} (own) / {} (total)",
-                pad, self.name, self.own_cost, self.total_cost
-            )?;
-        }
-
-        // Calls are statically free but their instruction count still belongs
-        // in the per-scope breakdown.
-        if self.has_category_counts() {
-            let inner_pad = "  ".repeat(indent + 1);
-            for labels in &instr::OPCODE_COST_LABELS {
-                let index = labels.category as usize;
-                let count = self.category_counts[index];
-                if count > 0 {
-                    writeln!(f, "{}{}: {}", inner_pad, labels.scope_label, count)?;
-                }
-            }
-        }
-
-        // Nested scopes
-        for nested in &self.nested {
-            nested.fmt_indent(f, indent + 1)?;
-        }
-
-        Ok(())
-    }
-}
-
-/// Static cost analysis of a Lua script.
-///
-/// This analyzes the bytecode without executing it. The actual runtime cost
-/// depends on which code paths are taken and how many loop iterations occur.
-#[derive(Debug, Default)]
-pub struct CostAnalysis {
-    /// Root scope (main chunk)
-    pub root: ScopeCost,
-}
-
-impl CostAnalysis {
-    /// Return the standard explanation of the limits of this static estimate.
-    ///
-    /// The command-line interface prints this text after its analysis report.
-    pub const fn caveat() -> &'static str {
-        concat!(
-            "Static cost analysis counts each costed opcode once across the main chunk and every nested function body, ",
-            "whether or not that body runs. Loops and branches count once. ",
-            "Call opcodes have no static charge, and the analyzer does not inspect their callees, ",
-            "so it excludes all native library charges, flat and data-dependent. It is not a runtime-cost bound or a native-cost estimate."
-        )
-    }
-
-    /// Collect totals across all scopes
-    fn totals(&self) -> ScopeTotals {
-        // analyze_chunk already computed the recursive total for the root.
-        // Reuse it while accumulating the remaining display statistics.
-        let mut totals = ScopeTotals {
-            total_cost: self.root.total_cost,
-            ..ScopeTotals::default()
-        };
-        self.root.accumulate(&mut totals);
-        totals
-    }
-}
-
-#[derive(Default)]
-struct ScopeTotals {
-    total_cost: u64,
-    category_counts: [u64; instr::OpcodeCost::COUNT],
-    instructions: u64,
-    function_count: u64,
-}
-
-impl ScopeCost {
-    fn accumulate(&self, totals: &mut ScopeTotals) {
-        for (total, count) in totals.category_counts.iter_mut().zip(&self.category_counts) {
-            *total += count;
-        }
-        totals.instructions += self.instructions;
-        totals.function_count += self.nested.len() as u64;
-        for nested in &self.nested {
-            nested.accumulate(totals);
-        }
-    }
-}
-
-fn write_summary_categories(
-    f: &mut std::fmt::Formatter<'_>,
-    counts: &[u64; instr::OpcodeCost::COUNT],
-    section: instr::CostSummarySection,
-) -> std::fmt::Result {
-    for labels in &instr::OPCODE_COST_LABELS {
-        if labels.summary_section != section {
-            continue;
-        }
-        let index = labels.category as usize;
-        let count = counts[index];
-        if count > 0 || labels.summary_when_zero {
-            writeln!(
-                f,
-                "{}{}{}",
-                labels.summary_prefix, count, labels.summary_suffix
-            )?;
-        }
-    }
-    Ok(())
-}
-
-impl std::fmt::Display for CostAnalysis {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let totals = self.totals();
-
-        writeln!(f, "=== Cost Analysis ===")?;
-        writeln!(f)?;
-        writeln!(f, "Static cost estimate: {}", totals.total_cost)?;
-        writeln!(f)?;
-        writeln!(f, "--- Costed Operations ---")?;
-        write_summary_categories(
-            f,
-            &totals.category_counts,
-            instr::CostSummarySection::CostedOperations,
-        )?;
-        writeln!(f)?;
-        writeln!(f, "--- Statistics ---")?;
-        writeln!(f, "  Total instructions:   {}", totals.instructions)?;
-        writeln!(f, "  Function definitions: {}", totals.function_count)?;
-        write_summary_categories(
-            f,
-            &totals.category_counts,
-            instr::CostSummarySection::Statistics,
-        )?;
-        writeln!(f)?;
-        writeln!(f, "--- Per-Scope Breakdown ---")?;
-        self.root.fmt_indent(f, 0)?;
-        Ok(())
-    }
-}
-
 /// A compiled, executable Lua program. Cheap to clone (refcounted) and safe
 /// to share across threads: compile once, then [`State::load`] it into as
 /// many `State`s as needed, on any thread.
@@ -534,7 +255,7 @@ impl Program {
 
     /// Statically analyze the cost of this program, without executing it.
     ///
-    /// Returns a `CostAnalysis` with per-scope cost breakdown. The actual
+    /// Returns a [`CostAnalysis`] with per-scope cost breakdown. The actual
     /// runtime cost depends on control flow and loop iterations.
     /// [`CostAnalysis::caveat`] returns the standard explanation of the
     /// estimate's limits for display in a host application.
@@ -545,12 +266,15 @@ impl Program {
         self.analyze_cost_with(&CostModel::default())
     }
 
-    /// [`Program::analyze_cost`] under `model`. Operation counts do not
-    /// depend on the model; costs do, and saturate.
+    /// [`Program::analyze_cost`] under `model`, which the analysis records.
+    /// Unit and instruction counts do not depend on the model; costs are
+    /// derived from them under it, and saturate.
     pub fn analyze_cost_with(&self, model: &CostModel) -> CostAnalysis {
-        CostAnalysis {
-            root: ScopeCost::analyze_chunk(&self.0, "main".to_string(), model),
-        }
+        // Deliberately no entry point that reprices an existing analysis
+        // under another model: the walk is one linear pass over the bytecode,
+        // the host keeps the Program, and a second pricing path would only
+        // duplicate this one.
+        CostAnalysis::analyze(&self.0, model)
     }
 
     /// The chunk name given at compile time, byte-exact.
@@ -582,162 +306,5 @@ impl State {
         self.check_usable()?;
         self.push_chunk(Arc::clone(&program.0))?;
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn analyze_cost(source: &str) -> Result<CostAnalysis> {
-        Program::compile(source, None).map(|program| program.analyze_cost())
-    }
-
-    #[test]
-    fn dynamic_set_list_has_zero_minimum_cost_when_empty() {
-        let analysis = analyze_cost("local function f(...) return {...} end\nf()")
-            .expect("variadic table constructor should parse");
-        let nested = &analysis.root.nested[0];
-
-        assert_eq!(nested.own_cost, 1);
-        assert_eq!(nested.array_elements(), 0);
-        assert_eq!(analysis.root.total_cost, 1);
-
-        let mut state = State::new();
-        crate::Program::compile("local function f(...) return {...} end\nf()", None)
-            .and_then(|program| state.load(&program))
-            .expect("variadic table constructor should load");
-        state
-            .call(ArgCount::Fixed(0), RetCount::Fixed(0))
-            .expect("no-argument variadic call should run");
-        assert_eq!(state.cost_used(), 1);
-
-        let fixed = analyze_cost("return {1, 2}").expect("fixed table constructor should parse");
-        assert_eq!(fixed.root.own_cost, 3);
-        assert_eq!(fixed.root.array_elements(), 2);
-    }
-
-    // Keep this as a tripwire against the old "(free)" label returning.
-    #[test]
-    fn zero_static_cost_generic_for_marks_the_estimate_as_static() {
-        let analysis = analyze_cost("for value in iterator do end")
-            .expect("generic-for iterator program should parse");
-        assert_eq!(analysis.root.own_cost, 0);
-        assert_eq!(analysis.root.function_calls(), 0);
-
-        let rendered = analysis.to_string();
-        assert!(rendered.contains("main: cost 0 (static)"), "{rendered}");
-        assert!(!rendered.contains("(free)"), "{rendered}");
-    }
-
-    #[test]
-    fn cost_analysis_display_preserves_category_report_bytes() {
-        let analysis = CostAnalysis {
-            root: ScopeCost {
-                name: "main".to_string(),
-                own_cost: 6,
-                total_cost: 6,
-                category_counts: [1, 1, 1, 1, 2, 1],
-                instructions: 7,
-                nested: Vec::new(),
-            },
-        };
-
-        assert_eq!(
-            analysis.to_string(),
-            concat!(
-                "=== Cost Analysis ===\n",
-                "\n",
-                "Static cost estimate: 6\n",
-                "\n",
-                "--- Costed Operations ---\n",
-                "  Arithmetic (+,-,*,/,%,^): 1 ops\n",
-                "  Unary negation (-):       1 ops\n",
-                "  Table creation {}:        1 ops\n",
-                "  Table writes (t[k],{k=}): 1 ops\n",
-                "  Array elements:           2 elements\n",
-                "\n",
-                "--- Statistics ---\n",
-                "  Total instructions:   7\n",
-                "  Function definitions: 0\n",
-                "  Call instructions:    1\n",
-                "\n",
-                "--- Per-Scope Breakdown ---\n",
-                "main: cost 6\n",
-                "  arithmetic: 1\n",
-                "  negation: 1\n",
-                "  table creation: 1\n",
-                "  table writes: 1\n",
-                "  array elements: 2\n",
-                "  call instructions: 1\n",
-            )
-        );
-    }
-
-    #[test]
-    fn static_analysis_excludes_flat_and_data_dependent_native_charges() {
-        let source = "math.floor(1.5); table.pack(1); string.upper('abcd')";
-        let analysis = analyze_cost(source).expect("native-call program should parse");
-        assert_eq!(analysis.root.total_cost, 0);
-
-        let mut state = State::new();
-        crate::Program::compile(source, None)
-            .and_then(|program| state.load(&program))
-            .expect("native-call program should load");
-        state
-            .call(ArgCount::Fixed(0), RetCount::Fixed(0))
-            .expect("native-call program should run");
-        assert_eq!(state.cost_used(), 6);
-    }
-
-    #[test]
-    fn static_analysis_counts_costed_loop_body_once() {
-        let closure_free = analyze_cost(
-            "local x = 0; for i = 1, 3 do do local y = i; x = x + y end end; return x",
-        )
-        .expect("closure-free loop should parse");
-        // Static analysis counts the loop body's single add once; the
-        // runtime sweep below observes it three times.
-        assert_eq!(closure_free.root.own_cost, 1);
-        assert_eq!(closure_free.root.total_cost, 1);
-
-        let dynamic = analyze_cost("local function f(...) return ... end; return f(1, f())")
-            .expect("dynamic-call program should parse");
-        assert_eq!(dynamic.root.own_cost, 0);
-        assert_eq!(dynamic.root.total_cost, 0);
-
-        let capture = analyze_cost(
-            "local function make() local x = 1; return function() return x end end; return make()()",
-        )
-        .expect("closure-capture program should parse");
-        assert_eq!(capture.root.own_cost, 0);
-        assert_eq!(capture.root.total_cost, 0);
-
-        for (source, returns, expected_cost) in [
-            (
-                "local x = 0; for i = 1, 3 do do local y = i; x = x + y end end; return x",
-                RetCount::Fixed(1),
-                3,
-            ),
-            (
-                "local function f(...) return ... end; return f(1, f())",
-                RetCount::All,
-                0,
-            ),
-            (
-                "local function make() local x = 1; return function() return x end end; return make()()",
-                RetCount::Fixed(1),
-                0,
-            ),
-        ] {
-            let mut state = State::new();
-            crate::Program::compile(source, None)
-                .and_then(|program| state.load(&program))
-                .expect("cost fixture should load");
-            state
-                .call(ArgCount::Fixed(0), returns)
-                .expect("cost fixture should run");
-            assert_eq!(state.cost_used(), expected_cost, "{source}");
-        }
     }
 }

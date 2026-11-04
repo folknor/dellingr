@@ -33,9 +33,11 @@ status 1. If one happens during script `print()`, the callback exits before
 the script finishes and before the cost summary can be printed. Stderr write
 failures do not panic; the command retains its normal result.
 
-The `--analyze` warning uses `CostAnalysis::caveat()` and the shared
-`cli::ANALYSIS_WARNING_PREFIX`. Library hosts can use the same caveat when
-presenting an analysis.
+The `--analyze` report is the `Display` of `Program::analyze_cost`, always
+under the default cost model, which its `Cost model:` line names
+(`docs/budget.md`, "Static analysis", describes the report). The warning uses
+`CostAnalysis::caveat()` and the shared `cli::ANALYSIS_WARNING_PREFIX`.
+Library hosts can use the same caveat when presenting an analysis.
 
 ## Arguments
 

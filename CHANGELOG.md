@@ -66,7 +66,9 @@ version's meaning is wider (see below).
   `raw`.
 - `ErrorKind::CostingOff`, returned by `set_cost_budget` under `Costing::Off`.
 - `Program::analyze_cost_with(&model)`: static analysis under a model.
-  `analyze_cost` is the default model.
+  `analyze_cost` is the default model. `CostAnalysis::model` returns the model
+  an analysis was priced under, and `ScopeCost::units(charge)` its units of
+  each `Charge`, so each operator is counted on its own.
 - Snapshots save and restore the costing.
 
 ### Changed (breaking): cost configuration
@@ -90,6 +92,18 @@ version's meaning is wider (see below).
   admission under any weight: `table.move` copies exactly the elements it paid
   for, and scans and matcher steps stop at the first unit that starts with no
   budget left.
+- Static analysis counts per `Charge`. `ScopeCost::arithmetic_ops`,
+  `negations`, `table_creations`, `table_writes` and `array_elements` are
+  replaced by `ScopeCost::units(charge)`; `function_calls` stays. `ScopeCost`
+  and `CostAnalysis` are read-only: their fields are accessor methods
+  (`name`, `own_cost`, `total_cost`, `instructions`, `nested`, `root`), and
+  they no longer implement `Default`. Costs are derived from the counts under
+  the recorded model and are unchanged for every script.
+- The `--analyze` report names its cost model (`Cost model: version 8, every
+  weight 1`, or every weight that differs from 1) and lists costed operations
+  per charge as `units x weight = cost` (`+: 3 x 1 = 3`); per-scope rows are
+  per charge too (`+: 3`, `table write: 2`). The merged
+  `Arithmetic (+,-,*,/,%,^)` and other category rows are gone.
 
 ### Changed (breaking): host function names
 
@@ -171,8 +185,6 @@ version's meaning is wider (see below).
   with the new `ErrorKind::SetGlobalNamedRustFnInRestrictedEnv`, before the id
   is registered. Before, the id stayed registered while its global was
   discarded with the environment, so retrying outside failed as a duplicate.
-- The `--analyze` summary labels table writes `Table writes (t[k],{k=})`,
-  since the count includes keyed constructor fields.
 - `select` takes any string starting with `#` as the count form, so
   `select("#n", ...)` returns the argument count instead of raising "number
   expected, got string".

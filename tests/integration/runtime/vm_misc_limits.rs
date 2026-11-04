@@ -128,10 +128,10 @@ fn anonymous_scopes_are_numbered_among_themselves() {
     .map(|program| program.analyze_cost())
     .unwrap();
     let anonymous: Vec<&str> = analysis
-        .root
-        .nested
+        .root()
+        .nested()
         .iter()
-        .map(|scope| scope.name.as_str())
+        .map(dellingr::ScopeCost::name)
         .filter(|name| name.starts_with("anonymous"))
         .collect();
     assert_eq!(anonymous, ["anonymous #1", "anonymous #2"]);
@@ -142,8 +142,8 @@ fn free_scopes_display_call_instruction_counts() {
     let analysis = dellingr::Program::compile("print()", None)
         .map(|program| program.analyze_cost())
         .unwrap();
-    assert_eq!(analysis.root.own_cost, 0);
-    assert_eq!(analysis.root.function_calls(), 1);
+    assert_eq!(analysis.root().own_cost(), 0);
+    assert_eq!(analysis.root().function_calls(), 1);
     let rendered = analysis.to_string();
     let (_, scopes) = rendered.split_once("--- Per-Scope Breakdown ---").unwrap();
     assert!(scopes.contains("call instructions: 1"), "{rendered}");

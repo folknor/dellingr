@@ -30,37 +30,3 @@ example).
 
 Approaches raised so far (not exhaustive): `Cow<'static, str>` names, or a
 static-name side table for catalog indices.
-
-## HOST-016 - Static cost analysis: location, counting model and provenance
-
-Scope: `cost-cli`. Structural.
-
-Three separate observations about the static cost analysis:
-
-- **Location.** `ScopeCost`, `CostAnalysis`, `ScopeTotals`,
-  `write_summary_categories` and two `Display` impls are about 300 lines in
-  `src/lib.rs`, the file that otherwise holds the public API surface. The
-  report's presentation tables (`OPCODE_COST_LABELS`, `CostSummarySection`) live
-  in `src/instr.rs`, the instruction-encoding module.
-- **Counting model.** The analysis keeps its own classification (`OpcodeCost`:
-  Arithmetic, Negation, TableCreation, TableWrite, ArrayElements, Call, Free),
-  parallel to the `Charge` registry the cost model prices, and prices it
-  through the registry. The categories merge `+ - * / % ^`, so a host analysing
-  under a model where `Pow` costs more than the other arithmetic cannot see where
-  its cost comes from. Whether operation counts depend on the model has already
-  needed a hand fix in a fix wave (the per-scope report now decides from counts
-  rather than cost).
-- **Provenance.** `CostAnalysis` does not record which model priced it, and its
-  `Display` prints "Static cost estimate" without naming the model, so reports
-  from two models are indistinguishable.
-
-Approaches raised so far (not exhaustive): a dedicated module for the analysis
-(for example `src/cost_analysis.rs` beside `cost_model.rs`) with the
-presentation tables moved out of `instr.rs`; counting units per `Charge`, which
-would make counts model-independent by construction, make cost a weighted sum
-over any `CostModel` so `analyze_cost_with` prices one analysis rather than
-re-walking bytecode, and reduce `OpcodeCost` to what dispatch needs; recording
-the model in the analysis and its report.
-
-Context noted during triage: counting per `Charge` changes the shape of the
-public analysis API and the report format; the move by itself does not.
