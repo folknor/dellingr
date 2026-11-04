@@ -104,7 +104,10 @@ equal the scenario's `native` field in `tests/native_stack.rs`.
   function without callers in `src/` is a classified root whose evidence
   holds: a callback has the `RustFunc` signature and is used as a value, a
   host-api root is a `pub fn` on `State`, a binary root is `src/main.rs`'s
-  `main`.
+  `main`. Conversely every `pub fn` on `State` in the closure is a host-api
+  root, whether or not it has callers. These are the Lua-reaching entries
+  `scripts/poison_contract.py` holds to the `State::guarded` shape
+  (`reference/error-reporting.md`, "Panics and poisoning").
 - No function in that closure, either execution boundary, `run_invocation`
   or `Frame::run` carries `hotpath::measure`, bare or under the
   `cfg_attr(feature = "hotpath", ...)` form measurement sites use. Its guard
@@ -221,8 +224,8 @@ The recurring native stack of each scenario's cycle, as printed by the
 on-demand probe `brokkr test native_bytes_per_level` (dev) and
 `brokkr test native_bytes_per_level --release` (release), which run the
 default and snapshot configurations of each profile. Measured on the tree of
-the commit that moved inline-cache validation into table slot tokens (parent
-c969d9f), on
+the commit that put `to_string_with_meta` under its own guard (parent
+817cfde), on
 plantasjen (x86-64 Linux), `rustc 1.101.0-nightly (e9bbadf68 2026-10-12)`,
 with that host's global rustflags (`-Ctarget-cpu=native`, the `wild` linker
 through clang). Release is Cargo's default release profile (the repository
@@ -261,7 +264,7 @@ separately.
 | `host_call` | 10304 | 848 | 848 |
 | `host_anchor` | 10848 | 1024 | 1024 |
 | `host_tostring_bytes` | 11152 | 1200 | 1200 |
-| `host_to_string_with_meta` | 11312 | 1264 | 1264 |
+| `host_to_string_with_meta` | 11296 | 1200 | 1200 |
 | `tostring` | 10512 | 1024 | 1024 |
 | `print` | 10896 | 1184 | 1184 |
 | `format` | 12672 | 1520 | 1520 |

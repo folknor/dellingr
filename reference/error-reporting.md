@@ -164,6 +164,22 @@ State marks itself poisoned instead of trying to make each site unwind-safe:
   `StatePoisoned` for the host. That translation is only correct because the
   guard returns straight to host code, so VM-internal callers use the
   unguarded bodies (`call_unguarded` and kin), never the public entry points.
+- Which public methods are guarded entries is derived and checked by
+  `scripts/poison_contract.py`, not decided per method. A public `State`
+  method in the native-call closure (`reference/native-calls.md`, where it
+  is necessarily a `host-api` root), or one whose signature takes a
+  callable over `&mut State` (a closure bound, a fn pointer, or a type alias
+  or trait defined in `src/` that names one), has exactly one shape: its
+  whole body is `self.guarded(|state| ...)`. The guard appears nowhere
+  else, and only `src/main.rs` calls a guarded method. Registrations that
+  take a `RustFunc` but only store it are a reviewed exemption list. The
+  check is lexical and follows the direct-call convention of
+  `reference/native-calls.md`; a generic `fn(&mut S)` or a trait object
+  defined outside `src/` that hands out the State is not seen. It is not a
+  type because the unguarded bodies' callers are the dispatch loop and the
+  library callbacks, all inside the crate, so a token that only `guarded`
+  and `invoke_rust_fn` could mint would have to cross the public `RustFunc`
+  signature, and a crate-visible one would constrain nothing.
 - Under `panic = "abort"` there is no unwind and nothing to mark.
 
 `State::check_usable` (`check_save_usable` for the snapshot methods, which

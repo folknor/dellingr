@@ -1616,6 +1616,19 @@ impl State {
     /// guarded entry points. A RustFn that calls a guarded entry gets the
     /// error back, and `invoke_rust_fn` re-raises the marker when that
     /// callback returns.
+    ///
+    /// Which public methods need this boundary is derived, not chosen:
+    /// `scripts/poison_contract.py` requires the whole body of every public
+    /// method that can run Lua (the native-call closure) or runs host code
+    /// against the State (its signature takes a callable over `&mut State`)
+    /// to be `self.guarded(|state| ...)`, allows the guard nowhere else, and
+    /// allows only the CLI to call a guarded method. The split is not a
+    /// type on purpose: a capability token minted here and in
+    /// `invoke_rust_fn` would have to reach the dispatch loop and every
+    /// library callback through the public `RustFunc` signature, and with a
+    /// crate-visible constructor it would constrain nothing inside the
+    /// crate, where every caller of the unguarded bodies lives. Nor would it
+    /// stop VM code from calling a guarded entry, the converse mistake.
     pub(crate) fn guarded<R>(&mut self, f: impl FnOnce(&mut Self) -> Result<R>) -> Result<R> {
         self.check_usable()?;
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(self))) {

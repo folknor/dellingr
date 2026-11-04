@@ -31,35 +31,6 @@ example).
 Approaches raised so far (not exhaustive): `Cow<'static, str>` names, or a
 static-name side table for catalog indices.
 
-## HOST-015 - Whether a public method may run Lua is a convention, not a type
-
-Scope: `vm-state`. Structural.
-
-Some public `State` methods can execute Lua (`call`, `call_anchor`, `get_table`
-through `__index`, `set_table`, `tostring_bytes` and `to_string_with_meta`
-through `__tostring`, `with_restricted_env`). These must enter through
-`guarded`, which catches a panic, poisons the State and translates the error.
-Methods that cannot run Lua only need `check_usable`, which refuses a poisoned
-State. Which group a method belongs to is decided by hand. What keeps the
-decision consistent is `scripts/poison_contract.py` and the native-calls
-inventory (`reference/native-calls.toml`), not the type system.
-
-The hunter traced two findings from the same hunt to this hand-maintained split:
-a guard list in `reference/error-reporting.md` that named a guard that did not
-exist and omitted `set_table` (since corrected), and `set_global_named_rust_fn`
-being accepted inside a restricted environment (since refused).
-
-Approaches raised so far (not exhaustive): route every Lua-reaching public
-method through one `HostEntry` wrapper; or make `call_unguarded` and the other
-re-entry functions take a zero-sized `Reentry` token that only `guarded` and
-`invoke_rust_fn` can create, so a public method that can run Lua without being
-guarded fails to compile and the reference docs can name the type instead of
-listing methods.
-
-Context noted during triage, not investigated: the re-entry functions are the
-ones `vm/eval.rs` and `reference/native-calls.md` hold to native-frame-size
-rules across `Frame::run`, so a change to their signatures meets those rules.
-
 ## HOST-016 - Static cost analysis: location, counting model and provenance
 
 Scope: `cost-cli`. Structural.

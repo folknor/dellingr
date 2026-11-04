@@ -882,11 +882,13 @@ impl State {
     /// Guarded like [`State::call`]: refused on a poisoned State, and a
     /// panic out of `__tostring` poisons it.
     pub fn to_string_with_meta(&mut self, idx: isize) -> Result<String> {
-        let raw = crate::native_call!(
-            "to_string_with_meta->tostring_bytes",
-            self.tostring_bytes(idx)
-        )?;
-        Self::lossy_utf8_checked(&raw)
+        self.guarded(|state| {
+            let raw = crate::native_call!(
+                "to_string_with_meta->tostring_bytes_unguarded",
+                state.tostring_bytes_unguarded(idx)
+            )?;
+            Self::lossy_utf8_checked(&raw)
+        })
     }
 
     /// The value's `tostring` rendering, byte-exact: what the `tostring`
@@ -918,7 +920,8 @@ impl State {
     }
 
     /// [`State::tostring_bytes`] without the poison boundary, for the
-    /// standard library.
+    /// standard library and for [`State::to_string_with_meta`], which runs
+    /// it inside its own guard rather than calling the guarded entry.
     pub(crate) fn tostring_bytes_unguarded(&mut self, idx: isize) -> Result<Vec<u8>> {
         match crate::native_call!(
             "tostring_bytes_unguarded->tostring_rendering",

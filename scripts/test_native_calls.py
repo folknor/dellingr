@@ -154,6 +154,25 @@ class NativeCallTests(SourceFixture):
             self.assertEqual(source.in_test(offset),
                              any(a <= offset < b for a, b in source.tests))
 
+    def test_public_state_methods_in_the_closure_are_host_api_roots(self):
+        source = self.source('''impl State {
+ pub fn entry(&mut self) {}
+ pub fn unclassified(&mut self) {}
+ pub(crate) fn internal(&mut self) {}
+}
+impl Other { pub fn other(&mut self) {} }''')
+        defs = guard.definitions([source])
+        listed = {
+            ("State", "entry"): {"root": "host-api"},
+            ("State", "unclassified"): {},
+            ("State", "internal"): {},
+            ("Other", "other"): {},
+        }
+        problems = []
+        guard.check_public_roots(listed, defs, problems)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("State::unclassified is a public method", problems[0])
+
     def test_callback_closure_and_markers(self):
         source = self.source('''fn register() {
  let callbacks = [("entry", |state| {

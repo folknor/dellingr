@@ -623,6 +623,12 @@ def method_value_pattern(names):
 ROOT_KINDS = {"callback", "host-api", "binary"}
 
 
+def is_pub_fn(f):
+    """Declared `pub fn`, not `pub(crate) fn` or narrower."""
+    line_start = f.src.code.rfind("\n", 0, f.start) + 1
+    return re.search(r"\bpub\s+fn\s*$", f.src.code[line_start:f.start + 2]) is not None
+
+
 def check_root(fn_entry, defs, sources, problems):
     key = (fn_entry.get("owner"), fn_entry["name"])
     kind = fn_entry["root"]
@@ -650,13 +656,23 @@ def check_root(fn_entry, defs, sources, problems):
         if not referenced:
             problems.append(f"inventory: {label}: a callback root must be referenced as a value")
     elif kind == "host-api":
-        public = [f for f in found
-                  if re.search(r"\bpub\s+fn\s*$", f.src.code[f.src.code.rfind("\n", 0, f.start) + 1:f.start + 2])]
-        if key[0] != "State" or not public:
+        if key[0] != "State" or not any(is_pub_fn(f) for f in found):
             problems.append(f"inventory: {label}: a host-api root must be a `pub fn` on State")
     elif kind == "binary":
         if not any(f.name == "main" and f.src.rel == "src/main.rs" for f in found):
             problems.append(f"inventory: {label}: a binary root must be src/main.rs's main")
+
+
+def check_public_roots(listed, defs, problems):
+    """A public State method in the closure is a host-api root by
+    derivation, not by choice: scripts/poison_contract.py holds every one to
+    the guarded entry shape, and check_root holds every host-api root to
+    being one."""
+    for key, entry in listed.items():
+        if key[0] == "State" and entry.get("root") != "host-api" and any(
+                is_pub_fn(f) for f in defs.get(key, [])):
+            problems.append(f"inventory: State::{key[1]} is a public method that reaches "
+                            "Lua, so its root kind is host-api")
 
 
 def check():
@@ -710,6 +726,7 @@ def check():
     callers_of = {}
     for site in sites:
         callers_of.setdefault(site.callee, []).append(site)
+    check_public_roots(listed, defs, problems)
     for key, entry in listed.items():
         if "root" in entry:
             check_root(entry, defs, sources, problems)

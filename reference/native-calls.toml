@@ -450,7 +450,7 @@ id = "table_sort_sift_down->table_sort_less:right"
 id = "table_sort_less->call_unguarded"
 
 [[edge]]
-id = "to_string_with_meta->tostring_bytes"
+id = "to_string_with_meta->tostring_bytes_unguarded"
 
 [[edge]]
 id = "tostring_bytes->tostring_bytes_unguarded"
@@ -791,12 +791,7 @@ path = ["@lua", "@rust", "tostring_bytes->tostring_bytes_unguarded", "@tostring"
 
 [[scenario]]
 name = "host_to_string_with_meta"
-path = [
-    "@lua", "@rust",
-    "to_string_with_meta->tostring_bytes",
-    "tostring_bytes->tostring_bytes_unguarded",
-    "@tostring",
-]
+path = ["@lua", "@rust", "to_string_with_meta->tostring_bytes_unguarded", "@tostring"]
 
 [[scenario]]
 name = "tostring"

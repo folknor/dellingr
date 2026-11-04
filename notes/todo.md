@@ -140,6 +140,15 @@ snapshot bench
 (optimizations.md "Snapshot path" - needs harness support, not a .lua
 file).
 
+Also open: a workload where one State holds a lot of loaded code and a small
+live heap, so that per-collection work proportional to retained runtimes
+(the runtime-cache walk, which since 2026-11-04 runs only every
+`CACHE_PRUNE_INTERVAL` collections, and the per-runtime
+`GcRoot::ChunkLiterals` visit) is what dominates. No registered workload loads
+more than one chunk, so the change that put the cache prune on a cadence was
+measured only on `gc_churn`. Scripts cannot load code, so this also needs a
+Rust-driven harness that loads many Programs into one State.
+
 Why deferred: the registry is live with the curated workloads;
 porting the rest before those have proven the recipe would be
 premature batch work.
