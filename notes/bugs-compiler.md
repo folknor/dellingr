@@ -18,48 +18,6 @@ documents and may be wrong; verify before fixing.
    and they are never deduplicated through git history. Carry the context
    inline instead.
 
-## COMP-002 - Error::is_recoverable misses two end-of-input cases it claims to cover
-
-Scope: `compiler-front`. Matters only to host REPLs, which are the method's sole
-purpose.
-
-`is_recoverable` is documented as covering errors "that appending more source
-text can fix". Two such cases are reported unrecoverable:
-
-- A numeral cut off at end of input (`x = 1e`, `x = 0x`, `x = 0x1p`) is
-  `BadNumber`; `1e` followed by `5` is valid.
-- A short string cut off at end of input (`print("abc`) is `UnclosedString`.
-  The code comment excludes it deliberately because the same kind also covers a
-  string broken by a newline, which appending cannot fix. The lexer knows which
-  case it is (the `None` arm versus the newline arm of `lex_string`), so the two
-  could be told apart.
-
-## COMP-005 - Stale or wrong doc comments in the compiler
-
-Scope: `compiler-front`.
-
-- `TokenStream::line_and_column` and `Lexer::line_and_col`: "Returns the current
-  position of the `TokenStream`/`Lexer`". Both map a given byte offset to
-  (line, column).
-- `ast.rs` `Stmt::While::body_close`: "...at the end of each iteration and
-  before each break". Codegen uses `break_close`, not `body_close`, for breaks
-  (`codegen.rs` `Stmt::Break` reads `LoopGen::break_close`).
-- `ast.rs` module doc: "walking the tree recursively never goes deeper than the
-  parser's charged syntax depth". The uncharged precedence levels (`Or`, `And`,
-  `Compare`, `Concat`, two `Arith` levels) nest between charged
-  `parse_expr`/`parse_unary` levels, so tree depth is a constant multiple of the
-  charged depth, not bounded by it. The real promise is that tree depth mirrors
-  the parser's own native recursion; the wording should say so.
-- `error.rs` `SyntaxError::TooManyArguments` is documented as "A fixed-arity
-  call uses the dynamic-argument sentinel". The parser raises it for more than
-  `MAX_FIXED_ARGS` fixed arguments (`checked_fixed_arg_count`).
-- `SyntaxError::TooManyTableFields` ("More fields in a single table constructor
-  than the VM accepts") versus `docs/limits.md` "Constructors have no overall
-  entry limit". The parser raises it when the `u16` batch counter overflows
-  (`parse_table`), which needs about 16.7M positional entries; the 16 MiB source
-  cap makes that unreachable, so the doc is right in practice and the variant is
-  dead. The two should agree.
-
 ## COMP-007 - Codegen reports u8 overflows as MultiValueTailMissingInstruction
 
 Scope: `compiler-back`. Smell; unreachable today.

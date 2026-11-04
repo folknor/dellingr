@@ -366,46 +366,18 @@ fn format_argument(state: &mut State, argument: usize, directive: &Directive) ->
                 "format_argument->tostring_rendering",
                 state.tostring_rendering(idx)
             )?;
-            match rendering {
+            let formatted = match rendering {
                 TostringRendering::Itself => {
                     let len = state.to_bytes(idx)?.len();
                     state.charge(Charge::StringFormat, len as u64)?;
-                    let bytes = state.to_bytes(idx)?;
-                    if directive.has_modifiers && bytes.contains(&0) {
-                        return Err(format_arg_error(
-                            state,
-                            argument,
-                            ArgDetail::StringContainsZeros,
-                        ));
-                    }
-                    let selected_len = directive.precision.map_or(bytes.len(), |precision| {
-                        usize::from(precision).min(bytes.len())
-                    });
-                    Ok(pad_bytes(
-                        &bytes[..selected_len],
-                        directive.width,
-                        directive.flags.left,
-                    ))
+                    format_string_rendering(state.to_bytes(idx)?, directive)
                 }
                 TostringRendering::Bytes(bytes) => {
                     state.charge(Charge::StringFormat, bytes.len() as u64)?;
-                    if directive.has_modifiers && bytes.contains(&0) {
-                        return Err(format_arg_error(
-                            state,
-                            argument,
-                            ArgDetail::StringContainsZeros,
-                        ));
-                    }
-                    let selected_len = directive.precision.map_or(bytes.len(), |precision| {
-                        usize::from(precision).min(bytes.len())
-                    });
-                    Ok(pad_bytes(
-                        &bytes[..selected_len],
-                        directive.width,
-                        directive.flags.left,
-                    ))
+                    format_string_rendering(&bytes, directive)
                 }
-            }
+            };
+            formatted.map_err(|detail| format_arg_error(state, argument, detail))
         }
         Conversion::Quoted => quote_argument(state, idx, argument),
         Conversion::Pointer => {
@@ -424,6 +396,23 @@ fn format_argument(state: &mut State, argument: usize, directive: &Directive) ->
             Ok(pad_bytes(&bytes, directive.width, directive.flags.left))
         }
     }
+}
+
+fn format_string_rendering(
+    bytes: &[u8],
+    directive: &Directive,
+) -> std::result::Result<Vec<u8>, ArgDetail> {
+    if directive.has_modifiers && bytes.contains(&0) {
+        return Err(ArgDetail::StringContainsZeros);
+    }
+    let selected_len = directive.precision.map_or(bytes.len(), |precision| {
+        usize::from(precision).min(bytes.len())
+    });
+    Ok(pad_bytes(
+        &bytes[..selected_len],
+        directive.width,
+        directive.flags.left,
+    ))
 }
 
 fn number_argument(state: &mut State, idx: isize, argument: usize) -> Result<f64> {

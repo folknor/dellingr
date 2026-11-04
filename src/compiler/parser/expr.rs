@@ -2,6 +2,7 @@ use super::super::ast::{
     ArithChain, ArithLink, CallSuffix, CompareChain, CompareLink, Expr, ExprKind, MethodSuffix,
     Place, Suffix, Suffixed,
 };
+use super::super::lexer::is_incomplete_numeral;
 use super::Parser;
 use super::Result;
 use super::SyntaxError;
@@ -433,8 +434,16 @@ impl Parser<'_> {
                 // The lexer determines token boundaries; this shared parser
                 // owns conversion and validates the complete numeral.
                 let text = self.input.source_bytes(tok.range());
-                let number = crate::numeral::parse_lua_numeral(text)
-                    .ok_or_else(|| self.error_at(SyntaxError::BadNumber, tok.start))?;
+                let number = crate::numeral::parse_lua_numeral(text).ok_or_else(|| {
+                    let kind = if tok.range().end == self.input.source_len()
+                        && is_incomplete_numeral(text)
+                    {
+                        SyntaxError::UnfinishedNumber
+                    } else {
+                        SyntaxError::BadNumber
+                    };
+                    self.error_at(kind, tok.start)
+                })?;
                 Expr::new(ExprKind::Num(self.find_or_add_number(number)?))
             }
             TokenKind::LiteralString => self.literal_string(tok)?,

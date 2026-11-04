@@ -144,10 +144,16 @@ impl<'a> TokenStream<'a> {
         }
     }
 
-    /// Returns the current position of the `TokenStream`.
+    /// Maps a source byte offset to its one-based line and column.
     #[must_use]
     pub(super) fn line_and_column(&self, pos: usize) -> (u32, u32) {
         self.lexer.line_and_col(pos)
+    }
+
+    /// Returns the source length in bytes.
+    #[must_use]
+    pub(super) fn source_len(&self) -> usize {
+        self.lexer.source.len()
     }
 
     /// Returns the byte offset just past the last consumed token.
@@ -247,7 +253,12 @@ impl<'a> Lexer<'a> {
 
                 b'0'..=b'9' => self.lex_full_number(first_char, tok_start)?,
 
-                b'a'..=b'z' | b'A'..=b'Z' | b'_' => self.lex_word(tok_start),
+                b'a'..=b'z' | b'A'..=b'Z' | b'_' => match self.lex_word(tok_start) {
+                    // Reserved so scripts cannot use the spelling as a name,
+                    // but goto statements and labels are not implemented.
+                    Goto => return Err(self.error_at(SyntaxError::UnsupportedGoto, tok_start)),
+                    word => word,
+                },
 
                 _ => return Err(self.invalid_character(first_char, tok_start)),
             };
@@ -462,7 +473,7 @@ impl<'a> Lexer<'a> {
         loop {
             let char_start = self.pos;
             let Some(c) = self.next_char() else {
-                return Err(self.error(SyntaxError::UnclosedString));
+                return Err(self.error(SyntaxError::UnfinishedString));
             };
             if c == quote {
                 let contents = match failure {
@@ -480,7 +491,7 @@ impl<'a> Lexer<'a> {
 
             if c == b'\\' {
                 let Some(escaped) = self.next_char() else {
-                    return Err(self.error(SyntaxError::UnclosedString));
+                    return Err(self.error(SyntaxError::UnfinishedString));
                 };
                 if escaped == b'z' {
                     self.consume_whitespace();
@@ -643,7 +654,7 @@ impl<'a> Lexer<'a> {
             // this boundary to keep malformed-mantissa diagnostics before a
             // following exponent, as in the original lexer.
             if parse_lua_numeral(&self.source[tok_start..self.pos]).is_none() {
-                return Err(self.error(SyntaxError::BadNumber));
+                return Err(self.malformed_number_error(tok_start));
             }
 
             // Optional binary exponent: p/P, an optional sign, then at least
@@ -657,7 +668,7 @@ impl<'a> Lexer<'a> {
                 }
                 self.lex_digits();
                 if parse_lua_numeral(&self.source[tok_start..self.pos]).is_none() {
-                    return Err(self.error(SyntaxError::BadNumber));
+                    return Err(self.malformed_number_error(tok_start));
                 }
             }
 
@@ -739,7 +750,7 @@ impl<'a> Lexer<'a> {
         TokenKind::keyword_match(&self.source[tok_start..self.pos])
     }
 
-    /// Returns the current position of the `Lexer`.
+    /// Maps a source byte offset to its one-based line and column.
     #[must_use]
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn line_and_col(&self, pos: usize) -> (u32, u32) {
@@ -750,6 +761,16 @@ impl<'a> Lexer<'a> {
         // Both values are bounded by the source length, which the parser caps
         // at `MAX_SOURCE_BYTES`; `limits` asserts that cap is below u32::MAX.
         ((line_index + 1) as u32, (column + 1) as u32)
+    }
+
+    fn malformed_number_error(&self, token_start: usize) -> Error {
+        let literal = &self.source[token_start..self.pos];
+        let kind = if self.pos == self.source.len() && is_incomplete_numeral(literal) {
+            SyntaxError::UnfinishedNumber
+        } else {
+            SyntaxError::BadNumber
+        };
+        self.error(kind)
     }
 
     #[must_use]
@@ -765,6 +786,49 @@ impl<'a> Lexer<'a> {
 
 fn is_identifier_continue(c: u8) -> bool {
     c.is_ascii_alphanumeric() || c == b'_'
+}
+
+/// Whether these numeral bytes form a valid prefix that appended digits can complete.
+pub(super) fn is_incomplete_numeral(input: &[u8]) -> bool {
+    if let Some(mantissa_and_exponent) = input
+        .strip_prefix(b"0x")
+        .or_else(|| input.strip_prefix(b"0X"))
+    {
+        let Some(exponent_start) = mantissa_and_exponent
+            .iter()
+            .position(|byte| matches!(*byte, b'p' | b'P'))
+        else {
+            return mantissa_and_exponent.is_empty() || mantissa_and_exponent == b".";
+        };
+        let mantissa = &mantissa_and_exponent[..exponent_start];
+        let exponent = &mantissa_and_exponent[exponent_start + 1..];
+        has_mantissa_digits(mantissa, u8::is_ascii_hexdigit)
+            && (exponent.is_empty() || exponent == b"+" || exponent == b"-")
+    } else {
+        let Some(exponent_start) = input.iter().position(|byte| matches!(*byte, b'e' | b'E'))
+        else {
+            return false;
+        };
+        let mantissa = &input[..exponent_start];
+        let exponent = &input[exponent_start + 1..];
+        has_mantissa_digits(mantissa, u8::is_ascii_digit)
+            && (exponent.is_empty() || exponent == b"+" || exponent == b"-")
+    }
+}
+
+fn has_mantissa_digits(input: &[u8], is_digit: fn(&u8) -> bool) -> bool {
+    let mut digit_seen = false;
+    let mut point_seen = false;
+    for byte in input {
+        if is_digit(byte) {
+            digit_seen = true;
+        } else if *byte == b'.' && !point_seen {
+            point_seen = true;
+        } else {
+            return false;
+        }
+    }
+    digit_seen
 }
 
 #[cfg(test)]
@@ -1062,14 +1126,24 @@ mod tests {
 
     #[test]
     fn malformed_hex_number_errors_keep_their_original_columns() {
-        for (input, column) in [("0x.", 4), ("0xp1", 3), ("0x1p+", 6)] {
+        for (input, column, unfinished) in
+            [("0x.", 4, true), ("0xp1", 3, false), ("0x1p+", 6, true)]
+        {
             let err = Lexer::new(input.as_bytes())
                 .next_token()
                 .expect_err("malformed hexadecimal numeral must fail in the lexer");
-            assert!(matches!(
-                err.kind(),
-                crate::error::ErrorKind::SyntaxError(SyntaxError::BadNumber)
-            ));
+            let has_expected_kind = if unfinished {
+                matches!(
+                    err.kind(),
+                    crate::error::ErrorKind::SyntaxError(SyntaxError::UnfinishedNumber)
+                )
+            } else {
+                matches!(
+                    err.kind(),
+                    crate::error::ErrorKind::SyntaxError(SyntaxError::BadNumber)
+                )
+            };
+            assert!(has_expected_kind, "{input:?}");
             assert_eq!(err.column(), column, "{input:?}");
         }
     }

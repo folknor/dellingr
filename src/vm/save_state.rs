@@ -851,6 +851,11 @@ impl<'a> SaveBuilder<'a> {
                 format_pointer_ids.push((saved, id));
             }
         }
+        // Pointer ids are unique and increase with first rendering in a
+        // continuous State. Loading merges setup-kept ids after saved ids, so
+        // map insertion order can differ even when the identities match. Sort
+        // the records to keep continuous and loaded States byte-identical.
+        format_pointer_ids.sort_unstable_by_key(|(_, id)| *id);
         Ok(SaveWalk {
             globals,
             global_pins,

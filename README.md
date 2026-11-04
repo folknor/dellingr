@@ -79,7 +79,8 @@ These Lua features are intentionally excluded:
 - IO/OS libraries - sandboxed environment, no filesystem or system access
 - Debug library - no introspection of VM internals
 - `pcall`/`xpcall`, `assert` - no error recovery; errors kill the callback
-- `goto`/labels - simplifies VM, prevents obfuscated control flow
+- `goto`/labels - simplifies VM, prevents obfuscated control flow; the `goto`
+  keyword remains reserved
 - `string.rep`, `string.byte`, `string.char`
 - Arithmetic/comparison/concat metamethods
 - The `__ipairs`, `__pairs`, `__mode`, `__gc`, `__close` and `__name` fields

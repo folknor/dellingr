@@ -11,8 +11,9 @@
 //! The tree's nesting mirrors the parser's recursion. Everything the parser
 //! iterates is a flat list here (operator chains of one precedence level,
 //! comparison, and/or and concat chains, suffix chains, elseif chains,
-//! statement lists), so walking the tree recursively never goes deeper than
-//! the parser's charged syntax depth.
+//! statement lists). The expression parser also contributes a fixed set of
+//! uncharged precedence layers, so a recursive walk can be a few levels
+//! deeper than the charged syntax-depth count.
 
 use crate::instr::{ArithOp, Builtin, CompareOp};
 
@@ -333,8 +334,8 @@ pub(super) enum Stmt {
     While {
         cond: Expr,
         body: Vec<Stmt>,
-        /// Close the body locals from this register at the end of each
-        /// iteration and before each break.
+        /// Close the body locals from this register at the end of each normal
+        /// iteration. Breaks use `break_close` instead.
         body_close: Option<u8>,
         /// The loop's breaks close upvalues from this register.
         break_close: Option<u8>,

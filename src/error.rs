@@ -1005,12 +1005,15 @@ impl ArgDetail {
     }
 }
 
-/// Syntax-level error categories raised by the parser.
+/// Syntax and lexical error categories raised while compiling source.
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum SyntaxError {
     /// Numeric literal could not be parsed as a number.
     BadNumber,
+    /// Numeric literal ended at EOF before its exponent or hexadecimal
+    /// mantissa was complete.
+    UnfinishedNumber,
     /// `break` used outside any enclosing loop.
     BreakOutsideLoop,
     /// Character not valid as part of any token.
@@ -1022,6 +1025,8 @@ pub enum SyntaxError {
     InvalidEscapeSequence,
     /// `_ENV` is deliberately unsupported as a variable name.
     UnsupportedEnvironmentName,
+    /// The reserved `goto` keyword is not implemented.
+    UnsupportedGoto,
     /// A hexadecimal string escape did not contain two hexadecimal digits.
     HexadecimalDigitExpected,
     /// A decimal string escape exceeds the byte range.
@@ -1048,7 +1053,7 @@ pub enum SyntaxError {
     TooManyUpvalues,
     /// Source exceeds the parser's bounded syntax nesting depth.
     TooManySyntaxLevels,
-    /// A fixed-arity call uses the dynamic-argument sentinel.
+    /// A fixed-arity call exceeds the compiler's supported argument count.
     TooManyArguments,
     /// A control-flow target cannot be represented by a jump instruction.
     JumpTooFar,
@@ -1058,10 +1063,13 @@ pub enum SyntaxError {
     TooManyNumbers,
     /// More string literals in a chunk than the literal pool accepts.
     TooManyStrings,
-    /// More fields in a single table constructor than the VM accepts.
+    /// The table-constructor batch index overflowed; the source size limit
+    /// makes this defensive check unreachable.
     TooManyTableFields,
-    /// String literal not closed before EOF or end of line.
+    /// String literal reached an unescaped line break before its closing quote.
     UnclosedString,
+    /// String literal reached EOF before its closing quote.
+    UnfinishedString,
     /// Source ended while a construct was still open.
     UnexpectedEof,
     /// A long comment (`--[[` / `--[==[`) reached EOF before its closing
@@ -1127,6 +1135,8 @@ pub enum TokenKind {
     For,
     /// `function`.
     Function,
+    /// `goto` (recognized as a reserved but unsupported keyword).
+    Goto,
     /// `if`.
     If,
     /// `in`.
@@ -1610,15 +1620,15 @@ impl ArgError {
 }
 
 impl SyntaxError {
-    /// Returns true if this is a SyntaxError that can be fixed by appending
-    /// more text to the source code.
+    /// Returns true if appending more text can complete this syntax construct.
     pub fn is_recoverable(&self) -> bool {
-        // Incomplete EOF constructs are recoverable. UnclosedString also
-        // covers unescaped line breaks, which appending text cannot fix, so
-        // short-string errors remain nonrecoverable.
-        // An unfinished long comment is the comment analogue of EOF: appending
-        // its closing delimiter completes the source.
-        matches!(self, Self::UnexpectedEof | Self::UnfinishedLongComment)
+        matches!(
+            self,
+            Self::UnexpectedEof
+                | Self::UnfinishedLongComment
+                | Self::UnfinishedNumber
+                | Self::UnfinishedString
+        )
     }
 }
 
@@ -1943,7 +1953,7 @@ impl fmt::Display for SyntaxError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use SyntaxError::*;
         match self {
-            BadNumber => write!(f, "malformed number"),
+            BadNumber | UnfinishedNumber => write!(f, "malformed number"),
             // The source location belongs to the enclosing Error, which
             // formats the actual line and column for this syntax error.
             BreakOutsideLoop => write!(f, "<break> not inside a loop"),
@@ -1953,6 +1963,7 @@ impl fmt::Display for SyntaxError {
             UnsupportedEnvironmentName => {
                 write!(f, "the special name '_ENV' is not supported")
             }
+            UnsupportedGoto => write!(f, "the 'goto' keyword is not supported"),
             HexadecimalDigitExpected => write!(f, "hexadecimal digit expected"),
             DecimalEscapeTooLarge => write!(f, "decimal escape too large"),
             LongStringUnsupported => write!(f, "long strings are not supported"),
@@ -1992,7 +2003,7 @@ impl fmt::Display for SyntaxError {
                 write!(f, "too many literal strings (limit {MAX_LITERALS})")
             }
             TooManyTableFields => write!(f, "too many fields in table constructor"),
-            UnclosedString => write!(f, "unfinished string"),
+            UnclosedString | UnfinishedString => write!(f, "unfinished string"),
             UnexpectedEof => write!(f, "unexpected <eof>"),
             UnfinishedLongComment => write!(f, "unfinished long comment"),
             ExpectedToken { expected, found } => {

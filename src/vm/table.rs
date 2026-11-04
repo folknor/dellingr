@@ -1019,9 +1019,11 @@ impl Table {
             }
             _ => 0,
         };
-        // Reset to a shell sized for the incoming hash entries, then re-insert
-        // in order so `pairs()` iteration order round-trips. with_capacity
-        // picks inline vs map storage from the count.
+        // Build into a local shell sized for the incoming hash entries, then
+        // re-insert in order so `pairs()` iteration order round-trips.
+        // with_capacity picks inline vs map storage from the count. Keep the
+        // old table intact until every entry validates, so an error preserves
+        // its contents, version and metatable.
         //
         // The rebuild may move keys to new indices, so the version must move
         // past every value an inline cache could have captured for this table
@@ -1032,7 +1034,7 @@ impl Table {
         let next_version = self.version().wrapping_add(1);
         let is_map = matches!(entries.get(array_slots), Some((Val::Nil, Val::Bool(true))));
         let capacity = entries.len() - array_slots - usize::from(is_map);
-        *self = Table::with_capacity(if is_map {
+        let mut rebuilt = Table::with_capacity(if is_map {
             capacity.max(INLINE_CAPACITY + 1)
         } else {
             capacity
@@ -1047,24 +1049,24 @@ impl Table {
             }
             array.push(value);
         }
-        self.array_live = array
+        rebuilt.array_live = array
             .iter()
             .filter(|value| !matches!(value, Val::Nil))
             .count();
-        self.array = array;
-        self.base = base;
-        self.vlen = vlen;
+        rebuilt.array = array;
+        rebuilt.base = base;
+        rebuilt.vlen = vlen;
         if is_map {
             let _ = entries.next();
         }
         for (key, value) in entries {
             let dead = matches!(value, Val::Nil);
-            if !dead && (self.array_key(&key).is_some() || self.is_array_append_key(&key)) {
+            if !dead && (rebuilt.array_key(&key).is_some() || rebuilt.is_array_append_key(&key)) {
                 return Err(TableError::InvalidSnapshot(
                     SnapshotTableFault::HashEntryBelongsInArray,
                 ));
             }
-            match &mut self.storage {
+            match &mut rebuilt.storage {
                 TableStorage::Inline { entries, len } => {
                     // Vacant slots arise only in map storage, whose marker
                     // keeps it a map on restore, so a nil key is invalid here.
@@ -1081,11 +1083,12 @@ impl Table {
                     map.insert(key, value);
                 }
             }
-            self.dead_count += usize::from(dead);
+            rebuilt.dead_count += usize::from(dead);
         }
-        self.version.set(next_version);
+        rebuilt.version.set(next_version);
         #[cfg(debug_assertions)]
-        self.debug_assert_invariants();
+        rebuilt.debug_assert_invariants();
+        *self = rebuilt;
         Ok(())
     }
 

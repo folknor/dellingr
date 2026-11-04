@@ -211,7 +211,8 @@ pub mod cli {
 }
 
 /// Cost breakdown for a single scope (function or main chunk).
-/// Category counts are available through the corresponding accessor methods.
+/// Instruction and category counts cover this scope's chunk only; nested
+/// function bodies have their own `ScopeCost` entries.
 #[derive(Debug, Default, Clone)]
 pub struct ScopeCost {
     /// Name of this scope
@@ -225,41 +226,43 @@ pub struct ScopeCost {
     // Category counters intentionally use one private array; use the accessors
     // below. This keeps analysis, aggregation, and rendering on the same index.
     category_counts: [u64; instr::OpcodeCost::COUNT],
-    /// Total instruction count
+    /// Instruction count in this scope's chunk, excluding nested functions.
     pub instructions: u64,
     /// Nested scopes (functions defined in this scope)
     pub nested: Vec<ScopeCost>,
 }
 
 impl ScopeCost {
-    /// Number of arithmetic operations (+, -, *, /, %, ^).
+    /// Number of arithmetic operations (+, -, *, /, %, ^) in this scope's chunk.
     pub fn arithmetic_ops(&self) -> u64 {
         self.category_count(instr::OpcodeCost::Arithmetic)
     }
 
-    /// Number of unary negation operations.
+    /// Number of unary negation operations in this scope's chunk.
     pub fn negations(&self) -> u64 {
         self.category_count(instr::OpcodeCost::Negation)
     }
 
-    /// Number of table creations ({}).
+    /// Number of table creations ({}) in this scope's chunk.
     pub fn table_creations(&self) -> u64 {
         self.category_count(instr::OpcodeCost::TableCreation)
     }
 
-    /// Number of table field writes (`t.x = v`, `t[k] = v`).
+    /// Number of table writes in this scope's chunk, including assignments
+    /// and keyed fields in table constructors.
     pub fn table_writes(&self) -> u64 {
         self.category_count(instr::OpcodeCost::TableWrite)
     }
 
-    /// Number of array elements initialized.
+    /// Number of array elements in closed `SET_LIST` batches in this scope's
+    /// chunk. An open batch is counted as zero.
     pub fn array_elements(&self) -> u64 {
         self.category_count(instr::OpcodeCost::ArrayElements)
     }
 
-    /// Number of call instructions (`OP_CALL`). Generic-`for` iterator calls
-    /// and metamethod-driven calls are not call instructions and are not
-    /// counted.
+    /// Number of `OP_CALL` instructions in this scope's chunk. Generic-`for`
+    /// iterator calls and metamethod-driven calls are not call instructions
+    /// and are not counted.
     pub fn function_calls(&self) -> u64 {
         self.category_count(instr::OpcodeCost::Call)
     }
@@ -268,6 +271,10 @@ impl ScopeCost {
         category
             .counter_index()
             .map_or(0, |index| self.category_counts[index])
+    }
+
+    fn has_category_counts(&self) -> bool {
+        self.category_counts.iter().any(|&count| count > 0)
     }
 
     pub(crate) fn analyze_chunk(chunk: &Bytecode, name: String, model: &CostModel) -> Self {
@@ -331,7 +338,9 @@ impl ScopeCost {
     fn fmt_indent(&self, f: &mut std::fmt::Formatter<'_>, indent: usize) -> std::fmt::Result {
         let pad = "  ".repeat(indent);
 
-        if self.own_cost == 0 && self.nested.is_empty() && self.function_calls() == 0 {
+        // Category counts do not depend on the model's weights, so a zero-cost
+        // scope can still have operations to show in its breakdown.
+        if self.own_cost == 0 && self.nested.is_empty() && !self.has_category_counts() {
             // Keep the marker on this zero-cost short form: TFOR_CALL is not
             // an OP_CALL but can invoke a costed iterator, so zero here does
             // not mean the scope has no runtime cost. Other scope costs are
@@ -353,7 +362,7 @@ impl ScopeCost {
 
         // Calls are statically free but their instruction count still belongs
         // in the per-scope breakdown.
-        if self.own_cost > 0 || self.function_calls() > 0 {
+        if self.has_category_counts() {
             let inner_pad = "  ".repeat(indent + 1);
             for labels in &instr::OPCODE_COST_LABELS {
                 let index = labels.category as usize;

@@ -112,6 +112,9 @@ does.
   function name - is the syntax error "the special name '_ENV' is not
   supported", so there is no lexical environment rebinding. Field names such
   as `t._ENV` remain ordinary.
+- `goto` remains a reserved word and raises "the 'goto' keyword is not
+  supported". Goto statements and labels are not implemented, and the spelling
+  cannot be used as an identifier.
 - Lua 5.4 `\u{XXXX}` string escapes are rejected as invalid escape sequences.
   The `<const>` and `<close>` local attributes are absent and raise syntax
   errors.
@@ -134,9 +137,12 @@ does.
 - When the parser reaches the end of the source where it needed a token, the
   error is `unexpected <eof>` (`SyntaxError::UnexpectedEof`, which
   `Error::is_recoverable` reports), where reference Lua names what it
-  expected, for example `'end' expected near <eof>`. Errors the lexer raises
-  at the end of the source keep their own kind (`unfinished string`,
-  `malformed number`, `unfinished long comment`).
+  expected, for example `'end' expected near <eof>`. A short string, numeral
+  or long comment that ends incomplete at EOF keeps its own diagnostic
+  (`unfinished string`, `malformed number`, `unfinished long comment`).
+- `Error::is_recoverable` also reports a short string or number that ends
+  incomplete at EOF. A short string broken by a line break remains
+  nonrecoverable.
 - Lexer errors (`malformed number`, `unfinished string`, invalid escapes)
   name no `near` token, and a missing closing bracket on a later line does
   not add reference Lua's `(to close '(' at line N)`. The parser's other

@@ -50,29 +50,6 @@ tombstones permanently (what `retain_dead` does before sealing, and what
 limits.md says sealing exists to stop). The hunter marks the trade-off as the
 user's call; the current wording is wrong either way.
 
-## RT-006 - A saturated automatic GC threshold becomes permanently Disabled
-
-Scope: `vm-heap`.
-
-Claim broken: `docs/limits.md`, GC policy: "After an automatic collection, the
-next threshold is `max(live_allocations * growth_factor, minimum_threshold)`,
-using saturating multiplication." The `gc_set_policy` doc in `vm.rs` repeats it.
-
-`GcHeap::collect` recomputes only while the threshold is
-`GcThreshold::Automatic`, and builds the new one with
-`GcThreshold::automatic(...)`, which maps `usize::MAX` to
-`GcThreshold::Disabled`. A saturating product (large `growth_factor`) therefore
-switches the State out of automatic mode. Every later collection, explicit
-`gc_collect` included, skips recomputation, so when the live count drops the
-threshold never returns to `max(live * growth, minimum)`. Only
-`gc_set_auto_threshold`/`gc_set_policy` recovers.
-
-The conflation is "automatic, threshold currently unreachable" versus "automatic
-collection disabled by the host". Low severity (needs a huge growth factor), but
-the documented formula is not what runs. Fix: keep `Automatic(usize::MAX)` as a
-distinct state; only `initial_threshold == usize::MAX` and host calls produce
-`Disabled`.
-
 ## RT-008 - error(msg, 1) and error(msg, nil) can render differently from error(msg)
 
 Scope: `stdlib-core`.
@@ -93,17 +70,6 @@ reads an absent level as 1 a few lines later (`unwrap_or(1)`). Edge case.
 Fix: map level 1, absent and nil to one `PrefixLocation`, either by folding
 `TraceFrame(0)` into `Current` or by having the no-argument path produce
 `TraceFrame(0)`.
-
-## RT-011 - Lateral: the release-mode upvalue pool is not defensive against double free
-
-Scope: `vm-heap`. Latent; reachable only through a root-set bug.
-
-`UpvaluePool::mark_slot` only `debug_assert!`s that a slot is not `Free`. In
-release, marking a freed slot flips it to `Reachable`; the next sweep sets it to
-`Unmarked` while it is still on the free list; a later sweep can push it a
-second time, after which two allocations share one slot. The failure mode is
-silent upvalue aliasing, unlike the heap's `get`, which fails loudly on a stale
-key.
 
 ## RT-014 - Lateral: inline-cache validation is re-implemented at every consumer
 
@@ -192,25 +158,20 @@ names the fix: shared ownership of heap string bytes (an `Rc<[u8]>`-style
 handle). With that, `find`, `match` and `gsub` would be borrow-only.
 `string.format` already borrows plain string arguments.
 
-## RT-024 - Lateral: the raw table.move per-copy poll is now untested, and its test is misnamed
+## RT-025 - Lateral: the raw table.move mid-copy interrupt test is a timing race
 
-Raised during a fix wave by the green agent. Test coverage.
+Raised during a fix wave by the orchestrator. Test reliability.
 
-Rust callbacks now poll for an interrupt at entry, so a pending interrupt stops
-`table.move` before it prepays or copies anything.
-`host::interrupt::an_interrupted_raw_move_keeps_its_destination_and_prepaid_cost`
-was adjusted to assert that (the run with the interrupt costs the same as the
-one without), but its name still describes the old behaviour, and the raw
-move's own per-copy poll can no longer be reached by a pending interrupt, so
-nothing exercises it. A test that raises the interrupt mid-move (for example
-from an `__index`/`__newindex` handler or a host callback invoked during the
-copy) would cover it; rename the existing test to what it now checks.
+`raw_move_polls_interrupt_during_its_prepaid_copy_loop`
+(`tests/integration/host/interrupt.rs`) covers the raw `table.move` per-copy
+interrupt poll by setting the interrupt from a second thread after a 50 ms
+sleep while a very large move runs (the count was raised to 200,000,000 copies
+so a fast build cannot finish first). It passed its first gate run, but it is
+still a race against scheduling and machine speed, and if the poll ever
+regressed the move would try to complete 200 million copies, growing the
+destination table by gigabytes before failing. The raw path runs no script or
+host code during the copy, which is why the test resorted to a thread. A
+deterministic trigger (a test-only hook that sets the interrupt after N copies,
+or an interrupt-after-N-polls test helper on `Interrupt`) would make the test
+exact and cheap.
 
-## RT-023 - Lateral: string.format duplicates the %s rendering tail across two arms
-
-Raised during a fix wave by the reconciler. Smell.
-
-In `format_argument` (`src/lua_std/string_format.rs`), the `Itself` and `Bytes`
-arms of the `%s` case are near-identical copies: the embedded-zero check, the
-precision cut and the padding. One shared helper taking `&[u8]` would remove the
-copy. The borrow of `state` across the arms is what makes merging them fiddly.

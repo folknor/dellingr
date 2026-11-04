@@ -60,47 +60,6 @@ unchanged keys: record tombstone, vacancy and position per slot, but carry a
 value only for keys in `upserts`, so unchanged keys keep setup's value. The
 hunter prefers (a) as simpler and consistent with the format-13 `_G` design.
 
-## SNAP-003 - format_pointer_ids are written in map insertion order, so a loaded State and its continuous run can stop saving identical bytes
-
-Scope: `snapshot`. Hunter's label: low-medium. Replay-visible only in save
-bytes; a fix needs a golden regeneration.
-
-Claims broken: `docs/save-state.md`, Byte stability: "A loaded State and the
-continuous run it came from keep saving identical bytes". Load section: "A setup
-that replays the saving State's initialization renders each such value with the
-id its counterpart had, so the loaded State continues as the saving one would."
-
-`SaveBuilder::walk` iterates `state.format_pointer_ids` (an `IndexMap` in render
-order) and writes entries in that order. After a load the map order is saved
-entries first, then setup-kept entries, then re-keyed ones
-(`materialize_payload` plus `merge_setup_pointer_ids`). The continuous run's
-order is pure render order. Pruning uses `retain`, which keeps order, so nothing
-re-canonicalises it.
-
-Scenario: setup renders an anchored table `A` (or `%p` of a string held only by
-an anchor) during init and gets id 1. Later a script renders global table `B`,
-id 2. The save drops `A` (unreachable) and keeps `B:2`. On load setup renders
-`A` again (id 1, not among the saved ids, so kept). Loaded map: `[B:2, A:1]`;
-continuous map: `[A:1, B:2]`. Both runs then store `A` in a global and save: the
-payloads list the two records in different orders though the logical state and
-every id are identical.
-
-Fix: write `format_pointer_ids` sorted by id (ids are unique and verified below
-`next_format_pointer_id`). That is canonical, does not change the format, and
-makes the loaded map's order irrelevant.
-
-## SNAP-007 - Lateral: Table::rebuild_from_snapshot is not atomic on error
-
-Raised by both `snapshot` and `vm-heap`.
-
-`rebuild_from_snapshot` replaces `*self` with an empty shell (version reset to
-0, metatable cleared) before validating array keys and hash keys. Every caller
-is a load path that discards the State on failure, so nothing observes the
-half-rebuilt table; it is safe only because of that. The `vm-heap` hunter adds
-that the version comment ("must move past every value an inline cache could
-have captured") holds only on the success path. Validating before replacing
-removes the dependency on the caller.
-
 ## SNAP-008 - Lateral: PathFinder can report a path that is not the edge the encoder followed
 
 Scope: `snapshot`.

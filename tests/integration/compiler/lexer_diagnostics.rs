@@ -29,6 +29,95 @@ fn unfinished_long_comment_has_its_own_message() {
 }
 
 #[test]
+fn incomplete_numbers_at_eof_are_recoverable() {
+    for source in [
+        "x = 1e",
+        "x = 1e+",
+        "x = 0x",
+        "x = 0x.",
+        "x = 0x1p",
+        "x = 0x1p-",
+    ] {
+        let err = load_error(source);
+        assert!(
+            matches!(
+                err.kind(),
+                ErrorKind::SyntaxError(SyntaxError::UnfinishedNumber)
+            ),
+            "{source:?}: {err}"
+        );
+        assert!(err.is_recoverable(), "{source:?}");
+        assert!(err.kind().is_recoverable(), "{source:?}");
+        assert!(format!("{err}").contains("malformed number"), "{err}");
+    }
+
+    for source in ["x = 1e+a", "x = 1e ", "x = 0xg"] {
+        let err = load_error(source);
+        assert!(matches!(
+            err.kind(),
+            ErrorKind::SyntaxError(SyntaxError::BadNumber)
+        ));
+        assert!(!err.is_recoverable(), "{source:?}");
+    }
+}
+
+#[test]
+fn appending_digits_completes_incomplete_numerals() {
+    for (prefix, digits) in [
+        ("return 1e", "5"),
+        ("return 0x", "1"),
+        ("return 0x.", "8"),
+        ("return 0x1p", "0"),
+    ] {
+        let source = format!("{prefix}{digits}");
+        dellingr::Program::compile(&source, None)
+            .expect("appended digits must complete the numeral");
+    }
+}
+
+#[test]
+fn short_string_ending_at_eof_is_recoverable() {
+    for source in ["print(\"abc", "print(\"abc\\"] {
+        let err = load_error(source);
+        assert!(
+            matches!(
+                err.kind(),
+                ErrorKind::SyntaxError(SyntaxError::UnfinishedString)
+            ),
+            "{source:?}: {err}"
+        );
+        assert!(err.is_recoverable(), "{source:?}");
+        assert!(err.kind().is_recoverable(), "{source:?}");
+        assert!(format!("{err}").contains("unfinished string"), "{err}");
+    }
+}
+
+#[test]
+fn goto_is_reserved_and_reports_that_the_feature_is_unsupported() {
+    for source in [
+        "local goto = 1",
+        "goto = 5",
+        "goto",
+        "goto continue",
+        "local value = goto",
+        "value.goto",
+    ] {
+        let err = load_error(source);
+        assert!(
+            matches!(
+                err.kind(),
+                ErrorKind::SyntaxError(SyntaxError::UnsupportedGoto)
+            ),
+            "{source:?}: {err}"
+        );
+        assert!(
+            format!("{err}").contains("the 'goto' keyword is not supported"),
+            "{err}"
+        );
+    }
+}
+
+#[test]
 fn unclosed_short_string_position_is_independent_of_newline_style() {
     // The error names the end of the line the string broke off on, where its
     // closing quote is missing, whichever newline convention ends that line.
@@ -41,6 +130,7 @@ fn unclosed_short_string_position_is_independent_of_newline_style() {
             ),
             "{err}"
         );
+        assert!(!err.is_recoverable(), "{source:?}");
         assert_eq!((err.line_num(), err.column()), (1, 3), "{source:?}");
     }
 }

@@ -149,9 +149,31 @@ version's meaning is wider (see below).
 - `docs/determinism.md` names the anchor release queue as a second
   asynchronous host input: a cross-thread `Anchor` drop concurrent with a run
   can change which collection frees its value.
+- `Error::is_recoverable` reports a short string or numeral cut off by the
+  end of the source (`"abc`, `1e`, `0x1p-`), through the new
+  `SyntaxError::UnfinishedString` and `SyntaxError::UnfinishedNumber`. Their
+  messages are unchanged (`unfinished string`, `malformed number`); a short
+  string broken by a line break stays `UnclosedString` and nonrecoverable.
+- An automatic GC threshold whose computed value saturates to `usize::MAX`
+  stays automatic, so a later collection recomputes it, instead of switching
+  allocation-triggered collection off for good.
+- A snapshot table restore that rejects an entry leaves the table's contents,
+  version and metatable as they were, instead of a half-rebuilt table.
+- Saves write rendered pointer identities in ascending id order, so a loaded
+  State and the continuous run it came from save identical bytes. A State
+  whose identity map was in another order saves different bytes than before,
+  with the same format and identities.
+- The `--analyze` per-scope breakdown shows a scope's operation counts when
+  the model weighs them zero, instead of reporting `cost 0 (static)`.
+- Marking a swept upvalue slot panics in release builds too, instead of
+  letting the sweep put the same slot on the free list twice.
 
 ### Changed
 
+- `goto` is a reserved word (breaking for scripts that used it as a name or
+  field): any use raises the new `SyntaxError::UnsupportedGoto`, "the 'goto'
+  keyword is not supported", and `TokenKind::Goto` names it. Goto statements
+  and labels remain unimplemented.
 - Bumped the dev-only `object` dependency (the libm symbol test's ELF reader)
   0.37 to 0.40, and the optional `hotpath` profiler 0.29 to 0.31. Neither
   touches a default build.

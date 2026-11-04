@@ -110,10 +110,11 @@ impl UpvaluePool {
     /// Mark one slot reachable during the GC mark phase.
     pub(super) fn mark_slot(&self, uv_ref: UpvalueRef) {
         let color = &self.colors[uv_ref.index()];
-        debug_assert!(
+        assert!(
             color.get() != UpvalueSlotColor::Free,
             "a reachable closure or open-upvalue entry holds an UpvalueRef \
-             whose slot was swept; the pool root set is incomplete"
+             whose slot was swept; the pool root set is incomplete, and \
+             marking it could let sweep add the same free slot twice"
         );
         color.set(UpvalueSlotColor::Reachable);
     }
@@ -324,13 +325,17 @@ impl Default for GcPolicy {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GcThreshold {
+    /// Automatic mode remains active even when a computed threshold saturates
+    /// to `usize::MAX`; a later collection can recompute it from live count.
     Automatic(usize),
     Manual(usize),
     Disabled,
 }
 
 impl GcThreshold {
-    fn automatic(value: usize) -> Self {
+    /// `usize::MAX` disables the initial automatic policy. Computed
+    /// thresholds use `Automatic` directly so saturation does not disable it.
+    fn from_initial(value: usize) -> Self {
         if value == usize::MAX {
             Self::Disabled
         } else {
@@ -388,7 +393,7 @@ impl GcHeap {
     pub(super) fn with_policy(policy: GcPolicy) -> Self {
         Self {
             objects: SlotMap::with_key(),
-            threshold: GcThreshold::automatic(policy.initial_threshold),
+            threshold: GcThreshold::from_initial(policy.initial_threshold),
             policy,
             strings: StringPool::new(),
             mark_worklist: Vec::new(),
@@ -718,7 +723,7 @@ impl GcHeap {
         // Preserve manual and disabled modes across explicit collections.
         // Automatic mode follows the State's policy rather than replacing it.
         if matches!(self.threshold, GcThreshold::Automatic(_)) {
-            self.threshold = GcThreshold::automatic(
+            self.threshold = GcThreshold::Automatic(
                 self.allocation_count()
                     .saturating_mul(self.policy.growth_factor)
                     .max(self.policy.minimum_threshold),
@@ -826,12 +831,12 @@ impl GcHeap {
     /// threshold.
     pub(super) fn set_policy(&mut self, policy: GcPolicy) {
         self.policy = policy;
-        self.threshold = GcThreshold::automatic(policy.initial_threshold);
+        self.threshold = GcThreshold::from_initial(policy.initial_threshold);
     }
 
     /// Resume automatic collection at the configured initial threshold.
     pub(super) fn reset_auto_threshold(&mut self) {
-        self.threshold = GcThreshold::automatic(self.policy.initial_threshold);
+        self.threshold = GcThreshold::from_initial(self.policy.initial_threshold);
     }
 
     /// Disable automatic collection while preserving explicit collection.
@@ -1078,6 +1083,44 @@ mod tests {
         assert!(heap.as_table_ref(t1).is_some());
         assert!(heap.as_table_ref(t2).is_some());
         assert_eq!(heap.object_count(), 2);
+    }
+
+    #[test]
+    fn saturated_automatic_threshold_is_recomputed_after_collection() {
+        let mut heap = GcHeap::with_policy(GcPolicy::new(1, 1, usize::MAX));
+        let kept = heap.no_gc_allocator().alloc_table();
+
+        let mut worklist = heap.take_mark_worklist();
+        heap.mark(kept, &mut worklist);
+        heap.drain_mark_worklist(&mut worklist, &UpvaluePool::new());
+        heap.restore_mark_worklist(worklist);
+        heap.collect();
+
+        assert_eq!(heap.threshold(), usize::MAX);
+        assert!(matches!(heap.threshold, GcThreshold::Automatic(usize::MAX)));
+
+        // Once the live count falls, automatic mode derives a lower threshold.
+        heap.collect();
+        assert_eq!(heap.threshold(), 1);
+    }
+
+    #[test]
+    fn maximum_initial_threshold_stays_disabled_after_collection() {
+        let mut heap = GcHeap::with_policy(GcPolicy::new(usize::MAX, 1, 2));
+        heap.collect();
+
+        assert_eq!(heap.threshold(), usize::MAX);
+        assert!(matches!(heap.threshold, GcThreshold::Disabled));
+    }
+
+    #[test]
+    #[should_panic(expected = "marking it could let sweep add the same free slot twice")]
+    fn marking_a_swept_upvalue_slot_is_rejected() {
+        let mut pool = UpvaluePool::new();
+        let uv_ref = pool.alloc(Upvalue::Closed(Val::Nil));
+        pool.sweep();
+
+        pool.mark_slot(uv_ref);
     }
 
     #[test]

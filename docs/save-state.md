@@ -209,7 +209,12 @@ returns; the loaded State starts with an empty stack.
   insertion history, storage kind, dead keys and vacant positions, so cleared
   `next` controls and later compaction behave identically after load. Dead keys
   remain GC roots until compaction removes their slots. A loaded State and the
-  continuous run it came from keep saving identical bytes.
+  continuous run it came from keep saving identical bytes. Rendered pointer
+  identity records are written in ascending id order: loading can merge setup
+  identities into the runtime map in a different insertion order, but that
+  order does not affect the encoded bytes. Resaving a State whose runtime map
+  order was not ascending may therefore produce different bytes from older
+  builds, while retaining the same format and identities.
 - A host that content-hashes saves across upgrades must hash the payload after
   the header, or accept that a version bump changes the bytes.
 - Saves are user-editable input. Authenticate them if tampering with future

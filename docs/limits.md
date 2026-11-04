@@ -137,9 +137,11 @@ the current threshold. The default automatic policy uses
 `DEFAULT_GC_THRESHOLD_GROWTH_FACTOR` as its growth factor. These crate-private
 defaults are defined in `src/limits/tuning.rs`. Each State stores its own
 policy; these are the defaults used when a State is created.
-After an automatic collection, the next threshold is
+After a collection while automatic mode is active, the next threshold is
 `max(live_allocations * growth_factor, minimum_threshold)`, using saturating
-multiplication.
+multiplication. A calculated `usize::MAX` remains an automatic threshold and
+later collections recompute it. Allocation-triggered collection is disabled
+by an initial or host-set threshold of `usize::MAX`, or by `gc_disable_auto`.
 
 Embedders can provide per-State values with
 `State::builder().gc_policy(initial_threshold, minimum_threshold, growth_factor)`

@@ -61,28 +61,6 @@ purpose, they belong in the README's "Won't implement" list and in
 `CallInfo` into `Frame` (tracked in `notes/optimizations.md`, call path after
 the frame-stack flattening) would make the in-place tail call simpler.
 
-## COMPAT-003 - goto is an ordinary identifier, and attempts to use it get misleading errors
-
-Scope: `compiler-front`. Hunter's label: medium-low.
-
-`token.rs` `KEYWORDS` has no `goto`, so the lexer returns it as `Identifier`:
-
-- `local goto = 1`, `goto = 5` and `goto` used as a variable all compile. Lua
-  5.2 and 5.4 reject them because `goto` is reserved in both. This
-  accepted-program divergence is not listed. The README's "Won't implement:
-  `goto`/labels" says the feature is absent, not that the name becomes free.
-- `goto continue` gives `syntax error near 'continue'` (the parser reads `goto`
-  as a global-variable expression statement), and `::continue::` gives
-  `unexpected symbol near ':'`. Neither says `goto` is unsupported. Compare
-  `_ENV` (`SyntaxError::UnsupportedEnvironmentName`) and long strings
-  (`LongStringUnsupported`), which have dedicated "not supported" errors for the
-  same reason.
-
-Claims broken: the page's opening sentence, and the project's rule that a
-misleading message is a defect for the script author. Fix options: reserve
-`goto` with an "unsupported" error as for `_ENV` and long strings, or document
-that the name is free.
-
 ## COMPAT-007 - Unlisted base and table library divergences: select and empty sort
 
 Scope: `stdlib-core`. The other bullets of this entry are documented; these two

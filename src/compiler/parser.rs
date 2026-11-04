@@ -216,9 +216,9 @@ impl<'a> Parser<'a> {
 
     /// Constructs a syntax error about `token` from the token's source bytes.
     /// An end-of-input token is always [`SyntaxError::UnexpectedEof`],
-    /// whatever was being parsed, because that is the parser kind
-    /// `is_recoverable` reports. (Lexer errors at the end of the source keep
-    /// their own kinds.)
+    /// whatever was being parsed, so hosts can recognize the incomplete
+    /// construct. Lexer and numeral-conversion errors at EOF keep their more
+    /// specific kinds.
     #[must_use]
     fn err_near(&self, token: Token, error: impl FnOnce(Vec<u8>) -> SyntaxError) -> Error {
         let error_kind = if token.typ == TokenKind::EndOfFile {

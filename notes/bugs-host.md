@@ -42,47 +42,16 @@ something like `SetupInRestrictedEnv { api }`), or document the split on both
 methods. Plain `register_rust_fn`/`add_rust_fn` are fine inside `f`: they
 install nothing into the environment.
 
-## HOST-005 - The cost-analysis report hides operation counts depending on the model
+## HOST-006 - The analysis report's table-writes label omits constructor fields
 
-Raised by both `vm-state` and `cost-cli`; re-confirmed by a later fix wave.
+Scope: `cost-cli`. The `ScopeCost` accessor docs are fixed; this residue is
+one report label.
 
-Claim broken: `Program::analyze_cost_with` and `docs/budget.md` ("Static
-analysis"): "Operation counts do not depend on the model; costs do."
-
-`ScopeCost::fmt_indent` (`src/lib.rs`) decides from cost whether to print a
-scope's category breakdown. With `own_cost == 0 && nested.is_empty() &&
-function_calls() == 0` it prints `name: cost 0 (static)` and no counts;
-otherwise it prints counts only when `own_cost > 0 || function_calls() > 0`.
-Under `analyze_cost_with(&CostModel::zero())`, or any model weighting a scope's
-charges at 0 (a design that makes arithmetic free, say), a scope full of
-arithmetic and table writes renders as `cost 0 (static)` with no breakdown,
-while the summary section above still prints `Arithmetic ...: N ops` for the
-same operations. Whether counts appear also depends on whether the scope
-contains a call: one `OP_CALL` makes every zero-weighted category appear. The
-accessors are right; the `Display` is wrong.
-
-Fix: gate the breakdown, and the `(static)` short form, on any category count
-being non-zero, not on `own_cost`. A later wave kept the `(static)` marker on
-the zero-cost short form on purpose (a zero static estimate can still have
-runtime cost, for example a generic-for iterator call); the comment beside it in
-`src/lib.rs` says why.
-
-## HOST-006 - ScopeCost field and accessor docs say something other than what they hold
-
-Scope: `cost-cli`.
-
-- `instructions` is documented as "Total instruction count" but counts only this
-  scope's own instructions (`analyze_chunk` counts `chunk.code`). Its sibling
-  `total_cost` uses "total" to mean "including nested", so the word misleads.
-  The six category accessors are own-only too, and nothing says so.
-- `array_elements()`: "Number of array elements initialized". An open `SET_LIST`
-  counts 0 even when the constructor certainly stores elements: `{1, 2, f()}`
-  reports 0 although 1 and 2 are always stored. The budget doc covers the open
-  count; the accessor doc contradicts it.
-- `table_writes()`: "table field writes (`t.x = v`, `t[k] = v`)". It also counts
-  constructor keyed fields (`INIT_FIELD`, `INIT_FIELD_PINNED`, `INIT_INDEX`, all
-  of class `TableWrite`). The report label `Table writes (t[k]=v)` has the same
-  gap.
+The table-writes category also counts constructor keyed fields
+(`INIT_FIELD`, `INIT_FIELD_PINNED`, `INIT_INDEX`, all of class `TableWrite`),
+and the `table_writes()` doc now says so. The report label in `src/instr.rs`
+(`OPCODE_COST_LABELS`) still reads `Table writes (t[k]=v)`. Reword it to cover
+keyed constructor fields; tests that pin the analysis report text move with it.
 
 ## HOST-008 - The CLI does not provision the native-stack envelope it relies on
 

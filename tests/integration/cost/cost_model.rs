@@ -534,6 +534,70 @@ fn analysis_applies_the_model_to_every_scope() {
 }
 
 #[test]
+fn zero_weights_keep_scope_operation_counts_visible() {
+    let program = Program::compile(
+        "local a = 1\n\
+         local b = 2\n\
+         local c = a + b\n\
+         local t = {named = c, [b] = c}\n\
+         t.extra = c",
+        None,
+    )
+    .expect("the program compiles");
+    let analysis = program.analyze_cost_with(&CostModel::zero());
+    assert_eq!(analysis.root.own_cost, 0);
+    assert_eq!(analysis.root.arithmetic_ops(), 1);
+    assert_eq!(analysis.root.table_writes(), 3);
+
+    let rendered = analysis.to_string();
+    let (_, scopes) = rendered
+        .split_once("--- Per-Scope Breakdown ---")
+        .expect("the report has a per-scope section");
+    assert!(
+        scopes.contains("main: cost 0\n  arithmetic: 1\n"),
+        "{rendered}"
+    );
+    assert!(scopes.contains("table writes: 3"), "{rendered}");
+    assert!(!scopes.contains("cost 0 (static)"), "{rendered}");
+}
+
+#[test]
+fn scope_counts_cover_only_their_chunk_and_open_array_batches_count_zero() {
+    let program = Program::compile(
+        "local t = {1, 2, f()}\n\
+         local keyed = {named = 1, [2] = 3}\n\
+         keyed.extra = 4\n\
+         local function inner()\n\
+             local a = 1\n\
+             local b = 2\n\
+             return a + b\n\
+         end",
+        None,
+    )
+    .expect("the program compiles");
+    let analysis = program.analyze_cost();
+    let nested = &analysis.root.nested[0];
+
+    assert_eq!(analysis.root.array_elements(), 0);
+    assert_eq!(analysis.root.table_writes(), 3);
+    assert_eq!(analysis.root.arithmetic_ops(), 0);
+    assert_eq!(nested.arithmetic_ops(), 1);
+    assert_eq!(analysis.root.function_calls(), 1);
+    assert_eq!(nested.function_calls(), 0);
+    assert!(analysis.root.instructions > 0);
+    assert!(nested.instructions > 0);
+
+    let rendered = analysis.to_string();
+    let total = rendered
+        .lines()
+        .find_map(|line| line.strip_prefix("  Total instructions:   "))
+        .expect("the report includes the all-scope instruction total")
+        .parse::<u64>()
+        .expect("the instruction total is numeric");
+    assert_eq!(total, analysis.root.instructions + nested.instructions);
+}
+
+#[test]
 fn analysis_agrees_with_a_straight_line_run() {
     // With no loops, branches or native calls, the static total is the cost.
     let source = "local a = 3 local b = a + a b = a * a b = -a local t = {1, 2, 3}";

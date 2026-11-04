@@ -365,9 +365,10 @@ impl StateBuilder {
     /// A host-selected garbage collection policy.
     ///
     /// The initial threshold is active while the standard library is opened.
-    /// After an automatic collection, the next threshold is
+    /// After a collection while automatic mode is active, the next threshold is
     /// `max(live_allocations * growth_factor, minimum_threshold)`. These values
-    /// are runtime policy and are not written to snapshots.
+    /// are runtime policy and are not written to snapshots. A calculated
+    /// `usize::MAX` remains automatic and is recomputed by later collections.
     ///
     /// `usize::MAX` as `initial_threshold` disables automatic collection until
     /// the threshold is changed. A zero threshold triggers collection before
@@ -939,9 +940,11 @@ impl State {
     /// Replaces this State's automatic GC policy and resets its threshold to
     /// `initial_threshold`.
     ///
-    /// After each automatic collection, the next threshold is
+    /// After each collection while automatic mode is active, the next threshold is
     /// `max(live_allocations * growth_factor, minimum_threshold)`. This also
     /// switches a manually set or disabled threshold back to automatic mode.
+    /// A calculated `usize::MAX` remains automatic and is recomputed by later
+    /// collections.
     /// `usize::MAX` as `initial_threshold` keeps automatic collection disabled.
     pub fn gc_set_policy(
         &mut self,

@@ -103,6 +103,10 @@ impl Parser<'_> {
                         line: self.input.last_line(),
                     });
                     i = 0;
+                    // Overflow needs more full batches than a u16 counts.
+                    // Even one-byte entries plus separators exceed the source
+                    // cap (`MAX_SOURCE_BYTES`) first, so this only guards the
+                    // batch-index invariant.
                     batch = batch
                         .checked_add(1)
                         .ok_or_else(|| self.error_here(SyntaxError::TooManyTableFields))?;
