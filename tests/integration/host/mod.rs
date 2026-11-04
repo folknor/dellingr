@@ -7,6 +7,7 @@ mod float_environment;
 mod host_call_preflight;
 mod host_error_reporting;
 mod host_frame_isolation;
+mod host_set_table;
 mod host_table_api_atomicity;
 mod interrupt;
 mod panic_poison;

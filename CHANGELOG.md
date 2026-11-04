@@ -11,6 +11,14 @@ version's meaning is wider (see below).
 
 ### Added
 
+- `State::set_table(i)`: the host store that honours `__newindex`, the
+  counterpart of `get_table`. It stores exactly as a script's `t[k] = v`
+  does (handler tables, functions and the metamethod depth rule, table
+  receivers only, nil and NaN keys passed to a handler and refused only by a
+  raw store) and charges nothing. Every failure before a handler runs leaves
+  the stack unchanged; a failing handler consumes the key and value. Errors
+  are reported to `on_error` like `get_table`'s. The table library's
+  metamethod stores now follow the same contract.
 - Host interrupts. `Interrupt` is a shareable flag (`trigger`, `reset`,
   `is_triggered`, `same_as`) that a host sets from any thread or a signal
   handler to stop running Lua: `StateBuilder::interrupt` installs a host-held
@@ -24,7 +32,9 @@ version's meaning is wider (see below).
   and the empty-pattern `string.gsub`). The flag is sticky until the host
   resets it, charges nothing, and is not saved in snapshots. There is still
   no instruction-count or time limit. See "Stopping a script from the host"
-  in `docs/budget.md`.
+  in `docs/budget.md`. The polls cost every run, interrupted or not: about
+  0.5 to 2.4 percent wall time on the benchmark workloads, most on call-heavy
+  code (`reference/performance.md`, "2026-11-04: interrupt safepoints").
 - `State::raw_field::<T>(table_arg, name)`: host functions read a typed field
   of an options table argument such as `game.spawn{player = 1, x = 2}`. It is a
   raw read (a field supplied by `__index` reads as absent), runs no Lua, leaves
@@ -108,6 +118,11 @@ version's meaning is wider (see below).
   `ValidationReason::BackwardLoopExit`. The compiler never emits one, so no
   save written by this crate is affected; the rule keeps every backward
   transfer an interrupt safepoint.
+- Bytecode admission no longer requires a `GET_GLOBAL` or `SET_GLOBAL` name
+  to be UTF-8, and `ValidationReason::GlobalNameNotUtf8` is removed
+  (breaking for code that matched it). `_G` is an ordinary table keyed by the
+  interned literal, so a binary name works as `_G["\255"]` does; the compiler
+  never emits one, so this only widens what a snapshot load accepts.
 
 ## [0.6.0] - 2026-10-25
 

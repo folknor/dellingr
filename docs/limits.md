@@ -259,13 +259,17 @@ capacity; what a collection frees is the payloads and entries it removes.
 
 ## Host table methods
 
-`get_table`, `get_table_raw`, `set_table_raw`, `table_next`,
+`get_table`, `get_table_raw`, `set_table`, `set_table_raw`, `table_next`,
 `set_metatable_of`, `table_insert_at` and `table_remove_at` validate before
 they pop. Every rejection detectable up front leaves the stack as it was:
-bad index, wrong type, invalid key, invalid position.
+bad index, wrong type, invalid key, invalid position. `get_table` and
+`set_table` also leave it unchanged when metamethod dispatch fails before a
+handler runs (a handler that can be neither indexed nor called, the
+metamethod depth limit, a handler call refused for stack or call depth).
 
-Exception: when `get_table` calls an `__index` function and that call fails,
-the key has already been consumed.
+Exception: when `get_table` calls an `__index` function, or `set_table` a
+`__newindex` function, and that call fails, the key (and for `set_table` the
+value) has already been consumed.
 
 ## Runtime call width
 

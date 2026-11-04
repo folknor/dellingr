@@ -418,17 +418,57 @@ impl State {
         Ok(())
     }
 
-    /// Library assignment with the same `__newindex` dispatch as bytecode.
-    /// Keep the key and value on the stack as GC roots throughout dispatch;
-    /// consume them only after a successful write or handler call. On error
-    /// the key, value and handler temporaries stay for the enclosing call
-    /// boundary or dispatch-loop unwind.
-    pub(crate) fn set_table(&mut self, i: isize) -> Result<()> {
-        let idx = self.table_operand_below_top(i, 2)?;
+    /// Does the equivalent of `t[k] = v`, where `t` is the value at the given
+    /// valid index, `k` is the value at the top of the stack minus 1, and `v`
+    /// is the value at the top of the stack. Pops both the key and the value.
+    /// As in Lua, this function may trigger a metamethod for the "newindex"
+    /// event: it stores exactly as a script's `t[k] = v` does, through
+    /// `__newindex` handler tables and functions, under the same metamethod
+    /// depth rule. The receiver must be a table, as in a script.
+    ///
+    /// A nil or NaN key is passed to a `__newindex` function like any other
+    /// key and refused only by a raw store.
+    ///
+    /// Every failure before a `__newindex` function is entered leaves the
+    /// stack unchanged: a bad index, too few operands, a non-table receiver,
+    /// an invalid key for a raw store, a handler that can be neither indexed
+    /// nor called, the metamethod depth limit, a refused table growth, and a
+    /// handler call refused before entry. An error from an entered handler
+    /// consumes the key and value and clears handler temporaries, preserving
+    /// every earlier stack slot. Writes made by the handler survive the error.
+    ///
+    /// An invalid index or missing operands are host misuse and do not fire
+    /// [`HostCallbacks::on_error`](crate::HostCallbacks::on_error); a
+    /// receiver that is not a table, and every failure of the store itself,
+    /// notify as `call`'s errors do.
+    ///
+    /// Charges no cost, like [`State::get_table`] and [`State::set_table_raw`].
+    /// Guarded like [`State::call`]: refused on a poisoned State, and a panic
+    /// out of a metamethod poisons it.
+    pub fn set_table(&mut self, i: isize) -> Result<()> {
+        self.guarded(|state| {
+            crate::native_call!(
+                "set_table->set_table_unguarded",
+                state.set_table_unguarded(i)
+            )
+        })
+    }
+
+    /// [`State::set_table`] without the poison boundary, for the standard
+    /// library and other VM-internal callers. The key and value stay on the
+    /// stack as GC roots throughout dispatch, below any handler window, so a
+    /// failure before handler entry has nothing to restore.
+    // This frame survives __newindex re-entry; instrumentation would add to
+    // every level of the bounded native stack.
+    pub(crate) fn set_table_unguarded(&mut self, i: isize) -> Result<()> {
+        let idx = self
+            .table_operand_below_top(i, 2)
+            .map_err(|error| self.report_index_receiver_error(error))?;
         let top = self.stack.len();
         let key = self.stack[top - 2];
         let val = self.stack[top - 1];
         let mut local_cost = 0;
+        let mut handler_entered = false;
         let ptr = self.stack[idx]
             .as_object_ptr()
             .expect("table_operand_below_top validated the table");
@@ -436,22 +476,42 @@ impl State {
             .heap
             .as_table(ptr)
             .expect("table_operand_below_top validated the table");
-        let pending = if matches!(tbl.get(&key), Val::Nil) {
-            self.store_new_key(ptr, key, val, &mut local_cost)?
+        let stored = if matches!(tbl.get(&key), Val::Nil) {
+            self.store_new_key(ptr, key, val, &mut local_cost)
         } else {
-            tbl.insert(key, val)?;
-            None
+            tbl.insert(key, val).map(|()| None).map_err(Into::into)
         };
-        if let Some(units) = pending {
-            let called = crate::native_call!(
-                "set_table->call_unguarded",
-                self.call_unguarded(ArgCount::Fixed(3), RetCount::Fixed(0))
-            );
-            self.in_flight.metamethod_depth -= units;
-            called?;
+        let result = match stored {
+            Ok(Some(units)) => {
+                let called = crate::native_call!(
+                    "set_table_unguarded->call_unguarded",
+                    self.call_unguarded(
+                        (
+                            ArgCount::Fixed(3),
+                            super::eval::StoreEntry(&mut handler_entered),
+                        ),
+                        RetCount::Fixed(0),
+                    )
+                );
+                self.in_flight.metamethod_depth -= units;
+                called
+            }
+            Ok(None) => Ok(()),
+            Err(error) => Err(error),
+        };
+        match result {
+            Ok(()) => {
+                self.stack.truncate(top - 2);
+                Ok(())
+            }
+            Err(error) => {
+                // Before entry the operands were never consumed: drop only a
+                // pushed window. After entry the store is spent.
+                self.stack
+                    .truncate(if handler_entered { top - 2 } else { top });
+                Err(self.report_escaping(error))
+            }
         }
-        self.stack.truncate(top - 2);
-        Ok(())
     }
 
     /// Returns the next key-value pair from a table, for use with `pairs`.

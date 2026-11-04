@@ -526,23 +526,20 @@ less than constructor pre-sizing is unmeasured for dellingr; the two
 are complementary (cold/first-touch vs. warm/steady-state), not
 substitutes.
 
-### Move stdlib install from per-State to per-Engine
+### Share the stdlib install across States
 
-What: today `State::with_callbacks` -> `open_libs` re-runs the
-standard library install on every new `State`, allocating each
-RustFn entry into the `globals: IndexMap<String, Val>`. With the
-`Engine` layer in place, the stdlib install can happen once on
-`Engine::new` and `Engine::new_state` can clone the prepared
-globals into the new State.
+What: today `StateBuilder::build` runs `open_libs` for every new
+`State`, building each library table and the global table (`_G`, an
+ordinary heap table) from scratch. There is no longer an `Engine` to
+hold a prepared copy, so sharing the install needs a new owner: a
+prepared template the builder clones from.
 
-Sketch: `Engine` carries a frozen `stdlib_globals: IndexMap<String,
-Val>` and a frozen `stdlib_builtins: [Val; Builtin::COUNT]` populated
-once at construction. `new_state` clones both into the State.
-Watch out: stdlib `Val`s currently include `Val::Str(StringPtr)` for
-some entries, which are tied to one specific `StringPool`. Either
-the stdlib stops baking string pointers (use `&'static [u8]` and
-intern lazily on first use), or the Engine carries a shared
-string pool that new States inherit.
+Sketch: build the standard environment once into a template and give
+new States a copy of it. Watch out: the library tables, `_G` and the
+interned key strings all live in one State's heap, so a copy has to
+rebuild them in the new heap (or the heap has to support cloning), and
+the snapshot environment tokens (`env_tokens`, `env_baselines`) are
+captured right after `open_libs` and must match the copy.
 
 Shipped smaller step on 2026-05-11: stdlib globals and module tables now
 install Rust functions through direct `Val`/string-key insertion helpers
@@ -550,7 +547,7 @@ instead of pushing key/function pairs through the Lua stack and calling
 the public table setters. This reduces the per-State setup work without
 changing the ownership model. The process-level `examples/comments.lua`
 signal is tiny and noisy on this host (roughly 495us to 487us in a
-200-run hyperfine sample), so this does not remove the per-Engine idea.
+200-run hyperfine sample), so this does not remove the shared-install idea.
 
 Why deferred: not on the hot path. State construction is amortized
 across however long the State lives; even at "one State per request

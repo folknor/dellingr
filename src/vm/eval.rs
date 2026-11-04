@@ -21,7 +21,8 @@ use crate::limits::{MAX_ARGUMENTS, MAX_METAMETHOD_DEPTH, MAX_NATIVE_CALL_DEPTH};
 pub(super) const FRAME_HEADROOM: usize = 4;
 
 /// Entry observation is zero-sized for ordinary calls, including debug builds.
-/// Only direct function-valued index handlers carry a mutable commit flag.
+/// Only direct function-valued `__index` and `__newindex` handlers carry a
+/// mutable commit flag.
 pub(crate) trait CallEntry {
     fn mark_entered(self);
     fn tracks_entry(&self) -> bool;
@@ -58,6 +59,30 @@ impl CallArguments for ArgCount {
 
 impl<'a> CallArguments for (ArgCount, &'a mut bool) {
     type Entry = &'a mut bool;
+    fn into_parts(self) -> (ArgCount, Self::Entry) {
+        self
+    }
+}
+
+/// The `__newindex` handler's entry observer: the same commit flag as the
+/// `&mut bool` one `get_table_unguarded` uses, as its own type, so the host
+/// read and the host store each get a `call_unguarded` instance with one
+/// caller that stays inlined. Sharing one instance outlined it and added its
+/// whole frame to every native level of every read path (128 bytes in
+/// release; reference/performance.md).
+pub(crate) struct StoreEntry<'a>(pub(crate) &'a mut bool);
+
+impl CallEntry for StoreEntry<'_> {
+    fn mark_entered(self) {
+        *self.0 = true;
+    }
+    fn tracks_entry(&self) -> bool {
+        true
+    }
+}
+
+impl<'a> CallArguments for (ArgCount, StoreEntry<'a>) {
+    type Entry = StoreEntry<'a>;
     fn into_parts(self) -> (ArgCount, Self::Entry) {
         self
     }
@@ -297,8 +322,9 @@ impl State {
             entered.mark_entered();
             return Ok(None);
         }
-        // Observed calls are only made for direct Lua or Rust __index
-        // functions. Callable-object resolution has no host-read observer.
+        // Observed calls are only made for direct Lua or Rust __index and
+        // __newindex functions (the resolvers hand back nothing else).
+        // Callable-object resolution has no host-access observer.
         debug_assert!(!entered.tracks_entry());
         crate::native_call!(
             "begin_call->begin_callable_call",

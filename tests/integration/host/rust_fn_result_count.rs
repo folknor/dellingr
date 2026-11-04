@@ -142,7 +142,7 @@ const LUA_OVER_REPORT_ROUTES: &[LuaOverReportRoute] = &[
         available: 3,
     },
     LuaOverReportRoute {
-        edge: "set_table->call_unguarded",
+        edge: "set_table_unguarded->call_unguarded",
         script: "table.insert(setmetatable({}, {__len = function() return 0 end, __newindex = bad}), 'x')",
         available: 4,
     },

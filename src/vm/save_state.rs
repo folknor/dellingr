@@ -4043,6 +4043,58 @@ mod tests {
         }
     }
 
+    /// A global name need not be UTF-8: `_G` is keyed by the interned
+    /// literal, as a script's `_G["\255"]` is. Forged bytecode that writes a
+    /// binary-named global, reads it back through a cached read and through
+    /// an uncached one (a plain `_G` table lookup), and publishes both, loads,
+    /// runs cold and warm, and survives a save round trip.
+    #[test]
+    fn a_binary_global_name_loads_runs_and_round_trips() {
+        let mut bytecode = valid_saved_bytecode();
+        bytecode.number_literals = vec![7.0f64.to_bits()];
+        bytecode.string_literals = vec![vec![255], b"seen".to_vec(), b"seen_raw".to_vec()];
+        bytecode.code = vec![
+            Instr::load_num(0, 0).raw(),
+            Instr::set_global(0, 0, Some(0)).raw(),
+            Instr::get_global(1, 0, Some(1)).raw(),
+            Instr::set_global(1, 1, Some(2)).raw(),
+            Instr::get_global(1, 0, None).raw(),
+            Instr::set_global(1, 2, Some(3)).raw(),
+            Instr::ret(0, RetCount::Fixed(0)).raw(),
+        ];
+        bytecode.global_cache_slots = 4;
+        bytecode.line_info = vec![1; bytecode.code.len()];
+        let mut state = load_bytecode_with_globals(
+            vec![bytecode],
+            vec![SavedObject::Closure {
+                chunk: 0,
+                upvalues: Vec::new(),
+            }],
+            vec![("writer".to_string(), SavedVal::Obj(0))],
+        )
+        .expect("a binary global name is admitted");
+
+        let check = |state: &mut State| {
+            for _ in 0..2 {
+                state.get_global("writer").expect("writer exists");
+                state
+                    .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+                    .expect("the forged chunk runs");
+            }
+            for name in ["seen", "seen_raw"] {
+                state.get_global(name).expect("the global is readable");
+                assert_eq!(state.to_number(-1).expect("a number"), 7.0, "{name}");
+                state.pop(1).expect("the global was pushed");
+            }
+        };
+        check(&mut state);
+        let save = state.save_state().expect("the State saves");
+        let mut reloaded =
+            State::load_state(&save.bytes, Box::new(crate::DefaultCallbacks), no_setup)
+                .expect("the save loads");
+        check(&mut reloaded);
+    }
+
     #[test]
     fn forged_closure_free_close_loads_and_executes() {
         let mut bytecode = valid_saved_bytecode();
@@ -4433,19 +4485,6 @@ mod tests {
         binary_literal.code.insert(0, Instr::load_str(0, 0).raw());
         binary_literal.line_info.insert(0, 1);
         assert!(load_bytecode(vec![binary_literal], Vec::new()).is_ok());
-
-        let mut bad_global_name = valid_saved_bytecode();
-        bad_global_name.string_literals.push(vec![255]);
-        bad_global_name
-            .code
-            .insert(0, Instr::get_global(0, 0, Some(0)).raw());
-        bad_global_name.global_cache_slots = 1;
-        bad_global_name.line_info.insert(0, 1);
-        assert_invalid(
-            &rejected_bytecode(vec![bad_global_name], Vec::new()),
-            0,
-            Some(0),
-        );
 
         let mut bad_builtin = valid_saved_bytecode();
         bad_builtin.code.insert(

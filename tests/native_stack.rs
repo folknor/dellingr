@@ -191,6 +191,17 @@ const SCENARIOS: &[Scenario] = &[
         raises: false,
     },
     Scenario {
+        name: "host_set_table",
+        setup: "",
+        step: "local seen
+            local t = setmetatable({}, {__newindex = function(_, _, v) DESCEND seen = v end})
+            host_newindex(t, 'x', 4)
+            if seen ~= 4 then error('host newindex') end",
+        native: 1,
+        meta: 1,
+        raises: false,
+    },
+    Scenario {
         name: "host_call",
         setup: "",
         step: "callthrough(function() DESCEND end)",
@@ -962,6 +973,13 @@ fn host_index(state: &mut State) -> dellingr::Result<u8> {
     Ok(1)
 }
 
+/// `host_newindex(t, k, v)` stores `t[k] = v` through `State::set_table`.
+fn host_newindex(state: &mut State) -> dellingr::Result<u8> {
+    state.set_top(3)?;
+    state.set_table(1)?;
+    Ok(0)
+}
+
 fn host_tostring(state: &mut State) -> dellingr::Result<u8> {
     let bytes = state.tostring_bytes(1)?;
     state.push_bytes(bytes)?;
@@ -997,6 +1015,7 @@ const CALLBACKS: &[(&str, dellingr::RustFunc)] = &[
     ("call_handler", call_handler),
     ("anchor_callthrough", anchor_callthrough),
     ("host_index", host_index),
+    ("host_newindex", host_newindex),
     ("host_tostring", host_tostring),
     ("host_to_string", host_to_string),
     ("arm_gc", arm_gc),
@@ -1366,6 +1385,7 @@ scenario_tests!(
     string_library_index,
     host_get_table,
     host_get_table_string,
+    host_set_table,
     host_call,
     host_anchor,
     host_tostring_bytes,

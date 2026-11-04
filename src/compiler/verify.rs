@@ -43,8 +43,6 @@ pub enum ValidationReason {
     MissingFinalReturn,
     /// unknown opcode
     UnknownOpcode,
-    /// global name operand is not UTF-8
-    GlobalNameNotUtf8,
     /// global cache slot does not match first-use order
     GlobalCacheSlotOrder,
     /// builtin slot is out of range
@@ -206,7 +204,6 @@ impl std::fmt::Display for ValidationReason {
             Self::LineInfoLengthMismatch => "line info length does not match code length",
             Self::MissingFinalReturn => "code does not end in return",
             Self::UnknownOpcode => "unknown opcode",
-            Self::GlobalNameNotUtf8 => "global name operand is not UTF-8",
             Self::GlobalCacheSlotOrder => "global cache slot does not match first-use order",
             Self::BuiltinSlotOutOfRange => "builtin slot is out of range",
             Self::TforCallWithoutResults => "TFOR_CALL requires at least one result",
@@ -544,7 +541,6 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
     let strings = view.string_literals().len();
     let numbers = view.number_literals_len();
     let mut global_slots: Vec<Option<usize>> = vec![None; strings];
-    let mut global_name_checked = vec![false; strings];
     let mut next_global_slot = 0usize;
     let mut next_field_slot = 0usize;
     let mut next_set_field_slot = 0usize;
@@ -696,16 +692,10 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
             }
             Instr::OP_GET_GLOBAL | Instr::OP_SET_GLOBAL => {
                 reg(pc, a)?;
+                // Any string literal names a global: `_G` is an ordinary
+                // table keyed by the interned literal, so a name need not be
+                // UTF-8, as `_G["\255"]` need not be in a script.
                 pool(pc, inst)?;
-                // Check each name once: re-scanning a long name at every
-                // reference would cost references x name length. The first
-                // reference to a bad name still reports.
-                if !global_name_checked[b as usize] {
-                    if std::str::from_utf8(&view.string_literals()[b as usize]).is_err() {
-                        return Err(err(Some(pc), ValidationReason::GlobalNameNotUtf8));
-                    }
-                    global_name_checked[b as usize] = true;
-                }
                 // "Uncached" is valid anywhere, not only once the slots are
                 // exhausted. The compiler never emits it early, but a
                 // hand-built or deliberately uncached snapshot is still

@@ -25,25 +25,10 @@ get deleted as they ship or stop being worth tracking.
   for the probe rationale", while their `examples/` partners are now
   `-- Workload:`. Rewording them re-pins the verdict files and cuts their
   stored history; do it the next time those workloads are re-pinned anyway.
-- The compiler verifier still requires GET/SET_GLOBAL names to be UTF-8,
-  although the runtime keys the global table with the interned literal and no
-  longer needs it. Either drop the check or say why it stays.
 - Strict-mode globals (`setmetatable(_G, {__index = ..., __newindex = ...})`)
   remain unavailable: `_G`'s metatable is protected and bare global access is
   raw. Supporting it would mean GET/SET_GLOBAL honouring `__index` and
   `__newindex`, a feature decision rather than a fix.
-
-### Hosts can read through metamethods but not write through them
-
-Found 2026-10-24. The public API has `get_table`, which honours `__index`,
-but the only public store is `set_table_raw`; `State::set_table` (which
-honours `__newindex`) is `pub(crate)` and used only by the table library.
-An embedder therefore cannot store into a proxy or class table the way a
-script would. Exposing a public `set_table` needs the same treatment
-`get_table` got: a defined error boundary and operand contract, `on_error`
-reporting, a scenario in `reference/native-calls.toml` and
-`tests/native_stack.rs` for the handler call, and the `__newindex` depth rule
-pinned by `tests/integration/runtime/newindex_depth_routes.rs`.
 
 ### Left from the configurable-costs, raw_field and naming work (2026-11-01)
 
@@ -89,8 +74,6 @@ cost-model decision):
 
 Cosmetic:
 
-- `notes/optimizations.md` still mentions `State::with_callbacks`, which the
-  builder replaced.
 - Tracker comments with quoting damage that `bz` cannot edit: dellingr#3
   opens with "Won`t" and dellingr#6 writes `Send + static` for
   `Send + 'static`.

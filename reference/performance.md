@@ -104,6 +104,40 @@ instead of polling them. `FOR_LOOP` costs 16 bytes per release cycle
 wherever its poll sits; it is accepted (2.4 KB at `MAX_NATIVE_CALL_DEPTH`).
 Dev grew 160 to 208 bytes per cycle.
 
+Wall cost, 912c2d5 against 3336729 on plantasjen, two interleaved pairs of
+`--bench` cells each, medians: arithmetic +1.4%, benchmark +1.7%, closure
++0.6%, method +2.4%, sort +1.4%, patterns +0.5%, the same sign in both pairs
+of every workload. Six launches of the 3336729 binary spread 0.5% (method)
+and 1.2% (benchmark), and every 912c2d5 cell lies below their minimum, so
+the delta belongs to the binary. Its assembly shows no new hot spill: the
+cost is the executed poll. LLVM merges every taken jump into one block,
+which went from branchless (`cmov`) to a sign branch whose backward side
+loads the handle pointer, then the flag, tests and branches; `FOR_LOOP`
+continuations and Lua call admissions run the same load, load, test,
+branch.
+
+Tried and dropped: a process-wide conservative count of triggered handles
+checked before the State's flag, so the fast poll is one load independent
+of the State. Method 3791 and 3797 ms against 3817 and 3829 for 3336729,
+inside the 3783 to 3802 same-binary spread; arithmetic 3486 and 3465
+against 3474 and 3498. The dependent loads were not the cost, and the gate
+would have made every State's polls slower while any handle in the process
+stayed triggered.
+
+### 2026-11-04: the host store's entry observer
+
+The public `State::set_table` first shared `get_table_unguarded`'s
+`call_unguarded::<(ArgCount, &mut bool)>` instance. With two callers LLVM
+outlined it (184 bytes) beside `get_table_unguarded` (200), where the read
+had inlined it into one 264-byte frame, so every read path through
+`get_table_unguarded` grew 128 bytes per release cycle (`host_get_table` 912
+to 1040). Giving the store its own observer type (`StoreEntry`) restores one
+inlined instance per caller: reads are back at their earlier figures, and the
+table library's writes, which used the shared, outlined
+`call_unguarded::<ArgCount>` before, shrink (`sort_metamethods_write` 1168 to
+1056 in release, 1200 to 1056 with snapshot). Dev writes grow 80 bytes per
+cycle.
+
 ### 2026-10-23: invocation driver inlined into `call_unguarded`
 
 Baseline 97973d1, against unmodified 22a263a, against 22a263a with

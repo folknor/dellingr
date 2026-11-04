@@ -213,8 +213,8 @@ The recurring native stack of each scenario's cycle, as printed by the
 on-demand probe `brokkr test native_bytes_per_level` (dev) and
 `brokkr test native_bytes_per_level --release` (release), which run the
 default and snapshot configurations of each profile. Measured on the tree of
-the commit that added `Interrupt` (parent 912c2d5), on plantasjen (x86-64
-Linux), `rustc 1.101.0-nightly (e9bbadf68 2026-10-12)`,
+the commit that added the public `State::set_table` (parent 3336729), on
+plantasjen (x86-64 Linux), `rustc 1.101.0-nightly (e9bbadf68 2026-10-12)`,
 with that host's global rustflags (`-Ctarget-cpu=native`, the `wild` linker
 through clang). Release is Cargo's default release profile (the repository
 sets no overrides). Dev default and dev snapshot agree in every row.
@@ -248,6 +248,7 @@ separately.
 | `string_library_index` | 9376 | 560 | 560 |
 | `host_get_table` | 10656 | 912 | 912 |
 | `host_get_table_string` | 10656 | 912 | 912 |
+| `host_set_table` | 10752 | 928 | 928 |
 | `host_call` | 10304 | 848 | 848 |
 | `host_anchor` | 10848 | 1024 | 1024 |
 | `host_tostring_bytes` | 11152 | 1200 | 1200 |
@@ -263,20 +264,20 @@ separately.
 | `sort_metamethods_comparator` | 11584 | 1440 | 1440 |
 | `sort_metamethods_length` | 10672 | 1120 | 1120 |
 | `sort_metamethods_read` | 10912 | 1040 | 1040 |
-| `sort_metamethods_write` | 10928 | 1168 | 1200 |
+| `sort_metamethods_write` | 11008 | 1056 | 1056 |
 | `insert_length` | 10624 | 1136 | 1136 |
 | `insert_shift_read` | 10864 | 1056 | 1056 |
-| `insert_shift_write` | 10896 | 1184 | 1216 |
-| `insert_value` | 10896 | 1184 | 1216 |
+| `insert_shift_write` | 10976 | 1072 | 1072 |
+| `insert_value` | 10976 | 1072 | 1072 |
 | `remove_length` | 10592 | 1072 | 1072 |
 | `remove_read` | 10832 | 992 | 992 |
 | `remove_shift_read` | 10832 | 992 | 992 |
-| `remove_shift_write` | 10864 | 1120 | 1152 |
-| `remove_clear` | 10864 | 1120 | 1152 |
+| `remove_shift_write` | 10944 | 1008 | 1008 |
+| `remove_clear` | 10944 | 1008 | 1008 |
 | `concat_length` | 11408 | 1136 | 1136 |
 | `concat_read` | 11648 | 1056 | 1056 |
 | `move_read` | 11136 | 1040 | 1040 |
-| `move_write` | 11168 | 1120 | 1152 |
+| `move_write` | 11248 | 1008 | 1008 |
 | `unpack_length` | 10544 | 1040 | 1040 |
 | `unpack_read` | 10784 | 960 | 960 |
 | `gsub_empty_function` | 12624 | 1568 | 1584 |

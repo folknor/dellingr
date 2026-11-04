@@ -48,7 +48,8 @@ pub trait HostCallbacks: Send {
     ///
     /// Each execution error is reported exactly once, before any host code
     /// can see it: before it is returned from `call()`, `call_anchor()`,
-    /// `get_table()`, `tostring_bytes()` or `to_string_with_meta()`. That holds
+    /// `get_table()`, `set_table()`, `tostring_bytes()` or
+    /// `to_string_with_meta()`. That holds
     /// at every depth: when a Rust callback makes one of these calls and
     /// handles the error instead of returning it, `on_error` has already
     /// fired for it. Reporting follows the `Error` value: propagating the same
@@ -63,14 +64,16 @@ pub trait HostCallbacks: Send {
     /// in resolving and setting up a call: calling a non-callable value,
     /// `__call` chains (including cyclic chains that reach the metamethod
     /// depth limit, and argument insertion), Lua frame setup, result padding
-    /// and the native call depth limit. A host table read or `tostring`
-    /// rendering fails the same way: a receiver that cannot be indexed, any
-    /// failure of `__index` resolution or `__tostring`, or a `__tostring`
-    /// result that is not a string or number.
+    /// and the native call depth limit. A host table read, table store or
+    /// `tostring` rendering fails the same way: a receiver that cannot be
+    /// indexed or stored into, any failure of `__index` or `__newindex`
+    /// resolution (including a nil or NaN key a raw store refuses) or of
+    /// `__tostring`, or a `__tostring` result that is not a string or number.
     ///
     /// It is NOT fired for host API misuse rejected before anything executes:
     /// `ArgCount::Dynamic`, insufficient stack values for a call, an invalid
-    /// stack index, a missing `get_table` key, a wrong-State anchor, or no
+    /// stack index, a missing `get_table` key or `set_table` key and value, a
+    /// wrong-State anchor, or no
     /// stack room to insert the anchored callee. Nor for a refusal of a
     /// poisoned State (`StatePoisoned`) or of an unsupported floating-point
     /// environment at an entry point (`UnsupportedFloatEnvironment`; raised

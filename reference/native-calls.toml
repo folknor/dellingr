@@ -117,6 +117,12 @@ owner = "State"
 [[function]]
 name = "set_table"
 owner = "State"
+root = "host-api"
+evidence = "State::set_table, a host store that runs __newindex"
+
+[[function]]
+name = "set_table_unguarded"
+owner = "State"
 
 [[function]]
 name = "instr_tfor_call"
@@ -407,7 +413,10 @@ id = "get_table->get_table_unguarded"
 id = "get_table_unguarded->call_unguarded"
 
 [[edge]]
-id = "set_table->call_unguarded"
+id = "set_table->set_table_unguarded"
+
+[[edge]]
+id = "set_table_unguarded->call_unguarded"
 
 [[edge]]
 id = "table_sort->table_sort_values:comparator"
@@ -572,7 +581,7 @@ id = "move_element->set_index"
 id = "sequence_len->call_unguarded"
 
 [[edge]]
-id = "set_index->set_table"
+id = "set_index->set_table_unguarded"
 
 [[edge]]
 id = "insert_through_metamethods->sequence_len"
@@ -611,7 +620,7 @@ id = "sort_through_metamethods->get_table_unguarded"
 id = "sort_through_metamethods->table_sort_scratch"
 
 [[edge]]
-id = "sort_through_metamethods->set_table"
+id = "sort_through_metamethods->set_table_unguarded"
 
 # src/main.rs
 [[edge]]
@@ -659,8 +668,8 @@ read = [
 ]
 # A table-library write through __newindex.
 write = [
-    "set_index->set_table",
-    "set_table->call_unguarded",
+    "set_index->set_table_unguarded",
+    "set_table_unguarded->call_unguarded",
 ]
 tostring = [
     "tostring_bytes_unguarded->tostring_rendering",
@@ -748,6 +757,14 @@ path = ["@lua", "@rust", "get_table->get_table_unguarded", "@read"]
 [[scenario]]
 name = "host_get_table_string"
 path = ["@lua", "@rust", "get_table->get_table_unguarded", "@read"]
+
+[[scenario]]
+name = "host_set_table"
+path = [
+    "@lua", "@rust",
+    "set_table->set_table_unguarded",
+    "set_table_unguarded->call_unguarded",
+]
 
 [[scenario]]
 name = "host_call"
@@ -891,8 +908,8 @@ name = "sort_metamethods_write"
 path = [
     "@lua", "@rust",
     "lib:table.sort->sort_through_metamethods",
-    "sort_through_metamethods->set_table",
-    "set_table->call_unguarded",
+    "sort_through_metamethods->set_table_unguarded",
+    "set_table_unguarded->call_unguarded",
 ]
 
 [[scenario]]

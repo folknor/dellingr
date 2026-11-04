@@ -530,7 +530,10 @@ pub(super) fn sequence_len(
 /// Uses the VM's assignment dispatch so nested library and bytecode handlers
 /// share the same depth limit. Both operands stay rooted until dispatch ends.
 fn set_index(state: &mut State, table_idx: isize) -> Result<()> {
-    crate::native_call!("set_index->set_table", state.set_table(table_idx))
+    crate::native_call!(
+        "set_index->set_table_unguarded",
+        state.set_table_unguarded(table_idx)
+    )
 }
 
 /// `table.insert` for a table with sequence metamethods, following Lua 5.4's
@@ -683,7 +686,10 @@ fn sort_through_metamethods(state: &mut State, has_comp: bool) -> Result<u8> {
         state.push_number(i as f64)?;
         state.push_number(i as f64)?;
         state.get_table_raw(s)?;
-        crate::native_call!("sort_through_metamethods->set_table", state.set_table(1))?;
+        crate::native_call!(
+            "sort_through_metamethods->set_table_unguarded",
+            state.set_table_unguarded(1)
+        )?;
     }
     state.set_top(0)?;
     Ok(0)

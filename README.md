@@ -300,6 +300,9 @@ point.
   `StateBuilder::interrupt`, `State::set_interrupt`) that the host triggers
   from any thread or a signal handler; running Lua fails with
   `ErrorKind::Interrupted` at its next safepoint, until the host resets it.
+- Table access - `State::get_table` and `State::set_table` read and store as a
+  script's `t[k]` and `t[k] = v` do, through `__index` and `__newindex`;
+  `get_table_raw` and `set_table_raw` skip metamethods.
 - Environment control - `State::seal_globals` ends the setup phase so globals
   a script deletes are reclaimed; `State::with_restricted_env` runs a closure
   against a whitelist of globals and restores the full environment afterwards.

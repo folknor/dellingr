@@ -281,6 +281,52 @@ fn a_terminal_insert_error_is_not_masked_by_the_depth_limit() {
     );
 }
 
+/// `host_site(o, k)`: the host store, `State::set_table`, of `o[k] = "stored"`.
+fn host_site(state: &mut State) -> dellingr::Result<u8> {
+    state.set_top(2)?;
+    state.push_string("stored")?;
+    state.set_table(1)?;
+    Ok(0)
+}
+
+/// The host store takes exactly the units a script store does, through
+/// every receiver, and is refused with one fewer.
+#[test]
+fn host_stores_follow_the_same_limit_edges() {
+    let mut state = state_with("");
+    state.push_new_rust_fn(host_site).expect("callback fits");
+    state.set_global("host_site").expect("callback set");
+    for (receiver, units) in [
+        ("one", 0),
+        ("held", 0),
+        ("two", 1),
+        ("three", 2),
+        ("by_function", 1),
+        ("function_behind_table", 2),
+    ] {
+        let store = format!("host_site({receiver}, 'greet')");
+        let landed = format!("landed({receiver}, 'greet')");
+        let fits = MAX_METAMETHOD_DEPTH - units;
+        assert_eq!(
+            probe(&mut state, fits, &store, &landed),
+            Outcome::Value("stored".to_string()),
+            "{store} at {fits}"
+        );
+        if units > 0 {
+            assert_eq!(
+                probe(&mut state, fits + 1, &store, &landed),
+                Outcome::DepthExceeded,
+                "{store} at {}",
+                fits + 1
+            );
+        }
+    }
+    assert_eq!(
+        probe(&mut state, 0, "host_site(bad, 'greet')", "nil"),
+        Outcome::HandlerTypeError
+    );
+}
+
 /// A Rust callback that runs the global function `store_probe` with its
 /// first argument through `State::call` and reports whether it failed,
 /// swallowing the error.
