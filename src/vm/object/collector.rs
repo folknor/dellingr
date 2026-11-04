@@ -167,9 +167,13 @@ impl State {
         self.sweep_bytecode_caches(live_chunks);
         // Sweep unmarked objects
         self.heap.collect();
-        // Weak references: clear cache entries naming what the sweep freed,
-        // before any allocation can reuse those slots.
-        self.drop_dead_cache_entries();
+        // Weak references: clear runtime cache entries naming what a sweep
+        // freed, on the cadence `CACHE_PRUNE_INTERVAL` sets.
+        if self.heap.runtime_cache_prune_due() {
+            self.drop_dead_cache_entries();
+        }
+        #[cfg(debug_assertions)]
+        self.check_closure_runtimes();
         self.for_each_gc_cleanup(|cleanup| match cleanup {
             GcCleanup::WeakTable(table, heap) => table.prune(heap),
             GcCleanup::UpvaluePool(pool) => pool.sweep(),

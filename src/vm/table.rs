@@ -457,7 +457,8 @@ impl Default for TableStorage {
 // handle. Applying a token to another table answers about that table's slot,
 // so every holder keeps the table's handle beside the token and checks the
 // table's identity itself (inline caches also rely on collection clearing
-// entries whose table was freed, `RuntimeCaches::drop_dead_entries`). Nor
+// entries whose table was freed before its slot's generation can wrap,
+// `RuntimeCaches::drop_dead_entries`). Nor
 // does a token record its key: a holder that skips the key comparison (a
 // current-version read) relies on its cache slot serving one key, which the
 // bytecode verifier proves for every cached operand, saved ones included.

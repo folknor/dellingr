@@ -329,15 +329,17 @@ Requirements the rewrite must meet:
   only those or passes an input NaN through.
 - **Cache aliasing (done).** The inline caches trust a cached handle
   without re-checking the key, so a dead object's entry matching a new object
-  in the same slot would read or write the wrong field. Every collection now
-  clears the entries naming what it freed (`State::drop_dead_cache_entries`
-  over `RuntimeCaches::drop_dead_entries`, right after the heap sweep and
-  before any allocation can reuse a slot), so no entry outlives its object and
-  a narrower generation does not reopen it. Whatever replaces the arena must
-  keep the property it rests on: a freed slot stays vacant until the next
-  allocation, and liveness of a handle that was live before the sweep is
-  exact until then. Any new side table holding weak handles needs the same
-  pruning.
+  in the same slot would read or write the wrong field. Every hit compares the
+  cached handle with a live one first, so a dead entry only misses until its
+  slot's generation wraps; collection clears such entries every
+  `CACHE_PRUNE_INTERVAL` collections (`object.rs`, `State::drop_dead_cache_entries`
+  over `RuntimeCaches::drop_dead_entries`), which is safe because only the
+  sweep frees, so a slot is reused at most once per collection. Whatever
+  replaces the arena must keep that property and its stepping (the
+  `version_steps_by_two_per_reuse` test), and a narrower generation must
+  bring the interval below half its period: with g generation bits the
+  interval must stay under 2^(g-1) collections. Any new side table holding
+  weak handles needs the same pruning.
 - **Handles.** slotmap keys are 64 bits (index plus generation) and cannot
   produce narrow keys, so objects (`GcHeap`) and the string pool need a
   custom generational arena. Keeping a 32-bit index avoids a new limit on
@@ -659,21 +661,6 @@ shim, the identity hack, the field interning and most of the fault enum, and
 give snapshots one typed record. It changes the snapshot format and the
 error-frame rule, but no cost and no `pairs` order, since the table is
 unreachable from scripts.
-
-### Keep the compiled-pattern cache across collections
-
-What: `State.patterns` (compiled patterns keyed by the pattern string's
-`StringPtr`) is cleared at the top of every collection, because sweep may
-free a key string and a later allocation may reuse its pointer. A script that
-allocates while it matches therefore recompiles its patterns after every
-collection. Instead, prune only the entries whose key string was not marked
-(weak keys, decided after marking and before sweep), or key the cache by the
-pattern bytes so pointer reuse cannot alias.
-
-Why deferred: unmeasured. No registered workload matches while allocating
-enough to collect often; `strings/patterns` and `alloc/gc_churn` each cover
-only one half. Write that workload first and check how much compile time a
-collection actually costs before changing the cache.
 
 ---
 

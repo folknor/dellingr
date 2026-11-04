@@ -274,7 +274,8 @@ impl State {
         // A field bound to `_` holds strong references or no heap handles,
         // so a sweep leaves nothing in it to prune; `bytecode_caches` is the
         // exception, whose weak cache cells `drop_dead_cache_entries` clears
-        // just before this runs.
+        // just before this runs, on the collections `CACHE_PRUNE_INTERVAL`
+        // picks.
         let State {
             #[cfg(feature = "fault-injection")]
                 fault_injection: _,

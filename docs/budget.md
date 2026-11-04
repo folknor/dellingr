@@ -137,7 +137,9 @@ let mut state = State::builder().interrupt(stop.clone()).build();
   (bounded by code length and call depth, since returns do not poll), where
   each instruction or library step makes at most one linear pass over a
   string or a table's storage; plus any garbage collection, which traces the
-  whole heap; plus the body of a host callback, which the VM cannot stop. A
+  whole heap and visits the runtime of every loaded function, and now and
+  then walks every inline-cache slot of that code (sized by what the host
+  loaded, which no script can grow); plus the body of a host callback, which the VM cannot stop. A
   host callback that must be stoppable polls its own condition. This is a
   bound on work, not on elapsed time.
 - **Errors.** `Interrupted` unwinds like any runtime error. An interrupted

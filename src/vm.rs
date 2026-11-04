@@ -984,9 +984,12 @@ impl State {
     /// a called-out change.
     ///
     /// `live` arrives holding what the root visit retained
-    /// (`GcRoot::ActiveChunk` trees and `GcRoot::PendingChunk` entries); the
-    /// marked closures can only be read once marking has finished, so they
-    /// are added here, before the pending identities.
+    /// (`GcRoot::ActiveChunk` trees and `GcRoot::PendingChunk` entries). The
+    /// marked closures are known only once marking has finished: tracing a
+    /// closure flags its runtime as reached (`GcHeap::mark_children`), and
+    /// every closure's runtime is its bytecode's entry here, so the flagged
+    /// entries are exactly the bytecodes of the marked closures. They are
+    /// added here, before the pending identities.
     fn sweep_bytecode_caches(&mut self, live: object::LiveChunks) {
         // Bytecode identity deduplication also covers nested prototypes and
         // active/pending functions with no reachable heap closure. Keep one
@@ -996,28 +999,43 @@ impl State {
             trees: mut live,
             pending,
         } = live;
-        for bytecode in self.heap.reachable_lua_bytecodes() {
-            Self::retain_bytecode_tree(&mut live, bytecode);
+        for entry in self.bytecode_caches.values() {
+            // Take every flag, even for an entry already retained through a
+            // tree, so none is left set for the next collection.
+            if entry.runtime.caches.take_reached() {
+                Self::retain_bytecode_tree(&mut live, &entry.bytecode);
+            }
         }
         live.extend(pending);
         self.bytecode_caches
             .retain(|identity, _| live.contains(identity));
     }
 
-    /// Clear every runtime cache entry that names an object or string the
-    /// sweep just freed (see `RuntimeCaches::drop_dead_entries`). Runs after
-    /// `sweep_bytecode_caches` and the heap sweep, before any allocation.
-    /// The map holds every runtime that can execute again: each runtime is
-    /// created into it, closures and frames take theirs from it, and an entry
-    /// is dropped only once no surviving closure, activation or pending
-    /// closure shell uses its bytecode. Debug builds check the closure half.
+    /// Clear every runtime cache entry that names an object the sweep freed
+    /// (see `RuntimeCaches::drop_dead_entries`). Runs after
+    /// `sweep_bytecode_caches` and the heap sweep, on every
+    /// `object::CACHE_PRUNE_INTERVAL`-th collection; that constant has the
+    /// argument for why the gap is safe. The map holds every runtime that
+    /// can execute again: each runtime is created into it, closures and
+    /// frames take theirs from it, and an entry is dropped only once no
+    /// surviving closure, activation or pending closure shell uses its
+    /// bytecode. Debug builds check the closure half on every collection
+    /// (`check_closure_runtimes`).
     #[inline(never)]
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn drop_dead_cache_entries(&self) {
         for entry in self.bytecode_caches.values() {
             entry.runtime.caches.drop_dead_entries(&self.heap);
         }
-        #[cfg(debug_assertions)]
+    }
+
+    /// Debug check, after every collection's sweep: each surviving closure's
+    /// runtime is the cached runtime for its bytecode. The cache prune and
+    /// the mark phase both rely on it: the prune reaches a closure's caches
+    /// only through the map, and marking roots a runtime's literals only
+    /// through it (`GcRoot::ChunkLiterals`), never per closure.
+    #[cfg(debug_assertions)]
+    fn check_closure_runtimes(&self) {
         for closure in self.heap.closures() {
             let identity = Arc::as_ptr(&closure.bytecode) as usize;
             debug_assert!(
@@ -1898,6 +1916,8 @@ mod runtime_tests {
                 field_lookup,
                 set_field_lookup,
                 tfor_cursor,
+                // The collector's mark flag, not a cache family.
+                reached: _,
             } = &entry.runtime.caches;
             // Register each enumeration even if its slots are all empty.
             // The exhaustive bundle destructuring above requires new fields
@@ -1970,9 +1990,58 @@ mod runtime_tests {
         (cells, families)
     }
 
-    /// Cache handles are weak: a collection that frees a cached object must
-    /// clear every entry naming it, or a later object reusing its arena slot
-    /// with a wrapped generation would satisfy the entry's handle check.
+    /// Between prunes a collection leaves an entry naming a freed object in
+    /// place, and the entry only misses: the next lookup through the site
+    /// answers from the live table and refills the entry. The pruning
+    /// collection then clears it.
+    #[test]
+    fn collections_between_prunes_keep_dead_entries_that_only_miss() {
+        fn field_handles(state: &State) -> Vec<Val> {
+            cache_cells(state)
+                .0
+                .into_iter()
+                .filter(|(_, cell)| cell.family() == "field")
+                .flat_map(|(_, cell)| cell.handles())
+                .collect()
+        }
+        fn run(state: &mut State, source: &str) {
+            crate::Program::compile(source, None)
+                .and_then(|program| state.load(&program))
+                .and_then(|()| state.call(ArgCount::Fixed(0), RetCount::Fixed(0)))
+                .expect("chunk runs");
+        }
+        let mut state = State::new();
+        state.gc_disable_auto();
+        // A pruning collection first, so the next one is known not to prune.
+        state.heap.force_runtime_cache_prune();
+        state.gc_collect();
+        run(&mut state, "function get(t) return t.k end get({ k = 1 })");
+        state.gc_collect();
+        let stale = field_handles(&state);
+        assert_eq!(stale.len(), 1, "one field site was warmed");
+        assert!(
+            !state.heap.val_is_live(&stale[0]),
+            "a collection between prunes keeps the dead entry"
+        );
+        run(
+            &mut state,
+            "for i = 1, 8 do if get({ k = i }) ~= i then error('stale hit') end end",
+        );
+        let refilled = field_handles(&state);
+        assert_eq!(refilled.len(), 1);
+        assert_ne!(
+            refilled[0], stale[0],
+            "the dead entry missed and was refilled"
+        );
+        state.heap.force_runtime_cache_prune();
+        state.gc_collect();
+        assert!(field_handles(&state).is_empty(), "the prune clears it");
+    }
+
+    /// Cache handles are weak: a pruning collection that frees a cached
+    /// object must clear every entry naming it, or a later object reusing its
+    /// arena slot with a wrapped generation would satisfy the entry's handle
+    /// check.
     /// Each family is warmed against objects that then become unreachable
     /// while the functions holding the sites stay reachable, and against
     /// objects that stay alive. Method entries name two handles, so each is
@@ -2039,6 +2108,7 @@ mod runtime_tests {
             .expect("cache warmup runs");
 
         let (before, families) = cache_cells(&state);
+        state.heap.force_runtime_cache_prune();
         state.gc_collect();
         let (after, _) = cache_cells(&state);
 
@@ -2209,8 +2279,12 @@ mod runtime_tests {
         assert_eq!(method_positions(&state), vec![[Some(mta), Some(mtc)]]);
 
         // c is used last, so the victim is a's position; then c dies. Its
-        // position empties and the next class takes it instead of a's.
+        // position empties on a pruning collection and the next class takes
+        // it instead of a's. (Between prunes the dead entry would hold its
+        // position, so that fill would evict a instead: one more miss for a,
+        // never a different answer.)
         run(&mut state, "site(c) c = nil mtc = nil");
+        state.heap.force_runtime_cache_prune();
         state.gc_collect();
         assert_eq!(method_positions(&state), vec![[Some(mta), None]]);
         run(&mut state, "site(b)");

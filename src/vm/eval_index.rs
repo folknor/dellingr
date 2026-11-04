@@ -47,7 +47,8 @@ impl State {
         // change (key added, removed or rehashed) misses on the version. That
         // a matching `string_lib` is the cached table and not a later one in
         // its arena slot rests on collection clearing entries that name freed
-        // objects (`RuntimeCaches::drop_dead_entries`), not on the generation.
+        // objects (`RuntimeCaches::drop_dead_entries`) before the slot's
+        // generation can wrap (`object::CACHE_PRUNE_INTERVAL`).
         let shape = self.string_mt_index_shape?;
         let mt = self.heap.as_table_ref(self.string_metatable?)?;
         let index_handler = mt.read_slot(shape)?;

@@ -270,9 +270,33 @@ new_key_type! {
 ///
 /// Generations wrap after about 2^31 reuses of one slot, so an old key is
 /// not an identity proof forever: anything holding handles weakly must drop
-/// them when the collector frees their referents (see `val_is_live`).
+/// them before their slot can come round again (see `val_is_live` and
+/// [`CACHE_PRUNE_INTERVAL`]).
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct ObjectPtr(pub(crate) ObjectKey);
+
+/// How many collections may pass between two runs of the runtime-cache
+/// prune (`State::drop_dead_cache_entries`).
+///
+/// The prune is only an alias guard. Every cache hit compares the cached
+/// handle with a live one before it dereferences anything, so an entry
+/// naming a freed object just misses, unless its slot's generation has come
+/// all the way round to the cached value. That takes 2^31 reuses: slotmap
+/// 1.1 keeps a `u32` version per slot, bumped once by a remove and once by
+/// an insert into the vacant slot (`version_steps_by_two_per_reuse` pins
+/// the step; the width is slotmap's representation, stated here, not
+/// tested). The sweep in `GcHeap::collect` is the only thing that frees an
+/// object, so one collection cycle reuses a slot at most once, and an entry
+/// pruned within this many collections of its referent's death can never
+/// alias. Pruning on every collection would make each one walk every cache
+/// cell of the loaded code, a cost that tracks code size, not garbage.
+///
+/// Warmth is unobservable (`RuntimeCaches`), so this cadence changes no
+/// result, cost, collection timing or snapshot. The other weak tables
+/// (compiled patterns, `%p` ids) still prune every collection: they hold
+/// memory, and a stale `%p` id would be visible.
+pub(super) const CACHE_PRUNE_INTERVAL: u32 = 1 << 16;
+const _: () = assert!(CACHE_PRUNE_INTERVAL > 0 && CACHE_PRUNE_INTERVAL < 1 << 31);
 
 /// Slotmap keys are process-local, so diagnostics keep the pointer opaque.
 impl fmt::Debug for ObjectPtr {
@@ -387,6 +411,9 @@ pub(crate) struct GcHeap {
     /// the stores `watched_table_unmarked` admits. The builtin mirror
     /// (`GlobalEnv`) is validated by it.
     watched_epoch: u64,
+    /// Collections left before the next one clears runtime cache entries
+    /// naming freed objects (`GcHeap::runtime_cache_prune_due`).
+    cache_prune_countdown: u32,
 }
 
 impl GcHeap {
@@ -400,6 +427,7 @@ impl GcHeap {
             empty_upvalues: Arc::from([]),
             watched: ObjectPtr(ObjectKey::null()),
             watched_epoch: 0,
+            cache_prune_countdown: CACHE_PRUNE_INTERVAL,
         }
     }
 
@@ -427,6 +455,7 @@ impl GcHeap {
             empty_upvalues: Arc::from([]),
             watched: ObjectPtr(ObjectKey::null()),
             watched_epoch: 0,
+            cache_prune_countdown: CACHE_PRUNE_INTERVAL,
         }
     }
 
@@ -688,7 +717,13 @@ impl GcHeap {
     ) {
         match &obj.raw {
             RawObject::LuaFn(closure) => {
-                closure.runtime.literals.mark_reachable(self, worklist);
+                // The runtime's literals are rooted once per collection as
+                // `GcRoot::ChunkLiterals`, since every closure's runtime is
+                // the State's cached one (checked in debug builds by
+                // `State::check_closure_runtimes`), so marking them again per
+                // closure would only repeat work. What the closure does add
+                // is that its runtime's entry must survive the cache sweep.
+                closure.runtime.caches.mark_reached();
                 // Mark the upvalue slots themselves (so the pool sweep keeps
                 // them) and the values stored in closed ones.
                 for uv_ref in closure.upvalues.iter() {
@@ -731,16 +766,22 @@ impl GcHeap {
         }
     }
 
-    // Borrow bytecodes during the cache sweep: cloning an Arc per closure
-    // and collecting a temporary Vec adds work without extending any lifetime.
-    pub(super) fn reachable_lua_bytecodes(&self) -> impl Iterator<Item = &Arc<Bytecode>> {
-        self.objects
-            .values()
-            .filter(|object| object.color.get() == Color::Reachable)
-            .filter_map(|object| match &object.raw {
-                RawObject::LuaFn(closure) => Some(&closure.bytecode),
-                RawObject::Table(_) => None,
-            })
+    /// Count one collection toward the runtime-cache prune, and report
+    /// whether this one must run it (every [`CACHE_PRUNE_INTERVAL`]-th).
+    pub(super) fn runtime_cache_prune_due(&mut self) -> bool {
+        self.cache_prune_countdown -= 1;
+        if self.cache_prune_countdown == 0 {
+            self.cache_prune_countdown = CACHE_PRUNE_INTERVAL;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Make the next collection run the runtime-cache prune.
+    #[cfg(test)]
+    pub(super) fn force_runtime_cache_prune(&mut self) {
+        self.cache_prune_countdown = 1;
     }
 
     /// Every closure in the heap, for the debug check that each one's runtime
@@ -763,8 +804,11 @@ impl GcHeap {
     /// are always live. Exact for a value that was live before the latest
     /// sweep, asked before the next allocation: a freed slot stays vacant
     /// until then. A handle kept across later allocations can alias one,
-    /// since generations wrap; that is why weak side tables (runtime caches,
-    /// `format_pointer_ids`) are pruned with this at every collection.
+    /// since generations wrap; that is why weak side tables are pruned with
+    /// this: `format_pointer_ids` and the pattern cache at every collection,
+    /// runtime caches within [`CACHE_PRUNE_INTERVAL`] collections. Asked
+    /// later than right after a sweep it is still exact for a freed handle
+    /// whose slot has not been reused 2^31 times since.
     pub(super) fn val_is_live(&self, val: &Val) -> bool {
         match val {
             Val::Obj(ptr) => self.objects.contains_key(ptr.0),
@@ -775,7 +819,9 @@ impl GcHeap {
 
     /// Test-only: the heap handles a mark phase coloured, after which every
     /// object and string colour is back to Unmarked, as a sweep would leave
-    /// them, without freeing anything. The caller resets the upvalue pool.
+    /// them, without freeing anything, and no runtime is left flagged as
+    /// reached for the next collection's cache sweep. The caller resets the
+    /// upvalue pool.
     #[cfg(all(test, feature = "snapshot"))]
     pub(super) fn take_marked_objects_and_strings(
         &self,
@@ -789,6 +835,9 @@ impl GcHeap {
                 marked.insert(ObjectPtr(key));
             }
             obj.color.set(Color::Unmarked);
+            if let RawObject::LuaFn(closure) = &obj.raw {
+                closure.runtime.caches.take_reached();
+            }
         }
         let mut marked_strings = std::collections::BTreeSet::new();
         for (key, entry) in &self.strings.strings {
@@ -1072,6 +1121,40 @@ mod tests {
         let ptr = pool.insert_with_hash(Box::from(&b"unrooted"[..]), 1);
         pool.collect();
         pool.mark(ptr);
+    }
+
+    /// `CACHE_PRUNE_INTERVAL` rests on one collection cycle moving a slot's
+    /// version by exactly two: one step when the sweep frees the object, one
+    /// when an allocation reuses the slot. A dependency change to that
+    /// stepping fails here.
+    #[test]
+    fn version_steps_by_two_per_reuse() {
+        fn index_and_version(ptr: ObjectPtr) -> (u64, u64) {
+            let ffi = ptr.0.data().as_ffi();
+            (ffi & 0xffff_ffff, ffi >> 32)
+        }
+        let mut heap = GcHeap::with_threshold(100);
+        let mut previous = index_and_version(heap.no_gc_allocator().alloc_table());
+        for _ in 0..4 {
+            heap.collect();
+            let next = index_and_version(heap.no_gc_allocator().alloc_table());
+            assert_eq!(next.0, previous.0, "the freed slot is reused");
+            assert_eq!(next.1, previous.1 + 2, "a reuse moves the version by two");
+            previous = next;
+        }
+    }
+
+    /// The runtime-cache prune runs on every `CACHE_PRUNE_INTERVAL`-th
+    /// collection and no other.
+    #[test]
+    fn runtime_cache_prune_runs_once_per_interval() {
+        let mut heap = GcHeap::with_threshold(100);
+        for _ in 0..2 {
+            for _ in 1..CACHE_PRUNE_INTERVAL {
+                assert!(!heap.runtime_cache_prune_due());
+            }
+            assert!(heap.runtime_cache_prune_due());
+        }
     }
 
     #[test]

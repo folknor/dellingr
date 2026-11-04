@@ -260,8 +260,10 @@ impl SetFieldLookupCacheSlot {
 /// depends on which values a site saw before. A negative entry has to prove
 /// absence exactly to keep that (absent globals do, by hash slot count); field
 /// and method entries cache hits only. Their handles
-/// are weak: every collection clears the entries naming what it freed
-/// (`drop_dead_entries`), so no entry outlives its referent.
+/// are weak: an entry naming a freed object misses, because every hit
+/// compares the cached handle with a live one first, and collection clears
+/// such entries (`drop_dead_entries`) often enough that no slot can come
+/// round to a cached generation (`object::CACHE_PRUNE_INTERVAL`).
 ///
 /// The interior `Cell`s give cache writes a `&self`-only borrow shape, which
 /// matches the dispatch loop's invariants: simultaneous frames executing the
@@ -272,6 +274,11 @@ pub(super) struct RuntimeCaches {
     pub(super) field_lookup: Vec<FieldLookupCacheSlot>,
     pub(super) set_field_lookup: Vec<SetFieldLookupCacheSlot>,
     pub(super) tfor_cursor: Vec<TforCursorSlot>,
+    /// Set when the mark phase traces a closure running this bundle, and
+    /// consumed by `State::sweep_bytecode_caches` for every entry in the
+    /// same collection, so it is false between collections. Not a cache;
+    /// it lives here for the confined-`Cell` argument below.
+    pub(super) reached: Cell<bool>,
 }
 
 // SAFETY: Every access to a cache cell must be confined to the exclusive
@@ -298,7 +305,20 @@ impl RuntimeCaches {
             field_lookup: slots(bc.field_cache_slots),
             set_field_lookup: slots(bc.set_field_cache_slots),
             tfor_cursor: slots(bc.tfor_cursor_slots),
+            reached: Cell::new(false),
         }
+    }
+
+    /// The mark phase traced a closure running this bundle.
+    #[inline(always)]
+    pub(super) fn mark_reached(&self) {
+        self.reached.set(true);
+    }
+
+    /// Whether a closure running this bundle was traced since the last
+    /// call, clearing the flag.
+    pub(super) fn take_reached(&self) -> bool {
+        self.reached.replace(false)
     }
 
     // Lookups by a decoded cache operand (`None` is uncached). They stay
@@ -331,12 +351,12 @@ impl RuntimeCaches {
     /// Cache handles are weak: they are never GC roots, and a hit trusts a
     /// matching handle without re-reading the key. A generational handle
     /// alone cannot keep a dead entry from matching a later object in the
-    /// same arena slot, because generations wrap. Clearing here, right after
-    /// the sweep, keeps the invariant that no entry outlives its referent:
-    /// entries start cold, are filled only with live handles, collection is
-    /// the only thing that frees, and the sweep leaves a freed slot vacant
-    /// until the next allocation, so `val_is_live` is exact at this point
-    /// whatever the generation width.
+    /// same arena slot forever, because generations wrap. Clearing here
+    /// keeps every entry from living long enough for that: entries start
+    /// cold, are filled only with live handles, collection is the only
+    /// thing that frees, and this runs within `object::CACHE_PRUNE_INTERVAL`
+    /// collections of any referent's death, long before its slot can be
+    /// reused 2^31 times, so `val_is_live` is exact for every handle here.
     ///
     /// Every struct is destructured without `..`, so a new cache family,
     /// cell or handle field fails to compile until its verdict is decided.
@@ -346,6 +366,7 @@ impl RuntimeCaches {
             field_lookup,
             set_field_lookup,
             tfor_cursor,
+            reached: _, // The collector's own flag, not a cache cell.
         } = self;
         for slot in global_lookup {
             let GlobalLookupCacheSlot { entry } = slot;
@@ -355,6 +376,9 @@ impl RuntimeCaches {
             // Method entries clear independently and stay in place. The
             // victim is left alone: a fill takes an empty position before
             // the victim, so a stale victim never evicts the survivor.
+            // Until this runs, a dead entry holds its position like a live
+            // one, so a fill can evict the survivor instead; that costs the
+            // survivor one miss, never an answer.
             let FieldLookupCacheSlot {
                 field_entry,
                 method_entries: [method_first, method_second],
@@ -390,6 +414,7 @@ impl RuntimeCaches {
             field_lookup,
             set_field_lookup,
             tfor_cursor,
+            reached: _,
         } = self;
         let mut out = Vec::new();
         // Global entries name no handle today; walking them anyway keeps

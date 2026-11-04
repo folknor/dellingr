@@ -17,24 +17,9 @@ and may be wrong; verify before acting.
    and they are never deduplicated through git history. Carry the context
    inline instead.
 
-The performance entries below (RT-015 through RT-020, RT-022) describe work the
+The performance entries below (RT-016 through RT-020, RT-022) describe work the
 hunters saw in the code. None has been measured; any change goes through a
 registered `brokkr dellingr` workload first.
-
-## RT-015 - Per-collection work scales with loaded code, not with garbage
-
-Scope: `vm-heap`. Performance and structure.
-
-Every collection walks every cache slot of every live runtime
-(`drop_dead_cache_entries`) and walks the whole object slot map a second time
-(`reachable_lua_bytecodes`). With many loaded chunks and small heaps, that work
-can dominate a collection. The heap is a single non-incremental mark-sweep
-triggered by allocation count, so one large table counts as one allocation
-(documented in `docs/limits.md`).
-
-Approaches raised so far (not exhaustive): marking runtimes reachable during the
-mark phase (closures already visit `closure.runtime`) and pruning only those,
-folding the second walk into the first.
 
 ## RT-016 - State::pop_n and balance_stack move one value per loop turn
 
