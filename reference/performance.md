@@ -133,10 +133,15 @@ stayed triggered.
 pairs of `--bench` cells: patterns 2238 and 2220 ms against 2331 and 2327
 (+4.4%), literal_find 4594 and 4577 against 4486 and 4487 (-2.3%), the same
 sign in both pairs. The patterns loss is above the same-binary spreads
-measured the same day (0.5 to 1.2%). Unconfirmed lead: the matcher charges
-each step through `consume_units(1)`, which since the weights computes
-`remaining.div_ceil(unit)`, a 64-bit division, on every step under a finite
-budget.
+measured the same day (0.5 to 1.2%). Not the meter's division: the bench
+harness sets no budget, and the per-unit `div_ceil` predates 022a10c. The
+release harness shows the cause: before 022a10c `MatchState::singlematch`
+was inlined into its callers; after it, with the meter's added `Off` variant
+in its body, it is an out-of-line call per subject byte. Marking
+`singlematch` and `charge` `#[inline(always)]` (after dbda895): patterns
+2290 and 2226 ms against 2376 and 2376 for dbda895, back at 9b13569's level.
+`match_at`, which recurses natively up to `MAXCCALLS`, grows 152 to 168
+bytes; no per-level row moved.
 
 ### 2026-11-04: the host store's entry observer
 

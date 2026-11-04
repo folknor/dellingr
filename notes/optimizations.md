@@ -563,17 +563,6 @@ embedder asking.
 
 ## Stdlib / patterns
 
-### Matcher step charge after the weights (patterns +4.4%)
-
-022a10c (configurable costs) made `patterns` 4.4% slower against 9b13569
-in interleaved pairs on plantasjen (`reference/performance.md`, "weighted
-library charges"). Lead, unconfirmed: every matcher step charges through
-`CostMeter::consume_units(1)`, and `consume_units_admitted` now computes
-`remaining.div_ceil(unit)` for a finite budget, a 64-bit division per step.
-A single-unit fast path (admit when `remaining > 0`, subtract `unit`) has the
-same outcome as one `consume(unit)` and would skip the division. Measure
-with `--hotpath` on the patterns pair before changing anything.
-
 ### Dev `Frame::run` frame after the weights (+2.4 KB per native level)
 
 022a10c grew the dev `Frame::run` frame from 5528 to 7976 bytes, every dev

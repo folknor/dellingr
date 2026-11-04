@@ -556,6 +556,7 @@ impl<'data, 'meter, 'cost> MatchState<'data, 'meter, 'cost> {
     }
     /// Take one matcher step: an interrupt safepoint, then its charge at the
     /// meter's unit cost.
+    #[inline(always)]
     fn charge(&mut self) -> MatchResult<()> {
         if crate::vm::interrupt_requested(self.interrupt) {
             return Err(MatchError::Interrupted);
@@ -566,6 +567,11 @@ impl<'data, 'meter, 'cost> MatchState<'data, 'meter, 'cost> {
             Err(MatchError::BudgetExceeded)
         }
     }
+    /// One byte against one class: the matcher's per-byte step. Inlined into
+    /// every caller: since the cost meter gained its `Off` variant the
+    /// optimizer outlined it, a call per subject byte (`patterns` measured
+    /// 4.4% slower; reference/performance.md).
+    #[inline(always)]
     fn singlematch(&mut self, pos: usize, class: ClassId) -> MatchResult<bool> {
         self.charge()?;
         let Some(&byte) = self.subject.get(pos) else {
