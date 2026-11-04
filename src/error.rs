@@ -118,8 +118,10 @@ pub(crate) enum CompilerFault {
 
 #[derive(Debug)]
 pub(crate) enum ParserFault {
-    InvalidStringToken,
-    MissingStringContents,
+    /// The lexer builds every numeral and string token with its value, its
+    /// kind taken from that value; a literal kind arriving without one is a
+    /// lexer bug, not a malformed script.
+    LiteralTokenWithoutValue,
     BlockExitWithoutEntry,
     MultiValueTailMissingInstruction,
     LoopExitWithoutEntry,
@@ -136,12 +138,9 @@ pub(crate) enum ParserFault {
     FoldedLiteralOutOfRange,
     /// A resolved local has no declaration in its function.
     LocalWithoutDeclaration,
-    /// Identifier and numeral tokens are ASCII by construction in the byte
-    /// lexer, and the parser reads them as `&str`.
+    /// Identifier tokens are ASCII by construction in the byte lexer, and the
+    /// parser reads them as `&str`.
     TokenTextNotUtf8,
-    /// The lexer validates every numeral token with the numeral parser the
-    /// parser then converts it with, so the conversion cannot fail.
-    InvalidNumberToken,
 }
 
 #[derive(Debug)]
@@ -228,8 +227,7 @@ impl fmt::Display for CompilerFault {
 impl ParserFault {
     fn message(&self) -> &'static str {
         match self {
-            Self::InvalidStringToken => "parser requested contents for an invalid string token",
-            Self::MissingStringContents => "lexer did not retain contents for a string token",
+            Self::LiteralTokenWithoutValue => "lexer produced a literal token without its value",
             Self::BlockExitWithoutEntry => "block exit requires a block entry",
             Self::MultiValueTailMissingInstruction => {
                 "multi-value tail does not end with its instruction"
@@ -252,8 +250,7 @@ impl ParserFault {
             Self::EmptyComparisonChain => "comparison chain requires an operator",
             Self::FoldedLiteralOutOfRange => "folded operand names a literal outside the pool",
             Self::LocalWithoutDeclaration => "resolved local has no declaration",
-            Self::TokenTextNotUtf8 => "lexer produced a non-UTF-8 identifier or numeral token",
-            Self::InvalidNumberToken => "lexer produced a numeral token the numeral parser rejects",
+            Self::TokenTextNotUtf8 => "lexer produced a non-UTF-8 identifier token",
         }
     }
 }

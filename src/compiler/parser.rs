@@ -11,8 +11,8 @@ use super::error::Error;
 use super::error::ErrorKind;
 use super::error::SyntaxError;
 use super::lexer::TokenStream;
-use super::token::Token;
 use super::token::TokenKind;
+use super::token::{EscapeError, Literal, Token};
 use crate::det_hash::{IndexMap, IndexSet};
 use crate::error::{InternalFault, ParserFault};
 use crate::instr::Builtin;
@@ -359,31 +359,15 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Takes the decoded bytes retained for a short-string token by the lexer.
-    fn get_literal_string_contents(&mut self, tok: Token) -> Result<Vec<u8>> {
-        use super::lexer::LiteralStringContents;
-
-        if tok.typ != TokenKind::LiteralString || tok.len < 2 {
-            return Err(self.internal_error_at(ParserFault::InvalidStringToken, tok.start));
-        }
-
-        match self.input.take_literal_string_contents(tok.start) {
-            Some(LiteralStringContents::Decoded(contents)) => Ok(contents),
-            Some(LiteralStringContents::SyntaxError { kind, pos }) => Err(self.error_at(kind, pos)),
-            Some(LiteralStringContents::StringSizeExceeded { size, limit }) => {
-                // Public parsing caps source bytes at MAX_STRING_BYTES, and
-                // decoding a quoted literal cannot grow beyond its source.
-                // This defensive branch is unreachable for admitted source,
-                // so its next-token location cannot misattribute a user error.
-                Err(self.error_here(ErrorKind::StringSizeExceeded { size, limit }))
-            }
-            None => Err(self.internal_error_at(ParserFault::MissingStringContents, tok.start)),
-        }
+    /// A literal-kind token that arrived without the value the lexer builds
+    /// every literal with: a lexer bug, not a malformed script.
+    fn literal_without_value(&self, token: Token) -> Error {
+        self.internal_error_at(ParserFault::LiteralTokenWithoutValue, token.start)
     }
 
-    /// The source text of an identifier or numeral token. The byte lexer only
-    /// builds those tokens from ASCII, so the conversion cannot fail on lexer
-    /// output; a failure is a lexer bug reported as an internal error.
+    /// The source text of an identifier token. The byte lexer only builds
+    /// identifiers from ASCII, so the conversion cannot fail on lexer output;
+    /// a failure is a lexer bug reported as an internal error.
     fn get_text(&self, token: Token) -> Result<&'a str> {
         std::str::from_utf8(self.input.source_bytes(token.range()))
             .map_err(|_| self.internal_error_at(ParserFault::TokenTextNotUtf8, token.start))
@@ -631,9 +615,14 @@ impl<'a> Parser<'a> {
         Ok(Variable::Global(i))
     }
 
-    /// Parses a literal string token into its pool index.
-    fn literal_string(&mut self, tok: Token) -> Result<Expr> {
-        let text = self.get_literal_string_contents(tok)?;
+    /// Interprets a string literal's value: raises its deferred escape error,
+    /// or adds its bytes to the string pool, which applies the string size
+    /// limit.
+    fn literal_string(
+        &mut self,
+        contents: std::result::Result<Vec<u8>, EscapeError>,
+    ) -> Result<Expr> {
+        let text = contents.map_err(|error| self.error_at(error.kind.syntax_error(), error.pos))?;
         let idx = self.find_or_add_string_bytes(&text)?;
         Ok(Expr::new(ExprKind::Str(idx)))
     }
@@ -643,11 +632,16 @@ impl<'a> Parser<'a> {
     /// Lua allows calls with parenthesized arguments, a single table constructor,
     /// or a single literal string: `f(...)`, `f{...}`, and `f"..."`.
     fn parse_call_args(&mut self) -> Result<Vec<Expr>> {
-        let tok = self.input.next()?;
-        match tok.typ {
-            TokenKind::LParen => self.parse_parenthesized_call_args(),
-            TokenKind::LiteralString => Ok(vec![self.literal_string(tok)?]),
-            TokenKind::LCurly => Ok(vec![self.parse_table(tok.line)?]),
+        let (tok, literal) = self.input.next_with_literal()?;
+        // A number carried with its value is valid lexer output but no call
+        // syntax, so it falls to the last arm.
+        match (tok.typ, literal) {
+            (_, Some(Literal::String(contents))) => Ok(vec![self.literal_string(contents)?]),
+            (TokenKind::LiteralString | TokenKind::LiteralNumber, None) => {
+                Err(self.literal_without_value(tok))
+            }
+            (TokenKind::LParen, _) => self.parse_parenthesized_call_args(),
+            (TokenKind::LCurly, _) => Ok(vec![self.parse_table(tok.line)?]),
             _ => Err(
                 self.err_near(tok, |found| SyntaxError::FunctionArgumentsExpected {
                     found,

@@ -8,38 +8,26 @@
 use super::Result;
 use super::error::Error;
 use super::error::SyntaxError;
-use super::token::Token;
 use super::token::TokenKind::{self, *};
+use super::token::{EscapeError, EscapeErrorKind, Literal, Token};
 use crate::numeral::{hex_value, is_lua_whitespace, is_newline_pair, parse_lua_numeral};
 
 use std::ops::Range;
+
+/// A token with the value the lexer established for it, if it is a literal.
+/// The value travels in the same lookahead slot as its token, so it cannot be
+/// handed to the parser for any other token.
+pub(super) type Lexed = (Token, Option<Literal>);
 
 /// A `TokenStream` is a wrapper around a `Lexer`. It provides a lookahead buffer and several
 /// helper methods.
 #[derive(Debug)]
 pub(super) struct TokenStream<'a> {
     lexer: Lexer<'a>,
-    lookahead: Option<Token>,
-    lookahead2: Option<Token>,
+    lookahead: Option<Lexed>,
+    lookahead2: Option<Lexed>,
     last_line: u32,
     last_pos: usize,
-}
-
-/// Decoded contents saved by the lexer for a short-string token.
-#[derive(Debug)]
-pub(super) enum LiteralStringContents {
-    /// The literal decoded successfully.
-    Decoded(Vec<u8>),
-    /// A malformed escape, retained until the parser consumes its token.
-    SyntaxError { kind: SyntaxError, pos: usize },
-    /// The decoded literal exceeded the configured string limit.
-    StringSizeExceeded { size: usize, limit: usize },
-}
-
-#[derive(Debug)]
-enum LiteralStringFailure {
-    SyntaxError(SyntaxError, usize),
-    StringSizeExceeded { size: usize, limit: usize },
 }
 
 /// A `Lexer` handles the raw conversion of bytes to tokens.
@@ -55,7 +43,6 @@ pub(super) struct Lexer<'a> {
     /// trailing `\r` starts a fresh break, as reference `inclinenumber` does.
     newline_pair_open: bool,
     source: &'a [u8],
-    literal_string_contents: Vec<(usize, LiteralStringContents)>,
 }
 
 impl<'a> TokenStream<'a> {
@@ -71,19 +58,28 @@ impl<'a> TokenStream<'a> {
         }
     }
 
-    /// Returns the next `Token`.
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    /// Returns the next `Token` and discards its literal value. Popping is
+    /// not interpreting: a string token popped here never raises its
+    /// deferred escape error. Only a consumer that interprets the literal
+    /// calls `next_with_literal`.
     pub(super) fn next(&mut self) -> Result<Token> {
-        let token = match self.lookahead.take() {
-            Some(token) => {
+        Ok(self.next_with_literal()?.0)
+    }
+
+    /// Returns the next `Token` with the value the lexer established for it
+    /// when it is a literal.
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    pub(super) fn next_with_literal(&mut self) -> Result<Lexed> {
+        let lexed = match self.lookahead.take() {
+            Some(lexed) => {
                 self.lookahead = self.lookahead2.take();
-                Ok(token)
+                Ok(lexed)
             }
             None => self.lexer.next_token(),
         }?;
-        self.last_line = token.line;
-        self.last_pos = token.range().end;
-        Ok(token)
+        self.last_line = lexed.0.line;
+        self.last_pos = lexed.0.range().end;
+        Ok(lexed)
     }
 
     /// Line of the last consumed token. Lookahead never changes attribution.
@@ -98,10 +94,11 @@ impl<'a> TokenStream<'a> {
         if self.lookahead.is_none() {
             self.lookahead = Some(self.lexer.next_token()?);
         }
-        Ok(self
+        Ok(&self
             .lookahead
             .as_ref()
-            .expect("lexer lookahead is populated before returning"))
+            .expect("lexer lookahead is populated before returning")
+            .0)
     }
 
     /// Returns the token after the next token, without popping it from the stream.
@@ -113,10 +110,11 @@ impl<'a> TokenStream<'a> {
         if self.lookahead2.is_none() {
             self.lookahead2 = Some(self.lexer.next_token()?);
         }
-        Ok(self
+        Ok(&self
             .lookahead2
             .as_ref()
-            .expect("second lexer lookahead is populated before returning"))
+            .expect("second lexer lookahead is populated before returning")
+            .0)
     }
 
     /// Returns the type of the next token.
@@ -163,19 +161,6 @@ impl<'a> TokenStream<'a> {
     pub(super) fn source_bytes(&self, range: Range<usize>) -> &'a [u8] {
         &self.lexer.source[range]
     }
-
-    /// Takes decoded contents for a string token already returned by the lexer.
-    pub(super) fn take_literal_string_contents(
-        &mut self,
-        token_start: usize,
-    ) -> Option<LiteralStringContents> {
-        let index = self
-            .lexer
-            .literal_string_contents
-            .iter()
-            .position(|(start, _)| *start == token_start)?;
-        Some(self.lexer.literal_string_contents.remove(index).1)
-    }
 }
 
 impl<'a> Lexer<'a> {
@@ -188,13 +173,12 @@ impl<'a> Lexer<'a> {
             newline_pair_open: false,
             pos: 0,
             source,
-            literal_string_contents: Vec::new(),
         }
     }
 
-    /// Returns the next `Token`.
+    /// Returns the next `Token`, with its value when it is a literal.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    pub(super) fn next_token(&mut self) -> Result<Token> {
+    pub(super) fn next_token(&mut self) -> Result<Lexed> {
         // Loop rather than recurse on comments: a comment skips its body and
         // continues the loop, so a long run of consecutive comments cannot
         // exhaust the stack the way tail-recursing into `next_token` did.
@@ -203,11 +187,11 @@ impl<'a> Lexer<'a> {
             let tok_start = self.pos;
             // Capture before consuming the body: a string token can consume
             // logical newlines through \z or an escaped physical newline.
-            // The compiler source cap keeps this one-based line count and the
-            // token's byte length below the u32 representational limit.
+            // The compiler source cap keeps this one-based line count below
+            // the u32 representational limit.
             let tok_line = self.linebreaks.len() as u32;
             let Some(first_char) = self.next_char() else {
-                return Ok(self.end_of_file(tok_line));
+                return Ok((self.end_of_file(tok_line), None));
             };
             let tok_type = match first_char {
                 b'+' => Plus,
@@ -225,7 +209,11 @@ impl<'a> Lexer<'a> {
                 b'}' => RCurly,
                 b']' => RSquare,
 
-                b'.' => self.peek_dot(tok_start)?,
+                b'.' if self.peek_char().is_some_and(|c| c.is_ascii_digit()) => {
+                    let number = self.lex_numeral(b'.', tok_start)?;
+                    return Ok(self.literal_token(Literal::Number(number), tok_start, tok_line));
+                }
+                b'.' => self.lex_dots(),
 
                 b'=' | b'<' | b'>' | b'~' => self.peek_equals(first_char)?,
 
@@ -237,7 +225,10 @@ impl<'a> Lexer<'a> {
                     Minus
                 }
 
-                b'\'' | b'\"' => self.lex_string(first_char, tok_start)?,
+                b'\'' | b'\"' => {
+                    let contents = self.lex_string(first_char)?;
+                    return Ok(self.literal_token(Literal::String(contents), tok_start, tok_line));
+                }
                 b'[' => {
                     if let Some(b'=' | b'[') = self.peek_char() {
                         return Err(self.error_at(SyntaxError::LongStringUnsupported, tok_start));
@@ -245,7 +236,10 @@ impl<'a> Lexer<'a> {
                     LSquare
                 }
 
-                b'0'..=b'9' => self.lex_numeral(first_char, tok_start)?,
+                b'0'..=b'9' => {
+                    let number = self.lex_numeral(first_char, tok_start)?;
+                    return Ok(self.literal_token(Literal::Number(number), tok_start, tok_line));
+                }
 
                 b'a'..=b'z' | b'A'..=b'Z' | b'_' => match self.lex_word(tok_start) {
                     // Reserved so scripts cannot use the spelling as a name,
@@ -256,13 +250,33 @@ impl<'a> Lexer<'a> {
 
                 _ => return Err(self.invalid_character(first_char, tok_start)),
             };
-            let len = (self.pos - tok_start) as u32;
-            return Ok(Token {
-                typ: tok_type,
-                start: tok_start,
-                len,
-                line: tok_line,
-            });
+            return Ok((self.plain_token(tok_type, tok_start, tok_line), None));
+        }
+    }
+
+    /// The token just read, for a kind that carries no value.
+    fn plain_token(&self, typ: TokenKind, start: usize, line: u32) -> Token {
+        debug_assert!(
+            !matches!(typ, LiteralNumber | LiteralString),
+            "a literal token must be built with its value"
+        );
+        self.token(typ, start, line)
+    }
+
+    /// The literal just read, its kind taken from its value.
+    fn literal_token(&self, literal: Literal, start: usize, line: u32) -> Lexed {
+        (self.token(literal.kind(), start, line), Some(literal))
+    }
+
+    fn token(&self, typ: TokenKind, start: usize, line: u32) -> Token {
+        // The compiler source cap keeps the token's byte length below the
+        // u32 representational limit.
+        let len = (self.pos - start) as u32;
+        Token {
+            typ,
+            start,
+            len,
+            line,
         }
     }
 
@@ -402,22 +416,17 @@ impl<'a> Lexer<'a> {
         Error::new(kind, line_num, column)
     }
 
-    /// The lexer just read a `.`.
-    /// Determines whether it is part of a `Dot`, `DotDot`, `DotDotDot` or `Number`.
-    fn peek_dot(&mut self, tok_start: usize) -> Result<TokenKind> {
-        let typ = match self.peek_char() {
-            Some(b'.') => {
-                self.next_char();
-                if self.try_next(b'.') {
-                    DotDotDot
-                } else {
-                    DotDot
-                }
-            }
-            Some(c) if c.is_ascii_digit() => self.lex_numeral(b'.', tok_start)?,
-            _ => Dot,
-        };
-        Ok(typ)
+    /// The lexer just read a `.` not followed by a digit (`next_token` sends
+    /// that form to `lex_numeral`). Determines whether it is a `Dot`,
+    /// `DotDot` or `DotDotDot`.
+    fn lex_dots(&mut self) -> TokenKind {
+        if !self.try_next(b'.') {
+            Dot
+        } else if self.try_next(b'.') {
+            DotDotDot
+        } else {
+            DotDot
+        }
     }
 
     /// The lexer just read something which might be part of a two-character
@@ -449,12 +458,22 @@ impl<'a> Lexer<'a> {
 
     /// Tokenizes and decodes a short literal string in one pass.
     ///
-    /// Escape failures are saved with the token and returned only when the
-    /// parser consumes it. This preserves the parser's error ordering when a
-    /// malformed string appears after an earlier syntax error. Bytes other
-    /// than the quote, backslash and line breaks are copied verbatim, so a
-    /// literal holds exactly the source's bytes, valid UTF-8 or not.
-    fn lex_string(&mut self, quote: u8, token_start: usize) -> Result<TokenKind> {
+    /// The first escape failure is returned as the literal's value, raised
+    /// only when the parser interprets the literal (see `Literal::String`).
+    /// This preserves the parser's error ordering when a malformed string
+    /// appears after an earlier syntax error. An unfinished or unclosed
+    /// string is still an error here, at lexing time. Bytes other than the
+    /// quote, backslash and line breaks are copied verbatim, so a literal
+    /// holds exactly the source's bytes, valid UTF-8 or not.
+    ///
+    /// No string size check runs here. Decoding never produces more bytes
+    /// than the body it reads, the parser rejects source longer than
+    /// `MAX_SOURCE_BYTES` (equal to `MAX_STRING_BYTES`) before lexing, and
+    /// the decoded literal enters the string pool through the parser's
+    /// `find_or_add_string_bytes`, which applies the string size limit to
+    /// every constant. That one check is the rule; a second one here could
+    /// not fire.
+    fn lex_string(&mut self, quote: u8) -> Result<std::result::Result<Vec<u8>, EscapeError>> {
         let body_start = self.pos;
         let mut decoded = Vec::new();
         let mut failure = None;
@@ -466,17 +485,10 @@ impl<'a> Lexer<'a> {
                 return Err(self.error(SyntaxError::UnfinishedString));
             };
             if c == quote {
-                let contents = match failure {
-                    Some(LiteralStringFailure::SyntaxError(kind, pos)) => {
-                        LiteralStringContents::SyntaxError { kind, pos }
-                    }
-                    Some(LiteralStringFailure::StringSizeExceeded { size, limit }) => {
-                        LiteralStringContents::StringSizeExceeded { size, limit }
-                    }
-                    None => LiteralStringContents::Decoded(decoded),
-                };
-                self.literal_string_contents.push((token_start, contents));
-                return Ok(LiteralString);
+                return Ok(match failure {
+                    Some(error) => Err(error),
+                    None => Ok(decoded),
+                });
             }
 
             if c == b'\\' {
@@ -510,25 +522,8 @@ impl<'a> Lexer<'a> {
                 // depend on whether the newline is CR, LF, CRLF or LFCR.
                 return Err(self.error_at(SyntaxError::UnclosedString, char_start));
             } else if failure.is_none() && char_start >= decoded_until {
-                match Self::check_decoded_string_growth(decoded.len()) {
-                    Ok(()) => decoded.push(c),
-                    Err(error) => failure = Some(error),
-                }
+                decoded.push(c);
             }
-        }
-    }
-
-    fn check_decoded_string_growth(
-        current_len: usize,
-    ) -> std::result::Result<(), LiteralStringFailure> {
-        let size = current_len.saturating_add(1);
-        if size > crate::limits::MAX_STRING_BYTES {
-            Err(LiteralStringFailure::StringSizeExceeded {
-                size,
-                limit: crate::limits::MAX_STRING_BYTES,
-            })
-        } else {
-            Ok(())
         }
     }
 
@@ -539,16 +534,12 @@ impl<'a> Lexer<'a> {
         quote: u8,
         lexical_end: usize,
         decoded: &mut Vec<u8>,
-    ) -> std::result::Result<usize, LiteralStringFailure> {
-        // `\z` appends no byte, so it skips the growth check every other
-        // escape runs. The source cap makes a decoded-string overflow
-        // unreachable through public parsing; the guard keeps the decoder
-        // correct without relying on that cap.
-        if escaped != b'z' {
-            Self::check_decoded_string_growth(decoded.len())?;
-        }
+    ) -> std::result::Result<usize, EscapeError> {
         let bytes = self.source;
-        let error = |kind| LiteralStringFailure::SyntaxError(kind, slash_pos);
+        let error = |kind| EscapeError {
+            kind,
+            pos: slash_pos,
+        };
         let unchanged_end = lexical_end;
 
         let skip_until = match escaped {
@@ -568,7 +559,7 @@ impl<'a> Lexer<'a> {
                     digits += 1;
                 }
                 if value > 255 {
-                    return Err(error(SyntaxError::DecimalEscapeTooLarge));
+                    return Err(error(EscapeErrorKind::DecimalTooLarge));
                 }
                 decoded.push(value as u8);
                 end
@@ -580,12 +571,12 @@ impl<'a> Lexer<'a> {
                     Some(&byte) if byte != quote => hex_value(byte),
                     _ => None,
                 }
-                .ok_or_else(|| error(SyntaxError::HexadecimalDigitExpected))?;
+                .ok_or_else(|| error(EscapeErrorKind::HexadecimalDigitExpected))?;
                 let low = match bytes.get(low_pos) {
                     Some(&byte) if byte != quote => hex_value(byte),
                     _ => None,
                 }
-                .ok_or_else(|| error(SyntaxError::HexadecimalDigitExpected))?;
+                .ok_or_else(|| error(EscapeErrorKind::HexadecimalDigitExpected))?;
                 decoded.push(high * 16 + low);
                 low_pos + 1
             }
@@ -630,7 +621,7 @@ impl<'a> Lexer<'a> {
                 decoded.push(b'\x0B');
                 unchanged_end
             }
-            _ => return Err(error(SyntaxError::InvalidEscapeSequence)),
+            _ => return Err(error(EscapeErrorKind::Invalid)),
         };
         Ok(skip_until)
     }
@@ -648,9 +639,9 @@ impl<'a> Lexer<'a> {
     /// anywhere smaller would accept sources both references reject:
     /// `1...2` would lex as `1.` `..` `2` and concatenate.
     ///
-    /// The whole span is then checked once with the shared numeral parser, so
-    /// every `LiteralNumber` token is a valid numeral by construction and
-    /// the parser only converts it. A failure is a lexer error at the
+    /// The whole span is then converted once with the shared numeral parser,
+    /// so every `LiteralNumber` token is a valid numeral by construction, and
+    /// its value rides beside it to the parser. A failure is a lexer error at the
     /// numeral's first byte, for every radix and form, and it is raised when
     /// the token is lexed: a malformed numeral reports `malformed number`
     /// even where the grammar wanted some other token (`local 1e = 2`).
@@ -658,7 +649,7 @@ impl<'a> Lexer<'a> {
     /// the span reaches the end of the source as a prefix that appended
     /// digits can complete. That claim is lexical, as for an unfinished
     /// string: `local 1e` is recoverable although no completion parses.
-    fn lex_numeral(&mut self, first_char: u8, tok_start: usize) -> Result<TokenKind> {
+    fn lex_numeral(&mut self, first_char: u8, tok_start: usize) -> Result<f64> {
         let exponent = if first_char == b'0' && (self.try_next(b'x') || self.try_next(b'X')) {
             b"pP"
         } else {
@@ -684,8 +675,8 @@ impl<'a> Lexer<'a> {
         }
 
         let literal = &self.source[tok_start..self.pos];
-        if parse_lua_numeral(literal).is_some() {
-            return Ok(LiteralNumber);
+        if let Some(number) = parse_lua_numeral(literal) {
+            return Ok(number);
         }
         let kind = if self.pos == self.source.len() && is_incomplete_numeral(literal) {
             SyntaxError::UnfinishedNumber
@@ -792,14 +783,21 @@ mod tests {
             line: lines.partition_point(|&line_start| line_start <= start) as u32,
         });
         loop {
-            let actual = lexer.next_token().unwrap();
+            let (actual, literal) = lexer.next_token().unwrap();
             if actual.typ == TokenKind::EndOfFile {
                 break;
             }
+            assert_eq!(
+                literal.as_ref().map(Literal::kind),
+                matches!(actual.typ, LiteralNumber | LiteralString).then_some(actual.typ),
+                "a token carries a value exactly when it is a literal, of its kind"
+            );
             if actual.typ == LiteralNumber {
+                let expected = parse_lua_numeral(&lexer.source[actual.range()])
+                    .expect("lexer emitted an invalid numeral token");
                 assert!(
-                    parse_lua_numeral(&lexer.source[actual.range()]).is_some(),
-                    "lexer emitted an invalid numeral token at {}",
+                    matches!(literal, Some(Literal::Number(n)) if n.to_bits() == expected.to_bits()),
+                    "numeral token at {} must carry its value",
                     actual.start
                 );
             }
@@ -880,8 +878,8 @@ mod tests {
         }
         src.push('x');
         let mut lexer = Lexer::new(src.as_bytes());
-        assert_eq!(lexer.next_token().unwrap().typ, TokenKind::Identifier);
-        assert_eq!(lexer.next_token().unwrap().typ, TokenKind::EndOfFile);
+        assert_eq!(lexer.next_token().unwrap().0.typ, TokenKind::Identifier);
+        assert_eq!(lexer.next_token().unwrap().0.typ, TokenKind::EndOfFile);
     }
 
     #[test]
@@ -934,30 +932,35 @@ mod tests {
     #[test]
     fn short_strings_are_decoded_by_the_lexer_and_bad_escapes_are_deferred() {
         let mut input = TokenStream::new("\"a\\x41\\n\"".as_bytes());
-        let token = input.next().expect("closed string must lex");
+        let (token, literal) = input.next_with_literal().expect("closed string must lex");
         assert_eq!(token.typ, LiteralString);
-        match input
-            .take_literal_string_contents(token.start)
-            .expect("lexer must retain decoded string contents")
-        {
-            LiteralStringContents::Decoded(contents) => {
-                assert_eq!(contents.as_slice(), &b"aA\n"[..]);
-            }
-            _ => panic!("valid escapes must decode successfully"),
-        }
+        assert_eq!(literal, Some(Literal::String(Ok(b"aA\n".to_vec()))));
 
-        let mut input = TokenStream::new("\"\\q\"".as_bytes());
-        let token = input
-            .next()
+        // The escape error is the literal's value, not a lexing error, and a
+        // later escape error does not replace the first.
+        let mut input = TokenStream::new("\"\\q\\256\" x".as_bytes());
+        let (token, literal) = input
+            .next_with_literal()
             .expect("invalid escapes remain deferred until parser consumption");
         assert_eq!(token.typ, LiteralString);
-        assert!(matches!(
-            input.take_literal_string_contents(token.start),
-            Some(LiteralStringContents::SyntaxError {
-                kind: SyntaxError::InvalidEscapeSequence,
+        assert_eq!(
+            literal,
+            Some(Literal::String(Err(EscapeError {
+                kind: EscapeErrorKind::Invalid,
                 pos: 1,
-            })
-        ));
+            })))
+        );
+        assert_eq!(input.next().expect("lexing continues").typ, Identifier);
+
+        // Popping without interpreting drops the deferred error.
+        let mut input = TokenStream::new("\"\\q\" x".as_bytes());
+        assert_eq!(input.peek2_type().expect("both tokens lex"), Identifier);
+        assert_eq!(
+            input.next().expect("popping is not interpreting").typ,
+            LiteralString
+        );
+        let (token, literal) = input.next_with_literal().expect("name lexes");
+        assert_eq!((token.typ, literal), (Identifier, None));
     }
 
     #[test]
@@ -1098,7 +1101,7 @@ mod tests {
         for input in ["0x.", "0xp1", "0x1p", "0x1p+", "0x1p-", "0x1p2f"] {
             let mut lexer = Lexer::new(input.as_bytes());
             let mut result = lexer.next_token();
-            while let Ok(token) = &result {
+            while let Ok((token, _)) = &result {
                 if token.typ == TokenKind::EndOfFile {
                     break;
                 }
@@ -1261,7 +1264,7 @@ mod tests {
             "x --[[",
         ] {
             let mut lexer = Lexer::new(input.as_bytes());
-            assert_eq!(lexer.next_token().unwrap().typ, Identifier);
+            assert_eq!(lexer.next_token().unwrap().0.typ, Identifier);
             let err = lexer
                 .next_token()
                 .expect_err("an unfinished long comment must not swallow the file");
@@ -1296,8 +1299,8 @@ mod tests {
             "f --[[ note ]] (g)",
         ] {
             let mut lexer = Lexer::new(input.as_bytes());
-            assert_eq!(lexer.next_token().unwrap().typ, Identifier);
-            assert_eq!(lexer.next_token().unwrap().typ, LParen, "{input:?}");
+            assert_eq!(lexer.next_token().unwrap().0.typ, Identifier);
+            assert_eq!(lexer.next_token().unwrap().0.typ, LParen, "{input:?}");
         }
         let mut tokens = TokenStream::new("f -- note\n(g)".as_bytes());
         assert_eq!(tokens.peek2().unwrap().typ, LParen);
@@ -1328,7 +1331,7 @@ mod tests {
             let mut lexer = Lexer::new(source.as_bytes());
             let mut actual_lines = Vec::new();
             loop {
-                let token = lexer.next_token().expect("line fixture must lex");
+                let (token, _) = lexer.next_token().expect("line fixture must lex");
                 actual_lines.push(token.line);
                 if token.typ == TokenKind::EndOfFile {
                     break;
@@ -1361,7 +1364,8 @@ mod tests {
     #[test]
     fn line_and_col_keeps_newline_boundary_tie_breaks() {
         let mut lexer = Lexer::new("a\r\nb\n\rc".as_bytes());
-        while lexer.next_token().expect("boundary fixture must lex").typ != TokenKind::EndOfFile {}
+        while lexer.next_token().expect("boundary fixture must lex").0.typ != TokenKind::EndOfFile {
+        }
 
         for (pos, expected) in [
             (0, (1, 1)),

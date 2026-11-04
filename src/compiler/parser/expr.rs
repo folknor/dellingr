@@ -2,12 +2,12 @@ use super::super::ast::{
     ArithChain, ArithLink, CallSuffix, CompareChain, CompareLink, Expr, ExprKind, MethodSuffix,
     Place, Suffix, Suffixed,
 };
+use super::Literal;
 use super::Parser;
 use super::Result;
 use super::SyntaxError;
 use super::TokenKind;
 use super::Variable;
-use crate::error::ParserFault;
 use crate::instr::{ArithOp, CompareOp};
 use crate::limits::{MAX_EXPRESSIONS, SYNTAX_SUFFIX_COST};
 
@@ -427,22 +427,20 @@ impl Parser<'_> {
     /// * One of the keywords `nil`, `false` or `true
     /// * A table constructor
     fn parse_expr_base(&mut self) -> Result<Expr> {
-        let tok = self.input.next()?;
-        Ok(match tok.typ {
-            TokenKind::LCurly => self.parse_table(tok.line)?,
-            TokenKind::LiteralNumber => {
-                // The lexer validates every numeral, and emits the token only
-                // after this same conversion succeeded on the same bytes; a
-                // failure here is a lexer bug, not a malformed script. The
-                // conversion runs twice per literal at compile time rather
-                // than carrying the value on the token.
-                let text = self.input.source_bytes(tok.range());
-                let number = crate::numeral::parse_lua_numeral(text).ok_or_else(|| {
-                    self.internal_error_at(ParserFault::InvalidNumberToken, tok.start)
-                })?;
-                Expr::new(ExprKind::Num(self.find_or_add_number(number)?))
+        let (tok, literal) = self.input.next_with_literal()?;
+        match literal {
+            // The value comes from the lexer's one validating conversion.
+            Some(Literal::Number(number)) => {
+                return Ok(Expr::new(ExprKind::Num(self.find_or_add_number(number)?)));
             }
-            TokenKind::LiteralString => self.literal_string(tok)?,
+            Some(Literal::String(contents)) => return self.literal_string(contents),
+            None => {}
+        }
+        Ok(match tok.typ {
+            TokenKind::LiteralNumber | TokenKind::LiteralString => {
+                return Err(self.literal_without_value(tok));
+            }
+            TokenKind::LCurly => self.parse_table(tok.line)?,
             TokenKind::Function => {
                 let nested = self.parse_fndef(None, false, tok.line)?;
                 Expr::new(ExprKind::Function {
