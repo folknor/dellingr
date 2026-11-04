@@ -11,6 +11,20 @@ version's meaning is wider (see below).
 
 ### Added
 
+- Host interrupts. `Interrupt` is a shareable flag (`trigger`, `reset`,
+  `is_triggered`, `same_as`) that a host sets from any thread or a signal
+  handler to stop running Lua: `StateBuilder::interrupt` installs a host-held
+  handle (one trigger stops every State sharing it), `State::interrupt`
+  returns a State's handle and `State::set_interrupt` replaces it, including
+  in a `load_state` setup. Lua fails with the new `ErrorKind::Interrupted` at
+  its next safepoint: every backward jump, every Lua call admission, and each
+  step of library work that could otherwise run without bound (pattern
+  matching, plain substring search, heap sort, `table.concat`, `table.move`,
+  the metamethod paths of `table.insert`, `table.remove` and `table.sort`,
+  and the empty-pattern `string.gsub`). The flag is sticky until the host
+  resets it, charges nothing, and is not saved in snapshots. There is still
+  no instruction-count or time limit. See "Stopping a script from the host"
+  in `docs/budget.md`.
 - `State::raw_field::<T>(table_arg, name)`: host functions read a typed field
   of an options table argument such as `game.spawn{player = 1, x = 2}`. It is a
   raw read (a field supplied by `__index` reads as absent), runs no Lua, leaves
@@ -87,8 +101,13 @@ version's meaning is wider (see below).
 ### Changed
 
 - Bumped the dev-only `object` dependency (the libm symbol test's ELF reader)
-  0.37 to 0.40. The lockfile also moves the optional `hotpath` profiler 0.29.0
-  to 0.29.1. Neither touches a default build.
+  0.37 to 0.40, and the optional `hotpath` profiler 0.29 to 0.31. Neither
+  touches a default build.
+- Bytecode admission, for compiled code and snapshot loads alike, refuses a
+  `FOR_PREP` or `TFOR_LOOP` whose exit jumps backward, with the new
+  `ValidationReason::BackwardLoopExit`. The compiler never emits one, so no
+  save written by this crate is affected; the rule keeps every backward
+  transfer an interrupt safepoint.
 
 ## [0.6.0] - 2026-10-25
 

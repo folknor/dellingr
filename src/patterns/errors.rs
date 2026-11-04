@@ -23,6 +23,8 @@ pub(crate) enum PatternError {
 pub(crate) enum MatchError {
     Pattern(PatternError),
     BudgetExceeded,
+    /// The host's interrupt was set at a matcher step.
+    Interrupted,
 }
 
 impl From<PatternError> for MatchError {

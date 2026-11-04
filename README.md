@@ -164,7 +164,9 @@ example, `while true do end` is free, which means that a user's Lua script
 could run forever. This is a known trade-off made in the full light of day -
 the main consumer of dellingr does not want to penalise the user (that is,
 subtract from their per-gametick budget) for structural semantics. Users should
-be encouraged to write more code, not less.
+be encouraged to write more code, not less. A host that must be able to stop
+such a script triggers its `Interrupt` (see "Stopping a script from the host"
+in [docs/budget.md](docs/budget.md)).
 
 Data-dependent native work in the string, pattern, and table libraries is
 generally charged for bytes examined or emitted, table elements visited, and
@@ -294,6 +296,10 @@ point.
   operation fails. It returns an error on a State built with `Costing::Off`.
   `State::builder().costing(..)` chooses the `CostModel` or Off;
   `program.analyze_cost_with(&model)` analyzes under a model.
+- Interrupts - an `Interrupt` handle (`State::interrupt`,
+  `StateBuilder::interrupt`, `State::set_interrupt`) that the host triggers
+  from any thread or a signal handler; running Lua fails with
+  `ErrorKind::Interrupted` at its next safepoint, until the host resets it.
 - Environment control - `State::seal_globals` ends the setup phase so globals
   a script deletes are reclaimed; `State::with_restricted_env` runs a closure
   against a whitelist of globals and restores the full environment afterwards.

@@ -1499,7 +1499,9 @@ fn gmatch_string_checks_preserve_relative_indexes_in_nested_frames() {
                     1,
                 );
                 assert_argument(
-                    &state.with_gmatch_matcher(1, 1, |_, _, _| ()).unwrap_err(),
+                    &state
+                        .with_gmatch_matcher(1, 1, |_, _, _, _| ())
+                        .unwrap_err(),
                     1,
                 );
                 assert_argument(&state.to_bytes(1).unwrap_err(), 1);
@@ -1507,7 +1509,9 @@ fn gmatch_string_checks_preserve_relative_indexes_in_nested_frames() {
                 assert_argument(&state.push_bytes_from_stack_range(1, 0..0).unwrap_err(), 1);
                 state.push_string("subject")?;
                 assert_argument(
-                    &state.with_gmatch_matcher(2, 1, |_, _, _| ()).unwrap_err(),
+                    &state
+                        .with_gmatch_matcher(2, 1, |_, _, _, _| ())
+                        .unwrap_err(),
                     1,
                 );
                 Ok(0)

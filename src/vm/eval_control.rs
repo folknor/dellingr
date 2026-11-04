@@ -36,6 +36,8 @@ impl State {
                 self.stack[local_slot] = Val::Num(n);
             }
         } else {
+            // Admission requires a forward offset here, so this jump is
+            // never an interrupt safepoint.
             *ip = Frame::jumped(*ip, body_len);
         }
         Ok(())
@@ -65,9 +67,11 @@ impl State {
             .expect("numeric for step stays numeric after setup");
         var += step;
         if check_numeric_for_condition(var, limit, step) {
+            // Jump first: the jump back is an interrupt safepoint, and an
+            // interrupted iteration writes no counter.
+            Frame::branch(self, ip, offset)?;
             self.stack[slot] = Val::Num(var);
             self.stack[slot + 3] = Val::Num(var);
-            *ip = Frame::jumped(*ip, offset);
         }
         Ok(())
     }
@@ -266,7 +270,8 @@ impl State {
         let first_var = &self.stack[base + 3];
 
         if matches!(first_var, Val::Nil) {
-            // Exit loop
+            // Exit loop. Admission requires a forward offset here, so this
+            // jump is never an interrupt safepoint.
             *ip = Frame::jumped(*ip, offset);
         } else {
             // Update control variable with first loop variable

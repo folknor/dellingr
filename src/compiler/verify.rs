@@ -33,6 +33,8 @@ pub enum ValidationReason {
     OpenResultsWithoutProducer,
     /// jump target is out of range
     JumpTargetOutOfRange,
+    /// a FOR_PREP or TFOR_LOOP loop exit jumps backward
+    BackwardLoopExit,
     /// code is empty
     EmptyCode,
     /// line info length does not match code length
@@ -199,6 +201,7 @@ impl std::fmt::Display for ValidationReason {
             Self::OpenResultsNotConsumed => "open results are not consumed by the next instruction",
             Self::OpenResultsWithoutProducer => "open results are read without a producer",
             Self::JumpTargetOutOfRange => "jump target is out of range",
+            Self::BackwardLoopExit => "loop exit jumps backward",
             Self::EmptyCode => "code is empty",
             Self::LineInfoLengthMismatch => "line info length does not match code length",
             Self::MissingFinalReturn => "code does not end in return",
@@ -796,7 +799,16 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
                 check_registers(pc, b, usize::from(c), frame)?;
             }
             Instr::OP_JMP => {}
-            Instr::OP_FOR_PREP | Instr::OP_FOR_LOOP | Instr::OP_TFOR_LOOP => {
+            Instr::OP_FOR_PREP | Instr::OP_TFOR_LOOP => {
+                // Loop exits: compiled code always skips forward past the
+                // loop. Dispatch does not poll the interrupt on these jumps,
+                // so a backward one would be a cycle with no safepoint.
+                if inst.sj() < 0 {
+                    return Err(err(Some(pc), ValidationReason::BackwardLoopExit));
+                }
+                check_registers(pc, a, 4, frame)?;
+            }
+            Instr::OP_FOR_LOOP => {
                 check_registers(pc, a, 4, frame)?;
             }
             Instr::OP_TFOR_CALL => {

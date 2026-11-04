@@ -70,9 +70,11 @@ counts zero for it; at runtime it charges the live number of elements.
 
 Structural code is free, so a loop that does only free work never exhausts a
 budget: `while true do end`, a busy-wait such as `while unit.hp > 0 do end`, or
-a loop whose increment was forgotten runs until the host process is stopped.
-This is deliberate. dellingr has no instruction-count limit, no time limit, no
-watchdog and no interrupt, and will not get one.
+a loop whose increment was forgotten runs until the host stops it. This is
+deliberate. dellingr has no instruction-count limit and no time limit, and
+will not get one: nothing stops a script on its own. A host that wants to
+stop one on demand triggers an interrupt (see "Stopping a script from the
+host" below).
 
 The games dellingr serves are played the way the old programming games were:
 authors write scripts, publish them, and other players download them and run
@@ -103,6 +105,51 @@ The arguments for a limit, and why they don't hold here:
 
 Configurable costs (`Costing`) do not change this: loops stay free under every
 model.
+
+## Stopping a script from the host
+
+Every State polls an `Interrupt`, a shareable flag the host can set from any
+thread or from a signal handler (Ctrl-C in a bench runner, a stop button in an
+editor). Running Lua fails with `ErrorKind::Interrupted` at its next
+safepoint. It is not a limit: nothing sets it but the host, and it charges
+nothing and changes no cost.
+
+```rust
+use dellingr::{Interrupt, State};
+
+let stop = Interrupt::new();
+let mut state = State::builder().interrupt(stop.clone()).build();
+// From another thread, or a signal handler: stop.trigger();
+// Once the host has handled the error: stop.reset();
+```
+
+- **Safepoints.** Every backward jump, every Lua function call admission
+  (from Lua or from Rust), and the library work that could otherwise run
+  without bound: pattern-matcher steps, plain substring search candidates,
+  heap-sort steps, and the iterations of `table.concat`, `table.move`, the
+  metamethod paths of `table.insert`, `table.remove` and `table.sort`, and the
+  empty-pattern `string.gsub`. Between two safepoints the work is at most one
+  linear pass over a string or a table's storage. `vm/interrupt.rs` lists
+  them.
+- **Errors.** `Interrupted` unwinds like any runtime error. An interrupted
+  call admission is a refusal: the error is reported at the caller's call
+  instruction and the callee never runs. `CallDepthExceeded` takes precedence
+  over it, and it takes precedence over the callee's `StackOverflow`
+  reservation.
+- **Sticky.** The VM only reads the flag. While it is set, every safepoint
+  fails, including the first one of a later call, until the host calls
+  `reset`. A Rust callback that swallows the error lets its Lua caller
+  continue only to that caller's next safepoint. A reset while a script still
+  runs can withdraw a request no safepoint has observed yet.
+- **Sharing.** Clones share one flag. `StateBuilder::interrupt` gives a State
+  a host-held handle, so one trigger stops every State built with it;
+  `State::interrupt` returns the State's own handle and `State::set_interrupt`
+  replaces it at any time, for example in a `load_state` setup. Snapshots do
+  not save it.
+- **Cost.** An interrupted operation has charged what it charged before the
+  safepoint. Raw `table.move` prepays its whole range, so after an
+  interruption `cost_used` can count copies it never made. Interrupted runs
+  are not replayable, so this never reaches a replay.
 
 ## Native charges
 

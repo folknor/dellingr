@@ -464,6 +464,10 @@ pub enum ErrorKind {
     /// built with [`Costing::Off`](crate::Costing::Off): there is no
     /// accounting to budget. Nothing changed.
     CostingOff,
+    /// The State's [`Interrupt`](crate::Interrupt) was triggered, and running
+    /// Lua reached a safepoint while it was set. Unwinds like any runtime
+    /// error; the State stays usable once the host resets the handle.
+    Interrupted,
     /// Metamethod chain (`__index` / `__newindex`, or a `__call` chain whose
     /// handler is itself a non-function callable) exceeded maximum depth.
     MetamethodDepthExceeded {
@@ -1738,6 +1742,7 @@ impl fmt::Display for ErrorKind {
                 )
             }
             CostingOff => f.write_str("cannot set a cost budget: costing is off for this state"),
+            Interrupted => f.write_str("interrupted"),
             MetamethodDepthExceeded { depth, limit } => {
                 write!(
                     f,

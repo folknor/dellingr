@@ -212,8 +212,9 @@ marker, which is the quickest way to see what a change touched.
 The recurring native stack of each scenario's cycle, as printed by the
 on-demand probe `brokkr test native_bytes_per_level` (dev) and
 `brokkr test native_bytes_per_level --release` (release), which run the
-default and snapshot configurations of each profile. Measured at 33734f8 on
-plantasjen (x86-64 Linux), `rustc 1.101.0-nightly (e9bbadf68 2026-10-12)`,
+default and snapshot configurations of each profile. Measured on the tree of
+the commit that added `Interrupt` (parent 912c2d5), on plantasjen (x86-64
+Linux), `rustc 1.101.0-nightly (e9bbadf68 2026-10-12)`,
 with that host's global rustflags (`-Ctarget-cpu=native`, the `wild` linker
 through clang). Release is Cargo's default release profile (the repository
 sets no overrides). Dev default and dev snapshot agree in every row.
@@ -233,64 +234,64 @@ separately.
 
 | Scenario | Dev, also snapshot | Release | Release + snapshot |
 |---|---|---|---|
-| `index_field` | 6688 | 528 | 528 |
-| `index_method` | 6688 | 528 | 528 |
-| `index_key` | 6656 | 624 | 624 |
-| `index_rust` | 8544 | 944 | 944 |
-| `newindex_field` | 6928 | 672 | 672 |
-| `newindex_key` | 6704 | 624 | 624 |
-| `newindex_rust` | 8784 | 1088 | 1088 |
-| `length` | 6560 | 432 | 432 |
-| `string_index_field` | 6688 | 528 | 528 |
-| `string_index_key` | 6656 | 624 | 624 |
-| `index_string_handler` | 6688 | 528 | 528 |
-| `string_library_index` | 6688 | 528 | 528 |
-| `host_get_table` | 7952 | 864 | 864 |
-| `host_get_table_string` | 7952 | 864 | 864 |
-| `host_call` | 7600 | 784 | 784 |
-| `host_anchor` | 8096 | 944 | 944 |
-| `host_tostring_bytes` | 8448 | 1120 | 1120 |
-| `host_to_string_with_meta` | 8608 | 1184 | 1184 |
-| `tostring` | 7808 | 944 | 944 |
-| `print` | 8192 | 1088 | 1088 |
-| `format` | 10304 | 1472 | 1472 |
-| `error_tostring` | 8352 | 1200 | 1200 |
-| `sort_comparator` | 9632 | 1408 | 1392 |
-| `sort_comparator_right` | 9632 | 1408 | 1392 |
-| `sort_comparator_sortdown` | 9632 | 1408 | 1392 |
-| `callable_rust` | 10048 | 1616 | 1600 |
-| `sort_metamethods_comparator` | 8880 | 1312 | 1312 |
-| `sort_metamethods_length` | 8016 | 1008 | 1008 |
-| `sort_metamethods_read` | 8256 | 976 | 976 |
-| `sort_metamethods_write` | 8272 | 1088 | 1104 |
-| `insert_length` | 7984 | 1008 | 1008 |
-| `insert_shift_read` | 8224 | 976 | 976 |
-| `insert_shift_write` | 8256 | 1088 | 1104 |
-| `insert_value` | 8256 | 1088 | 1104 |
-| `remove_length` | 7952 | 1008 | 1008 |
-| `remove_read` | 8192 | 976 | 976 |
-| `remove_shift_read` | 8192 | 976 | 976 |
-| `remove_shift_write` | 8224 | 1088 | 1104 |
-| `remove_clear` | 8224 | 1088 | 1104 |
-| `concat_length` | 9328 | 1024 | 1024 |
-| `concat_read` | 9568 | 992 | 992 |
-| `move_read` | 8544 | 976 | 976 |
-| `move_write` | 8576 | 1040 | 1056 |
-| `unpack_length` | 7808 | 928 | 928 |
-| `unpack_read` | 8048 | 896 | 896 |
-| `gsub_empty_function` | 10240 | 1424 | 1408 |
-| `gsub_plain_function` | 10272 | 1488 | 1472 |
-| `gsub_pattern_function` | 13680 | 3104 | 3168 |
-| `gsub_pattern_captures` | 13680 | 3104 | 3168 |
-| `gsub_empty_table` | 10144 | 1392 | 1376 |
-| `gsub_plain_table` | 10176 | 1456 | 1440 |
-| `gsub_pattern_table` | 13584 | 3072 | 3136 |
-| `tfor_lua` | 6720 | 640 | 640 |
-| `tfor_ipairs` | 8272 | 928 | 928 |
-| `tfor_host_iterator` | 8128 | 880 | 880 |
+| `index_field` | 9376 | 560 | 560 |
+| `index_method` | 9376 | 560 | 560 |
+| `index_key` | 9344 | 656 | 656 |
+| `index_rust` | 11280 | 1008 | 1008 |
+| `newindex_field` | 9616 | 704 | 704 |
+| `newindex_key` | 9392 | 672 | 672 |
+| `newindex_rust` | 11520 | 1152 | 1152 |
+| `length` | 9248 | 464 | 464 |
+| `string_index_field` | 9376 | 560 | 560 |
+| `string_index_key` | 9344 | 656 | 656 |
+| `index_string_handler` | 9376 | 560 | 560 |
+| `string_library_index` | 9376 | 560 | 560 |
+| `host_get_table` | 10656 | 912 | 912 |
+| `host_get_table_string` | 10656 | 912 | 912 |
+| `host_call` | 10304 | 848 | 848 |
+| `host_anchor` | 10848 | 1024 | 1024 |
+| `host_tostring_bytes` | 11152 | 1200 | 1200 |
+| `host_to_string_with_meta` | 11312 | 1264 | 1264 |
+| `tostring` | 10512 | 1024 | 1024 |
+| `print` | 10896 | 1184 | 1184 |
+| `format` | 12752 | 1552 | 1552 |
+| `error_tostring` | 11072 | 1312 | 1312 |
+| `sort_comparator` | 12240 | 1488 | 1488 |
+| `sort_comparator_right` | 12240 | 1488 | 1488 |
+| `sort_comparator_sortdown` | 12240 | 1488 | 1488 |
+| `callable_rust` | 12688 | 1712 | 1712 |
+| `sort_metamethods_comparator` | 11584 | 1440 | 1440 |
+| `sort_metamethods_length` | 10672 | 1120 | 1120 |
+| `sort_metamethods_read` | 10912 | 1040 | 1040 |
+| `sort_metamethods_write` | 10928 | 1168 | 1200 |
+| `insert_length` | 10624 | 1136 | 1136 |
+| `insert_shift_read` | 10864 | 1056 | 1056 |
+| `insert_shift_write` | 10896 | 1184 | 1216 |
+| `insert_value` | 10896 | 1184 | 1216 |
+| `remove_length` | 10592 | 1072 | 1072 |
+| `remove_read` | 10832 | 992 | 992 |
+| `remove_shift_read` | 10832 | 992 | 992 |
+| `remove_shift_write` | 10864 | 1120 | 1152 |
+| `remove_clear` | 10864 | 1120 | 1152 |
+| `concat_length` | 11408 | 1136 | 1136 |
+| `concat_read` | 11648 | 1056 | 1056 |
+| `move_read` | 11136 | 1040 | 1040 |
+| `move_write` | 11168 | 1120 | 1152 |
+| `unpack_length` | 10544 | 1040 | 1040 |
+| `unpack_read` | 10784 | 960 | 960 |
+| `gsub_empty_function` | 12624 | 1568 | 1584 |
+| `gsub_plain_function` | 12592 | 1616 | 1632 |
+| `gsub_pattern_function` | 16064 | 3296 | 3312 |
+| `gsub_pattern_captures` | 16064 | 3296 | 3312 |
+| `gsub_empty_table` | 12512 | 1504 | 1520 |
+| `gsub_plain_table` | 12480 | 1552 | 1568 |
+| `gsub_pattern_table` | 15952 | 3232 | 3248 |
+| `tfor_lua` | 9408 | 688 | 688 |
+| `tfor_ipairs` | 10976 | 976 | 976 |
+| `tfor_host_iterator` | 10832 | 944 | 944 |
 | `chain_index` | 0 | 0 | 0 |
 | `chain_newindex` | 0 | 0 | 0 |
 
 The largest recurring cycle is `gsub_pattern_function` (and its equals) in
-every column: 13,680 bytes in dev, 3,104 in release and 3,168 in release with
+every column: 16,064 bytes in dev, 3,296 in release and 3,312 in release with
 snapshot. No metamethod chain step costs native stack in any setting.

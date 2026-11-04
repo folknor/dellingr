@@ -224,6 +224,8 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
 
         let mut result = Vec::new();
         for idx in i..=j {
+            // The range is the script's number, not storage it allocated.
+            state.poll_interrupt()?;
             if idx > i {
                 let next = crate::limits::checked_string_growth(result.len(), sep.len())?;
                 state.charge(Charge::TableConcat, sep.len() as u64)?;
@@ -331,6 +333,9 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
             // attempted metamethod copy immediately before dispatch.
             for step in 0..count {
                 let i = if backwards { count - 1 - step } else { step };
+                // Before the charge, so an interruption has paid only for
+                // the copies attempted.
+                state.poll_interrupt()?;
                 state.charge(Charge::TableMove, 1)?;
                 crate::native_call!(
                     "lib:table.move->move_element:metamethods",
@@ -352,9 +357,14 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
                 );
             let paid = i64::try_from(admitted).expect("admitted units never exceed the move count");
             let paid_all = paid == count;
+            // The range is the script's number, so each copy is a safepoint.
+            // The whole range stays prepaid, keeping every uninterrupted
+            // outcome as before; an interruption leaves `cost_used` counting
+            // copies it paid for but never made.
             if backwards {
                 for step in 0..paid {
                     let i = count - 1 - step;
+                    state.poll_interrupt()?;
                     crate::native_call!(
                         "lib:table.move->move_element:raw-backward",
                         move_element(state, f + i, t + i, dest_idx, false)
@@ -362,6 +372,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
                 }
             } else {
                 for i in 0..paid {
+                    state.poll_interrupt()?;
                     crate::native_call!(
                         "lib:table.move->move_element:raw-forward",
                         move_element(state, f + i, t + i, dest_idx, false)
@@ -557,6 +568,8 @@ fn insert_through_metamethods(state: &mut State, num_args: usize) -> Result<u8> 
     )?;
     let mut i = first_empty;
     while i > pos {
+        // `__len` chose the distance, and table handlers call no Lua.
+        state.poll_interrupt()?;
         state.push_number(i as f64)?;
         state.push_number((i - 1) as f64)?;
         crate::native_call!(
@@ -603,6 +616,8 @@ fn remove_through_metamethods(state: &mut State) -> Result<u8> {
         state.get_table_unguarded(1)
     )?; // Stack: [t, removed]
     while pos < size {
+        // `__len` chose the distance, and table handlers call no Lua.
+        state.poll_interrupt()?;
         state.push_number(pos as f64)?;
         state.push_number((pos + 1) as f64)?;
         crate::native_call!(
@@ -648,6 +663,8 @@ fn sort_through_metamethods(state: &mut State, has_comp: bool) -> Result<u8> {
     let s = state.get_top() as isize;
 
     for i in 1..=len {
+        // `__len` chose the count, and table handlers call no Lua.
+        state.poll_interrupt()?;
         state.push_number(i as f64)?;
         state.push_number(i as f64)?;
         crate::native_call!(
@@ -662,6 +679,7 @@ fn sort_through_metamethods(state: &mut State, has_comp: bool) -> Result<u8> {
     )?;
 
     for i in 1..=len {
+        state.poll_interrupt()?;
         state.push_number(i as f64)?;
         state.push_number(i as f64)?;
         state.get_table_raw(s)?;

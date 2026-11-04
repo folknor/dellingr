@@ -4,6 +4,7 @@
 
 use core::ops;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use crate::cost_meter::CostMeter;
 
@@ -103,17 +104,20 @@ impl LuaPattern {
         s: &[u8],
         meter: &mut CostMeter<'_>,
     ) -> Result<bool, MatchError> {
-        self.matches_bytes_from(s, 0, meter)
+        static NEVER: AtomicBool = AtomicBool::new(false);
+        self.matches_bytes_from(s, 0, meter, &NEVER)
     }
 
-    /// Match the complete subject, beginning the search at `init`.
+    /// Match the complete subject, beginning the search at `init`. Every
+    /// matcher step polls `interrupt` (the State's interrupt flag).
     pub(crate) fn matches_bytes_from(
         &mut self,
         s: &[u8],
         init: usize,
         meter: &mut CostMeter<'_>,
+        interrupt: &AtomicBool,
     ) -> Result<bool, MatchError> {
-        let n_match = str_match(s, &self.compiled, init, &mut self.matches, meter)?;
+        let n_match = str_match(s, &self.compiled, init, &mut self.matches, meter, interrupt)?;
         self.n_match = n_match;
         Ok(n_match > 0)
     }
@@ -145,6 +149,22 @@ mod tests {
 
     fn count_only(used: &mut u64) -> CostMeter<'_> {
         CostMeter::count_only(used)
+    }
+
+    static NO_INTERRUPT: AtomicBool = AtomicBool::new(false);
+
+    /// A set interrupt stops the matcher at its first step, before charging
+    /// it, and is reported apart from budget exhaustion.
+    #[test]
+    fn a_set_interrupt_stops_the_first_step_uncharged() {
+        let set = AtomicBool::new(true);
+        let mut used = 0;
+        let mut matcher = LuaPattern::new(b"a+b");
+        assert_eq!(
+            matcher.matches_bytes_from(b"aaab", 0, &mut count_only(&mut used), &set),
+            Err(MatchError::Interrupted)
+        );
+        assert_eq!(used, 0);
     }
 
     #[test]
@@ -636,14 +656,25 @@ mod tests {
         let mut used = 0;
         let mut meter = count_only(&mut used);
         let mut frontier = LuaPattern::new(b"%f[%a]%a");
-        assert!(!frontier.matches_bytes_from(b"ab", 1, &mut meter).unwrap());
+        assert!(
+            !frontier
+                .matches_bytes_from(b"ab", 1, &mut meter, &NO_INTERRUPT)
+                .unwrap()
+        );
 
         let mut end = LuaPattern::new(b"$");
-        assert!(end.matches_bytes_from(b"ab", 1, &mut meter).unwrap());
+        assert!(
+            end.matches_bytes_from(b"ab", 1, &mut meter, &NO_INTERRUPT)
+                .unwrap()
+        );
         assert_eq!(end.range(), 2..2);
 
         let mut captures = LuaPattern::new(b"()(b)()");
-        assert!(captures.matches_bytes_from(b"ab", 1, &mut meter).unwrap());
+        assert!(
+            captures
+                .matches_bytes_from(b"ab", 1, &mut meter, &NO_INTERRUPT)
+                .unwrap()
+        );
         assert_eq!(captures.range(), 1..2);
         assert_eq!(captures.capture(1), LuaCapture::Position(1));
         assert_eq!(captures.capture(2), LuaCapture::Bytes { start: 1, end: 2 });
@@ -687,11 +718,13 @@ mod tests {
                         subject,
                         init,
                         &mut count_only(&mut used_literal),
+                        &NO_INTERRUPT,
                     );
                     let b = escaped.matches_bytes_from(
                         subject,
                         init,
                         &mut count_only(&mut used_escaped),
+                        &NO_INTERRUPT,
                     );
                     let context = format!("{pattern:?} on {subject:?} from {init}");
                     assert_eq!(format!("{a:?}"), format!("{b:?}"), "{context}");

@@ -2,6 +2,7 @@
 
 use core::result;
 use std::collections::BTreeMap;
+use std::sync::atomic::AtomicBool;
 
 use crate::cost_meter::CostMeter;
 use crate::limits::{LUA_MAXCAPTURES, MAXCCALLS};
@@ -522,6 +523,9 @@ struct MatchState<'data, 'meter, 'cost> {
     subject: &'data [u8],
     pattern: &'data CompiledPattern,
     meter: &'meter mut CostMeter<'cost>,
+    /// The host's interrupt request, polled every step: backtracking can
+    /// repeat bounded passes over the subject without bound.
+    interrupt: &'data AtomicBool,
     captures: [Capture; LUA_MAXCAPTURES],
 }
 
@@ -530,19 +534,25 @@ impl<'data, 'meter, 'cost> MatchState<'data, 'meter, 'cost> {
         subject: &'data [u8],
         pattern: &'data CompiledPattern,
         meter: &'meter mut CostMeter<'cost>,
+        interrupt: &'data AtomicBool,
     ) -> Self {
         Self {
             subject,
             pattern,
             meter,
+            interrupt,
             captures: [Capture {
                 init: 0,
                 len: CapLen::Len(0),
             }; LUA_MAXCAPTURES],
         }
     }
-    /// Charge one matcher step, at the meter's unit cost.
+    /// Take one matcher step: an interrupt safepoint, then its charge at the
+    /// meter's unit cost.
     fn charge(&mut self) -> MatchResult<()> {
+        if crate::vm::interrupt_requested(self.interrupt) {
+            return Err(MatchError::Interrupted);
+        }
         if self.meter.consume_units(1) {
             Ok(())
         } else {
@@ -783,6 +793,7 @@ pub(super) fn str_match(
     init: usize,
     out: &mut [LuaCapture; LUA_MAXMATCHES],
     meter: &mut CostMeter<'_>,
+    interrupt: &AtomicBool,
 ) -> MatchResult<usize> {
     // `""`, and `"^"` under `AnchorMode::Honour`, compile to no items and
     // match the empty range at `init` without consulting the
@@ -800,7 +811,7 @@ pub(super) fn str_match(
     }
     let mut pos = init;
     loop {
-        let mut state = MatchState::new(subject, pattern, meter);
+        let mut state = MatchState::new(subject, pattern, meter, interrupt);
         if let Some(end) = state.match_at(pos, 0, 0)? {
             return Ok(state.captures(pos, end, out));
         }

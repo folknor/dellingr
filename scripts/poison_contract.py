@@ -26,6 +26,8 @@ SAFE_INFALLIBLE = {
     "current_source", "seal_globals", "globals_sealed", "is_poisoned",
     "error", "get_top", "to_boolean", "typ", "raw_equal", "release_anchor",
     "anchor_type", "anchor_count", "registered_rust_fn",
+    # The interrupt handle is host configuration; polling it runs no Lua.
+    "interrupt", "set_interrupt",
     # Collection explicitly becomes a no-op after poisoning.
     "gc_collect",
     # Debug-only instrumentation controls, not script execution.

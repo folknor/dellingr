@@ -121,6 +121,10 @@ fn find_subslice(
             return Ok(None);
         };
         charge_scan_units(state, charge, offset)?;
+        // A safepoint per candidate: each prefix comparison is one bounded
+        // pass, but a needle sharing a long prefix with every candidate
+        // repeats it once per subject byte.
+        state.poll_interrupt()?;
         let cand = start + offset;
         let window = &haystack[cand..cand + needle.len()];
         let prefix = window
@@ -142,6 +146,7 @@ fn match_error(state: &State, function: StringPatternFunction, error: MatchError
     match error {
         MatchError::Pattern(error) => pattern_runtime_error(state, function, error),
         MatchError::BudgetExceeded => state.budget_exceeded_error(),
+        MatchError::Interrupted => state.interrupted_error(),
     }
 }
 
@@ -657,8 +662,8 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
             let mut matcher = pattern_matcher(state, &pattern)?;
             state.set_top(0)?;
             let matched = {
-                let mut meter = state.charge_meter(Charge::StringFind);
-                matcher.matches_bytes_from(&s, init, &mut meter)
+                let (mut meter, interrupt) = state.pattern_meter(Charge::StringFind);
+                matcher.matches_bytes_from(&s, init, &mut meter, interrupt)
             }
             .map_err(|err| match_error(state, StringPatternFunction::Find, err))?;
             match matched {
@@ -752,8 +757,8 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         let mut matcher = pattern_matcher(state, &pattern)?;
         state.set_top(0)?;
         let matched = {
-            let mut meter = state.charge_meter(Charge::StringMatch);
-            matcher.matches_bytes_from(&s, init, &mut meter)
+            let (mut meter, interrupt) = state.pattern_meter(Charge::StringMatch);
+            matcher.matches_bytes_from(&s, init, &mut meter, interrupt)
         }
         .map_err(|err| match_error(state, StringPatternFunction::Match, err))?;
         if matched {
@@ -892,6 +897,9 @@ fn gsub_empty_pattern(
     let mut result = Vec::with_capacity(s.len());
     let mut count = 0usize;
     for i in 0..=s.len() {
+        // A safepoint per position: no matcher runs here, and a long
+        // template of empty captures applies once per subject byte.
+        state.poll_interrupt()?;
         if max_replacements.is_none_or(|max| count < max) {
             let captures = [LuaCapture::Bytes { start: i, end: i }];
             crate::native_call!(
@@ -985,8 +993,8 @@ fn gsub_lua_pattern(
         }
 
         let matched = {
-            let mut meter = state.charge_meter(Charge::StringGsub);
-            matcher.matches_bytes_from(s, pos, &mut meter)
+            let (mut meter, interrupt) = state.pattern_meter(Charge::StringGsub);
+            matcher.matches_bytes_from(s, pos, &mut meter, interrupt)
         }
         .map_err(|err| match_error(state, StringPatternFunction::Gsub, err))?;
         if !matched {
@@ -1247,7 +1255,7 @@ pub(super) fn gmatch_iter(state: &mut State) -> Result<u8> {
         state.set_table_raw(1)?;
     }
     let (matched, range, captures) =
-        state.with_gmatch_matcher(2, 3, |subject, matcher, mut meter| {
+        state.with_gmatch_matcher(2, 3, |subject, matcher, mut meter, interrupt| {
             // Lua 5.4 semantics: an empty match ending where the previous accepted
             // match ended is rejected and the scan resumes one byte later, so
             // `gmatch("abc", "%a*")` yields only "abc", not 5.2's "abc" then "".
@@ -1255,7 +1263,7 @@ pub(super) fn gmatch_iter(state: &mut State) -> Result<u8> {
             // most once.
             let mut search = pos;
             let matched = loop {
-                match matcher.matches_bytes_from(subject, search, &mut meter) {
+                match matcher.matches_bytes_from(subject, search, &mut meter, interrupt) {
                     Ok(true) => {
                         let found = matcher.range();
                         if found.start == found.end && lastmatch == Some(found.end) {

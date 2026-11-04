@@ -100,6 +100,23 @@ impl Frame {
         }
     }
 
+    /// Take a jump that may go backward: move the cursor `ip` by a verified
+    /// `offset`, polling the interrupt first when the jump is backward. `JMP`,
+    /// the compare-and-branch and test opcodes and `FOR_LOOP` jump through
+    /// here; admission requires `FOR_PREP` and `TFOR_LOOP` offsets to be
+    /// forward, so every backward transfer in admitted bytecode is a
+    /// safepoint. The poll comes
+    /// before the cursor moves, so an interruption names the jumping
+    /// instruction (`locate_fault` reads `cursor - 1`).
+    #[inline(always)]
+    pub(super) fn branch(state: &State, ip: &mut usize, offset: i32) -> Result<()> {
+        if offset < 0 {
+            state.poll_interrupt()?;
+        }
+        *ip = Self::jumped(*ip, offset);
+        Ok(())
+    }
+
     #[must_use]
     pub(super) fn get_nested_bytecode(&self, i: u16) -> Arc<Bytecode> {
         Arc::clone(&self.bytecode.nested[i as usize])
@@ -621,7 +638,7 @@ impl Frame {
                 // Control flow
                 Instr::OP_JMP => {
                     fixed_cost!(Instr::OP_JMP);
-                    *ip = Self::jumped(*ip, inst.sj());
+                    Self::branch(state, ip, inst.sj())?;
                 }
                 // Compare-and-branch: jump when the comparison is false.
                 // One range arm with the variant decode outlined - per-
@@ -634,19 +651,19 @@ impl Frame {
                     let lhs = state.stack[ra];
                     let rhs = state.stack[base + inst.b() as usize];
                     if !state.compare_vals(op, lhs, rhs)? {
-                        *ip = Self::jumped(*ip, inst.sj());
+                        Self::branch(state, ip, inst.sj())?;
                     }
                 }
                 Instr::OP_TEST_FALSE => {
                     fixed_cost!(Instr::OP_TEST_FALSE);
                     if !state.stack[ra].truthy() {
-                        *ip = Self::jumped(*ip, inst.sj());
+                        Self::branch(state, ip, inst.sj())?;
                     }
                 }
                 Instr::OP_TEST_TRUE => {
                     fixed_cost!(Instr::OP_TEST_TRUE);
                     if state.stack[ra].truthy() {
-                        *ip = Self::jumped(*ip, inst.sj());
+                        Self::branch(state, ip, inst.sj())?;
                     }
                 }
 
@@ -838,6 +855,27 @@ mod tests {
             error.reason,
             crate::compiler::verify::ValidationReason::JumpTargetOutOfRange
         );
+    }
+
+    /// Dispatch polls the interrupt only on jumps that may go backward, so
+    /// admission refuses the loop exits that must not.
+    #[test]
+    fn verifier_rejects_backward_loop_exits() {
+        for exit in [Instr::for_prep(0, -1), Instr::tfor_loop(0, -1)] {
+            let bytecode = Bytecode {
+                code: vec![exit, Instr::ret(0, RetCount::Fixed(0))],
+                line_info: vec![1, 1],
+                max_stack: 4,
+                ..Bytecode::default()
+            };
+            let error = crate::compiler::verify::validate_bytecode(&bytecode)
+                .expect_err("a backward loop exit must be rejected before dispatch");
+            assert_eq!(error.instruction, Some(0));
+            assert_eq!(
+                error.reason,
+                crate::compiler::verify::ValidationReason::BackwardLoopExit
+            );
+        }
     }
 
     #[test]

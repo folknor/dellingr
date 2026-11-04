@@ -148,6 +148,7 @@ pub use instr::{ArgCount, RetCount};
 #[doc(hidden)]
 pub use native_call_trace::{active_path, is_observing, with_native_call_trace};
 pub use vm::Anchor;
+pub use vm::Interrupt;
 pub use vm::LuaType;
 pub use vm::RawField;
 pub use vm::RustFnHandle;
@@ -193,6 +194,8 @@ const _: () = {
     assert_send_sync::<error::Error>();
     // A handle may be dropped on any thread; its release queue is a Mutex.
     assert_send_sync::<Anchor>();
+    // Triggered from another thread or a signal handler while the State runs.
+    assert_send_sync::<Interrupt>();
 };
 
 /// Custom result type for evaluating Lua.

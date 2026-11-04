@@ -76,9 +76,33 @@ Hosts: plantasjen from 4a722cf on; the 2026-10-23 rows name x86-64 Linux only.
 | 0779c08, old release profile | 13680 | 3376 | 3408 |
 | 0779c08, Cargo's default release profile | 13680 | 3104 | 3168 |
 | 33734f8, Cargo's default release profile | 13680 | 3104 | 3168 |
+| 912c2d5 with the dependency bumps that followed it | 15856 | 3280 | 3296 |
+| host interrupt safepoints on top of that | 16064 | 3296 | 3312 |
 
 Every scenario's release cycle shrank under the default profile at 0779c08.
-The dev figure drifted from 13,552 (41ad774) to 13,680 (0779c08).
+The dev figure drifted from 13,552 (41ad774) to 13,680 (0779c08), and every
+dev cycle grew by about 2.5 KB between 33734f8 and 912c2d5 without a frame
+decision recorded here.
+
+### 2026-11-04: interrupt safepoints
+
+Host interrupts (`vm/interrupt.rs`) poll in the dispatch loop, which stays
+live across every native re-entry. Release `index_field` per cycle, against
+544 bytes without polls:
+
+| Poll placement | Release `index_field` |
+|---|---|
+| top of the `eval_batched` loop, plus every backward jump | 560 |
+| admission (`admit_lua_call`), plus every backward jump | 560 |
+| admission (`admit_lua_call`) only | 544 |
+| admission, `JMP` and the compare-and-branch and test arms | 544 |
+| the above plus `FOR_LOOP` (in its helper or in its arm) | 560 |
+
+The shipped shape polls at admission, in `JMP`, the branch and test arms and
+`FOR_LOOP`. Admission refuses backward `FOR_PREP` and `TFOR_LOOP` exits
+instead of polling them. `FOR_LOOP` costs 16 bytes per release cycle
+wherever its poll sits; it is accepted (2.4 KB at `MAX_NATIVE_CALL_DEPTH`).
+Dev grew 160 to 208 bytes per cycle.
 
 ### 2026-10-23: invocation driver inlined into `call_unguarded`
 

@@ -2,7 +2,7 @@
 
 `dellingr` is an embeddable, deterministic, pure-Rust Lua VM with per-opcode instruction-cost accounting. It is the script host for a game project; the README's "Won't implement" section is load-bearing - `pcall`/`xpcall`, `assert`, coroutines, `io`/`os`/`debug`, `goto`, integer division, bitwise ops, long strings, `string.rep`/`byte`/`char`, and arithmetic/comparison/concat metamethods are deliberately absent. Don't add them without asking. Errors kill the callback by design.
 
-- **No instruction-count or time limit on a call.** Runaway loops hang only the local harness that loaded the script. `docs/budget.md` ("Runaway loops are not the VM's problem") has the reasoning and the counterarguments already considered. Don't propose a step limit, watchdog or interrupt.
+- **No instruction-count or time limit on a call.** Runaway loops hang only the local harness that loaded the script. `docs/budget.md` ("Runaway loops are not the VM's problem") has the reasoning and the counterarguments already considered. Don't propose a step limit or time limit. A host stops a script on demand with an `Interrupt` (`docs/budget.md`, "Stopping a script from the host"); a new loop, call path or library loop that can run without bound needs a safepoint (`vm/interrupt.rs` lists them).
 
 Ground rules that are easy to get wrong (the `docs/` pages have the detail):
 

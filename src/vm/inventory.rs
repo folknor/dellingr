@@ -289,6 +289,7 @@ impl State {
             suspended_envs: _,
             upvalue_pool,
             cost: _,
+            interrupt: _,
             patterns,
             pattern_bytes,
             #[cfg(test)]
@@ -339,6 +340,7 @@ impl State {
             suspended_envs,
             upvalue_pool: _, // Slots are marked through closures and OpenUpvalue.
             cost: _,         // Counters only.
+            interrupt: _,    // An atomic flag the host shares: no values.
             patterns: _,     // Weak: pruned by for_each_gc_cleanup after sweep.
             pattern_bytes: _,
             #[cfg(test)]
@@ -425,6 +427,7 @@ impl State {
             suspended_envs,
             upvalue_pool: _,
             cost: _,
+            interrupt: _, // Persistent host handle; never saved.
             patterns: _,
             pattern_bytes: _,
             #[cfg(test)]

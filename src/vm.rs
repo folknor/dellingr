@@ -13,6 +13,7 @@ mod eval_store;
 mod fault_injection;
 mod frame;
 mod global_env;
+mod interrupt;
 mod inventory;
 mod lua_val;
 mod meta_name;
@@ -31,6 +32,8 @@ mod table_ops;
 pub use anchor::Anchor;
 #[cfg(feature = "fault-injection")]
 pub use fault_injection::{FaultEvent, FaultSite};
+pub use interrupt::Interrupt;
+pub(crate) use interrupt::requested as interrupt_requested;
 pub use lua_val::LuaType;
 pub use lua_val::RustFunc;
 pub(crate) use lua_val::number_to_string;
@@ -200,6 +203,9 @@ pub struct State {
     pub(super) upvalue_pool: UpvaluePool,
     /// Runtime cost accounting and optional budget.
     pub(super) cost: CostState,
+    /// The host's request to stop running Lua, polled at safepoints (see
+    /// `vm/interrupt.rs`). Host state: never saved, never a root.
+    pub(super) interrupt: Interrupt,
     /// Compiled pattern programs shared by `string.find`, `string.match`,
     /// `string.gsub` and `string.gmatch` iterators.
     ///
@@ -328,6 +334,7 @@ pub struct StateBuilder {
     gc_policy: GcPolicy,
     standard_library: bool,
     costing: Costing,
+    interrupt: Option<Interrupt>,
 }
 
 impl StateBuilder {
@@ -337,7 +344,16 @@ impl StateBuilder {
             gc_policy: GcPolicy::default(),
             standard_library: true,
             costing: Costing::default(),
+            interrupt: None,
         }
+    }
+
+    /// The [`Interrupt`] the State polls. By default it gets a fresh one of
+    /// its own; passing a clone of a host-held handle lets one trigger stop
+    /// every State that shares it.
+    pub fn interrupt(mut self, interrupt: Interrupt) -> Self {
+        self.interrupt = Some(interrupt);
+        self
     }
 
     /// Host callbacks. The default prints to stdout ([`DefaultCallbacks`]).
@@ -386,6 +402,9 @@ impl StateBuilder {
     pub fn build(self) -> State {
         let callbacks = self.callbacks.unwrap_or_else(|| Box::new(DefaultCallbacks));
         let mut state = State::build_raw(callbacks, self.gc_policy, self.costing);
+        if let Some(interrupt) = self.interrupt {
+            state.interrupt = interrupt;
+        }
         if self.standard_library {
             state
                 .open_libs_unchecked()
@@ -485,6 +504,7 @@ impl State {
             suspended_envs: Vec::new(),
             upvalue_pool: UpvaluePool::new(),
             cost: CostState::new(costing),
+            interrupt: Interrupt::new(),
             patterns: IndexMap::default(),
             pattern_bytes: 0,
             #[cfg(test)]
@@ -566,6 +586,47 @@ impl State {
     /// [`StateBuilder::costing`]).
     pub fn costing(&self) -> &Costing {
         self.cost.costing()
+    }
+
+    /// The [`Interrupt`] this State polls. Clone it to stop the State from
+    /// another thread or a signal handler while it runs Lua.
+    #[must_use]
+    pub fn interrupt(&self) -> Interrupt {
+        self.interrupt.clone()
+    }
+
+    /// Poll `interrupt` from now on instead of the current handle, for
+    /// example to join a State restored by `load_state` to a host-wide
+    /// handle. Allowed at any time, from a Rust callback too: the next
+    /// safepoint reads the new handle, so a request set only on the old one
+    /// no longer applies. Stickiness belongs to the handle, not to a run.
+    pub fn set_interrupt(&mut self, interrupt: Interrupt) {
+        self.interrupt = interrupt;
+    }
+
+    /// A safepoint: fail with [`ErrorKind::Interrupted`] while the host's
+    /// interrupt is triggered (see `vm/interrupt.rs` for where they are).
+    #[inline(always)]
+    pub(crate) fn poll_interrupt(&self) -> Result<()> {
+        if interrupt::requested(self.interrupt.flag()) {
+            return Err(self.interrupted_error());
+        }
+        Ok(())
+    }
+
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn interrupted_error(&self) -> Error {
+        self.error(ErrorKind::Interrupted)
+    }
+
+    /// A meter for the pattern matcher, with the interrupt flag it polls
+    /// per step.
+    pub(crate) fn pattern_meter(
+        &mut self,
+        charge: Charge,
+    ) -> (CostMeter<'_>, &std::sync::atomic::AtomicBool) {
+        (self.cost.charge_meter(charge), self.interrupt.flag())
     }
 
     /// Test instrumentation for the compiled-pattern cache.
@@ -694,7 +755,12 @@ impl State {
         &mut self,
         subject_idx: isize,
         pattern_idx: isize,
-        operation: impl FnOnce(&[u8], &mut LuaPattern, CostMeter<'_>) -> T,
+        operation: impl FnOnce(
+            &[u8],
+            &mut LuaPattern,
+            CostMeter<'_>,
+            &std::sync::atomic::AtomicBool,
+        ) -> T,
     ) -> Result<T> {
         // Preserve the argument-type contract before touching the cache.
         let subject_idx = self.expect_string_at(subject_idx)?;
@@ -703,7 +769,11 @@ impl State {
             .cached_pattern_at(pattern_idx, AnchorMode::Literal)
             .matcher();
         let State {
-            stack, heap, cost, ..
+            stack,
+            heap,
+            cost,
+            interrupt,
+            ..
         } = self;
         let subject = stack[subject_idx]
             .as_string(heap)
@@ -712,6 +782,7 @@ impl State {
             subject,
             &mut matcher,
             cost.charge_meter(Charge::StringGmatch),
+            interrupt.flag(),
         ))
     }
 

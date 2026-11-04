@@ -5,6 +5,11 @@ given build. The library reads no host state: no environment, clock, process
 arguments, unseeded RNG or randomized hashing. The CLI and the bench harness
 are hosts and are exempt.
 
+The one host input polled during a run is the `Interrupt` flag (see
+`budget.md`, "Stopping a script from the host"). A run that is never
+interrupted is unaffected by it. One that is ends at a point that depends on
+timing, so it is not a replay; the flag is not saved in snapshots.
+
 ## Cost
 
 The costing a State was built with is part of what determines a run. Cost

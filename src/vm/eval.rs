@@ -648,6 +648,11 @@ impl State {
                 limit: MAX_CALL_DEPTH,
             }));
         }
+        // The interrupt safepoint for every Lua function entry, from Lua or
+        // from Rust: recursion needs no backward jump. Polled before anything
+        // is pushed, so an interruption is a refusal like the depth check
+        // above, reported at the caller's call instruction.
+        self.poll_interrupt()?;
         self.in_flight.call_depth += 1;
         let frame_bottom = self.stack.len() - num_args as usize;
         self.in_flight.stack_bottom = frame_bottom;
