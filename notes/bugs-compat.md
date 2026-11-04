@@ -77,16 +77,3 @@ Tracebacks differ as well: Lua prints `(...tail calls...)`.
 - `notes/optimizations.md` (call path after the frame-stack flattening) tracks
   merging `CallInfo` into `Frame`; the hunter observed that this merge would make
   an in-place tail call simpler.
-
-## COMPAT-007 - Unlisted base and table library divergences: select and empty sort
-
-Scope: `stdlib-core`. The other bullets of this entry are documented; these two
-were left alone at triage.
-
-- `select` treats only the exact string `"#"` as the count form. lua5.2 and
-  lua5.4 test only the first byte (`*lua_tostring(L, 1) == '#'`), so
-  `select("#n", ...)` returns the count there and raises "number expected, got
-  string" here.
-- `table.sort` type-checks a non-nil second argument even when the length is 0
-  or 1. Lua 5.4 checks the comparator only when `n > 1`, so
-  `table.sort({}, 42)` succeeds there and raises here.

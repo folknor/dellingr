@@ -51,6 +51,9 @@ presenting an analysis.
   stderr renders a non-UTF-8 name with U+FFFD.
 - Scripts are bytes, from a file or stdin alike: Lua source need not be
   valid UTF-8, and string literals keep the bytes they contain.
+- The CLI reads at most `MAX_SOURCE_BYTES + 1` bytes from either input. That
+  extra byte is enough for `Program::compile` to return its usual source-size
+  error before tokenising; the CLI exits 1 without a cost summary.
 - A leading `#` shebang line is not stripped. It is parsed as Lua source and
   rejected at the `#`, unlike `lua script.lua`.
 - `--limit` takes a signed 64-bit integer and cannot be combined with

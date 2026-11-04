@@ -54,6 +54,29 @@ fn range_and_union_argument_errors_name_the_invalid_value() {
 }
 
 #[test]
+fn select_non_count_string_still_requires_a_numeric_index() {
+    assert_eq!(
+        argument_message(r#"return select("x#", "a")"#),
+        "bad argument #1 to 'select' (number expected, got string)"
+    );
+}
+
+#[test]
+fn sort_checks_a_non_nil_comparator_even_for_short_tables() {
+    for code in [
+        "table.sort({}, 42)",
+        "table.sort({1}, 42)",
+        "table.sort({2, 1}, 42)",
+    ] {
+        assert_eq!(
+            argument_message(code),
+            "bad argument #2 to 'sort' (function expected, got number)",
+            "{code}"
+        );
+    }
+}
+
+#[test]
 fn error_nil_level_uses_the_default_and_preserves_the_script_message() {
     let mut state = State::new();
     support::load(&mut state, r#"error("original message", nil)"#);

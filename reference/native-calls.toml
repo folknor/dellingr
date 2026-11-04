@@ -303,6 +303,9 @@ name = "main"
 root = "binary"
 evidence = "the CLI entry point"
 
+[[function]]
+name = "run_cli"
+
 # -------------------------------------------------------------------- edges
 #
 # Grouped by file. Edges that only scenarios cover carry nothing but their id.
@@ -624,7 +627,11 @@ id = "sort_through_metamethods->set_table_unguarded"
 
 # src/main.rs
 [[edge]]
-id = "main->call"
+id = "main->run_cli"
+excluded = "the CLI's own worker thread entry: the host frames below its first call, which docs/limits.md leaves to the embedder"
+
+[[edge]]
+id = "run_cli->call"
 excluded = "the CLI's own call into the script: the host frames below its first call, which docs/limits.md leaves to the embedder"
 
 # ----------------------------------------------------------------- segments

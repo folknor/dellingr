@@ -12,6 +12,7 @@ use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Read, Write};
+use std::panic::resume_unwind;
 use std::process::exit;
 
 use dellingr::cli::ANALYSIS_WARNING_PREFIX;
@@ -19,6 +20,8 @@ use dellingr::{ArgCount, CostAnalysis, HostCallbacks, Program, RetCount, State};
 
 const ERROR_PREFIX: &str = "Error: ";
 const COST_USED_PREFIX: &str = "Cost used: ";
+// Twice the documented dev envelope and four times the release envelope.
+const CLI_STACK_SIZE: usize = 8 * 1024 * 1024;
 
 #[derive(Clone, Copy)]
 enum OptionKind {
@@ -108,18 +111,23 @@ impl Input {
     fn read(&self) -> Result<Vec<u8>, String> {
         match self {
             Self::Stdin => {
-                let mut source = Vec::new();
-                io::stdin()
-                    .lock()
-                    .read_to_end(&mut source)
-                    .map(|_| source)
-                    .map_err(|error| format!("reading stdin: {error}"))
+                read_source(io::stdin().lock()).map_err(|error| format!("reading stdin: {error}"))
             }
             Self::File(path) => {
-                fs::read(path).map_err(|error| format!("reading {}: {error}", path.display()))
+                let file = fs::File::open(path)
+                    .map_err(|error| format!("reading {}: {error}", path.display()))?;
+                read_source(file).map_err(|error| format!("reading {}: {error}", path.display()))
             }
         }
     }
+}
+
+fn read_source(reader: impl Read) -> io::Result<Vec<u8>> {
+    let read_limit = u64::try_from(dellingr::limits::MAX_SOURCE_BYTES + 1)
+        .map_err(|_| io::Error::other("the source size limit does not fit in u64"))?;
+    let mut source = Vec::new();
+    reader.take(read_limit).read_to_end(&mut source)?;
+    Ok(source)
 }
 
 struct CliArgs {
@@ -338,6 +346,16 @@ fn main() {
         Err(error) => report_usage_error(&error),
     };
 
+    let worker = std::thread::Builder::new()
+        .stack_size(CLI_STACK_SIZE)
+        .spawn(move || dellingr::native_call!("main->run_cli", run_cli(&args)))
+        .unwrap_or_else(|error| report_error(format!("starting CLI worker thread: {error}")));
+    if let Err(payload) = worker.join() {
+        resume_unwind(payload);
+    }
+}
+
+fn run_cli(args: &CliArgs) {
     let source = match args.input.read() {
         Ok(source) => source,
         Err(error) => report_error(error),
@@ -371,7 +389,7 @@ fn main() {
 
     let result = state.load(&program).and_then(|()| {
         dellingr::native_call!(
-            "main->call",
+            "run_cli->call",
             state.call(ArgCount::Fixed(0), RetCount::Fixed(0))
         )
     });

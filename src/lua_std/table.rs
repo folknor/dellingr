@@ -156,6 +156,10 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // of the original range (at least 1) before any comparator runs.
     ("sort", |state| {
         check_type_named(state, 1, LuaType::Table, "sort")?;
+        // A non-function comparator is a script bug, so report it for short
+        // tables too instead of letting it surface only after the table grows.
+        // This matches Lua 5.2; Lua 5.4 accepts the call with fewer than two
+        // elements. This choice is deliberate; see docs/compatibility.md.
         let has_comp = check_optional_type_named(state, 2, LuaType::Function, "sort")?;
 
         if has_sequence_metamethods(state, 1)? {

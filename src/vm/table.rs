@@ -1791,9 +1791,11 @@ impl Table {
 
     /// Set how the hash part keeps its slots (`SlotPolicy`). The global table
     /// revives keys in place, which keeps a global's place in `pairs(_G)`
-    /// however often it is cleared and set, and retains every tombstone
-    /// while its environment initializes, which is what lets a snapshot
-    /// remember every name initialization wrote.
+    /// while its tombstone remains. Until the environment is sealed, every
+    /// tombstone is retained, which is what lets a snapshot remember every
+    /// name initialization wrote. After sealing, inserting a new global can
+    /// compact a tombstone away; redefining that global then appends it at
+    /// the end.
     ///
     /// Only map storage carries a policy: inline storage shifts a re-added
     /// key out and compacts to make room before it promotes. Inline storage

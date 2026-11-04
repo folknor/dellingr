@@ -641,6 +641,11 @@ fn select_negative_index_counts_from_end() {
 }
 
 #[test]
+fn select_count_form_accepts_any_string_starting_with_hash() {
+    assert_eq!(eval_number(r##"return select("#n", "a", "b")"##), 2.0);
+}
+
+#[test]
 fn select_zero_index_errors() {
     let err = run_error(r#"select(0, "a", "b")"#);
     match err.kind() {

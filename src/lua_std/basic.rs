@@ -412,13 +412,13 @@ pub(super) const BASE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     }),
     // select(index, ...)
     // If index is a number, returns all arguments after argument number index.
-    // If index is "#", returns the total number of extra arguments.
+    // If index starts with "#", returns the total number of extra arguments.
     ("select", |state| {
         check_any_named(state, 1, "select")?;
         let num_args = state.get_top();
 
-        // Check if first arg is "#"
-        if state.typ(1) == LuaType::String && state.to_bytes(1)? == b"#" {
+        // Any string starting with "#" selects the argument count form.
+        if state.typ(1) == LuaType::String && state.to_bytes(1)?.first() == Some(&b'#') {
             // Return count of remaining args
             state.set_top(0)?;
             state.push_number((num_args - 1) as f64)?;

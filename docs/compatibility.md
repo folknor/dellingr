@@ -215,6 +215,9 @@ does.
 
 ## Table library
 
+- `table.sort` requires a non-nil comparator to be a function even when the
+  table has length 0 or 1, as in Lua 5.2. Lua 5.4 accepts those calls without
+  checking the unused comparator.
 - `table.insert`, `remove`, `concat`, `unpack` (global `unpack` too) and
   `move` honour `__len`, `__index` and `__newindex` as in Lua 5.4. Library
   writes share the VM's metamethod depth limit.

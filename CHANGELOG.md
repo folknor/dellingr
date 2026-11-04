@@ -173,6 +173,14 @@ version's meaning is wider (see below).
   discarded with the environment, so retrying outside failed as a duplicate.
 - The `--analyze` summary labels table writes `Table writes (t[k],{k=})`,
   since the count includes keyed constructor fields.
+- `select` takes any string starting with `#` as the count form, so
+  `select("#n", ...)` returns the argument count instead of raising "number
+  expected, got string".
+- The CLI reads at most `MAX_SOURCE_BYTES + 1` bytes of input, so an
+  oversized file or an endless stdin fails with the source-size error instead
+  of being buffered in full. It compiles and runs the script on a thread with
+  an explicit 8 MiB stack instead of the main thread, whose size depends on
+  the platform (1 MiB on Windows, below the documented native-stack envelope).
 
 ### Changed
 

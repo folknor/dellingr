@@ -21,19 +21,6 @@ The performance entries below (RT-015 through RT-020, RT-022) describe work the
 hunters saw in the code. None has been measured; any change goes through a
 registered `brokkr dellingr` workload first.
 
-## RT-004 - A table.rs comment overstates where a cleared global keeps its place
-
-Scope: `vm-heap`. The documented guarantee was qualified in
-`docs/compatibility.md`, `docs/limits.md` and `global_env.rs`; this residue is
-one comment.
-
-Before `seal_globals`, a cleared and redefined global keeps its slot and its
-place in `pairs(_G)`. After sealing, inserting a new global can compact the
-cleared slot away, and a later redefinition then appends at the end. A comment
-in `src/vm/table.rs` (near the tombstone revival code) still says a global keeps
-its place "however often it is cleared and set", without the after-sealing
-qualification the three documents now carry.
-
 ## RT-014 - Inline-cache validation is implemented separately at each consumer
 
 Scope: `vm-heap`. Structural.

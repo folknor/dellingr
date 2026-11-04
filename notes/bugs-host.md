@@ -16,35 +16,6 @@ reports are work documents and may be wrong; verify before acting.
    and they are never deduplicated through git history. Carry the context
    inline instead.
 
-## HOST-008 - The CLI does not provision the native-stack envelope it relies on
-
-Scope: `cost-cli`. Hunter's label: low to medium.
-
-Claims at stake: `docs/limits.md` "Native stack / Envelope" (2 MiB release,
-4 MiB dev) and its embedder advice that "the main thread usually has 8 MiB
-already". `docs/cli.md` documents Windows behaviour (WTF-8 chunk names), so
-Windows is a target the CLI speaks for.
-
-`main` compiles and runs the script on the process main thread. On Windows the
-main thread's default stack is 1 MiB, below both envelope figures. A script
-nesting native calls to `MAX_NATIVE_CALL_DEPTH` (sort comparators, metamethod
-handlers, iterators), or source at the syntax budget, can overflow and abort the
-process, where the documented outcome is a clean limit error. `docs/cli.md` does
-allow for "process aborts", so this is not strictly a broken CLI promise, but
-"usually 8 MiB" is Linux/macOS-specific and the repo's own embedder is the one
-host guaranteed to hit it. Fix: run compile plus call on a
-`std::thread::Builder` thread with an explicit stack size (for example 8 MiB),
-and drop the "usually" sentence.
-
-## HOST-011 - The CLI reads unbounded input before rejecting it
-
-Scope: `cost-cli`. Robustness.
-
-`Input::read` calls `read_to_end` or `fs::read` with no cap; only then does
-`Program::compile` reject anything over `MAX_SOURCE_BYTES`. A huge file or an
-endless stdin is buffered in full first, or exhausts memory. Reading at most
-`MAX_SOURCE_BYTES + 1` bytes would fail fast with the same error.
-
 ## HOST-014 - Every State allocates names for the whole function catalog
 
 Scope: `vm-state`. Performance; unmeasured, so any change goes through a

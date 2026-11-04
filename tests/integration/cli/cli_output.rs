@@ -106,7 +106,8 @@ fn compile_errors_share_context_and_do_not_print_a_cost_summary() {
 
 #[test]
 fn source_size_compile_error_is_not_labeled_as_a_parse_error() {
-    let source = vec![b' '; dellingr::limits::MAX_SOURCE_BYTES + 1];
+    let limit = dellingr::limits::MAX_SOURCE_BYTES;
+    let source = vec![b' '; limit + 1024];
     let output = run_stdin(["-"], source);
 
     assert_eq!(output.status.code(), Some(1));
@@ -114,6 +115,10 @@ fn source_size_compile_error_is_not_labeled_as_a_parse_error() {
     assert!(
         stderr.starts_with("Error: compiling source: stdin: source size "),
         "{stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("source size {} exceeds limit {limit}", limit + 1)),
+        "the CLI should compile only the limit plus one byte: {stderr}"
     );
     assert!(!stderr.contains("parsing source:"), "{stderr}");
     assert!(!stderr.contains("Cost used:"), "{stderr}");

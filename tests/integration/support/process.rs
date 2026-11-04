@@ -538,10 +538,10 @@ where
         .stderr(Stdio::piped())
         .spawn()
         .expect("dellingr CLI should run");
-    // Dropping the handle after the write closes the pipe. The CLI reads stdin
-    // to its end before running anything, so a short script cannot block. A
-    // run that is rejected at argument parsing never reads stdin and may have
-    // exited already; that broken pipe is the expected outcome, not a failure.
+    // Dropping the handle after the write closes the pipe. The CLI reads at
+    // most MAX_SOURCE_BYTES + 1 bytes, so oversized input can make it exit
+    // before the pipe closes. Argument parsing can also reject the run before
+    // stdin is read; a broken pipe in either case is expected, not a failure.
     let written = child
         .stdin
         .take()

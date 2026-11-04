@@ -145,8 +145,9 @@ Rust default for spawned threads) in a release build, and a 4 MiB thread in a
 debug build. If a debug build of your host runs scripts on threads it spawns
 itself, give them 4 MiB (`std::thread::Builder::new().stack_size(4 << 20)`);
 otherwise a deeply recursive script can overflow the native stack and abort
-the process instead of failing with a limit error. Release builds and the main
-thread (usually 8 MiB) need nothing. The shared Lua/Rust value stack is capped
+the process instead of failing with a limit error. Release builds need nothing
+on spawned threads. The main thread's stack size is set by the platform
+(Windows gives it 1 MiB), so check it before running scripts there. The shared Lua/Rust value stack is capped
 at `limits::MAX_STACK_SIZE` values, and that cap is enforced on every operation
 that can grow the stack - bytecode operand pushes, frame setup, metamethod
 dispatch, and the host-facing `push_*` / `new_table` / `get_global` methods

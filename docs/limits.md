@@ -421,15 +421,20 @@ full-depth tests validate those peaks on the stated threads.
 Parsing keeps the stricter promise: parsing at the syntax budget fits a
 2 MiB thread in both settings.
 
-What this means for an embedder: a debug build that runs scripts on a
-thread it spawns with the default 2 MiB can overflow and abort the process
-before a recursion limit is reached. Give such threads 4 MiB with
-`std::thread::Builder::stack_size` (the main thread usually has 8 MiB
-already). Other build configurations - a host's own optimization levels or
-profile overrides for its dependencies, other targets - are the embedder's
-to validate; the stated sizes are what this repository tests. Cargo applies
-the embedding workspace's profile to dellingr, so a host whose release
-profile matches Cargo's default builds what the release envelope covers.
+What this means for an embedder: a thread that runs scripts needs at least
+4 MiB for a build matching dev settings, or 2 MiB for the default release
+profile. Below that, a deep script can overflow the native stack and abort
+the process before a recursion limit is reached. Set the size with
+`std::thread::Builder::stack_size` on threads the host spawns; the main
+thread's size is set by the platform (Windows gives it 1 MiB), so a host
+that runs scripts there checks it too. The CLI runs source compilation and
+script execution on a thread it spawns with an explicit 8 MiB stack, so it
+covers both settings on every platform. Other build
+configurations - a host's own optimization levels or profile overrides for
+its dependencies, other targets - are the embedder's to validate; the stated
+sizes are what this repository tests. Cargo applies the embedding workspace's
+profile to dellingr, so a host whose release profile matches Cargo's default
+builds what the release envelope covers.
 
 Outside the envelope, and the embedder's to provision:
 
