@@ -17,22 +17,6 @@ before acting.
    and they are never deduplicated through git history. Carry the context
    inline instead.
 
-## COMP-010 - Numeral validation is split between the lexer and the parser
-
-Scope: `compiler-front`. Structural. Re-observed by a fix wave.
-
-Hex numerals are validated in the lexer, twice: after the mantissa and again
-after the exponent, calling `parse_lua_numeral` both times. Decimal exponent
-errors (`1e`, `1e+`) are found later, in `parse_expr_base`. Error timing
-therefore depends on the radix: `x = 0x1p` fails while lexing, `x = 1e` while
-parsing. `1..2` lexes as the two tokens `1.` and `.2` and produces a parse
-error, where Lua 5.4 reports "malformed number near '1..2'". Since a fix wave,
-numerals cut off at the end of the source raise `UnfinishedNumber` from the
-parser side; that path is part of the same split.
-
-Approaches raised so far (not exhaustive): lex the maximal numeral span and
-validate it once, as Lua 5.4's `read_numeral` does.
-
 ## COMP-012 - Decoded string contents travel through a keyed side table
 
 Scope: `compiler-front`. Structural.
@@ -46,3 +30,9 @@ it the `MissingStringContents` internal fault and a `tok.len < 2` sanity check.
 Approaches raised so far (not exhaustive): carry the decoded contents on the
 token itself (for example `Token { kind, span, payload:
 Option<LiteralStringContents> }`, or an owned `TokenValue`).
+
+Related: numerals now validate entirely in the lexer (`lex_numeral`), and the
+parser converts the same bytes again, with `ParserFault::InvalidNumberToken`
+for a lexer that broke its promise. A token payload would let the lexer hand
+over the converted value and remove both the second conversion and that
+fault; the numeral change deliberately left the payload shape to this entry.

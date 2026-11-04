@@ -150,12 +150,6 @@ impl<'a> TokenStream<'a> {
         self.lexer.line_and_col(pos)
     }
 
-    /// Returns the source length in bytes.
-    #[must_use]
-    pub(super) fn source_len(&self) -> usize {
-        self.lexer.source.len()
-    }
-
     /// Returns the byte offset just past the last consumed token.
     ///
     /// Peeking ahead does not move this parser cursor.
@@ -231,7 +225,7 @@ impl<'a> Lexer<'a> {
                 b'}' => RCurly,
                 b']' => RSquare,
 
-                b'.' => self.peek_dot()?,
+                b'.' => self.peek_dot(tok_start)?,
 
                 b'=' | b'<' | b'>' | b'~' => self.peek_equals(first_char)?,
 
@@ -251,7 +245,7 @@ impl<'a> Lexer<'a> {
                     LSquare
                 }
 
-                b'0'..=b'9' => self.lex_full_number(first_char, tok_start)?,
+                b'0'..=b'9' => self.lex_numeral(first_char, tok_start)?,
 
                 b'a'..=b'z' | b'A'..=b'Z' | b'_' => match self.lex_word(tok_start) {
                     // Reserved so scripts cannot use the spelling as a name,
@@ -410,7 +404,7 @@ impl<'a> Lexer<'a> {
 
     /// The lexer just read a `.`.
     /// Determines whether it is part of a `Dot`, `DotDot`, `DotDotDot` or `Number`.
-    fn peek_dot(&mut self) -> Result<TokenKind> {
+    fn peek_dot(&mut self, tok_start: usize) -> Result<TokenKind> {
         let typ = match self.peek_char() {
             Some(b'.') => {
                 self.next_char();
@@ -420,11 +414,7 @@ impl<'a> Lexer<'a> {
                     DotDot
                 }
             }
-            Some(c) if c.is_ascii_digit() => {
-                self.next_char();
-                self.lex_number_after_decimal()?;
-                LiteralNumber
-            }
+            Some(c) if c.is_ascii_digit() => self.lex_numeral(b'.', tok_start)?,
             _ => Dot,
         };
         Ok(typ)
@@ -645,102 +635,64 @@ impl<'a> Lexer<'a> {
         Ok(skip_until)
     }
 
-    /// Reads in a number which starts with a digit (as opposed to a decimal point).
-    fn lex_full_number(&mut self, first_char: u8, tok_start: usize) -> Result<TokenKind> {
-        // Check for hex values (both 0x and 0X)
-        if first_char == b'0' && (self.try_next(b'x') || self.try_next(b'X')) {
-            // Mantissa: hex digits with an optional fraction (Lua 5.2 hex
-            // floats). At least one digit must appear in the mantissa:
-            // `0x1.8`, `0x1.`, and `0x.8` are valid, `0x.` is not.
-            self.lex_hex_digits();
-            if self.try_next(b'.') {
-                self.lex_hex_digits();
-            }
-            // Let the shared numeral parser own mantissa validation. Check at
-            // this boundary to keep malformed-mantissa diagnostics before a
-            // following exponent, as in the original lexer.
-            if parse_lua_numeral(&self.source[tok_start..self.pos]).is_none() {
-                return Err(self.malformed_number_error(tok_start));
-            }
-
-            // Optional binary exponent: p/P, an optional sign, then at least
-            // one DECIMAL digit (`0x1p-2`, `0x1.8p+0`).
-            let has_exponent = self.try_next(b'p') || self.try_next(b'P');
-            if has_exponent {
-                if let Some(c) = self.peek_char()
-                    && (c == b'+' || c == b'-')
-                {
-                    self.next_char();
-                }
-                self.lex_digits();
-                if parse_lua_numeral(&self.source[tok_start..self.pos]).is_none() {
-                    return Err(self.malformed_number_error(tok_start));
-                }
-            }
-
-            match self.peek_char() {
-                Some(c) if is_identifier_continue(c) => Err(self.error(SyntaxError::BadNumber)),
-                _ => Ok(LiteralNumber),
-            }
+    /// Reads a numeral of either radix, including the leading-dot form, whose
+    /// first byte (a digit, or a `.` before a digit) is already consumed.
+    ///
+    /// This is the one place numerals are validated. The span is the maximal
+    /// one reference Lua 5.4's lexer reads: hex digits and dots of either
+    /// radix, the radix's exponent letter (`e`/`E`, or `p`/`P` after `0x`)
+    /// with an optional sign straight after it, then one glued letter or
+    /// underscore swallowed so the span cannot be valid. Hex digits are
+    /// spanned in decimal numerals too, and the exponent letter is tested
+    /// before them, so `0xe+1` stays `0xe` plus `1`. Splitting the span
+    /// anywhere smaller would accept sources both references reject:
+    /// `1...2` would lex as `1.` `..` `2` and concatenate.
+    ///
+    /// The whole span is then checked once with the shared numeral parser, so
+    /// every `LiteralNumber` token is a valid numeral by construction and
+    /// the parser only converts it. A failure is a lexer error at the
+    /// numeral's first byte, for every radix and form, and it is raised when
+    /// the token is lexed: a malformed numeral reports `malformed number`
+    /// even where the grammar wanted some other token (`local 1e = 2`).
+    /// It is `UnfinishedNumber`, which `Error::is_recoverable` reports, when
+    /// the span reaches the end of the source as a prefix that appended
+    /// digits can complete. That claim is lexical, as for an unfinished
+    /// string: `local 1e` is recoverable although no completion parses.
+    fn lex_numeral(&mut self, first_char: u8, tok_start: usize) -> Result<TokenKind> {
+        let exponent = if first_char == b'0' && (self.try_next(b'x') || self.try_next(b'X')) {
+            b"pP"
         } else {
-            // Read in the rest of the base
-            self.lex_digits();
-
-            // Handle the fraction and exponent components.
-            if self.try_next(b'.') {
-                match self.peek_char() {
-                    Some(c) if c.is_ascii_digit() => self.lex_number_after_decimal()?,
-                    _ => self.lex_exponent()?,
+            b"eE"
+        };
+        // bounded: every iteration consumes a byte of the finite source.
+        loop {
+            if self.try_next(exponent[0]) || self.try_next(exponent[1]) {
+                if !self.try_next(b'+') {
+                    self.try_next(b'-');
                 }
-            } else {
-                self.lex_exponent()?;
-            }
-
-            Ok(LiteralNumber)
-        }
-    }
-
-    /// Reads in a literal number which starts with a decimal point.
-    fn lex_number_after_decimal(&mut self) -> Result<()> {
-        self.lex_digits();
-        self.lex_exponent()
-    }
-
-    /// Consumes an unbroken sequence of digits.
-    fn lex_digits(&mut self) {
-        while let Some(c) = self.peek_char() {
-            if c.is_ascii_digit() {
+            } else if self
+                .peek_char()
+                .is_some_and(|c| c == b'.' || hex_value(c).is_some())
+            {
                 self.next_char();
             } else {
                 break;
             }
         }
-    }
-
-    /// Consumes an unbroken sequence of hexadecimal digits.
-    fn lex_hex_digits(&mut self) {
-        while self.peek_char().is_some_and(|c| hex_value(c).is_some()) {
+        if self.peek_char().is_some_and(is_identifier_continue) {
             self.next_char();
         }
-    }
 
-    /// Consumes the optional exponent part of a literal number, then rejects
-    /// an identifier character glued to it.
-    fn lex_exponent(&mut self) -> Result<()> {
-        if self.try_next(b'E') || self.try_next(b'e') {
-            // The exponent might have a sign.
-            if let Some(c) = self.peek_char()
-                && (c == b'+' || c == b'-')
-            {
-                self.next_char();
-            }
-
-            self.lex_digits();
+        let literal = &self.source[tok_start..self.pos];
+        if parse_lua_numeral(literal).is_some() {
+            return Ok(LiteralNumber);
         }
-        match self.peek_char() {
-            Some(c) if is_identifier_continue(c) => Err(self.error(SyntaxError::BadNumber)),
-            _ => Ok(()),
-        }
+        let kind = if self.pos == self.source.len() && is_incomplete_numeral(literal) {
+            SyntaxError::UnfinishedNumber
+        } else {
+            SyntaxError::BadNumber
+        };
+        Err(self.error_at(kind, tok_start))
     }
 
     /// Reads a word and returns it as an identifier or keyword.
@@ -769,16 +721,6 @@ impl<'a> Lexer<'a> {
         ((line_index + 1) as u32, (column + 1) as u32)
     }
 
-    fn malformed_number_error(&self, token_start: usize) -> Error {
-        let literal = &self.source[token_start..self.pos];
-        let kind = if self.pos == self.source.len() && is_incomplete_numeral(literal) {
-            SyntaxError::UnfinishedNumber
-        } else {
-            SyntaxError::BadNumber
-        };
-        self.error(kind)
-    }
-
     #[must_use]
     const fn end_of_file(&self, line: u32) -> Token {
         Token {
@@ -795,7 +737,7 @@ fn is_identifier_continue(c: u8) -> bool {
 }
 
 /// Whether these numeral bytes form a valid prefix that appended digits can complete.
-pub(super) fn is_incomplete_numeral(input: &[u8]) -> bool {
+fn is_incomplete_numeral(input: &[u8]) -> bool {
     if let Some(mantissa_and_exponent) = input
         .strip_prefix(b"0x")
         .or_else(|| input.strip_prefix(b"0X"))
@@ -1094,14 +1036,50 @@ mod tests {
     }
 
     #[test]
-    fn decimal_exponent_validation_stays_with_the_shared_numeral_parser() {
-        for input in ["1e", "1e+"] {
-            let token = Lexer::new(input.as_bytes())
+    fn decimal_exponent_validation_happens_in_the_lexer() {
+        for (input, unfinished) in [("1e", true), ("1e+", true), ("1e ", false), ("1e+a", false)] {
+            let err = Lexer::new(input.as_bytes())
                 .next_token()
-                .expect("decimal exponent failure is deferred to parsing");
-            assert_eq!(token.typ, LiteralNumber);
-            assert!(parse_lua_numeral(input.as_bytes()).is_none());
+                .expect_err("a decimal numeral without exponent digits must fail to lex");
+            let kind = match err.kind() {
+                crate::error::ErrorKind::SyntaxError(SyntaxError::UnfinishedNumber) => true,
+                crate::error::ErrorKind::SyntaxError(SyntaxError::BadNumber) => false,
+                other => panic!("{input:?}: unexpected error {other:?}"),
+            };
+            assert_eq!(kind, unfinished, "{input:?}");
+            assert_eq!(err.column(), 1, "{input:?}");
         }
+    }
+
+    #[test]
+    fn numerals_span_every_glued_dot_as_reference_lua_does() {
+        // Splitting these at the second dot would lex `1.` `..` `2` and
+        // concatenate, where Lua 5.2 and 5.4 report a malformed number.
+        for input in [
+            "1..2", "1...2", "0x1...2", "1.5..x", "1e5..2", ".5..2", "1.2.3", "0x1p5.5",
+        ] {
+            let err = Lexer::new(input.as_bytes())
+                .next_token()
+                .expect_err("a numeral glued to a dot run must fail");
+            assert!(
+                matches!(
+                    err.kind(),
+                    crate::error::ErrorKind::SyntaxError(SyntaxError::BadNumber)
+                ),
+                "{input:?}"
+            );
+        }
+        // The exponent letter is the radix's: `e` is a hex digit after `0x`,
+        // so the sign after it is an operator.
+        check_line(
+            "0xe+1",
+            &[(LiteralNumber, 0, 3), (Plus, 3, 1), (LiteralNumber, 4, 1)],
+        );
+        check_line("1e+1", &[(LiteralNumber, 0, 4)]);
+        check_line(
+            "1 ..2",
+            &[(LiteralNumber, 0, 1), (DotDot, 2, 2), (LiteralNumber, 4, 1)],
+        );
     }
 
     #[test]
@@ -1131,13 +1109,19 @@ mod tests {
     }
 
     #[test]
-    fn malformed_hex_number_errors_keep_their_original_columns() {
-        for (input, column, unfinished) in
-            [("0x.", 4, true), ("0xp1", 3, false), ("0x1p+", 6, true)]
-        {
+    fn malformed_numerals_report_their_first_byte() {
+        for (input, column, unfinished) in [
+            ("0x.", 1, true),
+            ("0xp1", 1, false),
+            ("0x1p+", 1, true),
+            ("  1e", 3, true),
+            ("  3or", 3, false),
+            ("  .5e+x", 3, false),
+            ("  1..2", 3, false),
+        ] {
             let err = Lexer::new(input.as_bytes())
                 .next_token()
-                .expect_err("malformed hexadecimal numeral must fail in the lexer");
+                .expect_err("a malformed numeral must fail in the lexer");
             let has_expected_kind = if unfinished {
                 matches!(
                     err.kind(),

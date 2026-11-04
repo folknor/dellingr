@@ -103,6 +103,8 @@ does.
   too).
 - A numeral immediately followed by an identifier character is malformed, so
   `3or 4` and `1e5or` are rejected as in Lua 5.4; Lua 5.2 accepts `3or 4`.
+  As in both references, a numeral also runs on through glued dots, so
+  `1..2`, `1...2` and `1.5..x` are malformed numbers, not concatenations.
 - A `(` on the following line continues a call. Lua 5.2 rejects this as
   ambiguous syntax; Lua 5.4 accepts it.
 - Table constructors accept leading and lone comma or semicolon separators,
@@ -141,11 +143,13 @@ does.
   or long comment that ends incomplete at EOF keeps its own diagnostic
   (`unfinished string`, `malformed number`, `unfinished long comment`).
 - `Error::is_recoverable` also reports a short string or number that ends
-  incomplete at EOF. A short string broken by a line break remains
-  nonrecoverable.
+  incomplete at EOF. The claim is about that last token alone, whether or not
+  the preceding tokens would let the completed source parse: `local "abc` and
+  `local 1e` are both recoverable. A short string broken by a line break
+  remains nonrecoverable.
 - Lexer errors (`malformed number`, `unfinished string`, invalid escapes)
-  name no `near` token, and a missing closing bracket on a later line does
-  not add reference Lua's `(to close '(' at line N)`. The parser's other
+  name no `near` token; a malformed number's column is its first byte
+  instead. A missing closing bracket on a later line does not add reference Lua's `(to close '(' at line N)`. The parser's other
   errors (`unexpected symbol`, `syntax error`, `'X' expected`, `'=' or 'in'
   expected`, `function arguments expected`, each `near` the offending token)
   use the reference wording.

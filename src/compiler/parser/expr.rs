@@ -2,12 +2,12 @@ use super::super::ast::{
     ArithChain, ArithLink, CallSuffix, CompareChain, CompareLink, Expr, ExprKind, MethodSuffix,
     Place, Suffix, Suffixed,
 };
-use super::super::lexer::is_incomplete_numeral;
 use super::Parser;
 use super::Result;
 use super::SyntaxError;
 use super::TokenKind;
 use super::Variable;
+use crate::error::ParserFault;
 use crate::instr::{ArithOp, CompareOp};
 use crate::limits::{MAX_EXPRESSIONS, SYNTAX_SUFFIX_COST};
 
@@ -431,18 +431,14 @@ impl Parser<'_> {
         Ok(match tok.typ {
             TokenKind::LCurly => self.parse_table(tok.line)?,
             TokenKind::LiteralNumber => {
-                // The lexer determines token boundaries; this shared parser
-                // owns conversion and validates the complete numeral.
+                // The lexer validates every numeral, and emits the token only
+                // after this same conversion succeeded on the same bytes; a
+                // failure here is a lexer bug, not a malformed script. The
+                // conversion runs twice per literal at compile time rather
+                // than carrying the value on the token.
                 let text = self.input.source_bytes(tok.range());
                 let number = crate::numeral::parse_lua_numeral(text).ok_or_else(|| {
-                    let kind = if tok.range().end == self.input.source_len()
-                        && is_incomplete_numeral(text)
-                    {
-                        SyntaxError::UnfinishedNumber
-                    } else {
-                        SyntaxError::BadNumber
-                    };
-                    self.error_at(kind, tok.start)
+                    self.internal_error_at(ParserFault::InvalidNumberToken, tok.start)
                 })?;
                 Expr::new(ExprKind::Num(self.find_or_add_number(number)?))
             }

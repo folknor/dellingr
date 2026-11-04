@@ -168,6 +168,16 @@ version's meaning is wider (see below).
   `SyntaxError::UnfinishedString` and `SyntaxError::UnfinishedNumber`. Their
   messages are unchanged (`unfinished string`, `malformed number`); a short
   string broken by a line break stays `UnclosedString` and nonrecoverable.
+- A numeral glued to dots is a malformed number, as in Lua 5.2 and 5.4
+  (breaking for scripts that relied on it): `1...2` and `0x1...2` used to
+  concatenate to `12`, `1.5..x` and `1e5..2` to concatenate, and `1..2` and
+  `1.2.3` failed with a misleading `')' expected` or `unexpected symbol`.
+  Every numeral is validated by the lexer, so a malformed one reports
+  `malformed number` wherever it appears (`local 1e = 2` said `<name>
+  expected`), and its column is the numeral's first byte for every form
+  (malformed hex numerals and numerals glued to a letter pointed inside the
+  numeral). A source ending inside an incomplete numeral is recoverable even
+  where the grammar wanted another token (`local 1e`), as `local "abc` was.
 - An automatic GC threshold whose computed value saturates to `usize::MAX`
   stays automatic, so a later collection recomputes it, instead of switching
   allocation-triggered collection off for good.

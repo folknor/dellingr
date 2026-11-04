@@ -62,6 +62,37 @@ fn incomplete_numbers_at_eof_are_recoverable() {
 }
 
 #[test]
+fn malformed_numerals_are_lexer_errors_wherever_they_appear() {
+    // Each case is (source, unfinished, column). The numeral is diagnosed when
+    // it is lexed, at its first byte, even where the grammar wanted another
+    // token. Recoverability is a claim about the last token alone: `local 1e`
+    // ends inside an incomplete numeral although no completion parses, as
+    // `local "abc` ends inside an unfinished string.
+    for (source, unfinished, column) in [
+        ("local 1e", true, 7),
+        ("local 1e = 2", false, 7),
+        ("t = { a 1e }", false, 9),
+        ("t = { a 1e", true, 9),
+        ("print(1...2)", false, 7),
+        ("print(0x1...2)", false, 7),
+        ("print(1.5..'a')", false, 7),
+        ("x = 1e5..2", false, 5),
+        ("x = 1..2", false, 5),
+    ] {
+        let err = load_error(source);
+        let is_unfinished = match err.kind() {
+            ErrorKind::SyntaxError(SyntaxError::UnfinishedNumber) => true,
+            ErrorKind::SyntaxError(SyntaxError::BadNumber) => false,
+            _ => panic!("{source:?}: expected a numeral error, got {err}"),
+        };
+        assert_eq!(is_unfinished, unfinished, "{source:?}");
+        assert_eq!(err.is_recoverable(), unfinished, "{source:?}");
+        assert_eq!((err.line_num(), err.column()), (1, column), "{source:?}");
+        assert!(format!("{err}").contains("malformed number"), "{err}");
+    }
+}
+
+#[test]
 fn appending_digits_completes_incomplete_numerals() {
     for (prefix, digits) in [
         ("return 1e", "5"),

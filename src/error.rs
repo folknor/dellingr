@@ -139,6 +139,9 @@ pub(crate) enum ParserFault {
     /// Identifier and numeral tokens are ASCII by construction in the byte
     /// lexer, and the parser reads them as `&str`.
     TokenTextNotUtf8,
+    /// The lexer validates every numeral token with the numeral parser the
+    /// parser then converts it with, so the conversion cannot fail.
+    InvalidNumberToken,
 }
 
 #[derive(Debug)]
@@ -250,6 +253,7 @@ impl ParserFault {
             Self::FoldedLiteralOutOfRange => "folded operand names a literal outside the pool",
             Self::LocalWithoutDeclaration => "resolved local has no declaration",
             Self::TokenTextNotUtf8 => "lexer produced a non-UTF-8 identifier or numeral token",
+            Self::InvalidNumberToken => "lexer produced a numeral token the numeral parser rejects",
         }
     }
 }
