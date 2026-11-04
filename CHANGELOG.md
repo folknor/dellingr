@@ -167,6 +167,12 @@ version's meaning is wider (see below).
   the model weighs them zero, instead of reporting `cost 0 (static)`.
 - Marking a swept upvalue slot panics in release builds too, instead of
   letting the sweep put the same slot on the free list twice.
+- `State::set_global_named_rust_fn` inside `with_restricted_env` is refused
+  with the new `ErrorKind::SetGlobalNamedRustFnInRestrictedEnv`, before the id
+  is registered. Before, the id stayed registered while its global was
+  discarded with the environment, so retrying outside failed as a duplicate.
+- The `--analyze` summary labels table writes `Table writes (t[k],{k=})`,
+  since the count includes keyed constructor fields.
 
 ### Changed
 

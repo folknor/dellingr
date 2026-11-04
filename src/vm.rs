@@ -1305,10 +1305,17 @@ impl State {
     /// under a second global name, push its handle and call
     /// [`State::set_global`].
     ///
+    /// Refused inside [`State::with_restricted_env`] with
+    /// [`ErrorKind::SetGlobalNamedRustFnInRestrictedEnv`]. Its global would be
+    /// discarded with the temporary environment, but its function-table
+    /// entry would outlive that environment.
+    ///
     /// A rejected call changes nothing: the name is checked as
     /// [`State::set_global`] checks it ([`ErrorKind::StringSizeExceeded`])
     /// before the id is registered, and the install after registration
-    /// cannot fail.
+    /// cannot fail. Restricted-environment rejection also happens before the
+    /// id is registered, so the same id can be retried after the environment
+    /// is restored.
     #[cfg(feature = "snapshot")]
     pub fn set_global_named_rust_fn(
         &mut self,
@@ -1317,6 +1324,9 @@ impl State {
         func: RustFunc,
     ) -> Result<RustFnHandle> {
         self.check_usable()?;
+        if self.in_restricted_env() {
+            return Err(self.error(ErrorKind::SetGlobalNamedRustFnInRestrictedEnv));
+        }
         check_string_size(name.len())?;
         let handle = self.register_rust_fn(id, name, func)?;
         let function = self
@@ -1438,6 +1448,9 @@ impl State {
     /// whatever `f` stores in it, raw keys included, is discarded with it.
     /// [`State::open_libs`] is refused inside `f` with
     /// [`ErrorKind::OpenLibsInRestrictedEnv`].
+    /// `State::set_global_named_rust_fn` is refused with
+    /// [`ErrorKind::SetGlobalNamedRustFnInRestrictedEnv`] because its function
+    /// registration would outlive the discarded global.
     ///
     /// # Errors
     ///

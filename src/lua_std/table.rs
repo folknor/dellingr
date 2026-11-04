@@ -21,6 +21,44 @@ fn table_unpack_values(state: &mut State) -> crate::Result<u8> {
     )
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static RAW_MOVE_INTERRUPT_AFTER_COPIES: std::cell::Cell<Option<usize>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
+#[cfg(test)]
+fn trigger_raw_move_interrupt_after_copies(copies: usize) {
+    assert!(copies > 0, "the test hook requires at least one copy");
+    RAW_MOVE_INTERRUPT_AFTER_COPIES.with(|remaining| remaining.set(Some(copies)));
+}
+
+// Trigger after a successful write so the next iteration's real safepoint
+// observes the request.
+#[cfg(test)]
+fn trigger_raw_move_interrupt_after_copy(state: &State) {
+    let should_trigger = RAW_MOVE_INTERRUPT_AFTER_COPIES.with(|remaining| match remaining.get() {
+        Some(1) => {
+            remaining.set(None);
+            true
+        }
+        Some(copies) => {
+            remaining.set(Some(copies - 1));
+            false
+        }
+        None => false,
+    });
+    if should_trigger {
+        state.interrupt().trigger();
+    }
+}
+
+#[cfg(test)]
+fn clear_raw_move_interrupt_test_hook() {
+    RAW_MOVE_INTERRUPT_AFTER_COPIES.with(|remaining| remaining.set(None));
+}
+
 // Keep registration order: it determines table iteration and snapshot baselines.
 pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // table.insert(t, [pos,] value) - costs 1
@@ -370,6 +408,8 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
                         "lib:table.move->move_element:raw-backward",
                         move_element(state, f + i, t + i, dest_idx, false)
                     )?;
+                    #[cfg(test)]
+                    trigger_raw_move_interrupt_after_copy(state);
                 }
             } else {
                 for i in 0..paid {
@@ -378,6 +418,8 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
                         "lib:table.move->move_element:raw-forward",
                         move_element(state, f + i, t + i, dest_idx, false)
                     )?;
+                    #[cfg(test)]
+                    trigger_raw_move_interrupt_after_copy(state);
                 }
             }
             if !paid_all {
@@ -710,4 +752,54 @@ fn check_shift_distance(state: &State, distance: i64, function: LibraryFunction)
 
 fn position_out_of_bounds(state: &State, func_name: &str) -> crate::error::Error {
     super::argument_error(state, 2, func_name, ArgDetail::PositionOutOfBounds)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clear_raw_move_interrupt_test_hook, trigger_raw_move_interrupt_after_copies};
+    use crate::error::ErrorKind;
+    use crate::{ArgCount, Charge, CostModel, Costing, LuaType, Program, RetCount, State};
+
+    #[test]
+    fn raw_move_polls_interrupt_after_an_exact_number_of_copies() {
+        const COPY_COUNT: usize = 5;
+
+        let model = CostModel::zero().with(Charge::TableMove, 1);
+        let mut state = State::builder().costing(Costing::Metered(model)).build();
+
+        let setup = Program::compile("source = {[1] = 42, [5] = 99} dest = {}", None)
+            .expect("the table setup compiles");
+        state.load(&setup).expect("the table setup loads");
+        state
+            .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+            .expect("the tables are initialized");
+
+        let source = format!("table.move(source, 1, {COPY_COUNT}, 1, dest)");
+        let move_program = Program::compile(&source, None).expect("the move call compiles");
+        state.load(&move_program).expect("the move call loads");
+
+        let before = state.cost_used();
+        trigger_raw_move_interrupt_after_copies(1);
+        let result = state.call(ArgCount::Fixed(0), RetCount::Fixed(0));
+        clear_raw_move_interrupt_test_hook();
+
+        let error = result.expect_err("the raw move polls after its first copy");
+        assert!(matches!(error.kind(), ErrorKind::Interrupted), "{error}");
+        assert_eq!(state.cost_used() - before, COPY_COUNT as u64);
+
+        state.interrupt().reset();
+        let inspect = Program::compile("return dest[1], dest[5]", None)
+            .expect("the destination inspection compiles");
+        state
+            .load(&inspect)
+            .expect("the destination inspection loads");
+        state
+            .call(ArgCount::Fixed(0), RetCount::Fixed(2))
+            .expect("the destination inspection runs");
+        assert_eq!(
+            state.to_number(-2).expect("the first copy is numeric"),
+            42.0
+        );
+        assert_eq!(state.typ(-1), LuaType::Nil);
+    }
 }

@@ -13,5 +13,7 @@ mod newindex_depth_routes;
 mod numeric_loop_execution;
 mod plain_field_miss;
 mod restricted_global_lookup;
+#[cfg(feature = "snapshot")]
+mod restricted_rust_fn_setup;
 mod vm_depth_regressions;
 mod vm_misc_limits;

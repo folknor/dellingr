@@ -17,42 +17,6 @@ wrong; verify before fixing.
    and they are never deduplicated through git history. Carry the context
    inline instead.
 
-## HOST-001 - set_global_named_rust_fn inside with_restricted_env keeps the registration but loses the global
-
-Scope: `vm-state`. Hunter's label: low-medium.
-
-Claims: `with_restricted_env`'s doc says "whatever `f` stores in it, raw keys
-included, is discarded with it". `open_libs` is refused inside `f`
-(`ErrorKind::OpenLibsInRestrictedEnv`) because "the libraries would land in the
-temporary environment, which is discarded on restore, while the shared string
-metatable and the snapshot token map they also replace outlive it".
-`set_global_named_rust_fn` promises to "install it as global `name`" and "A
-rejected call changes nothing".
-
-`set_global_named_rust_fn` has the same split and is not refused. Inside `f` it
-registers the id in `rust_fns` (which outlives the environment) and writes the
-global into the restricted table (which `resume` discards). After `f` returns
-the global is gone but the id is still bound, so the obvious retry, calling it
-again outside, fails with `DuplicateFunctionRegistration`. The call is accepted
-and half its effect is then silently undone.
-
-Fix the hunter gave: refuse `set_global_named_rust_fn` inside a restricted
-environment for the same reason as `open_libs` (generalising the kind to
-something like `SetupInRestrictedEnv { api }`), or document the split on both
-methods. Plain `register_rust_fn`/`add_rust_fn` are fine inside `f`: they
-install nothing into the environment.
-
-## HOST-006 - The analysis report's table-writes label omits constructor fields
-
-Scope: `cost-cli`. The `ScopeCost` accessor docs are fixed; this residue is
-one report label.
-
-The table-writes category also counts constructor keyed fields
-(`INIT_FIELD`, `INIT_FIELD_PINNED`, `INIT_INDEX`, all of class `TableWrite`),
-and the `table_writes()` doc now says so. The report label in `src/instr.rs`
-(`OPCODE_COST_LABELS`) still reads `Table writes (t[k]=v)`. Reword it to cover
-keyed constructor fields; tests that pin the analysis report text move with it.
-
 ## HOST-008 - The CLI does not provision the native-stack envelope it relies on
 
 Scope: `cost-cli`. Hunter's label: low to medium.

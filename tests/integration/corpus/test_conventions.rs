@@ -257,6 +257,11 @@ const GATED_MODULES: &[(&str, &str, &str)] = &[
         "save_golden_program",
         "#[cfg(feature = \"snapshot\")]",
     ),
+    (
+        "runtime/mod.rs",
+        "restricted_rust_fn_setup",
+        "#[cfg(feature = \"snapshot\")]",
+    ),
     // Writes MXCSR, so it exists only where dellingr reads it.
     (
         "host/mod.rs",

@@ -654,7 +654,7 @@ mod tests {
                 "  Arithmetic (+,-,*,/,%,^): 1 ops\n",
                 "  Unary negation (-):       1 ops\n",
                 "  Table creation {}:        1 ops\n",
-                "  Table writes (t[k]=v):    1 ops\n",
+                "  Table writes (t[k],{k=}): 1 ops\n",
                 "  Array elements:           2 elements\n",
                 "\n",
                 "--- Statistics ---\n",

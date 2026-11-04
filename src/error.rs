@@ -401,12 +401,15 @@ struct ErrorRepr {
 /// blames the frame that raised the error, level 0 suppresses the prefix, and
 /// level N blames N-1 frames further up the traceback. For any other value it
 /// records `Suppressed`, as Lua 5.4 adds position information only to
-/// strings (Lua 5.2 also adds it to numbers). A host that builds a `ScriptError` itself controls the rendering
-/// directly.
+/// strings (Lua 5.2 also adds it to numbers). `Current` can fall back to a
+/// location on an error without a trace; `TraceFrame` has no prefix when its
+/// selected frame is absent. A host that builds a `ScriptError` itself
+/// controls the rendering directly.
 ///
 /// This is a closed set: every level maps to the current frame, no prefix, or
-/// a frame selected from the trace. `TraceFrame` represents all non-default
-/// positive levels.
+/// a frame selected from the trace. For `error()`, `Current` represents an
+/// omitted level; `TraceFrame` represents an explicitly supplied positive
+/// level, including level 1.
 #[derive(Debug, Clone, Copy)]
 pub enum PrefixLocation {
     /// Blame the frame where the error surfaced. The default.
@@ -564,6 +567,11 @@ pub enum ErrorKind {
     /// snapshot token map they also replace outlive it; the call is refused
     /// before any state changes.
     OpenLibsInRestrictedEnv,
+    /// A host called `State::set_global_named_rust_fn` inside
+    /// `State::with_restricted_env`. Its global would be discarded on
+    /// restore while its function-table entry would remain for the State's
+    /// lifetime, so the call is refused before registration.
+    SetGlobalNamedRustFnInRestrictedEnv,
     /// Invalid stack index passed to a host API.
     InvalidStackIndex {
         /// The bad index, as supplied by the caller.
@@ -1819,6 +1827,9 @@ impl fmt::Display for ErrorKind {
             OpenLibsInRestrictedEnv => {
                 f.write_str("cannot open libraries inside a restricted environment")
             }
+            SetGlobalNamedRustFnInRestrictedEnv => f.write_str(
+                "cannot register and install a named Rust function inside a restricted environment",
+            ),
             InvalidStackIndex { index } => {
                 write!(f, "invalid stack index ({index})")
             }

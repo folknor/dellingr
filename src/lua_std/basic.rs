@@ -206,6 +206,12 @@ pub(super) const BASE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         } else {
             ErrorValue::Nil
         };
+        // An absent level records Current; an explicit level 1 (or nil)
+        // records TraceFrame(0). They differ only for an error with no trace
+        // frame, where Current falls back to the error's own location. The
+        // error raised here never carries one of its own, so a direct host
+        // call renders both without a prefix, and with a trace both pick
+        // frame 0.
         let prefix_location = if state.get_top() < 2 {
             PrefixLocation::Current
         } else {

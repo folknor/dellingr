@@ -2,6 +2,7 @@
 //! stack frame.
 
 use dellingr::error::{Error, ErrorKind, PrefixLocation, StackFrame};
+use dellingr::{ArgCount, RetCount, State};
 
 fn frame(line: u32) -> StackFrame {
     StackFrame {
@@ -10,6 +11,80 @@ fn frame(line: u32) -> StackFrame {
         line,
         defined_line: 0,
     }
+}
+
+/// The level argument a direct host call of `error("boom", ...)` passes.
+#[derive(Clone, Copy)]
+enum LevelArg {
+    Absent,
+    Nil,
+    One,
+}
+
+fn call_error_builtin(level: LevelArg) -> Error {
+    let mut state = State::new();
+    state.get_global("error").expect("error builtin exists");
+    state.push_string("boom").expect("message fits");
+    let arguments = match level {
+        LevelArg::Absent => 1,
+        LevelArg::Nil => {
+            state.push_nil().expect("nil fits");
+            2
+        }
+        LevelArg::One => {
+            state.push_number(1.0).expect("level fits");
+            2
+        }
+    };
+    state
+        .call(ArgCount::Fixed(arguments), RetCount::Fixed(0))
+        .expect_err("error builtin raises")
+}
+
+#[test]
+fn direct_host_error_calls_have_no_location_to_distinguish_default_level() {
+    let default = call_error_builtin(LevelArg::Absent);
+    let explicit_one = call_error_builtin(LevelArg::One);
+    let explicit_nil = call_error_builtin(LevelArg::Nil);
+
+    for error in [&default, &explicit_one, &explicit_nil] {
+        assert!(error.stack_trace().is_empty());
+        assert!(error.source_name().is_none());
+        assert_eq!(error.to_string(), "boom");
+    }
+
+    assert!(matches!(
+        default.kind(),
+        ErrorKind::ScriptError {
+            prefix: PrefixLocation::Current,
+            ..
+        }
+    ));
+    for error in [&explicit_one, &explicit_nil] {
+        assert!(matches!(
+            error.kind(),
+            ErrorKind::ScriptError {
+                prefix: PrefixLocation::TraceFrame(0),
+                ..
+            }
+        ));
+    }
+
+    let host_error = |prefix| {
+        Error::new(
+            ErrorKind::ScriptError {
+                value: dellingr::error::ErrorValue::String(b"boom".to_vec()),
+                prefix,
+            },
+            4,
+            0,
+        )
+    };
+    assert_eq!(host_error(PrefixLocation::Current).to_string(), "4: boom");
+    assert_eq!(
+        host_error(PrefixLocation::TraceFrame(0)).to_string(),
+        "boom"
+    );
 }
 
 #[test]

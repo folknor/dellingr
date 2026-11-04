@@ -311,7 +311,7 @@ pub(crate) const OPCODE_COST_LABELS: [OpcodeCostLabels; OpcodeCost::COUNT] = [
     },
     OpcodeCostLabels {
         category: OpcodeCost::TableWrite,
-        summary_prefix: "  Table writes (t[k]=v):    ",
+        summary_prefix: "  Table writes (t[k],{k=}): ",
         summary_suffix: " ops",
         scope_label: "table writes",
         summary_section: CostSummarySection::CostedOperations,

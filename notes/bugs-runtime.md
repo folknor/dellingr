@@ -50,27 +50,6 @@ tombstones permanently (what `retain_dead` does before sealing, and what
 limits.md says sealing exists to stop). The hunter marks the trade-off as the
 user's call; the current wording is wrong either way.
 
-## RT-008 - error(msg, 1) and error(msg, nil) can render differently from error(msg)
-
-Scope: `stdlib-core`.
-
-`error` in `src/lua_std/basic.rs` maps an absent level to
-`PrefixLocation::Current`, but an explicit level 1 or explicit `nil` to
-`PrefixLocation::TraceFrame(0)`. `impl Display for Error` (`src/error.rs`)
-treats them alike when the stack trace has a frame 0. With an empty trace they
-differ: `Current` falls back to `source_name()`/`line_num`, while
-`TraceFrame(_)` with no frame suppresses the prefix. A host calling the `error`
-builtin directly (no Lua frame on the trace) gets a position prefix for
-`error("x")` but not for `error("x", 1)` or `error("x", nil)`.
-
-Claim broken: the function's own default. Both references treat `error(v)` and
-`error(v, 1)` as one call (`luaL_optinteger(L, 2, 1)`), and dellingr's own code
-reads an absent level as 1 a few lines later (`unwrap_or(1)`). Edge case.
-
-Fix: map level 1, absent and nil to one `PrefixLocation`, either by folding
-`TraceFrame(0)` into `Current` or by having the no-argument path produce
-`TraceFrame(0)`.
-
 ## RT-014 - Lateral: inline-cache validation is re-implemented at every consumer
 
 Scope: `vm-heap`. Structural.
@@ -157,21 +136,4 @@ Scope: `stdlib-strings`. Performance; the code already names this as deliberate.
 names the fix: shared ownership of heap string bytes (an `Rc<[u8]>`-style
 handle). With that, `find`, `match` and `gsub` would be borrow-only.
 `string.format` already borrows plain string arguments.
-
-## RT-025 - Lateral: the raw table.move mid-copy interrupt test is a timing race
-
-Raised during a fix wave by the orchestrator. Test reliability.
-
-`raw_move_polls_interrupt_during_its_prepaid_copy_loop`
-(`tests/integration/host/interrupt.rs`) covers the raw `table.move` per-copy
-interrupt poll by setting the interrupt from a second thread after a 50 ms
-sleep while a very large move runs (the count was raised to 200,000,000 copies
-so a fast build cannot finish first). It passed its first gate run, but it is
-still a race against scheduling and machine speed, and if the poll ever
-regressed the move would try to complete 200 million copies, growing the
-destination table by gigabytes before failing. The raw path runs no script or
-host code during the copy, which is why the test resorted to a thread. A
-deterministic trigger (a test-only hook that sets the interrupt after N copies,
-or an interrupt-after-N-polls test helper on `Interrupt`) would make the test
-exact and cheap.
 

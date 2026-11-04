@@ -21,7 +21,9 @@ bytecode and location.
 No kind carries free-form text built by dellingr. Each failure source has its
 own typed kind: `ScriptError` (the `ErrorValue` a script passed to `error()`),
 `LibraryError` (a `LibraryError` reason), `PatternError`, `SyntaxError`,
-`ArgError`, `TypeError` and the limit kinds. `InternalError` wraps an opaque
+`ArgError`, `TypeError`, the limit kinds, and the restricted-environment setup
+refusals `OpenLibsInRestrictedEnv` and
+`SetGlobalNamedRustFnInRestrictedEnv`. `InternalError` wraps an opaque
 `InternalError` reason that only dellingr constructs: it always means a
 dellingr bug. `HostError` is the one kind dellingr never constructs; it boxes
 a `RustFunc`'s own `std::error::Error`, which `Error::source` returns and
@@ -53,6 +55,11 @@ shared string metatable's `__tostring`. `State::tostring_rendering` owns the
 for a string value and `PrefixLocation::Suppressed` for any other value, as
 Lua 5.4 adds position information only to strings. `Display` follows the
 recorded policy, so a host that builds a `ScriptError` itself chooses its own.
+`PrefixLocation::Current` falls back to the error's own source and line when
+there is no traceback frame; `TraceFrame` suppresses the prefix when the
+selected frame is absent. A direct host call of the built-in `error` has
+neither a traceback nor a location, so the omitted level and explicit level 1
+render alike in that case.
 
 ## Argument error names
 

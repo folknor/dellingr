@@ -3,13 +3,14 @@
 //! function that triggers the running State's own handle, and the counters a
 //! script leaves behind show the poll fired where it should: at the next
 //! backward jump, activation start, or library-loop iteration, and not
-//! later. The cross-thread tests trigger from another thread while a free
-//! loop or a raw library copy loop runs.
+//! later. A cross-thread test triggers from another thread while a free loop
+//! spins; the raw `table.move` copy-loop poll is covered by a unit test in
+//! `src/lua_std/table.rs` with a deterministic trigger.
 
 use std::time::Duration;
 
 use dellingr::error::{Error, ErrorKind};
-use dellingr::{ArgCount, Charge, CostModel, Costing, Interrupt, Program, RetCount, State};
+use dellingr::{ArgCount, Interrupt, RetCount, State};
 
 use crate::support;
 use crate::support::PushNewRustFn;
@@ -295,54 +296,6 @@ fn an_interrupt_pending_at_raw_move_entry_leaves_it_unpaid_and_destination_empty
         charged
     };
     assert_eq!(run(4), run(1));
-}
-
-/// A request raised from another thread after a raw move starts is observed
-/// by its per-copy poll. The whole range is prepaid first, and the destination
-/// has its first copy but not its final copy when the poll stops the move.
-/// The range is large enough that an optimized build cannot finish it within
-/// the trigger delay, so the outcome does not depend on machine speed.
-#[test]
-fn raw_move_polls_interrupt_during_its_prepaid_copy_loop() {
-    const COPY_COUNT: usize = 200_000_000;
-
-    let model = CostModel::zero().with(Charge::TableMove, 1);
-    let mut state = State::builder().costing(Costing::Metered(model)).build();
-    support::run(
-        &mut state,
-        format!("source = {{[1] = 42, [{COPY_COUNT}] = 99}} dest = {{}}"),
-    );
-
-    let source = format!("table.move(source, 1, {COPY_COUNT}, 1, dest)");
-    let program = Program::compile(&source, None).expect("the move call compiles");
-    state.load(&program).expect("the move call loads");
-
-    let interrupt = state.interrupt();
-    let (start, started) = std::sync::mpsc::sync_channel(0);
-    let trigger = std::thread::spawn(move || {
-        started.recv().expect("the move test starts");
-        std::thread::sleep(Duration::from_millis(50));
-        interrupt.trigger();
-    });
-
-    let before = state.cost_used();
-    start.send(()).expect("the trigger thread is ready");
-    let result = state.call(ArgCount::Fixed(0), RetCount::Fixed(0));
-    trigger.join().expect("the trigger thread finishes");
-    assert_interrupted(result, &source);
-    assert_eq!(
-        state.cost_used() - before,
-        COPY_COUNT as u64,
-        "the raw move prepaid its full range before observing the request"
-    );
-
-    state.interrupt().reset();
-    support::eval(&mut state, format!("return dest[1], dest[{COPY_COUNT}]"), 2);
-    assert_eq!(
-        state.to_number(-2).expect("the first copy is numeric"),
-        42.0
-    );
-    assert_eq!(state.typ(-1), dellingr::LuaType::Nil);
 }
 
 #[test]
