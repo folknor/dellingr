@@ -167,7 +167,9 @@ does.
   one; a host that installs `__index` or `__newindex` there through the raw
   table API affects `_G.x` field access only, not `x`.
 - In `pairs(_G)`, a global set to nil and later redefined keeps its earlier
-  place, where an ordinary table moves a re-added key to the end. Order is
+  place before `State::seal_globals`. After sealing, it keeps that place only
+  until a later new global triggers compaction of its tombstone; redefining it
+  after compaction puts it at the end, as with an ordinary table. Order is
   deterministic either way; reference Lua's is unspecified.
 - All strings share one metatable, as in reference Lua.
   - `getmetatable("")` returns it.

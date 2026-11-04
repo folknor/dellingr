@@ -550,7 +550,13 @@ impl<'a> Lexer<'a> {
         lexical_end: usize,
         decoded: &mut Vec<u8>,
     ) -> std::result::Result<usize, LiteralStringFailure> {
-        Self::check_decoded_string_growth(decoded.len())?;
+        // `\z` appends no byte, so it skips the growth check every other
+        // escape runs. The source cap makes a decoded-string overflow
+        // unreachable through public parsing; the guard keeps the decoder
+        // correct without relying on that cap.
+        if escaped != b'z' {
+            Self::check_decoded_string_growth(decoded.len())?;
+        }
         let bytes = self.source;
         let error = |kind| LiteralStringFailure::SyntaxError(kind, slash_pos);
         let unchanged_end = lexical_end;

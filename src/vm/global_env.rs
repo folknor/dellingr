@@ -35,9 +35,11 @@ use super::table::{SlotPolicy, Table};
 /// only map storage carries a slot policy.
 const INITIAL_GLOBAL_SLOTS: usize = crate::limits::tuning::TABLE_INLINE_CAPACITY + 1;
 
-/// The global table's slot policy in `phase`. A global keeps its slot (and
-/// its place in `pairs(_G)`) however often it is cleared and set, as a
-/// binding always has; tombstones are retained until the environment seals.
+/// The global table's slot policy in `phase`. Before sealing, a global keeps
+/// its slot (and its place in `pairs(_G)`) however often it is cleared and
+/// set. After sealing, a later new global compacts tombstones once they reach
+/// the live count, so a cleared global keeps its slot only until then;
+/// redefining it after compaction appends it.
 fn slot_policy(phase: Phase) -> SlotPolicy {
     SlotPolicy {
         revive_in_place: true,
@@ -214,9 +216,10 @@ impl GlobalEnv {
     }
 
     /// The value of global `key`, a string, filling `cache`. A cleared
-    /// global keeps its slot (`SlotPolicy::revive_in_place`), so its entry
-    /// caches the slot and sees the global come back; only a name with no
-    /// slot at all is cached as absent.
+    /// global keeps its slot until a compaction (`SlotPolicy::revive_in_place`),
+    /// so its entry caches the slot and sees the global come back; only a name
+    /// with no slot at all is cached as absent. A compaction bumps the
+    /// version, which invalidates the entry.
     #[inline(never)]
     pub(super) fn read(
         &self,

@@ -58,6 +58,10 @@ impl<'a> Parser<'a> {
         full_name.push_str(last_field);
         let mut last_field_id = self.find_or_add_string(last_field)?;
 
+        // An intermediate field is read when a following separator makes it
+        // part of the receiver. Stamp it at that separator (also for `:` below),
+        // unlike expression fields stamped at their identifier. Both identify
+        // the declaration header; preserve the existing diagnostic line info.
         while self.input.try_pop(TokenKind::Dot)?.is_some() {
             suffixes.push(Suffix::Field {
                 name: last_field_id,
@@ -181,6 +185,8 @@ impl<'a> Parser<'a> {
             SyntaxError::TooManyNestedFunctions,
         )?;
         self.funcs.chunk.nested.push(Arc::new(new_chunk));
+        // Chunk generation has already succeeded here. A body limit error may
+        // therefore precede a missing `end`; no partial program is returned.
         self.expect(TokenKind::End)?;
         Ok(index)
     }

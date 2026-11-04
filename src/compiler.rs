@@ -206,6 +206,10 @@ fn finalize_at_depth(bc: &mut Bytecode, depth: usize) -> Result<()> {
         }
         bc.name = Some(Arc::from(&name[..end]));
     }
+    // Keep this separate from bytecode validation: missing line metadata must
+    // return an internal error even in debug builds, rather than triggering
+    // validation_error's debug assertion. Snapshot admission still needs the
+    // verifier's independent length check because it does not finalize chunks.
     if bc.code.len() != bc.line_info.len() {
         return Err(internal_error(error::CompilerFault::LineInfoDesynced));
     }

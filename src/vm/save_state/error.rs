@@ -35,6 +35,7 @@ pub enum SaveError {
     /// A reachable Rust function has no stable save/load id.
     UnregisteredFunction {
         /// Best-effort path to the value that made the function reachable.
+        /// May follow an environment alias rather than the encoder's route.
         reachable_from: String,
     },
     /// A reachable upvalue was still open.

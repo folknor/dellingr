@@ -2,7 +2,7 @@
 
 Filed from the 2026-11-04 defect hunt (scopes `compiler-back`, `vm-dispatch`,
 `vm-heap`, `stdlib-strings`, `stdlib-core`). Hunt reports are work documents
-and may be wrong; verify before fixing.
+and may be wrong; verify before acting.
 
 1. An entry is removed entirely when completely resolved. No historical record
    stays here.
@@ -17,123 +17,124 @@ and may be wrong; verify before fixing.
    and they are never deduplicated through git history. Carry the context
    inline instead.
 
-## RT-004 - A cleared global does not keep its place in pairs(_G) once the sealed table compacts
+The performance entries below (RT-015 through RT-020, RT-022) describe work the
+hunters saw in the code. None has been measured; any change goes through a
+registered `brokkr dellingr` workload first.
 
-Scope: `vm-heap`. Replay-visible order.
+## RT-004 - A table.rs comment overstates where a cleared global keeps its place
 
-Claims broken:
+Scope: `vm-heap`. The documented guarantee was qualified in
+`docs/compatibility.md`, `docs/limits.md` and `global_env.rs`; this residue is
+one comment.
 
-- `docs/compatibility.md`, Globals and metatables: "In `pairs(_G)`, a global
-  set to nil and later redefined keeps its earlier place, where an ordinary
-  table moves a re-added key to the end."
-- `docs/limits.md`, State-local growth: "Clearing and redefining the same global
-  reuses its slot in every phase."
-- `global_env.rs` `slot_policy`: "A global keeps its slot (and its place in
-  `pairs(_G)`) however often it is cleared and set, as a binding always has".
+Before `seal_globals`, a cleared and redefined global keeps its slot and its
+place in `pairs(_G)`. After sealing, inserting a new global can compact the
+cleared slot away, and a later redefinition then appends at the end. A comment
+in `src/vm/table.rs` (near the tombstone revival code) still says a global keeps
+its place "however often it is cleared and set", without the after-sealing
+qualification the three documents now carry.
 
-After `seal_globals` the global table's policy is `revive_in_place: true,
-retain_dead: false`. A tombstone revives in place only while its slot exists.
-Inserting a new key goes through `Table::insert_into_map_with_tombstones`, which
-compacts when `dead_count >= live_count` (`compact_dead`, permitted by the
-sealed policy). Compaction removes the cleared global's slot, so redefining it
-appends at the back.
-
-Sequence (sealed): `a = 1; b = 1; a = nil; c = 1; a = 2` gives `pairs(_G)` order
-`b, c, a` (after whatever setup installed), not `a, b, c`. Before sealing
-(`retain_dead: true`) the claim holds.
-
-Deterministic, so replays are not broken; three documents state an
-unconditional guarantee about replay-visible order that holds only until the
-next compaction. Options: qualify the docs ("after `seal_globals`, until a later
-new global compacts the cleared slot"), or keep the global table's string-keyed
-tombstones permanently (what `retain_dead` does before sealing, and what
-limits.md says sealing exists to stop). The hunter marks the trade-off as the
-user's call; the current wording is wrong either way.
-
-## RT-014 - Lateral: inline-cache validation is re-implemented at every consumer
+## RT-014 - Inline-cache validation is implemented separately at each consumer
 
 Scope: `vm-heap`. Structural.
 
-The rule "same table, same version, slot live; otherwise re-read the key at the
-cached index and refresh" exists separately in `get_cached_field`,
-`get_current_cached_field`, `cached_method_at`, `get_cached_string_method` and
-`try_set_field_cached`, with a global variant (`Present`/`Absent` plus slot
-count) in `GlobalEnv::read_cached`/`write_cached`. Soundness rests on table.rs
-invariants written only as prose: which operations bump the version, that
-`Vacant(i)` always sits at index `i`, that inline keys are unique. A
-`Table`-owned typed slot reference (`SlotRef { version, index }` with
-`Table::read_slot(&SlotRef, key)` / `write_slot(..)`) would put the invariant
-and its consumers in one file and collapse the five copies. Cache entries also
-do not record their key; correctness rests on the verifier's one-site-per-slot
-rule (`compiler/verify.rs`), which is checked but is a cross-module dependency
-worth naming at the cache definitions.
+The validation rule for an inline cache entry - same table, same version, slot
+still live; otherwise re-read the key at the cached index and refresh - is
+written out separately in `get_cached_field`, `get_current_cached_field`,
+`cached_method_at`, `get_cached_string_method` and `try_set_field_cached`. A
+global-table variant (`Present`/`Absent` plus slot count) lives in
+`GlobalEnv::read_cached` and `write_cached`. The soundness of all of them rests
+on `table.rs` invariants that exist only as prose: which operations bump the
+version, that `Vacant(i)` always sits at index `i`, that inline keys are unique.
+Cache entries do not record their key; correctness also depends on the
+verifier's one-site-per-slot rule in `compiler/verify.rs`, a cross-module
+dependency that is checked but not named at the cache definitions.
 
-## RT-015 - Lateral: per-collection cost scales with loaded code, not garbage
+Approaches raised so far (not exhaustive): a `Table`-owned typed slot reference
+(for example `SlotRef { version, index }` with `Table::read_slot` and
+`write_slot`) so the invariant and its consumers live in one file; naming the
+verifier dependency at the cache definitions.
+
+## RT-015 - Per-collection work scales with loaded code, not with garbage
 
 Scope: `vm-heap`. Performance and structure.
 
 Every collection walks every cache slot of every live runtime
 (`drop_dead_cache_entries`) and walks the whole object slot map a second time
-(`reachable_lua_bytecodes`). With many loaded chunks and small heaps this
-dominates. Marking runtimes reachable during the mark phase (closures already
-visit `closure.runtime`) and pruning only those would fold the second walk into
-the first. The hunter also notes that the heap is a single non-incremental
-mark-sweep triggered by allocation count, so one large table counts as one
-allocation (documented in limits.md).
+(`reachable_lua_bytecodes`). With many loaded chunks and small heaps, that work
+can dominate a collection. The heap is a single non-incremental mark-sweep
+triggered by allocation count, so one large table counts as one allocation
+(documented in `docs/limits.md`).
 
-## RT-016 - Lateral: State::pop_n and balance_stack work one value per turn
+Approaches raised so far (not exhaustive): marking runtimes reachable during the
+mark phase (closures already visit `closure.runtime`) and pruning only those,
+folding the second walk into the first.
+
+## RT-016 - State::pop_n and balance_stack move one value per loop turn
 
 Scope: `vm-dispatch`. Performance.
 
 `State::pop_n` pops one value per loop turn, and `balance_stack` pushes one nil
-per turn. `truncate` and `resize` do the same work in one call.
+per turn. `truncate` and `resize` express the same operations as single calls.
 
-## RT-017 - Lateral: sequence_len computes the raw border before checking for __len
+## RT-017 - sequence_len computes the raw border before checking for __len
 
 Scope: `stdlib-core`. Performance and clarity.
 
 `sequence_len` (`table.rs`) computes the raw border before checking for `__len`
-and discards it when a handler exists: wasted work on every metamethod-path
-call. `i64::try_from(..).map_or(i64::MAX, i64::from)` there and in `table_sort`
-is an identity map with extra steps.
+and discards it when a handler exists, so every metamethod-path call does that
+work for nothing. The expression `i64::try_from(..).map_or(i64::MAX,
+i64::from)` there and in `table_sort` is an identity map written indirectly.
 
-## RT-018 - Lateral: gmatch construction re-interns strings already on the stack
+## RT-018 - gmatch construction re-interns strings already on the stack
 
 Scope: `stdlib-strings`. Performance.
 
 `gmatch` copies `s` and `pattern` into `Vec`s, then `push_bytes(&s)` re-interns
-them, hashing up to 16 MiB to find the string already at stack slot 1 or 2. When
-the argument is a string, push the existing value (`push_value(1)`) instead.
+them, hashing up to 16 MiB to find the string that is already at stack slot 1 or
+2.
 
-## RT-019 - Lateral: str_match builds a fresh MatchState per start position
+Approaches raised so far (not exhaustive): when the argument is a string, push
+the existing stack value (`push_value(1)`) instead of re-interning.
+
+## RT-019 - str_match builds a fresh MatchState for every start position
 
 Scope: `stdlib-strings`. Performance.
 
-`str_match` builds a fresh `MatchState` for every start position, initialising
-the 32-entry capture array (about 512 bytes); a failed search over an n-byte
-subject does n of these. Every path writes a capture slot before reading it, and
-`captures()` reads only slots the successful path set, so the state can be built
-once per search and reused, keeping "fresh per search" (the `SharedPattern` doc)
-intact.
+`str_match` builds a new `MatchState` for each start position, which initialises
+a 32-entry capture array (about 512 bytes). A failed search over an n-byte
+subject does this n times. The hunter observed that every path writes a capture
+slot before reading it and that `captures()` reads only slots the successful
+path set, and that the `SharedPattern` doc requires state to be fresh per
+search, not per start position.
 
-## RT-020 - Lateral: string.format appends literal bytes one at a time
+Approaches raised so far (not exhaustive): build the state once per search and
+reuse it across start positions.
 
-Scope: `stdlib-strings`. Performance. The fixer that added the per-directive
-poll to `string.format` re-raised this.
+## RT-020 - string.format appends literal bytes one at a time
 
-Each literal byte of the format string goes through `append_output`
-(`checked_string_growth` plus an atomic `state.charge` of 1). Batch literal runs
-with `charge_units`, which matches per-byte admission exactly (as
-`append_bytes_units` does in gsub). `%%` also goes through `parse_directive`,
-`format_argument` and a `Vec` allocation to emit one byte.
+Scope: `stdlib-strings`. Performance. Raised by the hunt and again by a fix
+wave.
 
-## RT-022 - Lateral: subject and pattern are copied on every pattern call
+Each literal byte of a format string goes through `append_output`, which runs
+`checked_string_growth` and an atomic `state.charge` of 1 per byte. `%%` goes
+through `parse_directive`, `format_argument` and a `Vec` allocation to emit one
+byte.
 
-Scope: `stdlib-strings`. Performance; the code already names this as deliberate.
+Approaches raised so far (not exhaustive): batch literal runs with
+`charge_units`, which admits charges exactly as per-byte charging does (the
+technique `append_bytes_units` uses in gsub).
 
-`string_or_number_bytes` copies the subject and pattern on every
-`find`/`match`/`gsub`/`gmatch` call. Its doc comment calls this deliberate and
-names the fix: shared ownership of heap string bytes (an `Rc<[u8]>`-style
-handle). With that, `find`, `match` and `gsub` would be borrow-only.
-`string.format` already borrows plain string arguments.
+## RT-022 - Subject and pattern are copied on every pattern call
 
+Scope: `stdlib-strings`. Performance. The code documents the copy as
+deliberate.
+
+`string_or_number_bytes` copies the subject and pattern on every `find`,
+`match`, `gsub` and `gmatch` call. Its doc comment calls the copy deliberate and
+names shared ownership of heap string bytes (an `Rc<[u8]>`-style handle) as the
+way to remove it. `string.format` already borrows plain string arguments since a
+fix wave.
+
+Approaches raised so far (not exhaustive): the shared-ownership handle the doc
+comment names, which would let `find`, `match` and `gsub` borrow.

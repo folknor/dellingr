@@ -439,6 +439,15 @@ fn jump_target(pc: usize, inst: Instr, code_len: usize) -> Option<usize> {
 // arguments, an open return or set-list) on the very next instruction, which
 // no jump may enter, and the consumer's own operand range must start at or
 // below the producer's.
+//
+// This checks a function body, not a closure's supplied captures. Compiled
+// program roots have no upvalue descriptors by construction, but a snapshot
+// can retain a captured function without its original parent chunk. Requiring
+// zero descriptors on chunks without a parent would reject those valid saves.
+// validate_child checks descriptors where a parent exists; snapshot admission's
+// validate_closures checks each closure's capture count and references before
+// materialization. A new entry path that supplies no captures must establish
+// the empty-upvalue contract itself.
 pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), BytecodeValidationError> {
     let code_len = view.code_len();
     if code_len == 0 {

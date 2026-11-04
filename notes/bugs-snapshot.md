@@ -1,8 +1,7 @@
 # Snapshot findings: save, load, verify
 
-Filed from the 2026-11-04 defect hunt (scope `snapshot`, with one entry also
-raised by `vm-heap`). Hunt reports are work documents and may be wrong; verify
-before fixing.
+Filed from the 2026-11-04 defect hunt (scope `snapshot`). Hunt reports are work
+documents and may be wrong; verify before acting.
 
 1. An entry is removed entirely when completely resolved. No historical record
    stays here.
@@ -17,55 +16,66 @@ before fixing.
    and they are never deduplicated through git history. Carry the context
    inline instead.
 
-## SNAP-002 - Environment deltas are not deltas: any slot change in a library table re-imposes every field's saved value
+## SNAP-002 - Standard-library tables are saved whole once touched, not as deltas
 
-Scope: `snapshot`. Hunter's label: medium.
+Scope: `snapshot`. Awaiting a decision by the project owner. Hunter's label:
+medium.
 
-Claims broken: README, "Changes you make to the standard library tables ... are
-persisted as a delta against the pristine environment and replayed on load";
-`docs/save-state.md`, "Standard-library tables as deltas against the pristine
+### What the documents claim
+
+README: "Changes you make to the standard library tables ... are persisted as a
+delta against the pristine environment and replayed on load".
+`docs/save-state.md`: "Standard-library tables as deltas against the pristine
 environment" and "The load setup callback configures the rebuilt environment".
 
-`encode_env_deltas` emits `hash_slots` whenever a table's physical slots differ
-from the baseline's, and then encodes every physical slot with its value, not
-only the changed ones (the comment "Values are part of this comparison
-deliberately" confirms it). On load, the `hash_slots` branch of
-`materialize_payload` treats every saved key as authoritative and drops setup's
-live value for any key the save mentions (`saved_keys` excludes it from the
-extras). Whether a setup override of a library field survives a load thus
-depends on whether the script changed some other field of the same table:
+### What the code does
+
+`encode_env_deltas` emits `hash_slots` for a library table whenever its physical
+slots differ from the pristine baseline's, and then encodes every physical slot
+of that table with its value, not only the changed ones. A code comment says the
+values are part of the comparison deliberately. On load, the `hash_slots` branch
+of `materialize_payload` treats every saved key as authoritative: `saved_keys`
+excludes it from the setup-provided extras, so setup's live value for any key
+the save mentions is dropped. The `order` section behaves the same way: it lists
+every live key, unchanged ones included.
+
+So whether a load setup override of a library field survives depends on whether
+the script changed some other field of the same table:
 
 - Save A: the script never touched `math`, so there is no delta. Load setup
   replaces `math.floor` with a host function; the override survives.
 - Save B: the script did `math.myconst = 42`, so `hash_slots` holds
-  `(floor, Fn("math.floor"))`. The same setup override is silently reverted to
+  `(floor, Fn("math.floor"))`. The same setup override is silently replaced by
   the stock function.
 
-The `order` section has the same issue: it lists every live key, unchanged ones
-included. Consequences: a host that changes its setup between game versions
-(sandboxing a library function, swapping `math.random`) has the change reverted
-only in saves whose scripts touched that table. Compatibility is equally
-inconsistent: if a later build drops a library function, an old save with a
-`math` delta fails with `UnknownFunction("math.bar")` (from `hash_slots`) or
-`OrderKeyAbsent` (from `order`), while a save without one loads. The doc
-promises only that adding a field is safe, but the failure depends on unrelated
-script edits no host can predict.
+Version compatibility is uneven in the same way. If a later build removes a
+library function, an old save with a `math` delta fails with
+`UnknownFunction("math.bar")` (from `hash_slots`) or `OrderKeyAbsent` (from
+`order`), while an old save without one loads. `docs/save-state.md` promises
+that adding a field is safe; the outcome of removing one depends on unrelated
+script edits.
 
-Structural fix the hunter gave, pick one model: (a) treat each environment table
-like `_G`, saved whole and authoritative for every key it holds, with setup
-contributing only keys the save never mentions; document that and drop the
-delete/upsert/order machinery, whose result `hash_slots` overwrites anyway in
-every save where it matters. Or (b) make the slot history value-free for
-unchanged keys: record tombstone, vacancy and position per slot, but carry a
-value only for keys in `upserts`, so unchanged keys keep setup's value. The
-hunter prefers (a) as simpler and consistent with the format-13 `_G` design.
+### Context
 
-## SNAP-008 - Lateral: PathFinder can report a path that is not the edge the encoder followed
+- `_G` itself has been saved whole, and authoritative for every key it holds,
+  since snapshot format 13. The current format is 14 (`FORMAT_VERSION` in
+  `src/snapshot_format.rs`).
+- A fix wave made the environment diff compare numbers by bits, so a signed-zero
+  change to a library field is recorded; that does not change the shape
+  described here.
 
-Scope: `snapshot`.
+### Models raised so far (not exhaustive)
 
-`PathFinder` (unregistered-function diagnostics) re-expands `_G` and other
-environment objects with fresh visited sets, while the encoder treats `_G` as a
-token. The reported path can run through `_G` to another global holding the
-same function. The path is valid, but not the edge the encoder actually
-followed, which the comment implies it is.
+- Treat each library table like `_G`: saved whole and authoritative for every
+  key it holds, with setup contributing only keys the save never mentions. The
+  delete, upsert and order machinery would no longer be needed, since
+  `hash_slots` already overrides it whenever it is emitted. The documents would
+  describe that model instead of a delta.
+- Make the slot history value-free for unchanged keys: record tombstone,
+  vacancy and position for each slot, but carry a value only for keys the script
+  changed, so untouched keys keep setup's value.
+
+Considerations noted during triage, not verified against the code: under the
+first model, a setup override of a library function would not take effect for
+any table the script has touched; either model appears to change what is
+written, which would mean a format version bump and regenerated save goldens.

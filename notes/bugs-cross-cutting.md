@@ -1,7 +1,7 @@
-# Cross-cutting findings: repo rules and the hunt process
+# Cross-cutting findings: repo rules
 
 Filed from the 2026-11-04 defect hunt. Findings that belong to no single scope.
-Hunt reports are work documents and may be wrong; verify before fixing.
+Hunt reports are work documents and may be wrong; verify before acting.
 
 1. An entry is removed entirely when completely resolved. No historical record
    stays here.
@@ -18,29 +18,54 @@ Hunt reports are work documents and may be wrong; verify before fixing.
 
 ## X-001 - Lint suppressions in the tree, and two rule sources that disagree about them
 
-Raised by `stdlib-strings` and `snapshot`.
+Raised by `stdlib-strings` and `snapshot`. Awaiting a decision by the project
+owner.
 
-Claim broken: AGENTS.md, "Never disable a lint; fix the code."
+### The two rules
 
-- `saturating_usize` in `src/lua_std/string.rs` carries
-  `#[allow(clippy::disallowed_methods)]` for `Result::unwrap_or`. The
-  `clippy.toml` reason text for that ban says "or use a scoped allow for an
-  intentional fallback", so the repo's two rule sources disagree, and one of
-  them should change. The code fix is trivial
-  (`usize::try_from(n.max(0)).map_or(usize::MAX, |v| v)`, or a `match`). The
-  `stdlib-strings` hunter reports the same pattern in `lua_std/basic.rs`,
-  `vm/stack.rs`, `crmath/mod.rs`, `host.rs` and `main.rs`.
-- `src/snapshot_format.rs` uses `#[cfg_attr(not(feature = "snapshot"),
-  allow(dead_code))]`. Gating the constant, or its non-snapshot users, removes
-  the need for it.
+- AGENTS.md: "Never disable a lint; fix the code. The `clippy.toml` bans name
+  their replacements."
+- `clippy.toml` reason texts invite a scoped `allow` in several bans:
+  `Result::unwrap_or` and `Result::unwrap_or_default` ("or use a scoped allow
+  for an intentional fallback"), `std::panic::set_hook` and `take_hook` ("Use a
+  scoped allow only for a permanent filtering installer"), and `std::io::stdout`
+  and `stderr` ("Hosts and harnesses whose job is printing use a scoped allow").
 
-## X-002 - Process: the cost-cli scope brief placed the analysis in the wrong file
+### What is in the tree
 
-Raised by `cost-cli`. About the hunt brief, not the code.
+The hunters named `saturating_usize` in `src/lua_std/string.rs`
+(`#[allow(clippy::disallowed_methods)]` for `Result::unwrap_or`) and
+`#[cfg_attr(not(feature = "snapshot"), allow(dead_code))]` in
+`src/snapshot_format.rs`. A scan of `src/` during triage found at least 24
+suppressions across several lints, most with an inline reason:
 
-The brief said `Program::analyze_cost` and `ScopeCost` live in
-`src/cost_model.rs`. They live in `src/lib.rs` (`ScopeCost`, `CostAnalysis` and
-all report rendering); `cost_model.rs` holds only the `Charge` registry,
-`CostModel` and `Costing`. The hunter reviewed the correct code. A future hunt's
-scope map should place the analysis in `lib.rs`, or in its own module if the
-proposal in `notes/bugs-host.md` to move it out of the crate root lands.
+- `clippy::disallowed_methods`: `src/main.rs` (four), `src/host.rs`,
+  `src/vm/stack.rs`, `src/lua_std/basic.rs`, `src/lua_std/string.rs`,
+  `src/crmath/mod.rs`
+- `clippy::let_underscore_must_use`: `src/main.rs`, `src/host.rs`
+- `clippy::expect_used`: `src/compiler/lexer.rs` (two),
+  `src/compiler/parser/state.rs` (two)
+- `clippy::panic`: `src/compiler/lexer.rs`
+- `clippy::float_cmp`: `src/lua_std/math.rs`, `src/vm/table.rs` (two), and a
+  module-wide `#![allow]` in `src/crmath/mod.rs`
+- `clippy::print_stderr` and one multi-lint `allow`: `src/crmath/tests/golden.rs`
+- one multi-lint `allow` in `src/vm/object.rs`
+- `dead_code` (feature-conditional): `src/snapshot_format.rs`
+
+`tests/`, `examples/` and `scripts/` were not scanned.
+
+### Directions raised so far (not exhaustive)
+
+- Align on AGENTS.md: reword the `clippy.toml` reasons that invite a scoped
+  `allow`, and replace each suppression with code the lints accept (the
+  `stdlib-strings` hunter suggested forms such as
+  `usize::try_from(n.max(0)).map_or(usize::MAX, |v| v)` or a `match` for the
+  `unwrap_or` sites; gating the constant or its non-snapshot users for the
+  `dead_code` one).
+- Align on `clippy.toml`: state in AGENTS.md which scoped suppressions are
+  accepted and on what terms (for example the cases the ban reasons name, with
+  an inline reason), and leave conforming sites as they are.
+
+A point noted during triage: rewriting `unwrap_or(x)` as an equivalent
+`map_or` call satisfies the ban mechanically without changing what the code
+does.

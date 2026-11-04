@@ -1,8 +1,7 @@
-# Host-boundary findings: State API, error rendering, cost analysis, CLI
+# Host-boundary findings: State API, cost analysis, CLI
 
-Filed from the 2026-11-04 defect hunt (scopes `vm-state` and `cost-cli`, with
-one entry also from `stdlib-core`). Hunt reports are work documents and may be
-wrong; verify before fixing.
+Filed from the 2026-11-04 defect hunt (scopes `vm-state` and `cost-cli`). Hunt
+reports are work documents and may be wrong; verify before acting.
 
 1. An entry is removed entirely when completely resolved. No historical record
    stays here.
@@ -46,50 +45,80 @@ Scope: `cost-cli`. Robustness.
 endless stdin is buffered in full first, or exhausts memory. Reading at most
 `MAX_SOURCE_BYTES + 1` bytes would fail fast with the same error.
 
-## HOST-014 - Lateral: every State allocates names for the whole function catalog
+## HOST-014 - Every State allocates names for the whole function catalog
 
-Scope: `vm-state`. Performance.
+Scope: `vm-state`. Performance; unmeasured, so any change goes through a
+registered `brokkr dellingr` workload first.
 
 `RustFnTable::new` allocates one `Box<str>` name per catalog entry for every
-State. Under `snapshot`, `bind_catalog` allocates two more per entry (`ids` and
-`by_id`), and `catalog_conflict` formats every id again on each `open_libs`. All
-are compile-time strings. A `Cow<'static, str>` (or a static-name side table for
-catalog indices) removes the per-State work, which matters to hosts building one
-State per script or per tick.
+State. Under the `snapshot` feature, `bind_catalog` allocates two more per entry
+(`ids` and `by_id`), and `catalog_conflict` formats every id again on each
+`open_libs`. All of these names are compile-time strings. The cost is per State,
+so it grows with how many States a host builds (one per script or per tick, for
+example).
 
-## HOST-015 - Lateral: whether a public method is guarded is a convention, not a type
+Approaches raised so far (not exhaustive): `Cow<'static, str>` names, or a
+static-name side table for catalog indices.
+
+## HOST-015 - Whether a public method may run Lua is a convention, not a type
 
 Scope: `vm-state`. Structural.
 
-Whether a public method needs `guarded` (because it can run Lua) or only
-`check_usable` is decided by hand and checked by `scripts/poison_contract.py`
-plus the native-calls inventory. The hunter traced a stale guard list in
-`reference/error-reporting.md` (since corrected) and HOST-001 to that
-hand-maintained split drifting. Structural option: route every Lua-reaching
-public method through one `HostEntry` wrapper, or make `call_unguarded` and kin
-take a zero-sized `Reentry` token that only `guarded` and `invoke_rust_fn` can
-mint. "Public entry that can run Lua but is not guarded" then becomes a compile
-error, and the reference docs can point at the type instead of listing methods.
+Some public `State` methods can execute Lua (`call`, `call_anchor`, `get_table`
+through `__index`, `set_table`, `tostring_bytes` and `to_string_with_meta`
+through `__tostring`, `with_restricted_env`). These must enter through
+`guarded`, which catches a panic, poisons the State and translates the error.
+Methods that cannot run Lua only need `check_usable`, which refuses a poisoned
+State. Which group a method belongs to is decided by hand. What keeps the
+decision consistent is `scripts/poison_contract.py` and the native-calls
+inventory (`reference/native-calls.toml`), not the type system.
 
-## HOST-016 - Lateral: the static cost analysis lives in the crate root and counts per category, not per charge
+The hunter traced two findings from the same hunt to this hand-maintained split:
+a guard list in `reference/error-reporting.md` that named a guard that did not
+exist and omitted `set_table` (since corrected), and `set_global_named_rust_fn`
+being accepted inside a restricted environment (since refused).
+
+Approaches raised so far (not exhaustive): route every Lua-reaching public
+method through one `HostEntry` wrapper; or make `call_unguarded` and the other
+re-entry functions take a zero-sized `Reentry` token that only `guarded` and
+`invoke_rust_fn` can create, so a public method that can run Lua without being
+guarded fails to compile and the reference docs can name the type instead of
+listing methods.
+
+Context noted during triage, not investigated: the re-entry functions are the
+ones `vm/eval.rs` and `reference/native-calls.md` hold to native-frame-size
+rules across `Frame::run`, so a change to their signatures meets those rules.
+
+## HOST-016 - Static cost analysis: location, counting model and provenance
 
 Scope: `cost-cli`. Structural.
 
-- `ScopeCost`, `CostAnalysis`, `ScopeTotals`, `write_summary_categories` and two
-  `Display` impls are about 300 lines in `src/lib.rs`, the file that otherwise
-  holds the API surface. They belong in their own module (for example
-  `src/cost_analysis.rs`, beside `cost_model.rs`), with `OPCODE_COST_LABELS` and
-  `CostSummarySection` moved out of `instr.rs` with them; presentation tables
-  currently live in the instruction-encoding module.
-- The analysis keeps a second classification (`OpcodeCost`: Arithmetic,
-  Negation, TableCreation, TableWrite, ArrayElements, Call, Free) parallel to the
-  `Charge` registry and prices it through the registry. Because the categories
-  merge `+ - * / % ^`, a host analysing under a model with `Pow` at 10 cannot see
-  where its cost comes from. Counting units per `Charge` would make counts
-  model-independent by construction (HOST-005 disappears), make cost a dot
-  product with any `CostModel` (so `analyze_cost_with` prices one analysis
-  instead of re-walking), and shrink `OpcodeCost` to what dispatch needs (`Call`
-  survives only as a statistic).
-- `CostAnalysis` does not record which model priced it; its `Display` prints
-  "Static cost estimate" with no model, so reports from two models are
-  indistinguishable.
+Three separate observations about the static cost analysis:
+
+- **Location.** `ScopeCost`, `CostAnalysis`, `ScopeTotals`,
+  `write_summary_categories` and two `Display` impls are about 300 lines in
+  `src/lib.rs`, the file that otherwise holds the public API surface. The
+  report's presentation tables (`OPCODE_COST_LABELS`, `CostSummarySection`) live
+  in `src/instr.rs`, the instruction-encoding module.
+- **Counting model.** The analysis keeps its own classification (`OpcodeCost`:
+  Arithmetic, Negation, TableCreation, TableWrite, ArrayElements, Call, Free),
+  parallel to the `Charge` registry the cost model prices, and prices it
+  through the registry. The categories merge `+ - * / % ^`, so a host analysing
+  under a model where `Pow` costs more than the other arithmetic cannot see where
+  its cost comes from. Whether operation counts depend on the model has already
+  needed a hand fix in a fix wave (the per-scope report now decides from counts
+  rather than cost).
+- **Provenance.** `CostAnalysis` does not record which model priced it, and its
+  `Display` prints "Static cost estimate" without naming the model, so reports
+  from two models are indistinguishable.
+
+Approaches raised so far (not exhaustive): a dedicated module for the analysis
+(for example `src/cost_analysis.rs` beside `cost_model.rs`) with the
+presentation tables moved out of `instr.rs`; counting units per `Charge`, which
+would make counts model-independent by construction, make cost a weighted sum
+over any `CostModel` so `analyze_cost_with` prices one analysis rather than
+re-walking bytecode, and reduce `OpcodeCost` to what dispatch needs; recording
+the model in the analysis and its report.
+
+Context noted during triage: counting per `Charge` changes the shape of the
+public analysis API and the report format; the move by itself does not.

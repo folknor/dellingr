@@ -616,6 +616,10 @@ impl Generator<'_> {
             let val = self.expr(value)?;
             let last = index + 1 == values.len();
             if last && value.is_multi() && usize::from(want) > index {
+                // The parser's multi-assignment check bounds this tail by
+                // MAX_FIXED_RESULTS. This conversion cannot fail for a parsed
+                // tree; the shared internal fault below is a defensive fallback,
+                // not evidence that an emitted instruction is missing.
                 let needed = u8::try_from(usize::from(want) - index)
                     .map_err(|_| Self::internal(ParserFault::MultiValueTailMissingInstruction))?;
                 self.set_returns(val, RetCount::Fixed(needed))?;
@@ -1086,6 +1090,10 @@ impl Generator<'_> {
             Ok(ArgCount::Dynamic)
         } else {
             self.next_reg(val)?;
+            // The parser bounds explicit plus implicit arguments together by
+            // MAX_FIXED_ARGS, including a method's receiver. Keep the fallible
+            // conversion as a defensive check on that contract; its shared
+            // internal fault does not describe a reachable source error.
             let count = u8::try_from(args.len() + usize::from(implicit))
                 .map_err(|_| Self::internal(ParserFault::MultiValueTailMissingInstruction))?;
             Ok(ArgCount::Fixed(count))

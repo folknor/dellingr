@@ -459,6 +459,9 @@ impl<'a> Parser<'a> {
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn parse_all(mut self) -> Result<Bytecode> {
         // The top-level chunk is a vararg function (can receive command-line args)
+        // As with nested functions, generate the body before checking its
+        // terminator. A body limit error can win over trailing invalid syntax;
+        // either failure rejects the whole program, so keep this precedence.
         let c = self.parse_chunk(&[], true)?;
         let token = self.input.next()?;
         if !self.funcs.frames.is_empty() {
@@ -498,6 +501,9 @@ impl<'a> Parser<'a> {
     fn finish_chunk(&mut self, num_params: u8, body: Vec<Stmt>) -> Result<Bytecode> {
         // The implicit return belongs to the block terminator. Keep its token
         // position because codegen errors are reported before it is consumed.
+        // Jump overflow has no originating span in CodegenError, so the end of
+        // the rejected body is its diagnostic anchor, not the parser cursor
+        // (which still points just past the last consumed token).
         let end = self.input.peek()?;
         let end_line = end.line;
         let end_pos = end.start;

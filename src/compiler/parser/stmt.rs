@@ -216,6 +216,8 @@ impl<'a> Parser<'a> {
 
         // optional step value
         let step = self.parse_numeric_for_step()?;
+        // Both step forms have consumed `do`, so control validation errors
+        // are attributed to that line. The choice affects diagnostics only.
         let prep_line = self.input.last_line();
 
         self.add_local("")?;
@@ -310,6 +312,9 @@ impl<'a> Parser<'a> {
         }
 
         self.expect(TokenKind::Do)?;
+        // The implicit iterator call and loop test belong to the completed
+        // header at `do`, rather than the first iterator expression. Keep this
+        // consumed-token attribution even when the header spans several lines.
         let call_line = self.input.last_line();
 
         self.enter_loop(base);

@@ -445,9 +445,15 @@ enum PathObjectChildren {
 }
 
 // Save tasks carry no path data. Rewalk a root only after finding an
-// unregistered function, preserving the encoder's LIFO order for diagnostics.
+// unregistered function, using the encoder's child order for diagnostics.
 // Earlier roots have encoded successfully, so a shared object cannot hide the
 // first unregistered function from this root's fresh visited sets.
+// This finds a reachability witness, not the encoder's exact traversal route:
+// the fresh environment set expands even _G, which encode_globals marks
+// expanded before walking its entries. A path can therefore pass through _G
+// or another environment alias to the same function. That is intentional for
+// the best-effort diagnostic; reproducing encoder history is unnecessary to
+// identify a reachable function that needs a save id.
 struct PathFinder<'a> {
     state: &'a State,
     env_reverse: &'a BTreeMap<ObjectPtr, String>,

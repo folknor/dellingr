@@ -219,7 +219,9 @@ entries it removes.
   `snapshot` feature), and from then on the table's tombstones compact as in
   any table: once they reach its live entries, the next new key compacts them.
   The table's allocated capacity stays at its peak. Clearing and redefining
-  the same global reuses its slot in every phase. Globals created inside
+  the same global always reuses its slot before sealing; after sealing, it
+  keeps the slot until a later new global compacts its tombstone, after which
+  redefining it appends it at the end. Globals created inside
   `with_restricted_env` go away with that environment. For that reason,
   `set_global_named_rust_fn` is refused there: its function-table entry would
   outlive the discarded global and prevent the host from retrying the id.
