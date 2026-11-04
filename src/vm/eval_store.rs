@@ -96,34 +96,27 @@ impl State {
         if entry.table != ptr {
             return false;
         }
-        let (target_index, current_version, needs_refresh) = {
+        // Validate under a shared borrow: `heap.as_table` moves the global
+        // table's mutation epoch, which a miss must not do.
+        let (slot, renewed) = {
             let Some(tbl) = self.heap.as_table_ref(ptr) else {
                 return false;
             };
-            let current_version = tbl.version();
-            if entry.table_version == current_version {
-                (entry.index, current_version, false)
+            if tbl.slot_is_current(entry.slot) {
+                (entry.slot, false)
             } else {
-                let Some((cached_key, _)) = tbl.get_index(entry.index) else {
+                let Some((slot, _)) = tbl.renew_slot(entry.slot, key) else {
                     return false;
                 };
-                if cached_key != key {
-                    return false;
-                }
-                (entry.index, current_version, true)
+                (slot, true)
             }
         };
-
         let Some(tbl) = self.heap.as_table(ptr) else {
             return false;
         };
-        let did_set = tbl.set_at_index(target_index, val);
-        if did_set && needs_refresh {
-            cache.set(FieldLookupCacheEntry {
-                table: ptr,
-                table_version: current_version,
-                index: target_index,
-            });
+        let did_set = tbl.store_slot(slot, val);
+        if did_set && renewed {
+            cache.set(FieldLookupCacheEntry { table: ptr, slot });
         }
         did_set
     }

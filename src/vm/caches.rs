@@ -6,6 +6,7 @@ use crate::compiler::Bytecode;
 
 use super::lua_val::Val;
 use super::object::{GcHeap, ObjectPtr};
+use super::table::{HashProbe, KeyedIndex, SlotRef};
 
 // Under `disable-inline-caches` every cache read misses. Only this crate's unit tests can re-enable hits for the paired execution.
 #[cfg(all(feature = "disable-inline-caches", test))]
@@ -26,26 +27,31 @@ pub(super) fn hits_disabled() -> bool {
     }
 }
 
-/// A lookup in the global table, valid while its shape version is `version`.
+// No entry records its key. A hit that skips the key comparison (a
+// current-version read) trusts that its slot serves one key, and that is a
+// property of the bytecode, which `compiler/verify.rs` proves for every
+// cached operand, a loaded save's included (saves are user-editable input):
+// field, method and set-field slots are allocated one per site in
+// instruction order, and every such site names a literal key; a global slot
+// is one per name (a cached GET_GLOBAL reuses its name's slot, each cached
+// SET_GLOBAL takes a fresh one). A TFOR_CALL cursor slot is one per site too,
+// but its key is the loop's dynamic control, which the cursor re-checks
+// itself. Whatever the slot rule becomes, it must keep one key per field,
+// method, set-field and global slot.
+//
+// What an entry's slot token proves, and the table rule it rests on, is in
+// `table.rs` (`SlotRef`, `KeyedIndex`, `HashProbe`).
+
+/// A lookup in the global table: the key's hash slot, whose value is read
+/// live (a tombstone there is the answer nil), or its absence. Global keys
+/// are strings, which never live in the array part, so no hash slot means
+/// absent from the table.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct GlobalLookupCacheEntry {
-    pub(super) version: u64,
-    pub(super) index: GlobalLookupIndex,
+    pub(super) probe: HashProbe,
     /// The key is a builtin name, so a store through this entry must move
     /// the global table's mutation epoch (see `GlobalEnv::builtin_mirror`).
     pub(super) builtin: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum GlobalLookupIndex {
-    /// The key's hash slot. Its value is read live: a tombstone there is the
-    /// answer nil, since the key keeps its slot until the version moves.
-    Present(usize),
-    /// The key had no live slot at this hash slot count. Appending a slot
-    /// invalidates misses without invalidating positive slot caches; every
-    /// other way a key can come alive moves the version
-    /// (`Table::hash_slot_count`).
-    Absent(usize),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -92,16 +98,17 @@ impl GlobalLookupCacheSlot {
     }
 }
 
+/// The site's key's live slot in `table`, for own-field reads (GET_FIELD,
+/// SELF) and for SET_FIELD's value updates.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct FieldLookupCacheEntry {
     pub(super) table: ObjectPtr,
-    pub(super) table_version: u64,
-    pub(super) index: usize,
+    pub(super) slot: SlotRef,
 }
 
 /// A proven hit one `__index` table up: the receiver's metatable names
 /// `method_table` as its `__index`, and that table holds the key at
-/// `method_index`.
+/// `method_slot`.
 ///
 /// Only hits are cached. A valid hit returns exactly what the uncached lookup
 /// returns, so the cache never decides which route a lookup takes, and with
@@ -114,23 +121,22 @@ pub(super) struct FieldLookupCacheEntry {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct MethodLookupCacheEntry {
     pub(super) receiver_metatable: ObjectPtr,
-    /// Slot of `__index` in `receiver_metatable`; the key it must still hold
-    /// is the State's interned `MetaName::Index`.
-    pub(super) index_field_index: usize,
+    /// Slot of `__index` in `receiver_metatable`, re-checked on every use
+    /// against the State's interned `MetaName::Index`, so it holds across
+    /// the metatable's shape changes.
+    pub(super) index_field: KeyedIndex,
     pub(super) method_table: ObjectPtr,
-    pub(super) method_table_version: u64,
-    pub(super) method_index: usize,
+    pub(super) method_slot: SlotRef,
 }
 
 /// Cache for `s:method()` style calls where the receiver is a string and
 /// the method is resolved through the shared string metatable's `__index`
-/// table. Stores that table's identity, its version at lookup time, and the
-/// method's index. The fast path also validates the live metatable handler.
+/// table. Stores that table's identity and the method's slot. The fast path
+/// also validates the live metatable handler.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct StringMethodCacheEntry {
     pub(super) string_lib: ObjectPtr,
-    pub(super) version: u64,
-    pub(super) index: usize,
+    pub(super) slot: SlotRef,
 }
 
 /// How many method entries a field slot holds: one site serving receivers of
@@ -245,7 +251,7 @@ impl SetFieldLookupCacheSlot {
 /// Per-(State, Bytecode) lookup caches owned by the State runtime bundle.
 ///
 /// These are never shared across `State`s: cached `ObjectPtr` keys are only
-/// valid inside the heap of the State that wrote them, and version cells are
+/// valid inside the heap of the State that wrote them, and slot tokens are
 /// keyed to that State's table versions (the global table's included). They are never
 /// serialized and are rebuilt cold when a snapshot is loaded, which is sound
 /// only because warmth is unobservable: an entry answers only what the
@@ -428,8 +434,7 @@ impl CacheEntry for GlobalLookupCacheEntry {
         // a GC root, so the entry names no handle that can die; its version
         // advances across content swaps and never resets.
         let Self {
-            version: _,
-            index: _,
+            probe: _,
             builtin: _,
         } = self;
     }
@@ -437,11 +442,7 @@ impl CacheEntry for GlobalLookupCacheEntry {
 
 impl CacheEntry for FieldLookupCacheEntry {
     fn for_each_handle(&self, f: &mut dyn FnMut(Val)) {
-        let Self {
-            table,
-            table_version: _,
-            index: _,
-        } = self;
+        let Self { table, slot: _ } = self;
         f(Val::Obj(*table));
     }
 }
@@ -450,10 +451,9 @@ impl CacheEntry for MethodLookupCacheEntry {
     fn for_each_handle(&self, f: &mut dyn FnMut(Val)) {
         let Self {
             receiver_metatable,
-            index_field_index: _,
+            index_field: _,
             method_table,
-            method_table_version: _,
-            method_index: _,
+            method_slot: _,
         } = self;
         f(Val::Obj(*receiver_metatable));
         f(Val::Obj(*method_table));
@@ -464,8 +464,7 @@ impl CacheEntry for StringMethodCacheEntry {
     fn for_each_handle(&self, f: &mut dyn FnMut(Val)) {
         let Self {
             string_lib,
-            version: _,
-            index: _,
+            slot: _,
         } = self;
         f(Val::Obj(*string_lib));
     }

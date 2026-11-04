@@ -205,12 +205,12 @@ impl State {
                     let found = self
                         .heap
                         .as_table_ref(metatable)
-                        .and_then(|mt| mt.get_with_index(&index_key));
-                    let Some((index_field_index, handler)) = found else {
+                        .and_then(|mt| mt.find_keyed(&index_key));
+                    let Some((index_field, handler)) = found else {
                         return Ok(Some(Val::Nil));
                     };
                     if cache.is_some() {
-                        method_fill = Some((metatable, index_field_index));
+                        method_fill = Some((metatable, index_field));
                     }
                     (receiver, handler)
                 }
@@ -229,23 +229,20 @@ impl State {
                 && let Some(table) = self.heap.as_table_ref(table_ptr)
             {
                 let val = match method_fill.take() {
-                    Some((receiver_metatable, index_field_index)) => {
-                        match table.get_with_index(&key) {
-                            Some((method_index, method)) => {
-                                if let Some(cache) = cache {
-                                    cache.fill_method(MethodLookupCacheEntry {
-                                        receiver_metatable,
-                                        index_field_index,
-                                        method_table: table_ptr,
-                                        method_table_version: table.version(),
-                                        method_index,
-                                    });
-                                }
-                                return Ok(Some(method));
+                    Some((receiver_metatable, index_field)) => match table.find_slot(&key) {
+                        Some((method_slot, method)) => {
+                            if let Some(cache) = cache {
+                                cache.fill_method(MethodLookupCacheEntry {
+                                    receiver_metatable,
+                                    index_field,
+                                    method_table: table_ptr,
+                                    method_slot,
+                                });
                             }
-                            None => Val::Nil,
+                            return Ok(Some(method));
                         }
-                    }
+                        None => Val::Nil,
+                    },
                     None => table.get(&key),
                 };
                 if !matches!(val, Val::Nil) {
@@ -323,8 +320,8 @@ impl State {
         };
         let index_key = self.meta_names.get(MetaName::Index);
         let (handler, shape) = match self.heap.as_table_ref(mt_ptr) {
-            Some(mt) => match mt.get_with_index(&index_key) {
-                Some((slot, handler)) => (handler, Some((mt.version(), slot))),
+            Some(mt) => match mt.find_slot(&index_key) {
+                Some((slot, handler)) => (handler, Some(slot)),
                 None => (Val::Nil, None),
             },
             None => (Val::Nil, None),
@@ -336,14 +333,12 @@ impl State {
             && let Some(shape) = shape
             && let Some(lib_ptr) = handler.as_object_ptr()
             && let Some(tbl) = self.heap.as_table_ref(lib_ptr)
-            && let Some((index, method)) = tbl.get_with_index(&key)
+            && let Some((slot, method)) = tbl.find_slot(&key)
         {
-            let version = tbl.version();
             self.string_mt_index_shape = Some(shape);
             cache.set_string_method(StringMethodCacheEntry {
                 string_lib: lib_ptr,
-                version,
-                index,
+                slot,
             });
             return Ok(StringStep::Done(method));
         }
@@ -386,18 +381,13 @@ impl State {
             .heap
             .as_table(ptr)
             .expect("checked to be a table just above");
-        if let Some((index, _)) = tbl.get_with_index(&key) {
+        if let Some((slot, _)) = tbl.find_slot(&key) {
             if matches!(val, Val::Nil) {
-                tbl.remove_at_index(index);
+                tbl.remove_slot(slot);
             } else {
-                let table_version = tbl.version();
-                tbl.set_at_index(index, val);
+                tbl.store_slot(slot, val);
                 if let Some(cache) = cache {
-                    cache.set(FieldLookupCacheEntry {
-                        table: ptr,
-                        table_version,
-                        index,
-                    });
+                    cache.set(FieldLookupCacheEntry { table: ptr, slot });
                 }
             }
             return Ok(None);
@@ -409,13 +399,9 @@ impl State {
         if pending.is_none()
             && let Some(cache) = cache
             && let Some(tbl) = self.heap.as_table_ref(ptr)
-            && let Some((index, _)) = tbl.get_with_index(&key)
+            && let Some((slot, _)) = tbl.find_slot(&key)
         {
-            cache.set(FieldLookupCacheEntry {
-                table: ptr,
-                table_version: tbl.version(),
-                index,
-            });
+            cache.set(FieldLookupCacheEntry { table: ptr, slot });
         }
         Ok(pending)
     }

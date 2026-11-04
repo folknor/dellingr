@@ -21,27 +21,6 @@ The performance entries below (RT-015 through RT-020, RT-022) describe work the
 hunters saw in the code. None has been measured; any change goes through a
 registered `brokkr dellingr` workload first.
 
-## RT-014 - Inline-cache validation is implemented separately at each consumer
-
-Scope: `vm-heap`. Structural.
-
-The validation rule for an inline cache entry - same table, same version, slot
-still live; otherwise re-read the key at the cached index and refresh - is
-written out separately in `get_cached_field`, `get_current_cached_field`,
-`cached_method_at`, `get_cached_string_method` and `try_set_field_cached`. A
-global-table variant (`Present`/`Absent` plus slot count) lives in
-`GlobalEnv::read_cached` and `write_cached`. The soundness of all of them rests
-on `table.rs` invariants that exist only as prose: which operations bump the
-version, that `Vacant(i)` always sits at index `i`, that inline keys are unique.
-Cache entries do not record their key; correctness also depends on the
-verifier's one-site-per-slot rule in `compiler/verify.rs`, a cross-module
-dependency that is checked but not named at the cache definitions.
-
-Approaches raised so far (not exhaustive): a `Table`-owned typed slot reference
-(for example `SlotRef { version, index }` with `Table::read_slot` and
-`write_slot`) so the invariant and its consumers live in one file; naming the
-verifier dependency at the cache definitions.
-
 ## RT-015 - Per-collection work scales with loaded code, not with garbage
 
 Scope: `vm-heap`. Performance and structure.

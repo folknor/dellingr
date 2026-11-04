@@ -332,7 +332,7 @@ impl State {
                 fault_injection: _, // Countdown and event log: no values.
             global_env,
             string_metatable,
-            string_mt_index_shape: _, // A (shape version, slot) pair: no handle.
+            string_mt_index_shape: _, // A slot token: no handle.
             meta_names,
             stack,
             heap: _, // The graph itself: roots point into it.

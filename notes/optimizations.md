@@ -18,6 +18,23 @@ plantasjen) unless noted.
 
 ## Investigate
 
+### bench/method about 2% slower after the slot-token move (2026-11-04)
+
+What: moving inline-cache validation into `Table`'s slot tokens (parent
+c969d9f, plantasjen) left `method` about 2% slower than its parent in
+matched pairs (+2.2%, +1.7%); `write`, `global` and `method_polymorphic`
+moved under that, `same_obj_read` was sign-inconsistent, and native bytes per
+level went down or stayed equal in every row. Two shape fixes found on the
+way are in the code (one flat global probe; a force-inlined
+`Table::slot_is_current` on the SET_FIELD hit), and each recovered a
+measured loss. Restoring the old `cached_method_at` body changed nothing;
+`resolve_index` and `Frame::run` differ in register allocation and block
+order with no added steady-state work found on the path.
+
+Why not yet: no mechanism; the size is in the band code layout alone moves.
+Signal: a perf annotate of `resolve_index` or `Frame::run` on `method` that
+shows a specific reload or spill the old build did not have.
+
 ### Per-instruction weight of the register dispatch loop (2026-10-23)
 
 The entries below share one measurement. perf on plantasjen (Zen 3),

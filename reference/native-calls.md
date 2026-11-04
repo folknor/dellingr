@@ -221,7 +221,8 @@ The recurring native stack of each scenario's cycle, as printed by the
 on-demand probe `brokkr test native_bytes_per_level` (dev) and
 `brokkr test native_bytes_per_level --release` (release), which run the
 default and snapshot configurations of each profile. Measured on the tree of
-the commit that added the public `State::set_table` (parent 3336729), on
+the commit that moved inline-cache validation into table slot tokens (parent
+c969d9f), on
 plantasjen (x86-64 Linux), `rustc 1.101.0-nightly (e9bbadf68 2026-10-12)`,
 with that host's global rustflags (`-Ctarget-cpu=native`, the `wild` linker
 through clang). Release is Cargo's default release profile (the repository
@@ -242,18 +243,18 @@ separately.
 
 | Scenario | Dev, also snapshot | Release | Release + snapshot |
 |---|---|---|---|
-| `index_field` | 9376 | 560 | 560 |
-| `index_method` | 9376 | 560 | 560 |
-| `index_key` | 9344 | 656 | 656 |
+| `index_field` | 9360 | 560 | 560 |
+| `index_method` | 9360 | 560 | 560 |
+| `index_key` | 9328 | 656 | 656 |
 | `index_rust` | 11280 | 1008 | 1008 |
-| `newindex_field` | 9616 | 704 | 704 |
-| `newindex_key` | 9392 | 672 | 672 |
-| `newindex_rust` | 11520 | 1152 | 1152 |
-| `length` | 9248 | 464 | 464 |
-| `string_index_field` | 9376 | 560 | 560 |
-| `string_index_key` | 9344 | 656 | 656 |
-| `index_string_handler` | 9376 | 560 | 560 |
-| `string_library_index` | 9376 | 560 | 560 |
+| `newindex_field` | 9600 | 688 | 688 |
+| `newindex_key` | 9376 | 672 | 672 |
+| `newindex_rust` | 11520 | 1136 | 1136 |
+| `length` | 9232 | 464 | 464 |
+| `string_index_field` | 9360 | 560 | 560 |
+| `string_index_key` | 9328 | 656 | 656 |
+| `index_string_handler` | 9360 | 560 | 560 |
+| `string_library_index` | 9360 | 560 | 560 |
 | `host_get_table` | 10656 | 912 | 912 |
 | `host_get_table_string` | 10656 | 912 | 912 |
 | `host_set_table` | 10752 | 928 | 928 |
@@ -263,7 +264,7 @@ separately.
 | `host_to_string_with_meta` | 11312 | 1264 | 1264 |
 | `tostring` | 10512 | 1024 | 1024 |
 | `print` | 10896 | 1184 | 1184 |
-| `format` | 12752 | 1552 | 1552 |
+| `format` | 12672 | 1520 | 1520 |
 | `error_tostring` | 11072 | 1312 | 1312 |
 | `sort_comparator` | 12240 | 1488 | 1488 |
 | `sort_comparator_right` | 12240 | 1488 | 1488 |
@@ -295,12 +296,11 @@ separately.
 | `gsub_empty_table` | 12512 | 1504 | 1520 |
 | `gsub_plain_table` | 12480 | 1552 | 1568 |
 | `gsub_pattern_table` | 15952 | 3232 | 3248 |
-| `tfor_lua` | 9408 | 688 | 688 |
+| `tfor_lua` | 9392 | 688 | 688 |
 | `tfor_ipairs` | 10976 | 976 | 976 |
 | `tfor_host_iterator` | 10832 | 944 | 944 |
 | `chain_index` | 0 | 0 | 0 |
 | `chain_newindex` | 0 | 0 | 0 |
 
 The largest recurring cycle is `gsub_pattern_function` (and its equals) in
-every column: 16,064 bytes in dev, 3,296 in release and 3,312 in release with
-snapshot. No metamethod chain step costs native stack in any setting.
+every column. No metamethod chain step costs native stack in any setting.

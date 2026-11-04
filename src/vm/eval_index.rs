@@ -24,13 +24,9 @@ impl State {
         }
 
         let tbl = self.heap.as_table_ref(ptr)?;
-        if let Some((index, val)) = tbl.get_with_index(&key) {
+        if let Some((slot, val)) = tbl.find_slot(&key) {
             if let Some(cache) = cache {
-                cache.set_field(FieldLookupCacheEntry {
-                    table: ptr,
-                    table_version: tbl.version(),
-                    index,
-                });
+                cache.set_field(FieldLookupCacheEntry { table: ptr, slot });
             }
             return Some((Some(val), None));
         }
@@ -52,33 +48,24 @@ impl State {
         // a matching `string_lib` is the cached table and not a later one in
         // its arena slot rests on collection clearing entries that name freed
         // objects (`RuntimeCaches::drop_dead_entries`), not on the generation.
-        let (mt_version, slot) = self.string_mt_index_shape?;
+        let shape = self.string_mt_index_shape?;
         let mt = self.heap.as_table_ref(self.string_metatable?)?;
-        if mt.version() != mt_version {
-            return None;
-        }
-        let (_, index_handler) = mt.get_index(slot)?;
+        let index_handler = mt.read_slot(shape)?;
         if index_handler.as_object_ptr() != Some(entry.string_lib) {
             return None;
         }
         let tbl = self.heap.as_table_ref(entry.string_lib)?;
-        let version = tbl.version();
-        if entry.version == version {
-            return tbl.get_index_value(entry.index);
+        if let Some(method) = tbl.slot_value(entry.slot) {
+            return method;
         }
-        // Slow validation: re-read the key at the cached index. If still
-        // the same method name, refresh the entry's version and use it.
-        let (cached_key, cached_val) = tbl.get_index(entry.index)?;
-        if cached_key == key {
-            cache.set_string_method(StringMethodCacheEntry {
-                string_lib: entry.string_lib,
-                version,
-                index: entry.index,
-            });
-            Some(cached_val)
-        } else {
-            None
-        }
+        // The library's shape moved: if its slot still holds the method
+        // name, refresh the entry and use it.
+        let (slot, method) = tbl.renew_slot(entry.slot, key)?;
+        cache.set_string_method(StringMethodCacheEntry {
+            string_lib: entry.string_lib,
+            slot,
+        });
+        Some(method)
     }
 
     /// The own-field cache hit alone: same table, unchanged version, live
@@ -94,11 +81,7 @@ impl State {
         if entry.table != ptr {
             return None;
         }
-        let tbl = self.heap.as_table_ref(ptr)?;
-        if entry.table_version != tbl.version() {
-            return None;
-        }
-        tbl.get_index_value(entry.index)
+        self.heap.as_table_ref(ptr)?.read_slot(entry.slot)
     }
 
     #[inline(always)]
@@ -113,21 +96,12 @@ impl State {
             return None;
         }
         let tbl = self.heap.as_table_ref(ptr)?;
-        let table_version = tbl.version();
-        if entry.table_version == table_version {
-            return tbl.get_index_value(entry.index);
+        if let Some(val) = tbl.slot_value(entry.slot) {
+            return val;
         }
-        let (cached_key, cached_val) = tbl.get_index(entry.index)?;
-        if cached_key == key {
-            cache.set_field(FieldLookupCacheEntry {
-                table: ptr,
-                table_version,
-                index: entry.index,
-            });
-            Some(cached_val)
-        } else {
-            None
-        }
+        let (slot, val) = tbl.renew_slot(entry.slot, key)?;
+        cache.set_field(FieldLookupCacheEntry { table: ptr, slot });
+        Some(val)
     }
 
     /// The method-cache hit alone, for a receiver with metatable
@@ -174,31 +148,24 @@ impl State {
             return None;
         }
         let metatable = self.heap.as_table_ref(receiver_metatable)?;
-        let (index_key, index_handler) = metatable.get_index(entry.index_field_index)?;
-        if index_key != self.meta_names.get(MetaName::Index)
-            || index_handler != Val::Obj(entry.method_table)
-        {
+        let index_handler =
+            metatable.value_if_key(entry.index_field, self.meta_names.get(MetaName::Index))?;
+        if index_handler != Val::Obj(entry.method_table) {
             return None;
         }
 
         let method_table = self.heap.as_table_ref(entry.method_table)?;
-        let method_table_version = method_table.version();
-        if entry.method_table_version == method_table_version {
-            return method_table.get_index_value(entry.method_index);
+        if let Some(method) = method_table.slot_value(entry.method_slot) {
+            return method;
         }
-
-        let (cached_key, method) = method_table.get_index(entry.method_index)?;
-        if cached_key == key {
-            cache.refresh_method(
-                position,
-                MethodLookupCacheEntry {
-                    method_table_version,
-                    ..entry
-                },
-            );
-            Some(method)
-        } else {
-            None
-        }
+        let (method_slot, method) = method_table.renew_slot(entry.method_slot, key)?;
+        cache.refresh_method(
+            position,
+            MethodLookupCacheEntry {
+                method_slot,
+                ..entry
+            },
+        );
+        Some(method)
     }
 }

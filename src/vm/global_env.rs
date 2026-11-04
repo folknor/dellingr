@@ -7,9 +7,10 @@
 //! `with_restricted_env` swaps its contents, not the object, so any reference
 //! to `_G` always sees the environment in force.
 //!
-//! Lookups are cached by the table's shape version. A cached slot index stays
-//! valid while the version is unchanged, and a cached absence also needs the
-//! hash slot count unchanged (see `Table::hash_slot_count`). The builtin names
+//! Lookups are cached as probes the table mints and validates (`HashProbe`
+//! in `table.rs`): a cached slot stays valid
+//! while the table's shape version is unchanged, and a cached absence also
+//! needs the hash slot count unchanged. The builtin names
 //! (`Builtin`) are interned once and read through a mirror validated by the
 //! heap's mutation epoch for this table (`builtin_mirror`), so the builtin
 //! opcodes do not reach the table at all while no builtin has changed.
@@ -27,7 +28,7 @@ use std::cell::Cell;
 use crate::instr::Builtin;
 
 use super::Val;
-use super::caches::{GlobalLookupCacheEntry, GlobalLookupCacheSlot, GlobalLookupIndex};
+use super::caches::{GlobalLookupCacheEntry, GlobalLookupCacheSlot};
 use super::object::{GcHeap, Markable, ObjectPtr, StringPtr};
 use super::table::{SlotPolicy, Table};
 
@@ -203,16 +204,7 @@ impl GlobalEnv {
     #[inline(always)]
     pub(super) fn read_cached(&self, heap: &GcHeap, cache: &GlobalLookupCacheSlot) -> Option<Val> {
         let entry = cache.get()?;
-        let table = self.contents(heap);
-        if entry.version != table.version() {
-            return None;
-        }
-        match entry.index {
-            GlobalLookupIndex::Present(index) => table.hash_slot_value(index),
-            GlobalLookupIndex::Absent(count) => {
-                (count == table.hash_slot_count()).then_some(Val::Nil)
-            }
-        }
+        self.contents(heap).read_probe(entry.probe)
     }
 
     /// The value of global `key`, a string, filling `cache`. A cleared
@@ -227,15 +219,10 @@ impl GlobalEnv {
         key: Val,
         cache: Option<&GlobalLookupCacheSlot>,
     ) -> Val {
-        let table = self.contents(heap);
-        let (index, value) = match table.hash_slot_of(&key) {
-            Some((index, value)) => (GlobalLookupIndex::Present(index), value),
-            None => (GlobalLookupIndex::Absent(table.hash_slot_count()), Val::Nil),
-        };
+        let (probe, value) = self.contents(heap).probe_hash(&key);
         if let Some(cache) = cache {
             cache.set(GlobalLookupCacheEntry {
-                version: table.version(),
-                index,
+                probe,
                 builtin: self.is_builtin_key(key),
             });
         }
@@ -270,26 +257,11 @@ impl GlobalEnv {
         if entry.builtin {
             heap.mark_watched_changed();
         }
-        let table = heap
-            .watched_table_unmarked()
-            .expect("the global table lives as long as the State");
-        if entry.version != table.version() {
-            return false;
-        }
-        match entry.index {
-            // A live store over a live value, the steady state, needs no
-            // tombstone accounting.
-            GlobalLookupIndex::Present(index) => {
-                if matches!(val, Val::Nil) || !table.set_at_index(index, *val) {
-                    // A rejected slot must take the keyed fallback, never
-                    // report a completed store. Current global slot policy
-                    // preserves keys until a version change.
-                    return table.write_slot(index, val);
-                }
-                true
-            }
-            GlobalLookupIndex::Absent(_) => false,
-        }
+        // A rejected probe (stale, absent or vacant) takes the keyed
+        // fallback, never reports a completed store.
+        heap.watched_table_unmarked()
+            .expect("the global table lives as long as the State")
+            .store_probe(&entry.probe, val)
     }
 
     /// Store global `key`, a string. A binding with a slot (live or cleared)
@@ -304,15 +276,15 @@ impl GlobalEnv {
         cache: Option<&GlobalLookupCacheSlot>,
     ) {
         let table = self.contents_mut(heap);
-        if let Some((index, _)) = table.hash_slot_of(&key) {
+        let (probe, _) = table.probe_hash(&key);
+        if probe.has_slot() {
             assert!(
-                table.write_slot(index, &val),
+                table.store_probe(&probe, &val),
                 "a slot found by its key under the current version remains writable"
             );
             if let Some(cache) = cache {
                 cache.set(GlobalLookupCacheEntry {
-                    version: table.version(),
-                    index: GlobalLookupIndex::Present(index),
+                    probe,
                     builtin: self.is_builtin_key(key),
                 });
             }
@@ -424,20 +396,16 @@ impl GlobalEnv {
     /// Put `incoming` into the global table and return what it held. The
     /// version moves past both, so every cache entry naming the table (in any
     /// cache family) misses or revalidates by key.
-    fn swap_contents(&self, heap: &mut GcHeap, mut incoming: Table) -> Table {
-        let table = self.contents_mut(heap);
-        std::mem::swap(table, &mut incoming);
-        table.advance_version_past(incoming.version());
-        incoming
+    fn swap_contents(&self, heap: &mut GcHeap, incoming: Table) -> Table {
+        self.contents_mut(heap).swap_contents(incoming)
     }
 
     /// Raw slot lookup, tombstones included, for tests that inspect the table.
     #[cfg(test)]
     pub(super) fn get(&self, heap: &GcHeap, name: &str) -> Option<Val> {
         let key = Val::Str(heap.find_string(name.as_bytes())?);
-        self.contents(heap)
-            .hash_slot_of(&key)
-            .map(|(_, value)| value)
+        let (probe, value) = self.contents(heap).probe_hash(&key);
+        probe.has_slot().then_some(value)
     }
 
     /// Whether the table has no slots at all, for tests.
@@ -555,10 +523,9 @@ impl Markable for GlobalEnv {
         for slot in 0..Builtin::COUNT {
             let (epoch, mirrored) = self.builtin_mirror[slot].get();
             if epoch == heap.watched_epoch() {
-                let actual = self
+                let (_, actual) = self
                     .contents(heap)
-                    .hash_slot_of(&self.builtin_key(slot as u8))
-                    .map_or(Val::Nil, |(_, value)| value);
+                    .probe_hash(&self.builtin_key(slot as u8));
                 // Lua equality rejects NaN and equates signed zeros; the
                 // mirror must hold identical numeric bits instead.
                 debug_assert!(match (mirrored, actual) {
@@ -583,7 +550,7 @@ mod tests {
     use crate::State;
     use crate::instr::{ArgCount, Builtin, RetCount};
     use crate::vm::Val;
-    use crate::vm::caches::{GlobalLookupCacheEntry, GlobalLookupCacheSlot, GlobalLookupIndex};
+    use crate::vm::caches::{GlobalLookupCacheEntry, GlobalLookupCacheSlot};
     use std::sync::Arc;
 
     fn key(state: &mut State, name: &str) -> Val {
@@ -664,8 +631,10 @@ mod tests {
         let mut state = State::raw();
         let cache = GlobalLookupCacheSlot::default();
         cache.set(GlobalLookupCacheEntry {
-            version: state.global_env.contents(&state.heap).version(),
-            index: GlobalLookupIndex::Present(usize::MAX),
+            probe: state
+                .global_env
+                .contents(&state.heap)
+                .probe_for_test(usize::MAX),
             builtin: false,
         });
         assert!(

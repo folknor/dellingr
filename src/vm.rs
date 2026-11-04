@@ -178,11 +178,11 @@ pub struct State {
     /// `None` in a `State::raw` that never opened the libraries. Not a
     /// global: `with_restricted_env` leaves it alone. A GC root.
     pub(super) string_metatable: Option<ObjectPtr>,
-    /// `(shape version, slot)` of `__index` in `string_metatable`, recorded
-    /// by the string-method IC's slow path so its fast path can re-check the
+    /// The slot of `__index` in `string_metatable`, recorded by the
+    /// string-method IC's slow path so its fast path can re-check the
     /// `__index` value without a hash lookup. Reset when the metatable is
     /// replaced; a stale entry only causes misses.
-    pub(super) string_mt_index_shape: Option<(u64, usize)>,
+    pub(super) string_mt_index_shape: Option<table::SlotRef>,
     /// Metamethod event keys, interned at construction and always rooted.
     meta_names: MetaNames,
     /// The main stack which stores values. Host-held: it may hold values the

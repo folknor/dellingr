@@ -437,6 +437,87 @@ impl Default for TableStorage {
     }
 }
 
+// Slot tokens: what an inline cache holds to find a key again without a
+// keyed lookup. Their fields are private, so only `Table` mints them (from a
+// lookup by key) and only `Table` interprets them; no code outside this file
+// reads or compares a shape version. Every token rests on one rule, which
+// the version-bump sites below keep and the debug shape witness checks:
+//
+//   While a table's shape version is unchanged, every existing hash slot
+//   keeps its key. A slot may die and revive in place, and new slots may be
+//   appended, but nothing is removed, reordered or renamed. Every operation
+//   that does one of those moves the version (`compact_dead`, the inline
+//   shift-out and the vacate-rename in `insert`, `rebuild_from_snapshot`,
+//   `swap_contents`).
+//
+// Array-part tokens carry tagged indices naming absolute keys, which survive
+// any window move, so the array part never moves the version.
+//
+// A token names a position, not a table: Table does not know its own heap
+// handle. Applying a token to another table answers about that table's slot,
+// so every holder keeps the table's handle beside the token and checks the
+// table's identity itself (inline caches also rely on collection clearing
+// entries whose table was freed, `RuntimeCaches::drop_dead_entries`). Nor
+// does a token record its key: a holder that skips the key comparison (a
+// current-version read) relies on its cache slot serving one key, which the
+// bytecode verifier proves for every cached operand, saved ones included.
+
+/// A slot that held a live value for some key when [`Table::find_slot`]
+/// minted it. While the version is unchanged it names that key's slot
+/// (which may since have died); after a change, [`Table::renew_slot`]
+/// re-checks the key at the same position.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SlotRef {
+    version: u64,
+    index: usize,
+}
+
+/// What [`Table::probe_hash`] found for a key in a table that revives keys
+/// in place (the global table), checked by one version comparison:
+///
+/// - The key's hash slot, live or a tombstone. Under an unchanged version a
+///   nil there is the key's answer, not a miss: the key keeps this slot
+///   while it is dead, and no other slot can take it.
+/// - Proof that the key had no hash slot at this slot count. A key with no
+///   slot can gain one only by appending a slot, which grows the count, and
+///   everything else moves the version. This proves the key absent from
+///   the table only for a key that cannot live in the array part (the
+///   global table's string keys); for a number it says nothing about the
+///   array.
+///
+/// Flat rather than an enum: the store is forced inline into the dispatch
+/// loop, and in a dev build a match binding there is a stack slot of every
+/// native level.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct HashProbe {
+    version: u64,
+    /// The slot's index when `present`, else the hash slot count.
+    at: usize,
+    present: bool,
+}
+
+impl HashProbe {
+    /// Whether the key had a hash slot, live or dead.
+    pub(super) fn has_slot(self) -> bool {
+        self.present
+    }
+}
+
+/// A slot position whose key is re-checked on every use
+/// ([`Table::value_if_key`]), independent of the shape version.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct KeyedIndex(usize);
+
+/// What the debug shape witness last saw: the version, the number of hash
+/// slots, and a fingerprint of their keys in physical order.
+#[cfg(debug_assertions)]
+#[derive(Clone, Copy, Debug)]
+struct ShapeWitness {
+    version: u64,
+    len: usize,
+    fingerprint: u64,
+}
+
 /// A Lua table: an array part for keys `1..=vlen` beside an
 /// insertion-ordered hash part for everything else.
 ///
@@ -491,12 +572,17 @@ pub(super) struct Table {
     array_live: usize,
     storage: TableStorage,
     metatable: Option<ObjectPtr>,
-    /// Shape version for hash-part key/index stability. Value updates do not
-    /// bump this, and neither does anything in the array part, whose tagged
-    /// indices name absolute keys and so survive window moves.
+    /// Shape version for hash-part key/index stability (the rule is at the
+    /// slot tokens above). Value updates do not bump this, and neither does
+    /// anything in the array part, whose tagged indices name absolute keys
+    /// and so survive window moves.
     version: Cell<u64>,
     /// Number of occupied hash slots whose nil value makes them logically absent.
     dead_count: usize,
+    /// The last shape `debug_assert_invariants` observed, against which it
+    /// checks the version rule; `None` when the last check was skipped.
+    #[cfg(debug_assertions)]
+    shape_witness: Cell<Option<ShapeWitness>>,
 }
 
 impl Default for Table {
@@ -511,6 +597,8 @@ impl Default for Table {
             metatable: None,
             version: Cell::new(0),
             dead_count: 0,
+            #[cfg(debug_assertions)]
+            shape_witness: Cell::new(None),
         }
     }
 }
@@ -602,8 +690,10 @@ impl Table {
             .map_or(Val::Nil, |position| self.array[position])
     }
 
+    /// The shape version. Private: outside this file a version is only ever
+    /// held inside a slot token.
     #[inline]
-    pub(super) fn version(&self) -> u64 {
+    fn version(&self) -> u64 {
         self.version.get()
     }
 
@@ -618,8 +708,11 @@ impl Table {
     /// its hinted dead prefix are checked for nil. A live hash key at the
     /// append position would be migrated into the array before becoming
     /// visible. The tombstone count tracks every nil-valued hash slot,
-    /// including vacant map entries. Large maps check only the counter bound,
-    /// avoiding a full walk on each mutation.
+    /// including vacant map entries. Hash keys are unique (inline storage is
+    /// checked; a map cannot hold a duplicate), and a vacant slot names its
+    /// own index. Under an unchanged version the hash slots seen at the last
+    /// check keep their keys (`check_shape_witness`). Large maps check only
+    /// the counter bound, avoiding a full walk on each mutation.
     #[cfg(debug_assertions)]
     fn debug_assert_invariants(&self) {
         debug_assert!(
@@ -645,7 +738,13 @@ impl Table {
             TableStorage::Inline { entries, len } => {
                 debug_assert!((*len as usize) <= INLINE_CAPACITY);
                 let mut dead_count = 0;
-                for (key, value) in entries.iter().take(*len as usize) {
+                for (position, (key, value)) in entries.iter().take(*len as usize).enumerate() {
+                    debug_assert!(
+                        entries[..position]
+                            .iter()
+                            .all(|(earlier, _)| earlier != key),
+                        "an inline hash key occupies one slot"
+                    );
                     if matches!(value, Val::Nil) {
                         dead_count += 1;
                     } else {
@@ -655,16 +754,22 @@ impl Table {
                 dead_count
             }
             TableStorage::Map(map, _) => {
-                // Past a small size, check only the O(1) counter bound.
+                // Past a small size, check only the O(1) counter bound. The
+                // witness is dropped: a later check must not compare against
+                // a shape from before an interval nobody observed.
                 if map.len() > crate::limits::tuning::TABLE_DEBUG_FULL_WALK_LIMIT {
                     debug_assert!(
                         self.dead_count <= map.len(),
                         "dead_count must not exceed the number of hash slots"
                     );
+                    self.shape_witness.set(None);
                     return;
                 }
                 let mut dead_count = 0;
-                for (key, value) in map {
+                for (position, (key, value)) in map.iter().enumerate() {
+                    if let TableKeyKind::Vacant(index) = key.0 {
+                        debug_assert_eq!(index, position, "a vacant slot names its own index");
+                    }
                     if matches!(value, Val::Nil) {
                         dead_count += 1;
                     } else {
@@ -686,6 +791,68 @@ impl Table {
             self.dead_count, dead_count,
             "dead_count must equal the number of nil-valued hash slots"
         );
+        self.check_shape_witness();
+    }
+
+    /// The version rule at the slot tokens, checked between two observed
+    /// shapes: if the version has not moved since the last check, the hash
+    /// slots seen then are a prefix of the slots now, key for key. Then the
+    /// current shape becomes the witness. Probabilistic (a fingerprint, not
+    /// the keys), and blind to anything a fresh table replaces wholesale:
+    /// a rebuild's version move has its own test.
+    #[cfg(debug_assertions)]
+    fn check_shape_witness(&self) {
+        let len = self.hash_slot_count();
+        if let Some(witness) = self.shape_witness.get()
+            && witness.version == self.version()
+        {
+            debug_assert!(
+                witness.len <= len && self.shape_fingerprint(witness.len) == witness.fingerprint,
+                "a hash slot was removed, reordered or renamed without a shape version change"
+            );
+        }
+        self.shape_witness.set(Some(ShapeWitness {
+            version: self.version(),
+            len,
+            fingerprint: self.shape_fingerprint(len),
+        }));
+    }
+
+    /// An order-sensitive fingerprint of the first `count` hash keys, dead
+    /// ones included. Each key is tagged before its payload (live or vacant,
+    /// then the value's variant), because the table-key hash alone gives
+    /// `Vacant(0)` and the number `0` the same input.
+    #[cfg(debug_assertions)]
+    fn shape_fingerprint(&self, count: usize) -> u64 {
+        use std::hash::BuildHasher;
+        fn live<H: Hasher>(value: Val, hasher: &mut H) {
+            0_u8.hash(hasher);
+            std::mem::discriminant(&value).hash(hasher);
+            hash_table_key_value(value, hasher);
+        }
+        let mut hasher = crate::det_hash::FixedState::default().build_hasher();
+        // Both walks are short: inline storage has at most INLINE_CAPACITY
+        // slots, and the witness is kept only for maps within
+        // TABLE_DEBUG_FULL_WALK_LIMIT.
+        match &self.storage {
+            TableStorage::Inline { entries, .. } => {
+                for (key, _) in entries.iter().take(count) {
+                    live(*key, &mut hasher);
+                }
+            }
+            TableStorage::Map(map, _) => {
+                for key in map.keys().take(count) {
+                    match key.0 {
+                        TableKeyKind::Live(value) => live(value, &mut hasher),
+                        TableKeyKind::Vacant(index) => {
+                            1_u8.hash(&mut hasher);
+                            index.hash(&mut hasher);
+                        }
+                    }
+                }
+            }
+        }
+        hasher.finish()
     }
 
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
@@ -745,7 +912,7 @@ impl Table {
     }
 
     #[inline]
-    pub(super) fn get_index(&self, index: usize) -> Option<(Val, Val)> {
+    fn get_index(&self, index: usize) -> Option<(Val, Val)> {
         if index & ARRAY_SLOT_TAG != 0 {
             let slot = index & !ARRAY_SLOT_TAG;
             return self.window_position(slot).and_then(|position| {
@@ -772,7 +939,7 @@ impl Table {
     /// key/value pair goes through a stack out-parameter that the caller
     /// re-reads as overlapping byte/word loads, defeating store forwarding.
     #[inline]
-    pub(super) fn get_index_value(&self, index: usize) -> Option<Val> {
+    fn get_index_value(&self, index: usize) -> Option<Val> {
         let value = if index & ARRAY_SLOT_TAG != 0 {
             let position = self.window_position(index & !ARRAY_SLOT_TAG)?;
             self.array[position]
@@ -791,11 +958,11 @@ impl Table {
     }
 
     /// The value in hash slot `index`, nil for a tombstone or vacant slot;
-    /// `None` only past the last slot. The global table's lookup caches read
-    /// this: under an unchanged version the slot still holds the cached key,
-    /// so a nil here is the answer, not a miss.
+    /// `None` only past the last slot. [`Self::read_probe`] reads this:
+    /// under an unchanged version the slot still holds the cached key, so a
+    /// nil here is the answer, not a miss.
     #[inline]
-    pub(super) fn hash_slot_value(&self, index: usize) -> Option<Val> {
+    fn hash_slot_value(&self, index: usize) -> Option<Val> {
         match &self.storage {
             TableStorage::Inline { entries, len } => {
                 (index < usize::from(*len)).then(|| entries[index].1)
@@ -809,7 +976,7 @@ impl Table {
     /// too; the global table caches their slot, because a revived global
     /// takes the same slot back.
     #[inline]
-    pub(super) fn hash_slot_of(&self, key: &Val) -> Option<(usize, Val)> {
+    fn hash_slot_of(&self, key: &Val) -> Option<(usize, Val)> {
         if !is_valid_table_key(key) {
             return None;
         }
@@ -833,9 +1000,9 @@ impl Table {
     /// False, changing nothing, for a vacant or missing slot. Outlined: the
     /// global table's steady-state store is `set_at_index`. `value` is a
     /// reference so its inlined callers in the dispatch loop can pass the
-    /// source register without a stack copy (`GlobalEnv::write_cached`).
+    /// source register without a stack copy ([`Self::store_probe`]).
     #[inline(never)]
-    pub(super) fn write_slot(&mut self, index: usize, value: &Val) -> bool {
+    fn write_slot(&mut self, index: usize, value: &Val) -> bool {
         let value = *value;
         debug_assert!(
             matches!(&self.storage, TableStorage::Map(_, policy) if policy.revive_in_place),
@@ -860,6 +1027,171 @@ impl Table {
         true
     }
 
+    // Slot tokens (the rule they rest on is at their definitions). The live
+    // family serves field, method and string-method caches; the probe
+    // serves the global table, which revives keys in place. The accessors
+    // are inline hints, like the primitives they wrap: forcing them inline
+    // measured no faster on the method-cache path and grew the SET_FIELD
+    // path's native frame.
+
+    /// The live slot holding `key`, and its value: [`Self::get_with_index`]
+    /// as a token.
+    #[inline]
+    pub(super) fn find_slot(&self, key: &Val) -> Option<(SlotRef, Val)> {
+        let (index, value) = self.get_with_index(key)?;
+        Some((
+            SlotRef {
+                version: self.version(),
+                index,
+            },
+            value,
+        ))
+    }
+
+    /// The slot's value if `slot` is current: `None` when the version has
+    /// moved, `Some(None)` when the slot has died since. A current slot's
+    /// key is the one it was minted for, so the key is not read.
+    #[inline]
+    pub(super) fn slot_value(&self, slot: SlotRef) -> Option<Option<Val>> {
+        (slot.version == self.version()).then(|| self.get_index_value(slot.index))
+    }
+
+    /// The live value of a current `slot`; `None` for a stale or dead one,
+    /// which only means "not answered here". The hit-only probe.
+    #[inline]
+    pub(super) fn read_slot(&self, slot: SlotRef) -> Option<Val> {
+        self.slot_value(slot).flatten()
+    }
+
+    /// After the version moved: if the slot still holds `key` live, a token
+    /// for it at the current version, and its value.
+    #[inline]
+    pub(super) fn renew_slot(&self, slot: SlotRef, key: Val) -> Option<(SlotRef, Val)> {
+        let (slot_key, value) = self.get_index(slot.index)?;
+        (slot_key == key).then_some((
+            SlotRef {
+                version: self.version(),
+                index: slot.index,
+            },
+            value,
+        ))
+    }
+
+    /// Whether `slot` is current, so it still names its key's slot without
+    /// a key read; a store validates this way before [`Self::store_slot`],
+    /// under a shared borrow, and renews on a moved version. Forced inline:
+    /// SET_FIELD's steady state is this comparison, and a hinted validation
+    /// returning the token measured slower on a method-call workload.
+    #[inline(always)]
+    pub(super) fn slot_is_current(&self, slot: SlotRef) -> bool {
+        slot.version == self.version()
+    }
+
+    /// Overwrite a live slot through a token just found or validated
+    /// ([`Self::find_slot`], [`Self::slot_is_current`],
+    /// [`Self::renew_slot`]), with no mutation between them. False,
+    /// changing nothing, if the slot has died: reviving it is a new key's
+    /// store, whose `__newindex` the keyed path must consult. `value` must
+    /// not be nil (assigning nil removes, which is the keyed path's job).
+    #[inline]
+    pub(super) fn store_slot(&mut self, slot: SlotRef, value: Val) -> bool {
+        debug_assert_eq!(
+            slot.version,
+            self.version(),
+            "a store token is validated just before the store"
+        );
+        self.set_at_index(slot.index, value)
+    }
+
+    /// Remove the live entry a token [`Self::find_slot`] just returned, as
+    /// [`Self::remove_at_index`] does.
+    #[inline]
+    pub(super) fn remove_slot(&mut self, slot: SlotRef) -> bool {
+        debug_assert_eq!(
+            slot.version,
+            self.version(),
+            "a removal token is the one just found"
+        );
+        self.remove_at_index(slot.index)
+    }
+
+    /// Probe for `key`: its hash slot, live or a tombstone, or its absence;
+    /// with its value (nil for a tombstone or an absent key).
+    #[inline]
+    pub(super) fn probe_hash(&self, key: &Val) -> (HashProbe, Val) {
+        let (at, present, value) = match self.hash_slot_of(key) {
+            Some((index, value)) => (index, true, value),
+            None => (self.hash_slot_count(), false, Val::Nil),
+        };
+        (
+            HashProbe {
+                version: self.version(),
+                at,
+                present,
+            },
+            value,
+        )
+    }
+
+    /// The key's value if `probe` still answers for it, nil included;
+    /// `None` when it no longer does.
+    #[inline]
+    pub(super) fn read_probe(&self, probe: HashProbe) -> Option<Val> {
+        if probe.version != self.version() {
+            return None;
+        }
+        if probe.present {
+            self.hash_slot_value(probe.at)
+        } else {
+            (probe.at == self.hash_slot_count()).then_some(Val::Nil)
+        }
+    }
+
+    /// Store `value`, nil included, into the slot `probe` found, if it is
+    /// still current. False, changing nothing, when the version has moved,
+    /// the key had no slot, or the slot is vacant; the caller then takes the
+    /// keyed path. A live store over a live value, the steady state, needs
+    /// no tombstone accounting; the rest is the outlined `write_slot`.
+    /// Forced inline: SET_GLOBAL's steady state is this store, and as a
+    /// call it measured a sixth slower on a global-write workload. `probe`
+    /// is a reference for the reason `value` is: a by-value copy is a dev
+    /// build stack slot of every native level.
+    #[inline(always)]
+    pub(super) fn store_probe(&mut self, probe: &HashProbe, value: &Val) -> bool {
+        if probe.version != self.version() || !probe.present {
+            return false;
+        }
+        if matches!(value, Val::Nil) || !self.set_at_index(probe.at, *value) {
+            return self.write_slot(probe.at, value);
+        }
+        true
+    }
+
+    /// A current probe naming hash slot `index`, whatever the slot holds,
+    /// so a test can present a slot no lookup would find (one past the end).
+    #[cfg(test)]
+    pub(super) fn probe_for_test(&self, index: usize) -> HashProbe {
+        HashProbe {
+            version: self.version(),
+            at: index,
+            present: true,
+        }
+    }
+
+    /// The live slot holding `key` as a key-checked position.
+    #[inline]
+    pub(super) fn find_keyed(&self, key: &Val) -> Option<(KeyedIndex, Val)> {
+        let (index, value) = self.get_with_index(key)?;
+        Some((KeyedIndex(index), value))
+    }
+
+    /// The live value at `at` if the key there is `key`, whatever the version.
+    #[inline]
+    pub(super) fn value_if_key(&self, at: KeyedIndex, key: Val) -> Option<Val> {
+        let (slot_key, value) = self.get_index(at.0)?;
+        (slot_key == key).then_some(value)
+    }
+
     /// The number of occupied hash slots, tombstones and vacant slots
     /// included. A key with no slot at all can gain one only by appending a
     /// slot, which grows this; everything that removes or reorders slots
@@ -882,12 +1214,16 @@ impl Table {
         }
     }
 
-    /// Move the shape version past both this table's and `other`, so no
-    /// cache entry captured against either matches. The global table swaps
-    /// its contents with a restricted environment's this way.
-    pub(super) fn advance_version_past(&self, other: u64) {
+    /// Put `incoming` into this table and return what it held. The version
+    /// moves past both, so no token minted against either contents (in any
+    /// cache family) is current afterwards. The global table swaps its
+    /// contents with a restricted environment's this way, keeping its
+    /// identity.
+    pub(super) fn swap_contents(&mut self, mut incoming: Table) -> Table {
+        std::mem::swap(self, &mut incoming);
         self.version
-            .set(self.version.get().max(other).wrapping_add(1));
+            .set(self.version.get().max(incoming.version()).wrapping_add(1));
+        incoming
     }
 
     /// Iterate live hash entries in insertion order with their physical slots.
@@ -1092,16 +1428,14 @@ impl Table {
         Ok(())
     }
 
-    /// Update the value at a specific entry index. Returns true on success.
+    /// Update the value at a specific entry index. Returns true on success,
+    /// false for a dead or missing slot.
     ///
-    /// This is a hot-path helper for the OP_SET_FIELD inline cache: when a
-    /// callsite has already verified that a key lives at a known index, the
-    /// IC writes the new value through this method without re-doing the key
-    /// lookup. Caller must ensure the value is non-nil (assigning nil is
-    /// remove-semantics and must go through the slow path) and that the
-    /// entry at `index` corresponds to the intended key (typically verified
-    /// by table_version match or get_index key compare). Does not bump
-    /// version (value-only change preserves (key, index) bindings).
+    /// For a caller that has just found the key at `index` (by a keyed
+    /// lookup, or through a slot token's validation): the value must be
+    /// non-nil (assigning nil is remove-semantics and must go through the
+    /// slow path), and the entry at `index` must be the intended key. Does
+    /// not bump version (value-only change preserves (key, index) bindings).
     #[inline]
     pub(super) fn set_at_index(&mut self, index: usize, value: Val) -> bool {
         debug_assert!(
@@ -1336,12 +1670,10 @@ impl Table {
                     *len -= 1;
                     self.dead_count -= 1;
                     self.bump_version();
-                } else if self.dead_count >= *len as usize - self.dead_count {
-                    if self.compact_dead() {
-                        self.bump_version();
-                    }
-                } else if *len as usize == INLINE_CAPACITY && self.compact_dead() {
-                    self.bump_version();
+                } else if self.dead_count >= *len as usize - self.dead_count
+                    || *len as usize == INLINE_CAPACITY
+                {
+                    self.compact_dead();
                 }
                 let TableStorage::Inline { entries, len } = &mut self.storage else {
                     unreachable!("inline compaction cannot promote storage");
@@ -1645,8 +1977,8 @@ impl Table {
                 None => break,
             }
         }
-        if migrated && self.dead_count >= self.hash_live_len() && self.compact_dead() {
-            self.bump_version();
+        if migrated && self.dead_count >= self.hash_live_len() {
+            self.compact_dead();
         }
         #[cfg(debug_assertions)]
         self.debug_assert_invariants();
@@ -1732,8 +2064,8 @@ impl Table {
             TableStorage::Map(map, _) => map.len() - self.dead_count,
             TableStorage::Inline { .. } => unreachable!("map insertion requires map storage"),
         };
-        if self.dead_count >= live_count && self.compact_dead() {
-            self.bump_version();
+        if self.dead_count >= live_count {
+            self.compact_dead();
         }
         if let TableStorage::Map(map, _) = &mut self.storage {
             map.insert(key, value);
@@ -1864,15 +2196,17 @@ impl Table {
         removed
     }
 
-    /// Stably remove logically absent hash slots. The caller owns version
-    /// changes. A retaining map (`SlotPolicy::retain_dead`) keeps them all.
-    fn compact_dead(&mut self) -> bool {
+    /// Stably remove logically absent hash slots, moving the version when
+    /// any goes (later slots shift down, and a freed position can be reused
+    /// by another key). A retaining map (`SlotPolicy::retain_dead`) keeps
+    /// them all.
+    fn compact_dead(&mut self) {
         if self.dead_count == 0
             || matches!(self.storage, TableStorage::Map(_, policy) if policy.retain_dead)
         {
             #[cfg(debug_assertions)]
             self.debug_assert_invariants();
-            return false;
+            return;
         }
         match &mut self.storage {
             TableStorage::Inline { entries, len } => {
@@ -1894,9 +2228,10 @@ impl Table {
             TableStorage::Map(map, _) => map.retain(|_, value| !matches!(value, Val::Nil)),
         }
         self.dead_count = 0;
+        // Before the check below, which holds the result to the version rule.
+        self.bump_version();
         #[cfg(debug_assertions)]
         self.debug_assert_invariants();
-        true
     }
 
     /// Reserve a positional batch against the window the append will keep.
@@ -3722,6 +4057,62 @@ mod tests {
         table.array.push(Val::Nil);
         table.vlen += 1;
         table.debug_assert_invariants();
+    }
+
+    /// A map with `count` live hash-only keys, its shape witnessed.
+    #[cfg(debug_assertions)]
+    fn witnessed_map(count: usize) -> Table {
+        let mut table = Table::with_capacity(INLINE_CAPACITY + 1);
+        for key in 0..count {
+            table
+                .insert(h(key), Val::Bool(true))
+                .expect("hash key is valid");
+        }
+        assert!(matches!(table.storage, TableStorage::Map(..)));
+        table.debug_assert_invariants();
+        table
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "without a shape version change")]
+    fn shape_witness_detects_a_reorder_without_a_version_move() {
+        let mut table = witnessed_map(3);
+        let TableStorage::Map(map, _) = &mut table.storage else {
+            unreachable!("built as a map");
+        };
+        map.swap_indices(0, 1);
+        table.debug_assert_invariants();
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "without a shape version change")]
+    fn shape_witness_tells_a_vacant_slot_from_the_number_zero() {
+        // The table-key hash gives `Vacant(0)` and the number 0 the same
+        // input; the witness must still see slot 0 renamed.
+        let mut table = Table::with_capacity(INLINE_CAPACITY + 1);
+        table
+            .insert(n(0), Val::Bool(true))
+            .expect("numeric table key is valid");
+        table.debug_assert_invariants();
+        let TableStorage::Map(map, _) = &mut table.storage else {
+            unreachable!("built as a map");
+        };
+        map.replace_index(0, TableKey::vacant(0))
+            .expect("no other slot holds the vacant key");
+        map[0] = Val::Nil;
+        table.dead_count = 1;
+        table.debug_assert_invariants();
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn shape_witness_accepts_a_compaction_that_moves_the_version() {
+        let mut table = witnessed_map(3);
+        table.remove(&h(0));
+        table.compact_dead();
+        assert_eq!(table.hash_slot_count(), 2);
     }
 }
 
