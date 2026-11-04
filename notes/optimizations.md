@@ -243,6 +243,14 @@ since 27ee714. What B-O1 listed and is still open:
   still re-enter natively per call (one `run_invocation` each). Flattening
   them needs a continuation per frame (where the results go). That would also
   take them off `MAX_NATIVE_CALL_DEPTH`.
+- The 2026-11-04 defect hunt (`vm-dispatch`) re-raised the first two bullets:
+  four atomic `Arc` clones per call (the `CallInfo` bytecode clone in
+  `lua_function_bytecode`, plus bytecode, runtime and upvalues in
+  `admitted_frame`), dropped again on return, although the closure in the
+  function slot already roots all of them. Its suggested shape is one stack:
+  merge the activation record into the frame, with records owned by
+  invocations and tracebacks walking frames. It notes that the merge would also
+  simplify an in-place tail call (filed in `notes/bugs-compat.md`).
 
 Measurement lesson worth keeping: on plantasjen (Zen 3) the first flattened
 version moved frames and records by value and lost 14-22% to store-forwarding
@@ -618,6 +626,22 @@ object holding (fn, state) - which touches GC marking, Val size (and the
 NaN-boxing plan), and snapshot encoding. That is rewrite-class, not a
 stdlib cleanup; only worth doing as part of a broader Val/callable rework,
 or if `strings/patterns` profiling shows the wrapper call dominating.
+
+The 2026-11-04 defect hunt (`stdlib-strings`) proposed the same rewrite on
+correctness and maintenance grounds, not speed. Per iteration it counts about
+six `push_string` calls (an intern hash and lookup each), four raw table reads,
+full type and range revalidation (`gmatch_state_index`, `GmatchStateFault`) and
+a `Vec<LuaCapture>` allocation. Beyond the cost, the table-backed state brings
+`is_gmatch_wrapper` identity matching and frame omission in error reporting
+(`reference/error-reporting.md`), `gmatch_iterator_bytecode` substitution on
+snapshot load, and the verifier's gmatch section (`validate_gmatch_*`), which
+re-derives invariants the runtime then checks again. A typed heap object
+(subject `StringPtr`, pattern `StringPtr`, `pos`, `lastmatch: Option`,
+`compile_charged`), or native closures with typed upvalues, would delete the
+shim, the identity hack, the field interning and most of the fault enum, and
+give snapshots one typed record. It changes the snapshot format and the
+error-frame rule, but no cost and no `pairs` order, since the table is
+unreachable from scripts.
 
 ### Keep the compiled-pattern cache across collections
 
