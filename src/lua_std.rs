@@ -1,8 +1,8 @@
 //! Lua's standard library.
 //!
-//! Version-sensitive compatibility decisions are per function: `string.format`
-//! follows Lua 5.4, `math.random` follows Lua 5.4's interval and error behavior
-//! except that `math.random(0)` is rejected as an empty interval,
+//! Version-sensitive compatibility decisions are per function: `math.random`
+//! follows Lua 5.4's interval and error behavior except that `math.random(0)`
+//! is rejected as an empty interval,
 //! `math.log(x, base)` follows Lua 5.2's general-base calculation, and
 //! `math.atan(y, x)` uses the Lua 5.3+ two-argument form. Global `unpack` is kept
 //! from Lua 5.2; it and `table.unpack` share one implementation with Lua 5.4
@@ -11,11 +11,7 @@
 //! `unpack`, `move`, `sort`) follows Lua 5.4's metamethod rules: lengths come from
 //! `__len`, reads go through `__index` and writes through `__newindex`, where
 //! Lua 5.2 reads raw. Sort handler calls have a different order from Lua 5.4.
-//! The `%p` conversion in
-//! `string.format` follows Lua 5.4 and is absent in Lua 5.2.
-//! `string.gsub` and `string.gmatch` follow Lua 5.4's empty-match rule: an
-//! empty match ending where the previous match ended is skipped.
-//! `string.gmatch` also accepts Lua 5.4's optional `init` argument.
+//! The string library's version choices are listed in `docs/compatibility.md`.
 //!
 //! # Position arguments
 //!
@@ -217,6 +213,7 @@ const TABLE_SEGMENT: usize = 4;
 const fn segment_offset(segment: usize) -> usize {
     let mut offset = 0;
     let mut index = 0;
+    // bounded: segment is an index into the fixed library catalog.
     while index < segment {
         offset += CATALOG[index].functions.len();
         index += 1;
@@ -227,11 +224,13 @@ const fn segment_offset(segment: usize) -> usize {
 /// The position of `name` in a segment, found at compile time.
 const fn position_in(functions: &[(&str, crate::RustFunc)], name: &str) -> usize {
     let mut index = 0;
+    // bounded: the library function list is fixed at compile time.
     while index < functions.len() {
         let candidate = functions[index].0.as_bytes();
         let wanted = name.as_bytes();
         if candidate.len() == wanted.len() {
             let mut byte = 0;
+            // bounded: both names are fixed catalog strings.
             while byte < wanted.len() && candidate[byte] == wanted[byte] {
                 byte += 1;
             }
@@ -289,6 +288,7 @@ pub(crate) fn catalog_ids() -> impl Iterator<Item = (RustFnId, String)> {
 /// Installs each function of a library segment into the table on top of the
 /// stack, in the segment's order.
 fn install_library_functions(state: &mut State, segment: usize) -> Result<()> {
+    // bounded: each library segment is a fixed catalog list.
     for (index, &(name, _)) in CATALOG[segment].functions.iter().enumerate() {
         state.set_table_str_key_rust_fn(-1, name, library_fn(segment, index))?;
     }
@@ -410,15 +410,12 @@ pub(super) fn unpack_values(state: &mut State) -> Result<u8> {
             table::sequence_len(state, 1, crate::error::LibraryFunction::Unpack)
         )?,
     };
-    if i <= j {
-        table::check_sequence_keys(state, i, j, crate::error::LibraryFunction::Unpack)?;
-    }
-
-    state.set_top(1)?;
     if i > j {
         state.set_top(0)?;
         return Ok(0);
     }
+    // Refuse an impossible result count before checking whether every key is
+    // exactly representable.
     let span = j.checked_sub(i).ok_or_else(|| {
         state.error(ErrorKind::TooManyResults {
             limit: crate::limits::MAX_RESULTS,
@@ -429,9 +426,12 @@ pub(super) fn unpack_values(state: &mut State) -> Result<u8> {
             limit: crate::limits::MAX_RESULTS,
         }));
     }
+    table::check_sequence_keys(state, i, j, crate::error::LibraryFunction::Unpack)?;
+    state.set_top(1)?;
     // Unpack charges nothing, however many elements it visits: a deliberate
     // game-design choice of the cost model (the budget is not a CPU meter),
     // like `select`. Do not add a per-element charge.
+    // bounded: at most MAX_RESULTS elements, checked above.
     for index in i..=j {
         state.push_number(index as f64)?;
         crate::native_call!(

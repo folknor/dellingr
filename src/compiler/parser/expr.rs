@@ -439,7 +439,7 @@ impl Parser<'_> {
             }
             TokenKind::LiteralString => self.literal_string(tok)?,
             TokenKind::Function => {
-                let (nested, _) = self.parse_fndef(None, false)?;
+                let nested = self.parse_fndef(None, false)?;
                 Expr::new(ExprKind::Function {
                     nested,
                     line: tok.line,
@@ -450,7 +450,7 @@ impl Parser<'_> {
             TokenKind::True => Expr::new(ExprKind::True),
             TokenKind::DotDotDot => {
                 if !self.funcs.chunk.is_vararg {
-                    return Err(self.error_here(SyntaxError::VarargOutsideVarargFunction));
+                    return Err(self.error_at(SyntaxError::VarargOutsideVarargFunction, tok.start));
                 }
                 Expr::new(ExprKind::Vararg { line: tok.line })
             }

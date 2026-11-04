@@ -124,18 +124,28 @@ let mut state = State::builder().interrupt(stop.clone()).build();
 ```
 
 - **Safepoints.** Every backward jump, every Lua function call admission
-  (from Lua or from Rust), and the library work that could otherwise run
-  without bound: pattern-matcher steps, plain substring search candidates,
-  heap-sort steps, and the iterations of `table.concat`, `table.move`, the
-  metamethod paths of `table.insert`, `table.remove` and `table.sort`, and the
-  empty-pattern `string.gsub`. Between two safepoints the work is at most one
-  linear pass over a string or a table's storage. `vm/interrupt.rs` lists
-  them.
+  (from Lua or from Rust), entry to every Rust callback (including library
+  functions and Rust metamethod handlers), and the library work that could
+  otherwise run without bound: pattern-matcher steps, plain substring search
+  candidates, heap-sort steps, `string.format` directives, and the iterations
+  of `table.concat`, `table.move`, the metamethod paths of `table.insert`,
+  `table.remove` and `table.sort`, and the empty-pattern `string.gsub`.
+  `vm/interrupt.rs` lists them.
+- **Latency.** Nothing a script can repeat without bound avoids a safepoint,
+  so the work between two polls is bounded by the VM's fixed limits, never by
+  the script. It is a run of instructions with no backward jump and no call
+  (bounded by code length and call depth, since returns do not poll), where
+  each instruction or library step makes at most one linear pass over a
+  string or a table's storage; plus any garbage collection, which traces the
+  whole heap; plus the body of a host callback, which the VM cannot stop. A
+  host callback that must be stoppable polls its own condition. This is a
+  bound on work, not on elapsed time.
 - **Errors.** `Interrupted` unwinds like any runtime error. An interrupted
   call admission is a refusal: the error is reported at the caller's call
-  instruction and the callee never runs. `CallDepthExceeded` takes precedence
-  over it, and it takes precedence over the callee's `StackOverflow`
-  reservation.
+  instruction and the callee never runs. Lua admission checks
+  `CallDepthExceeded` before polling and reserves the callee's stack after
+  polling. Rust callback entry polls before changing callback bookkeeping;
+  argument preparation and callable resolution have already happened.
 - **Sticky.** The VM only reads the flag. While it is set, every safepoint
   fails, including the first one of a later call, until the host calls
   `reset`. A Rust callback that swallows the error lets its Lua caller

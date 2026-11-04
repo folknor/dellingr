@@ -42,32 +42,6 @@ something like `SetupInRestrictedEnv { api }`), or document the split on both
 methods. Plain `register_rust_fn`/`add_rust_fn` are fine inside `f`: they
 install nothing into the environment.
 
-## HOST-002 - The anchor release queue is a second host input read mid-run
-
-Scope: `vm-state`. Replay-visible through `%p`/`tostring` identity.
-
-Claim broken: `docs/determinism.md`: "The library reads no host state ... The
-one host input polled during a run is the `Interrupt` flag."
-
-`collect_garbage` starts with `self.registry.drain_released()`, reading the
-`Arc<Mutex<Vec<AnchorKey>>>` that `Anchor::drop` writes from any thread.
-Automatic collections run mid-run at allocation points. If a host thread drops
-an `Anchor` while a script runs, timing decides whether the drop lands before
-collection N or N+1, and so whether a value only that anchor held is freed at N.
-That decides `object_count()` at every later observation, and, by
-determinism.md's own rule ("a string that is dropped and later rebuilt with the
-same bytes keeps its id only if no collection ran in between"), the `%p` /
-`tostring` identity a rebuilt string shows. A drop on the State's own thread or
-inside a callback is deterministic; only a cross-thread drop concurrent with a
-run is affected, which `Anchor`'s `Send + Sync` and the module doc ("a handle
-can be dropped on any thread") explicitly invite.
-
-Fix options the hunter gave: (a) drain only at host-boundary points (the
-prologue of `guarded` entries, `Registry::insert`, explicit `gc_collect`), never
-in an automatic collection, so a run sees a fixed anchor set; no hot-path cost.
-Or (b) name the queue in determinism.md as a second host input, with the rule
-"drop anchors on the State's thread or between runs".
-
 ## HOST-003 - Unnamed chunks and location-less errors render misleading prefixes
 
 Scope: `vm-state`. Misleading messages; no determinism or cost effect.

@@ -506,6 +506,12 @@ impl State {
         call_base: usize,
         method: bool,
     ) -> Result<u8> {
+        // Every Rust callee passes here, including library functions and
+        // metamethods. Poll before changing callback bookkeeping so a pending
+        // interrupt refuses entry and the enclosing boundary owns cleanup.
+        // Straight-line Lua can otherwise chain expensive native calls
+        // without reaching a backward jump or another Lua admission.
+        self.poll_interrupt()?;
         let f = self.rust_fns.function(function);
         let old_stack_bottom = self.in_flight.stack_bottom;
         self.in_flight.stack_bottom = call_base;

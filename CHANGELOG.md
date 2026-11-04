@@ -25,16 +25,20 @@ version's meaning is wider (see below).
   handle (one trigger stops every State sharing it), `State::interrupt`
   returns a State's handle and `State::set_interrupt` replaces it, including
   in a `load_state` setup. Lua fails with the new `ErrorKind::Interrupted` at
-  its next safepoint: every backward jump, every Lua call admission, and each
-  step of library work that could otherwise run without bound (pattern
-  matching, plain substring search, heap sort, `table.concat`, `table.move`,
-  the metamethod paths of `table.insert`, `table.remove` and `table.sort`,
-  and the empty-pattern `string.gsub`). The flag is sticky until the host
+  its next safepoint: every backward jump, every Lua call admission, entry to
+  every Rust callback, and each step of library work that could otherwise
+  run without bound (pattern matching, plain substring search, heap sort,
+  `string.format` directives, `table.concat`, `table.move`, the metamethod
+  paths of `table.insert`, `table.remove` and `table.sort`, and the
+  empty-pattern `string.gsub`). Between two safepoints the work is bounded by
+  the VM's fixed limits, plus any garbage collection and the body of a host
+  callback, which the VM cannot stop. The flag is sticky until the host
   resets it, charges nothing, and is not saved in snapshots. There is still
   no instruction-count or time limit. See "Stopping a script from the host"
   in `docs/budget.md`. The polls cost every run, interrupted or not: about
   0.5 to 2.4 percent wall time on the benchmark workloads, most on call-heavy
-  code (`reference/performance.md`, "2026-11-04: interrupt safepoints").
+  code (`reference/performance.md`, "2026-11-04: interrupt safepoints"),
+  measured before the Rust-callback-entry and `string.format` polls existed.
 - `State::raw_field::<T>(table_arg, name)`: host functions read a typed field
   of an options table argument such as `game.spawn{player = 1, x = 2}`. It is a
   raw read (a field supplied by `__index` reads as absent), runs no Lua, leaves
@@ -107,6 +111,30 @@ version's meaning is wider (see below).
 - Host functions exposed only through tables (`game.spawn`, `game.after`) no
   longer render as `<anonymous>` in argument errors: they show the name the
   host gave (dellingr#5).
+- Syntax errors for `break` outside a loop and `...` outside a vararg
+  function point at the offending token, not just past it. Other parser
+  errors without a token of their own point just past the last consumed
+  token, whatever the parser had peeked.
+- The compiler rejects a backward jump of exactly 2^23 instructions with
+  `JumpTooFar`, matching the documented "fewer than 2^23" span limit.
+- Edited snapshot bytecode that reaches `FOR_LOOP` with nonnumeric hidden
+  controls returns an internal error instead of panicking.
+- `unpack` and `table.unpack` refuse a range of more than `MAX_RESULTS`
+  elements with `TooManyResults` before checking that its keys are exactly
+  representable.
+- Snapshot loads reject global pins whose strings have equal contents under
+  different arena ids, as documented, instead of merging them.
+- An environment delta records a library number that changed between `0`
+  and `-0`; before, the change was dropped as equal. No current library
+  baseline holds a zero, so no existing save changes.
+- Save and load diagnostics name the environment hash-slot step and
+  collection (new `TableRestoreStep::RestoreEnvironmentHashSlots` and
+  `SaveCollection::EnvironmentHashSlots`), and an unregistered function under
+  a global-table key that is not a UTF-8 name is reported as
+  `global table entry[i].key` or `.value` instead of `environment _G`.
+- `docs/determinism.md` names the anchor release queue as a second
+  asynchronous host input: a cross-thread `Anchor` drop concurrent with a run
+  can change which collection frees its value.
 
 ### Changed
 

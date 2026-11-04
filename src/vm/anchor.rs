@@ -11,6 +11,11 @@
 //! removes the slot at once instead. Each slot is queued at most once, by the
 //! one handle that owns it, so every queued key still names a live slot.
 //!
+//! Cross-thread drops are safe, but a drop concurrent with execution can reach
+//! the queue before or after an automatic collection and change what survives.
+//! For replay, drop on the State's thread at deterministic points, or finish
+//! and synchronize drops between runs before resuming the State.
+//!
 //! Each anchor is bound to the [`State`](super::State) that produced it,
 //! caught by an embedded `state_id`. Cross-State misuse returns
 //! [`ErrorKind::InvalidAnchor`](super::ErrorKind::InvalidAnchor) instead
@@ -84,6 +89,11 @@ impl ReleaseQueue {
 /// `Anchor` is `Send + Sync + 'static` but neither `Copy` nor `Clone`; share
 /// one through `Rc` or `Arc` when several owners need it. Handles compare and
 /// hash by identity.
+///
+/// Cross-thread drops concurrent with execution can change collection results
+/// and rebuilt strings' `%p` identities. For replay, drop on the State's thread
+/// at deterministic points, or finish and synchronize drops between runs (see
+/// `docs/determinism.md`).
 ///
 /// Anchors are bound to one `State`. Operations on a wrong-State anchor
 /// return [`ErrorKind::InvalidAnchor`](super::ErrorKind::InvalidAnchor)
@@ -179,6 +189,11 @@ impl Registry {
     /// Remove the slots of dropped handles. Every queued key names a live
     /// slot: only its owning handle queues it, and only after
     /// `release_anchor` did not already remove it.
+    ///
+    /// This reads asynchronous host input, including when collection calls it
+    /// during execution. Replay hosts must synchronize cross-thread drops
+    /// between runs; the queue deliberately retains prompt reclamation at
+    /// automatic collections rather than delaying releases to a host entry.
     pub(crate) fn drain_released(&mut self) {
         let released = std::mem::take(&mut *self.released.lock());
         for key in released {

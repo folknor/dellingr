@@ -16,10 +16,18 @@ host-dependent ones, such as NaN rendering below, are pinned by Rust tests.
 - Numbers are f64 only. There is no integer subtype.
 - `tostring` and `string.format` render numbers with Lua 5.2's `%.14g`
   (`0.3`, `1e+15`, `-0`). Whole-valued floats print without Lua 5.4's `.0`.
+- `%` uses Lua 5.4's `fmod` and sign-correction rule, not Lua 5.2's
+  `a - floor(a / b) * b`; for example, `1 % 0.1` is `0.1` here and `0`
+  in 5.2. Since every number is an f64, `% 0` returns NaN even for
+  whole-valued operands; Lua 5.4 raises an error for integer `% 0`.
 - NaN prints as `nan` in `tostring` and `string.format`, never `-nan`.
   C Lua on x86-64 prints `-nan` for `0/0`. `%q` prints `(0/0)`.
 - `tonumber(s, base)` accumulates in floating point, as Lua 5.2 does. Lua 5.4
   wraps to a 64-bit integer.
+- Hex literals without a radix point or binary exponent are parsed as f64,
+  not wrapped to a signed 64-bit integer: `0xffffffffffffffff` is about
+  `1.8e19`, as in Lua 5.2; Lua 5.4 wraps it to `-1`. The same applies to
+  `tonumber("0xffffffffffffffff")`.
 - `math.sin`, `cos`, `tan`, `asin`, `acos`, `atan` (one and two arguments),
   `atan2`, `exp`, `log` and the `^` operator are correctly rounded and
   computed in-crate rather than by the C library, so the last bit can differ
@@ -66,11 +74,37 @@ does.
   the same position rules as `string.find`. Lua 5.2 has no `init` and
   ignores a third argument.
 
+## String library
+
+- `gsub` and `gmatch` use Lua 5.4's empty-match rule: an empty match ending
+  where the previous accepted match ended is skipped. Thus
+  `("abc"):gsub("%a*", "-")` returns `"-", 1`, and
+  `("abc"):gmatch("%a*")` yields only `"abc"`; Lua 5.2 returns `"--", 2`
+  and yields a final empty match.
+- `string.format` accepts `%p` and uses Lua 5.4's `%q` behavior: `%q` renders
+  numbers, nil and booleans as Lua literals, while 5.2 quotes a number as a
+  string and rejects nil and booleans. Flags and precision are validated for
+  each conversion; an invalid combination raises "invalid conversion
+  specification", while 5.2 passes it to `sprintf`.
+- In a `gsub` replacement, `%` followed by a byte that is neither a digit nor
+  `%` raises "invalid use of '%' in replacement string". Lua 5.2 inserts the
+  following byte literally.
+
 ## Control flow and syntax
 
 - A numeric `for` with a zero step skips its body in both directions. Lua 5.2
   skips an ascending range but loops forever on a descending one. Lua 5.4
   raises an error.
+- Numeric `for` controls are f64. Beyond 2^53, adding a nonzero step can stop
+  changing the control: `for i = 9007199254740991, 9007199254740993 do ...
+  end` never terminates here. Lua 5.2 has the same floating-point loop
+  behavior; Lua 5.4 reads those integer literals as integers and its integer
+  loop completes this range (with `2^53` operands it is a float loop there
+  too).
+- A numeral immediately followed by an identifier character is malformed, so
+  `3or 4` and `1e5or` are rejected as in Lua 5.4; Lua 5.2 accepts `3or 4`.
+- A `(` on the following line continues a call. Lua 5.2 rejects this as
+  ambiguous syntax; Lua 5.4 accepts it.
 - Table constructors accept leading and lone comma or semicolon separators,
   for example `{,}` and `{;}`. Lua 5.2 and 5.4 reject those forms.
 - `_ENV` is not a variable. Every variable use of the name - reading it,
@@ -114,6 +148,9 @@ does.
 
 - Global `unpack` exists, as in Lua 5.2, alongside `table.unpack`.
 - `pairs` ignores `__pairs`, which Lua 5.2 and 5.4 honor.
+- `ipairs` ignores `__ipairs`, which Lua 5.2 honors; Lua 5.4 also ignores it.
+- `ipairs` requires a table. Lua 5.4 accepts any value and indexes through
+  `__index`, so `ipairs("abc")` yields nothing; Lua 5.2 also requires a table.
 - `ipairs` reads each item through `__index`; Lua 5.2 reads those items raw.
 - `getmetatable(_G)` returns `false`, not `nil`. `_G` is the global table
   itself (`pairs`, `next`, `rawget` and `rawset` see every global), but it
@@ -178,6 +215,8 @@ does.
   handler reads and writes during its quicksort, so a handler that observes
   call order sees a different sequence. Stable handlers and a consistent
   comparator give the same sorted values. Tie order is unspecified.
+- The heap sort does not detect an inconsistent comparator or raise "invalid
+  order function for sorting"; reference Lua's quicksort can diagnose it.
 - On the raw path, comparator writes to the array can be overwritten by the
   sorted snapshot's writeback, and a metatable attached during comparison is
   not used for that writeback. Lua does not specify these comparator mutations.

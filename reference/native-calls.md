@@ -70,6 +70,14 @@ graph, each listed with its kind and the evidence for it:
 - `host-api`: a `pub fn` on `State` that a host, or a host callback, calls.
 - `binary`: the CLI's `main`.
 
+Both kinds of entry poll the host interrupt: Lua call admission, and Rust
+callback entry at the top of `invoke_rust_fn`, before any
+callback bookkeeping changes. A refusal there propagates to the existing call
+boundary or dispatch unwind without invoking the callback, so the poll adds
+no native call edge or callback frame. What the polls and the library's own
+safepoints bound is stated once, in docs/budget.md, "Stopping a script from
+the host" (mirrored in `vm/interrupt.rs`).
+
 An edge id is `caller->callee`, with a `:tag` when one caller calls one
 callee from several sites (`run_frame->reg_get_field:field` and `...:self`).
 Each edge is either covered or excluded:

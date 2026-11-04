@@ -49,6 +49,8 @@ presenting an analysis.
   stderr renders a non-UTF-8 name with U+FFFD.
 - Scripts are bytes, from a file or stdin alike: Lua source need not be
   valid UTF-8, and string literals keep the bytes they contain.
+- A leading `#` shebang line is not stripped. It is parsed as Lua source and
+  rejected at the `#`, unlike `lua script.lua`.
 - `--limit` takes a signed 64-bit integer and cannot be combined with
   `--analyze` or `--dump-bytecode`.
 - `--analyze` and `--dump-bytecode` cannot be combined. `--quiet` is accepted

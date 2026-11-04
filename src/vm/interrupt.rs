@@ -20,19 +20,34 @@
 //!   is a refusal reported at the caller's call instruction. Recursion needs
 //!   no backward jump; a return needs no poll, since every return pairs with
 //!   a call that polled;
+//! - entry to every Rust callback, before its bookkeeping is changed or its
+//!   body runs, including library functions and Rust metamethod handlers.
+//!   The generic `for` fast paths for `next` and the `ipairs` iterator run
+//!   without entering a callback and skip this poll; the loop's backward
+//!   jump polls instead;
 //! - native library work that can repeat a bounded pass without bound: each
 //!   pattern-matcher step, each candidate of a plain substring search, each
-//!   heap-sort step, and each iteration of the library loops whose trip count
+//!   heap-sort step, each iteration of the library loops whose trip count
 //!   a script chooses by a number (`table.concat`, `table.move`, the
-//!   metamethod paths of `table.insert`, `table.remove` and `table.sort`, and
-//!   the empty-pattern `string.gsub`).
+//!   metamethod paths of `table.insert`, `table.remove` and `table.sort`),
+//!   each subject position of the empty-pattern `string.gsub`, and each
+//!   `string.format` directive, before it is parsed and its argument
+//!   rendered (the literal bytes between directives are one pass over the
+//!   format string, a string capped by `MAX_STRING_BYTES`).
 //!
-//! Between two safepoints the work is at most one linear pass over a string
-//! capped by `MAX_STRING_BYTES` or over a table's storage. The
-//! `safepoint-loops` script check (`scripts/safepoint_loops.py`) holds every
-//! loop in the standard library, the pattern matcher and the table
-//! operations to that: each polls, or records why it is bounded or where it
-//! polls instead.
+//! Between two polls the work is bounded by the VM's fixed limits, never by
+//! the script: a run of instructions with no backward jump and no call
+//! (bounded by code length and call depth, since returns do not poll), where
+//! each instruction or library step makes at most one linear pass over a
+//! string capped by `MAX_STRING_BYTES` or over a table's storage; plus any
+//! garbage collection, which traces the whole heap; plus the body of a host
+//! callback, which the VM cannot stop and which must poll its own condition
+//! if it needs to be stoppable. It bounds work, not elapsed time;
+//! `docs/budget.md` ("Stopping a script from the host") states the same
+//! contract. The `safepoint-loops` script check
+//! (`scripts/safepoint_loops.py`) holds every loop in the standard library,
+//! the pattern matcher and the table operations to the per-step pass: each
+//! polls, or records why it is bounded or where it polls instead.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

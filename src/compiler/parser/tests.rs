@@ -98,7 +98,23 @@ fn break_outside_loop_uses_the_source_line() {
         ErrorKind::SyntaxError(SyntaxError::BreakOutsideLoop)
     ));
     assert_eq!(err.line_num(), 3);
-    assert_eq!(err.to_string(), "3:6: <break> not inside a loop");
+    assert_eq!(err.column(), 1);
+    assert_eq!(err.to_string(), "3:1: <break> not inside a loop");
+}
+
+#[test]
+fn vararg_outside_vararg_function_points_at_the_ellipsis() {
+    let source = "local f = function() return ... end";
+    let err = parse_unfinalized(source).expect_err("nested function is not vararg");
+
+    assert!(matches!(
+        err.kind(),
+        ErrorKind::SyntaxError(SyntaxError::VarargOutsideVarargFunction)
+    ));
+    assert_eq!(
+        err.column() as usize,
+        source.find("...").expect("source has an ellipsis") + 1
+    );
 }
 
 #[test]

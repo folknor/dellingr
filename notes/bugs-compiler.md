@@ -54,46 +54,6 @@ text can fix". Two such cases are reported unrecoverable:
   case it is (the `None` arm versus the newline arm of `lex_string`), so the two
   could be told apart.
 
-## COMP-003 - The backward jump-span limit is one past what the docs state
-
-Scope: `compiler-back`. Contract mismatch; nothing breaks at runtime.
-
-`Generator::patch` (`codegen.rs`) rejects only `offset > MAX_JUMP_OFFSET ||
-offset < -MAX_JUMP_OFFSET - 1`, so it accepts a backward offset of exactly
-`-(2^23)`. The docs disagree:
-
-- `instr.rs` `MAX_JUMP_OFFSET`: "Largest jump offset magnitude ... the compiler
-  rejects a jump at or past `2^23` instructions". The most negative accepted
-  offset has magnitude `2^23`.
-- `docs/limits.md`: "a branch or loop may span fewer than 2^23 instructions of
-  one function's bytecode". A `while` loop whose back `JMP` has offset `-(2^23)`
-  spans exactly `2^23`.
-
-Reachable just barely at `MAX_SOURCE_BYTES`: a loop body holding a
-`{1,1,1,...}` constructor emits about one instruction per two source bytes, so
-16 MiB of source gives about 2^23 instructions. Encoding and runtime accept it
-(`frame.rs` `jump_accepts_the_most_negative_offset`).
-`jump_patching_rejects_offsets_past_the_encoding` tests only the forward edge.
-Fix: make `patch` symmetric (reject `offset < -MAX_JUMP_OFFSET`) or reword both
-docs to state the asymmetric range.
-
-## COMP-004 - Error columns from error_here depend on lookahead state
-
-Scope: `compiler-front`.
-
-`TokenStream::pos` is documented as "Returns how many bytes have been read". It
-actually returns the start of the lookahead token when one is buffered, and the
-offset just past the last consumed token otherwise. `error_here` builds on it,
-so it points at two different places depending on lookahead state: after
-`break` outside a loop, or `...` outside a vararg function, the error column is
-just past the offending token rather than at it.
-
-The hunter's structural note: many errors are built with `error_here()`, whose
-position depends on whether a lookahead token happens to be buffered. Passing
-the relevant token or span explicitly, as `err_near`/`error_at` already do,
-would make every diagnostic position deterministic by construction rather than
-by parse state.
-
 ## COMP-005 - Stale or wrong doc comments in the compiler
 
 Scope: `compiler-front`.
@@ -119,20 +79,6 @@ Scope: `compiler-front`.
   (`parse_table`), which needs about 16.7M positional entries; the 16 MiB source
   cap makes that unreachable, so the doc is right in practice and the variant is
   dead. The two should agree.
-
-## COMP-006 - parse_fndef documents and returns a stamp nobody uses
-
-Scope: `compiler-front`. Smell.
-
-`parse_fndef` is documented as returning "the new function's nested-chunk index
-and the stamp of its closure creation". The second value,
-`self.input.last_line()` taken just before `end`, is discarded by all five
-callers (`let (nested, _) = ...`); the real closure stamps come from the
-`function` token's line or the statement's line. The dead value contradicts the
-stamping rule actually used. Likewise the `bool` from `parse_statements`
-("whether the block's own last statement was a `return`") is ignored by every
-caller; codegen recomputes it from `block.stmts.last()` in `if_stmt`. Both can
-go.
 
 ## COMP-007 - Codegen reports u8 overflows as MultiValueTailMissingInstruction
 

@@ -250,24 +250,15 @@ fn unpack_rejects_huge_range_without_overflow() {
 
 #[test]
 fn unpack_rejects_i64_span_overflow() {
-    // The key-range refusal now fires before the result-count check.
-    for (code, name) in [
-        (
-            "return unpack({}, -9223372036854775808, 9223372036854774784)",
-            "unpack",
-        ),
-        (
-            "return table.unpack({}, -9223372036854775808, 9223372036854774784)",
-            "unpack",
-        ),
+    // The result-count refusal fires before the key-range check, so a span
+    // that overflows i64 reports the result limit.
+    for code in [
+        "return unpack({}, -9223372036854775808, 9223372036854774784)",
+        "return table.unpack({}, -9223372036854775808, 9223372036854774784)",
     ] {
-        expect_error(
-            code,
-            &format!("{name} range exceeds the exactly representable integer keys"),
-            |kind| matches!(kind, ErrorKind::LibraryError(_)),
-        );
+        expect_error(code, "too many results (limit 255)", too_many_results);
     }
-    // In-range but too wide still reports the result limit.
+    // In-range but too wide reports the result limit as well.
     expect_error(
         "return table.unpack({}, -9007199254740992, 9007199254740992)",
         "too many results (limit 255)",

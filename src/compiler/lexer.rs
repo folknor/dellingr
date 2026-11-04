@@ -22,6 +22,7 @@ pub(super) struct TokenStream<'a> {
     lookahead: Option<Token>,
     lookahead2: Option<Token>,
     last_line: u32,
+    last_pos: usize,
 }
 
 /// Decoded contents saved by the lexer for a short-string token.
@@ -66,6 +67,7 @@ impl<'a> TokenStream<'a> {
             lookahead: None,
             lookahead2: None,
             last_line: 1,
+            last_pos: 0,
         }
     }
 
@@ -80,6 +82,7 @@ impl<'a> TokenStream<'a> {
             None => self.lexer.next_token(),
         }?;
         self.last_line = token.line;
+        self.last_pos = token.range().end;
         Ok(token)
     }
 
@@ -147,13 +150,12 @@ impl<'a> TokenStream<'a> {
         self.lexer.line_and_col(pos)
     }
 
-    /// Returns how many bytes have been read.
+    /// Returns the byte offset just past the last consumed token.
+    ///
+    /// Peeking ahead does not move this parser cursor.
     #[must_use]
     pub(super) fn pos(&self) -> usize {
-        match &self.lookahead {
-            Some(token) => token.start,
-            None => self.lexer.pos,
-        }
+        self.last_pos
     }
 
     /// Returns a range of the source bytes; token ranges are always in bounds.
@@ -1280,6 +1282,16 @@ mod tests {
         assert_eq!(tokens.next().unwrap().line, 1);
         assert_eq!(tokens.next().unwrap().line, 2);
         assert_eq!(tokens.next().unwrap().line, 2);
+    }
+
+    #[test]
+    fn parser_cursor_does_not_move_when_lookahead_is_buffered() {
+        let mut tokens = TokenStream::new(b"a  b c");
+        let first = tokens.next().expect("first token must lex");
+        assert_eq!(tokens.pos(), first.range().end);
+
+        tokens.peek2().expect("lookahead tokens must lex");
+        assert_eq!(tokens.pos(), first.range().end);
     }
 
     #[test]

@@ -195,16 +195,6 @@ The hunter adds a design question: a literal template is charged twice while a
 function replacement returning the same text is charged once. If that asymmetry
 is unintended, removing it is a `COST_MODEL_VERSION` bump.
 
-## DOC-009 - interrupt.rs files the empty-pattern gsub under the wrong safepoint class
-
-Scope: `stdlib-strings`. Doc nit; the poll itself is correct.
-
-`src/vm/interrupt.rs` lists the empty-pattern `string.gsub` among "the library
-loops whose trip count a script chooses by a number". Its trip count is the
-subject length plus one, not a numeric argument. The poll in
-`gsub_empty_pattern` is right. Reword, for example "each position of the
-empty-pattern `string.gsub`". `docs/budget.md` lists it neutrally and is fine.
-
 ## DOC-010 - open_libs comments claim more atomicity than the code has
 
 Scope: `stdlib-core`. Wording.

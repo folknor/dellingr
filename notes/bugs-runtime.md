@@ -17,133 +17,6 @@ and may be wrong; verify before fixing.
    and they are never deduplicated through git history. Carry the context
    inline instead.
 
-## RT-001 - Verifier-admitted bytecode can panic the VM at FOR_LOOP
-
-Scope: `compiler-back` (the hunter followed it into `src/vm/eval_control.rs`).
-
-`State::instr_for_loop` reads the three hidden numeric-for registers (control,
-limit, step) with `.as_num().expect("numeric for variable stays numeric after
-setup")`. The invariant behind that `expect` is a codegen property: `FOR_PREP`
-writes the registers, nothing writes them afterwards, and no jump enters the
-body without passing through `FOR_PREP`. The verifier checks none of it; for
-`FOR_LOOP` it checks only `check_registers(pc, a, 4, frame)` and the jump
-target.
-
-Claims broken:
-
-- The dispatch-policy comment above `validate_bytecode` in `verify.rs` says the
-  verifier does not prove runtime value types and lists "numeric loop values"
-  among what "still need fallible runtime checks". `FOR_LOOP` performs no
-  fallible check; it panics.
-- `docs/save-state.md`: "Saves are user-editable input." Snapshot bytecode is
-  admitted by the same `validate_bytecode` (`vm/save_state/verify.rs`), so
-  untrusted input reaches the panic. `Table::init_at_index` and
-  `Table::with_template_keys` already treat forged snapshot bytecode as a case
-  that must stay sound; this path is the exception.
-- `frame.rs` accepts a panic only as "a verifier regression". The verifier never
-  claimed this property, and the quoted comment says the opposite.
-
-Minimal admitted chunk: `code = [FOR_LOOP 0 +0, RETURN 0 0]`, `max_stack = 4`,
-`line_info` of length 2. Registers 0..4 are in the frame, the target (1) is in
-range, and the last instruction is RETURN, so every check passes. Frame
-admission sets the registers to nil and the first `FOR_LOOP` panics. Under
-unwind that poisons the State (`reference/error-reporting.md`, "Panics and
-poisoning"); under `panic = "abort"` it kills the host.
-
-Other admitted shapes reaching the same panic: a `JMP` into the loop body that
-skips `FOR_PREP`; a body instruction whose destination is in `a..a+2`; an open
-producer (`VARARG`/`CALL` with all results) at a register below `a` whose values
-spill over the hidden registers.
-
-Compiled code is not affected: the hidden registers sit below `nactive`, and
-every producer in a body sits at `freereg >= base + 4`.
-
-Fix options the hunter gave:
-
-- Make `instr_for_loop` fallible on a non-number, returning an
-  `InternalFault`-style error as `reg_set_list` does for
-  `ConstructorTableMissing`. The variant check already runs; the cost is a cold
-  error arm. The hunter recommends this, since it matches what the verifier
-  comment already says the VM does.
-- Have the verifier prove the pairing: each `FOR_LOOP` targets `FOR_PREP + 1`
-  with the same `A`, and that `FOR_PREP` exits to `FOR_LOOP + 1`. A sound proof
-  must also exclude every write to `a..a+2` inside the region, including
-  open-producer spills, which is much more verifier code.
-
-## RT-002 - A Rust call is not a safepoint, so the documented bound on work between safepoints is false
-
-Scope: `vm-dispatch`. See also RT-003, which breaks the same sentence through a
-different mechanism.
-
-Claim broken: the `src/vm/interrupt.rs` module doc says "Between two safepoints
-the work is at most one linear pass over a string capped by `MAX_STRING_BYTES`
-or over a table's storage." `docs/budget.md` ("Stopping a script from the host",
-Safepoints bullet) repeats it.
-
-The safepoints are backward jumps (`Frame::branch`, `instr_for_loop`), Lua
-admission (`admit_lua_call`) and the library loops listed in `interrupt.rs`.
-Calling a Rust function is not among them: `call_from_lua`, `begin_call`,
-`begin_callable_call`, `invoke_rust_fn` and `instr_tfor_call_rust_fn` never
-poll. Straight-line bytecode can therefore chain any number of Rust calls, each
-a full linear pass, with no poll between them. Example: after building a 16 MiB
-string `s`, a generated chunk consisting only of `s:upper()` lines (about 1.6
-million calls fit in `MAX_SOURCE_BYTES` of 16 MiB) makes a 16 MiB pass, an
-allocation and an intern hash per call without one poll. The same applies to
-repeated `string.lower`, `reverse`, `sub`, `format`, and to Rust `__index`,
-`__newindex` and `__len` handlers reached from straight-line code.
-
-Work stays bounded by code size, so "no unbounded execution" holds; the "at most
-one linear pass" bound does not. With no budget (the count-only default and the
-CLI default) or under `Costing::Off`, an editor's stop button cannot stop such a
-script for a long time.
-
-A smaller instance of the same claim: an allocation-triggered collection
-(`State::allocator` calls `maybe_collect`) is a pass over the whole heap, which
-is neither a string nor one table's storage, and can happen between any two
-safepoints.
-
-Direction the hunter gave: poll once in `invoke_rust_fn` before calling `f`. It
-is the single choke point for every Rust callee, the poll is one relaxed load,
-and the interrupt would be reported at the caller's call instruction like an
-admission refusal. Alternative: restate the bound as "per library call" and drop
-the stronger wording.
-
-## RT-003 - string.format can make about 254 full 16 MiB passes between two safepoints
-
-Scope: `stdlib-strings`. Same claim as RT-002, different mechanism: this one is
-inside a single library call, so polling at Rust-call entry does not fix it.
-
-Claim broken: `src/vm/interrupt.rs` and `docs/budget.md`, the "at most one
-linear pass" sentence quoted in RT-002. The `format` loop's own comment ("one
-pass over the format string's bytes, each directive rendering one argument")
-gives the per-directive bound, not the total.
-
-`string.format` has no safepoint of its own; a directive polls only when it runs
-a `__tostring` handler. Each argument directive makes a full pass over its
-argument:
-
-- `%s`: `tostring_bytes_unguarded` copies the whole rendering (`to_vec()`). With
-  a precision, `bytes.truncate` drops it afterwards, so `%.0s` copies 16 MiB and
-  appends nothing, and the output cap (`checked_string_growth`) never bounds it.
-- `%q` of a string: `to_vec()` plus `quote_string`'s pass.
-- `%d`/`%f`/... of a numeral string: `to_vec()` plus `parse_lua_numeral` (a
-  valid numeral can be 16 MiB of whitespace around one digit).
-
-With `MAX_ARGUMENTS` at 255, one call can make 254 such passes, about 4 GiB of
-copying with no poll. Under a default model the charge (16M per `%s`) usually
-stops this through the budget, but the interrupt contract holds whatever the
-costing: `Costing::Off`, a zero `StringFormat` weight (the `budget.md` example
-itself sets one) and an unset budget all reach it. Bounded work, so latency, not
-a hang.
-
-Fix the hunter gave: poll once per directive in the `format` loop (interrupts
-charge nothing, so this is cost-neutral). Separately, render `%s` with a
-precision by slicing before copying: keep charging the full length as today
-("Charge the full rendering before precision truncation" stays true) but copy
-only `min(precision, len)` bytes, and for a plain string with no `__tostring`
-borrow the stack value instead of `to_vec()`. Shared ownership of heap string
-bytes (RT-022) would remove the copying entirely.
-
 ## RT-004 - A cleared global does not keep its place in pairs(_G) once the sealed table compacts
 
 Scope: `vm-heap`. Replay-visible order.
@@ -177,46 +50,6 @@ tombstones permanently (what `retain_dead` does before sealing, and what
 limits.md says sealing exists to stop). The hunter marks the trade-off as the
 user's call; the current wording is wrong either way.
 
-## RT-005 - array_insert can fail its growth reservation after mutating the table
-
-Scope: `vm-heap`.
-
-Claims broken:
-
-- `table.rs` `reserve_array`: "Growth paths call this before touching the
-  logical length or removing migrated hash keys, so a refusal leaves the table
-  logically unchanged."
-- `table.rs` `reserve_outside_window`: "Reserve the storage
-  `write_outside_window(key, ..)` will need once the window has grown by
-  `extra` pushed slots."
-- `docs/save-state.md`: an array growth that cannot be reserved "raises the
-  ordinary `table growth failed` error, which kills the callback and leaves the
-  table unchanged". `table_ops.rs` `table_insert_at` promises "leaves the stack
-  and table unchanged" for its other rejections.
-
-In `Table::array_insert`, the structural case (`len == vlen`) with
-`pos <= base` and a live value reserves with `reserve_outside_window(pos,
-extra)`, computed from the current `array_live`. It then pushes, rotates and
-runs `migrate_from_hash`, which pulls `extra - 1` live values in and raises
-`array_live`. The final `write_outside_window(pos, value)` calls
-`reserve_outside_window(pos, 0)` again with the larger `array_live`, so its
-downward padding `pad = min(pos - 1, array_live.div_ceil(2))` can exceed what
-was reserved. If that second reservation needs more capacity and the allocator
-refuses, `GrowthFailed` returns after `vlen` grew, elements shifted and hash
-keys migrated, but before the value was written: `table.insert(t, pos, v)`
-half-applied.
-
-Concrete shape: keys 1..100 set, 1..60 cleared, append 101 (drops the dead
-prefix: base 60, 41 live), live hash keys 103 and 104, then
-`table.insert(t, 50, v)`: reserved pad 21, needed pad 22.
-
-Practical impact is small (only an allocator refusal at exactly that point
-exposes it; otherwise the extra growth succeeds unreserved), but it breaks the
-reserve-then-mutate discipline, and the helper's own doc misleads by accounting
-for the pushed slots' count but not that migrated slots are live. Fix: reserve
-with the post-migration live count (`array_live + extra - 1` in the structural
-case), or reserve in one helper taking both the pushed count and the live delta.
-
 ## RT-006 - A saturated automatic GC threshold becomes permanently Disabled
 
 Scope: `vm-heap`.
@@ -240,27 +73,6 @@ the documented formula is not what runs. Fix: keep `Automatic(usize::MAX)` as a
 distinct state; only `initial_threshold == usize::MAX` and host calls produce
 `Disabled`.
 
-## RT-007 - unpack checks the key range before the result count, so an over-long range reports the wrong error
-
-Scope: `stdlib-core`.
-
-In `unpack_values` (`src/lua_std.rs`), `table::check_sequence_keys(i, j, ...)`
-runs before the `span >= MAX_RESULTS` test. `table.unpack({}, 1, 2^60)` (or
-`unpack(t, 1, 2^54)`) therefore raises `IntegerKeyRangeExceeded` ("unpack range
-exceeds the exactly representable integer keys") instead of `TooManyResults`.
-The real problem is that it asks for about 2^60 results; Lua 5.4 reports "too
-many results to unpack", and dellingr does too when the range lies inside
-+/-2^53.
-
-Claim broken: `docs/compatibility.md` (Table library) says of the key-range
-refusal that "the functions' other argument checks still apply first". The
-result-count limit is applied second here. Also a misleading message for the
-script author.
-
-Fix: test `span >= MAX_RESULTS` (with the `checked_sub`) before
-`check_sequence_keys`. A range of up to 255 keys reaching past 2^53 still gets
-the key-range error, which is the case the refusal exists for.
-
 ## RT-008 - error(msg, 1) and error(msg, nil) can render differently from error(msg)
 
 Scope: `stdlib-core`.
@@ -281,29 +93,6 @@ reads an absent level as 1 a few lines later (`unwrap_or(1)`). Edge case.
 Fix: map level 1, absent and nil to one `PrefixLocation`, either by folding
 `TraceFrame(0)` into `Current` or by having the no-argument path produce
 `TraceFrame(0)`.
-
-## RT-009 - The safepoint-loops check does not scan src/lua_std.rs
-
-Scope: `stdlib-core`.
-
-Claims broken: `src/vm/interrupt.rs` (the `safepoint-loops` check "holds every
-loop in the standard library ... to that") and AGENTS.md (it "makes every loop
-in native library code poll or carry a ... comment").
-
-`scripts/safepoint_loops.py` scopes itself with `SCOPE_DIRS = ("src/lua_std/",
-"src/patterns/")`. The library's root module `src/lua_std.rs` does not start
-with `src/lua_std/`, so it is never scanned. Loops there with neither a poll nor
-a decision comment: the `for index in i..=j` element loop in `unpack_values`;
-the `for` in `install_library_functions`; the `while` loops in the const fns
-`segment_offset` and `position_in`. All are bounded today (unpack's span is
-capped below `MAX_RESULTS`; the rest run over fixed lists or at compile time).
-The gap is in the guarantee: a future unbounded loop in `lua_std.rs`, where the
-shared argument helpers live, would pass `brokkr check`. The unpack loop's
-comment explains the charge decision but carries no `bounded:`, and the check
-accepts it.
-
-Fix: add `src/lua_std.rs` to `SCOPE_FILES`, and add `// bounded:` comments to
-those loops (unpack: "at most MAX_RESULTS elements, checked above").
 
 ## RT-010 - Lateral: global stores silently drop a write to a vacant cached slot
 
@@ -419,7 +208,8 @@ intact.
 
 ## RT-020 - Lateral: string.format appends literal bytes one at a time
 
-Scope: `stdlib-strings`. Performance.
+Scope: `stdlib-strings`. Performance. The fixer that added the per-directive
+poll to `string.format` re-raised this.
 
 Each literal byte of the format string goes through `append_output`
 (`checked_string_growth` plus an atomic `state.charge` of 1). Batch literal runs
@@ -444,5 +234,28 @@ Scope: `stdlib-strings`. Performance; the code already names this as deliberate.
 `string_or_number_bytes` copies the subject and pattern on every
 `find`/`match`/`gsub`/`gmatch` call. Its doc comment calls this deliberate and
 names the fix: shared ownership of heap string bytes (an `Rc<[u8]>`-style
-handle). With that, `find`, `match`, `gsub` and `format` (`%s`, `%q`, numeral
-arguments) would be borrow-only, and RT-003's copying would go with it.
+handle). With that, `find`, `match` and `gsub` would be borrow-only.
+`string.format` already borrows plain string arguments.
+
+## RT-024 - Lateral: the raw table.move per-copy poll is now untested, and its test is misnamed
+
+Raised during a fix wave by the green agent. Test coverage.
+
+Rust callbacks now poll for an interrupt at entry, so a pending interrupt stops
+`table.move` before it prepays or copies anything.
+`host::interrupt::an_interrupted_raw_move_keeps_its_destination_and_prepaid_cost`
+was adjusted to assert that (the run with the interrupt costs the same as the
+one without), but its name still describes the old behaviour, and the raw
+move's own per-copy poll can no longer be reached by a pending interrupt, so
+nothing exercises it. A test that raises the interrupt mid-move (for example
+from an `__index`/`__newindex` handler or a host callback invoked during the
+copy) would cover it; rename the existing test to what it now checks.
+
+## RT-023 - Lateral: string.format duplicates the %s rendering tail across two arms
+
+Raised during a fix wave by the reconciler. Smell.
+
+In `format_argument` (`src/lua_std/string_format.rs`), the `Itself` and `Bytes`
+arms of the `%s` case are near-identical copies: the embedded-zero check, the
+precision cut and the padding. One shared helper taking `&[u8]` would remove the
+copy. The borrow of `state` across the arms is what makes merging them fiddly.

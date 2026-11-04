@@ -154,7 +154,7 @@ impl<'a> Parser<'a> {
         // (this allows recursive calls like `local function fib(n) ... fib(n-1) ... end`)
         self.add_local(name)?;
 
-        let (nested, _) = self.parse_fndef(Some(name.to_string()), false)?;
+        let nested = self.parse_fndef(Some(name.to_string()), false)?;
         Ok(Stmt::LocalFunction { reg, nested, line })
     }
 
@@ -226,7 +226,7 @@ impl<'a> Parser<'a> {
         self.add_local(name)?;
 
         self.enter_loop(base);
-        let (body, _) = self.parse_statements()?;
+        let body = self.parse_statements()?;
         self.expect(TokenKind::End)?;
 
         // Close the visible loop variable and body locals before its slot is
@@ -313,7 +313,7 @@ impl<'a> Parser<'a> {
         let call_line = self.input.last_line();
 
         self.enter_loop(base);
-        let (body, _) = self.parse_statements()?;
+        let body = self.parse_statements()?;
         self.expect(TokenKind::End)?;
 
         // Close the visible loop variables and body locals before their slots are reused.
@@ -352,7 +352,7 @@ impl<'a> Parser<'a> {
     pub(super) fn parse_do(&mut self) -> Result<Stmt> {
         self.input.next()?; // `do` keyword
         self.level_up();
-        let (stmts, _) = self.parse_statements()?;
+        let stmts = self.parse_statements()?;
         self.expect(TokenKind::End)?;
         let close = self.level_down()?;
         Ok(Stmt::Do(Block { stmts, close }))
@@ -367,7 +367,7 @@ impl<'a> Parser<'a> {
         let body_locals_start = self.local_slot_count()?;
 
         self.enter_loop(body_locals_start);
-        let (body, _) = self.parse_statements()?;
+        let body = self.parse_statements()?;
         self.expect(TokenKind::Until)?;
         let cond = self.parse_expr()?;
 
@@ -400,7 +400,7 @@ impl<'a> Parser<'a> {
         let body_locals_start = self.local_slot_count()?;
 
         self.enter_loop(body_locals_start);
-        let (body, _) = self.parse_statements()?;
+        let body = self.parse_statements()?;
         self.expect(TokenKind::End)?;
 
         // Close upvalues for any captured locals declared inside the loop body
@@ -436,7 +436,7 @@ impl<'a> Parser<'a> {
             let cond = self.parse_expr()?;
             self.expect(TokenKind::Then)?;
             self.level_up();
-            let (stmts, _) = self.parse_statements()?;
+            let stmts = self.parse_statements()?;
             let close = self.level_down()?;
             arms.push(IfArm {
                 cond,
@@ -459,7 +459,7 @@ impl<'a> Parser<'a> {
     fn parse_else(&mut self) -> Result<Block> {
         self.level_up();
         self.input.next()?; // `else` keyword
-        let (stmts, _) = self.parse_statements()?;
+        let stmts = self.parse_statements()?;
         self.expect(TokenKind::End)?;
         let close = self.level_down()?;
         Ok(Block { stmts, close })

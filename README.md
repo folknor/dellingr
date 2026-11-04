@@ -82,8 +82,9 @@ These Lua features are intentionally excluded:
 - `goto`/labels - simplifies VM, prevents obfuscated control flow
 - `string.rep`, `string.byte`, `string.char`
 - Arithmetic/comparison/concat metamethods
-- The `__pairs`, `__mode`, `__gc`, `__close` and `__name` fields are ignored:
-  no pairs hook, weak tables, finalizers, close handlers or custom type names
+- The `__ipairs`, `__pairs`, `__mode`, `__gc`, `__close` and `__name` fields
+  are ignored: no `ipairs` or `pairs` hook, weak tables, finalizers, close
+  handlers or custom type names
 - Dynamic code and module loading (`load`, `loadstring`, `dofile`, `require`,
   and the `package` library); script-controlled collection (`collectgarbage`)
 - `math.randomseed` (the host seeds the stream with `State::set_rng_seed`)

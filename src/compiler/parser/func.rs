@@ -31,7 +31,7 @@ impl<'a> Parser<'a> {
             Variable::Global(name) => Place::Global(name),
             Variable::Builtin(builtin) => Place::Builtin(builtin),
         };
-        let (nested, _) = self.parse_fndef(Some(name.to_string()), false)?;
+        let nested = self.parse_fndef(Some(name.to_string()), false)?;
         Ok(Stmt::Function {
             target,
             nested,
@@ -86,7 +86,7 @@ impl<'a> Parser<'a> {
         } else {
             Expr::new(ExprKind::Suffixed(Box::new(Suffixed { base, suffixes })))
         };
-        let (nested, _) = self.parse_fndef(Some(full_name), method)?;
+        let nested = self.parse_fndef(Some(full_name), method)?;
         Ok(Stmt::Function {
             target: Place::Field { object, name },
             nested,
@@ -106,7 +106,7 @@ impl<'a> Parser<'a> {
         let name = self.find_or_add_string(method_name)?;
 
         // Parse the function params and body with implicit self.
-        let (nested, _) = self.parse_fndef(Some(full_name), true)?;
+        let nested = self.parse_fndef(Some(full_name), true)?;
         Ok(Stmt::Function {
             target: Place::Field { object, name },
             nested,
@@ -152,8 +152,8 @@ impl<'a> Parser<'a> {
     /// Parses the parameters and body of a function definition with an
     /// optional diagnostic name. A `method` (`function t:m()`) gets the
     /// implicit leading `self` parameter. Returns the new function's
-    /// nested-chunk index and the stamp of its closure creation.
-    pub(super) fn parse_fndef(&mut self, name: Option<String>, method: bool) -> Result<(u8, u32)> {
+    /// nested-chunk index.
+    pub(super) fn parse_fndef(&mut self, name: Option<String>, method: bool) -> Result<u8> {
         let defined_line = self.input.peek()?.line;
         let (mut params, is_vararg) = self.parse_params()?;
         if method {
@@ -176,8 +176,7 @@ impl<'a> Parser<'a> {
             SyntaxError::TooManyNestedFunctions,
         )?;
         self.funcs.chunk.nested.push(Arc::new(new_chunk));
-        let line = self.input.last_line();
         self.expect(TokenKind::End)?;
-        Ok((index, line))
+        Ok(index)
     }
 }

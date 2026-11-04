@@ -1,4 +1,4 @@
-use super::super::error::TypeError;
+use super::super::error::{Error, InternalFault, TypeError};
 use super::Result;
 use super::RustFnId;
 use super::State;
@@ -52,19 +52,16 @@ impl State {
         ip: &mut usize,
         offset: i32,
     ) -> Result<()> {
-        // `instr_for_prep` converts all three hidden controls to numbers, and
-        // script code can only write the visible loop variable at `slot + 3`.
-        // Safe extraction from tagged `Val`s still checks their variants; the
-        // expects document the setup invariant without building Lua errors.
-        let mut var = self.stack[slot]
-            .as_num()
-            .expect("numeric for variable stays numeric after setup");
-        let limit = self.stack[slot + 1]
-            .as_num()
-            .expect("numeric for limit stays numeric after setup");
-        let step = self.stack[slot + 2]
-            .as_num()
-            .expect("numeric for step stays numeric after setup");
+        // Compiled bodies cannot write these hidden controls, but admission
+        // proves register bounds, not setup dominance or runtime value types.
+        // Edited snapshot bytecode may skip setup or overwrite a control.
+        let (Some(mut var), Some(limit), Some(step)) = (
+            self.stack[slot].as_num(),
+            self.stack[slot + 1].as_num(),
+            self.stack[slot + 2].as_num(),
+        ) else {
+            return Err(invalid_numeric_for_controls());
+        };
         var += step;
         if check_numeric_for_condition(var, limit, step) {
             // Jump first: the jump back is an interrupt safepoint, and an
@@ -295,4 +292,11 @@ fn check_numeric_for_condition(var: f64, limit: f64, step: f64) -> bool {
         // step < 0.0
         var >= limit
     }
+}
+
+/// Keep malformed-bytecode error construction out of the loop's fast path.
+#[cold]
+#[inline(never)]
+fn invalid_numeric_for_controls() -> Error {
+    Error::internal_fault(InternalFault::NumericForControlsNotNumeric)
 }

@@ -1,14 +1,25 @@
 # Determinism
 
 The same script and inputs produce the same result and the same cost on a
-given build. The library reads no host state: no environment, clock, process
-arguments, unseeded RNG or randomized hashing. The CLI and the bench harness
+given build. The library reads no environment, clock, process arguments,
+unseeded RNG or randomized hashing. The CLI and the bench harness
 are hosts and are exempt.
 
-The one host input polled during a run is the `Interrupt` flag (see
+The library polls two asynchronous host inputs during a run. One is the
+`Interrupt` flag (see
 `budget.md`, "Stopping a script from the host"). A run that is never
 interrupted is unaffected by it. One that is ends at a point that depends on
 timing, so it is not a replay; the flag is not saved in snapshots.
+
+The other is the anchor release queue. Dropping an `Anchor` on any thread
+queues its release; collections (including automatic collections during Lua
+execution) and anchor creation drain the queue. A concurrent drop can therefore
+change which collection frees a value retained only by that anchor. This can
+change object and string counts, later collection thresholds, and the `%p`
+identity of a string rebuilt after collection. For replay, drop anchors on the
+State's thread at deterministic points, or finish and synchronize their drops
+between runs before resuming the State. Concurrent drops during a run are safe
+but their timing is an additional input that a replay must control.
 
 ## Cost
 
@@ -165,7 +176,8 @@ that saved it would have.
 ## Garbage collection timing
 
 Collections fire on allocation-count thresholds, so their timing is
-deterministic for a given build. It is not a cross-version contract: a release
+deterministic for a given build and anchor release history, subject to the
+cross-thread drop requirement above. It is not a cross-version contract: a release
 may move allocation points or collection thresholds, which can change `%p` ids
 of rebuilt strings and `State::object_count()`. Such changes are called out in
 the changelog, like other replay-visible changes.

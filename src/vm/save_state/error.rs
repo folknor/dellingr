@@ -186,6 +186,8 @@ pub enum SaveCollection {
     EnvironmentDeletedKeys,
     /// An environment delta's upserts.
     EnvironmentUpserts,
+    /// An environment delta's physical hash slots.
+    EnvironmentHashSlots,
     /// An environment delta's key order.
     EnvironmentOrder,
     /// An environment delta's array slots.
@@ -226,6 +228,7 @@ impl fmt::Display for SaveCollection {
             Self::FormatPointerIds => "format pointer ids",
             Self::EnvironmentDeletedKeys => "environment deleted keys",
             Self::EnvironmentUpserts => "environment upserts",
+            Self::EnvironmentHashSlots => "environment hash slots",
             Self::EnvironmentOrder => "environment order",
             Self::EnvironmentArray => "environment array",
             Self::TableArraySlots => "table array slots",
@@ -923,6 +926,8 @@ pub enum TableRestoreStep {
     UpsertEnvironmentEntry,
     /// Restoring an environment table's key order.
     RestoreEnvironmentOrder,
+    /// Restoring an environment table's physical hash slots.
+    RestoreEnvironmentHashSlots,
     /// Restoring an environment table's array shape.
     RestoreEnvironmentArray,
     /// Re-adding an entry the load setup put at the array's append key.
@@ -936,6 +941,7 @@ impl fmt::Display for TableRestoreStep {
             Self::DeleteEnvironmentKey => "deleted environment key is invalid",
             Self::UpsertEnvironmentEntry => "environment upsert is invalid",
             Self::RestoreEnvironmentOrder => "saved environment order is invalid",
+            Self::RestoreEnvironmentHashSlots => "saved environment hash slots are invalid",
             Self::RestoreEnvironmentArray => "saved environment array is invalid",
             Self::SetupEnvironmentAppend => "setup environment append is invalid",
         })
@@ -1515,6 +1521,18 @@ mod tests {
         );
         assert_eq!(
             SnapshotError::InvalidTable {
+                location: TableLoadLocation::Environment {
+                    token: "math".to_owned(),
+                    entry: None,
+                },
+                step: TableRestoreStep::RestoreEnvironmentHashSlots,
+                failure: TableRestoreFailure::NilKey,
+            }
+            .to_string(),
+            "invalid saved table at environment math: saved environment hash slots are invalid: table index was nil"
+        );
+        assert_eq!(
+            SnapshotError::InvalidTable {
                 location: TableLoadLocation::Object(3),
                 step: TableRestoreStep::ObjectRebuild,
                 failure: TableRestoreFailure::HashEntryBelongsInArray,
@@ -1551,6 +1569,15 @@ mod tests {
             }
             .to_string(),
             "save table entries count 5 exceeds the supported limit"
+        );
+        assert_eq!(
+            SaveError::TooLarge {
+                collection: SaveCollection::EnvironmentHashSlots,
+                count: 5,
+                limit: 4,
+            }
+            .to_string(),
+            "save environment hash slots count 5 exceeds the supported limit"
         );
         assert_eq!(
             SaveError::FieldSizeExceeded {

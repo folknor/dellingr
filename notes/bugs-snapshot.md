@@ -120,52 +120,6 @@ Fix: write `format_pointer_ids` sorted by id (ids are unique and verified below
 `next_format_pointer_id`). That is canonical, does not change the format, and
 makes the loaded map's order irrelevant.
 
-## SNAP-004 - Duplicate pins with equal content are silently merged, not rejected
-
-Scope: `snapshot`. Forged input only; an engine save never produces it.
-
-Claim broken: `docs/save-state.md`, Load: "Duplicate keys in the saved global
-table and duplicate pins are rejected, not silently replaced".
-
-`validate_references` checks pin uniqueness by string arena id
-(`insert_unique(&mut pins, *id, ...)`), not by content, and the decoder does not
-reject equal-content entries in the string arena. Pins `[Str(0), Str(1)]` with
-`strings[0] == strings[1]` pass verification, and `GlobalEnv::restore` merges
-them silently ("Distinct saved ids can intern to one string; keep the first.").
-Global table keys, by contrast, are checked by content (`SavedVal::table_key`
-resolves to bytes). Fix: check pins by content as `table_key` does, or reword
-the doc.
-
-## SNAP-005 - Snapshot diagnostics that name something other than what happened
-
-Scope: `snapshot`.
-
-- A hash-slot restore failure in an environment delta is reported as
-  `TableRestoreStep::RestoreEnvironmentOrder` ("saved environment order is
-  invalid"; `materialize_payload`, `hash_slots` branch). No hash-slots step
-  exists. `error.rs` says every reason is an enum a host can match on, so this
-  one misleads.
-- `SavedEnvDelta::encode` writes `hash_slots` under
-  `SaveCollection::EnvironmentUpserts`, so a `TooLarge` there names the wrong
-  collection.
-- In `encode_globals`, a global whose key is not a UTF-8 string (array part
-  `_G[1] = f`, non-UTF-8 names now that `State::set_table` allows them, table
-  keys) is encoded through `encode_environment_root(.., "_G")`. An unregistered
-  function under it is reported as `environment _G...`: the path neither names
-  the key nor says it is a global.
-
-## SNAP-006 - Latent: the environment diff compares values with Lua ==, losing a signed-zero change
-
-Scope: `snapshot`. Nothing is lost today.
-
-`encode_env_deltas` decides "unchanged" with `base_value == value` and
-`slots == baseline.hash_slots`, both `Val::eq`, which is f64 `==`. A library
-field changed from `0.0` to `-0.0` (or back) would count as unchanged and lose
-its sign on load. The code comment covers the NaN half of this, not the
-signed-zero half. No current library baseline holds a zero (`math.pi`,
-`math.huge`), but a future constant would break "`-0.0` is exact". Fix: compare
-numbers by bits, as `GlobalEnv`'s mirror check already does.
-
 ## SNAP-007 - Lateral: Table::rebuild_from_snapshot is not atomic on error
 
 Raised by both `snapshot` and `vm-heap`.

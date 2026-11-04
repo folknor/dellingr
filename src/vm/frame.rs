@@ -879,6 +879,71 @@ mod tests {
     }
 
     #[test]
+    fn admitted_numeric_for_without_setup_returns_internal_error() {
+        for code in [
+            vec![Instr::for_loop(0, 0), Instr::ret(0, RetCount::Fixed(0))],
+            vec![
+                Instr::jump(1),
+                Instr::for_prep(0, 1),
+                Instr::for_loop(0, 0),
+                Instr::ret(0, RetCount::Fixed(0)),
+            ],
+        ] {
+            check_invalid_numeric_for_controls(code);
+        }
+    }
+
+    #[test]
+    fn admitted_numeric_for_with_overwritten_control_returns_internal_error() {
+        for control in 0..3 {
+            check_invalid_numeric_for_controls(vec![
+                Instr::load_num(0, 0),
+                Instr::load_num(1, 0),
+                Instr::load_num(2, 0),
+                Instr::for_prep(0, 2),
+                Instr::load_bool(control, false),
+                Instr::for_loop(0, -2),
+                Instr::ret(0, RetCount::Fixed(0)),
+            ]);
+        }
+    }
+
+    fn check_invalid_numeric_for_controls(code: Vec<Instr>) {
+        let bytecode = Bytecode {
+            line_info: vec![1; code.len()],
+            code,
+            number_literals: vec![1.0],
+            max_stack: 4,
+            ..Bytecode::default()
+        };
+        crate::compiler::verify::validate_bytecode(&bytecode)
+            .expect("admission checks bounds but does not prove numeric control types");
+        let mut state = State::new();
+        state
+            .push_chunk(Arc::new(bytecode))
+            .expect("the admitted chunk fits in the state");
+        let error = state
+            .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+            .expect_err("nonnumeric hidden controls must return an error without panicking");
+        assert!(matches!(
+            error.kind(),
+            super::super::ErrorKind::InternalError(_)
+        ));
+        assert!(
+            error
+                .to_string()
+                .contains("numeric for controls must remain numbers")
+        );
+        assert!(!state.is_poisoned());
+        let program =
+            crate::Program::compile("return", None).expect("the recovery chunk is valid Lua");
+        state.load(&program).expect("the state remains loadable");
+        state
+            .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+            .expect("the error boundary leaves the state callable");
+    }
+
+    #[test]
     fn documented_opcode_charges_match_static_costs() {
         use crate::cost_model::CostModel;
         let docs = include_str!("../../docs/budget.md");

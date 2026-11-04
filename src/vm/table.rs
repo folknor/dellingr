@@ -1553,18 +1553,22 @@ impl Table {
     }
 
     /// Reserve the storage `write_outside_window(key, ..)` will need once the
-    /// window has grown by `extra` pushed slots. The arithmetic mirrors that
-    /// function's three cases and must change with it.
+    /// window has grown by `extra` pushed slots and gained `live_delta` live
+    /// values. Migrated hash entries increase both counts; a pushed nil only
+    /// increases the slot count. The arithmetic mirrors that function's three
+    /// cases and must change with it.
     fn reserve_outside_window(
         &mut self,
         key: usize,
         extra: usize,
+        live_delta: usize,
     ) -> std::result::Result<(), TableError> {
         let len = self.array.len() + extra;
-        let needed = if self.array_live == 0 {
+        let live = self.array_live + live_delta;
+        let needed = if live == 0 {
             1
         } else if key <= self.base {
-            let pad = (key - 1).min(self.array_live.div_ceil(2));
+            let pad = (key - 1).min(live.div_ceil(2));
             len.checked_add(self.base - (key - 1 - pad))
                 .ok_or(TableError::GrowthFailed)?
         } else {
@@ -1583,7 +1587,7 @@ impl Table {
         key: usize,
         value: Val,
     ) -> std::result::Result<(), TableError> {
-        self.reserve_outside_window(key, 0)?;
+        self.reserve_outside_window(key, 0, 0)?;
         debug_assert!(!matches!(value, Val::Nil));
         if self.array_live == 0 {
             self.reset_window(key - 1);
@@ -2004,7 +2008,11 @@ impl Table {
             usize::from(len == self.base + self.array.len())
         };
         if pos <= self.base && !matches!(value, Val::Nil) {
-            self.reserve_outside_window(pos, extra)?;
+            // The rotation preserves the live count, but migration runs before
+            // the downward write and increases its padding requirement. Reserve
+            // for that final count before changing slots or removing hash keys.
+            let live_delta = if structural { extra - 1 } else { 0 };
+            self.reserve_outside_window(pos, extra, live_delta)?;
         } else {
             self.reserve_array(self.array.len() + extra)?;
         }
@@ -2857,6 +2865,45 @@ mod tests {
         assert_eq!(t.array_remove(0).unwrap(), Val::Bool(true));
         assert_eq!(t.get(&n(0)), Val::Nil);
         assert_eq!(t.array_remove(0).unwrap(), Val::Nil);
+    }
+
+    #[test]
+    fn array_insert_reserves_downward_padding_after_migration() {
+        let mut t = Table::default();
+        fill(&mut t, 1..=100);
+        for key in 1..=60 {
+            t.insert(n(key), Val::Nil).unwrap();
+        }
+        t.insert(n(101), Val::Bool(true)).unwrap();
+        fill(&mut t, 103..=104);
+        assert_eq!((t.base, t.array.len(), t.array_live), (60, 41, 41));
+        let extra = t.append_growth().unwrap();
+        assert_eq!(extra, 3);
+
+        // Before migration the pad is ceil(41 / 2) = 21, but afterward it
+        // is ceil(43 / 2) = 22. The final window needs 44 + (60 - 27) = 77
+        // slots. Give it only the old reservation's 76 so allocator rounding
+        // cannot hide the missing slot in the reservation calculation.
+        let mut array = Vec::with_capacity(76);
+        array.extend_from_slice(&t.array);
+        t.array = array;
+        let before = array_shape(&t);
+        t.reserve_outside_window(50, extra, extra - 1).unwrap();
+        assert_eq!(array_shape(&t), before);
+        assert!(t.array.capacity() >= 77);
+        let capacity = t.array.capacity();
+
+        t.array_insert(50, Val::Bool(false)).unwrap();
+        assert_eq!(t.array.capacity(), capacity);
+        assert_eq!((t.base, t.array.len(), t.array_live), (27, 77, 44));
+        assert_eq!(t.vlen, 104);
+        assert_eq!(t.get(&n(50)), Val::Bool(false));
+        assert_eq!(t.get(&n(61)), Val::Nil);
+        assert_eq!(t.get(&n(62)), Val::Bool(true));
+        assert_eq!(t.get(&n(102)), Val::Bool(true));
+        assert_eq!(t.get(&n(103)), Val::Bool(true));
+        assert_eq!(t.get(&n(104)), Val::Bool(true));
+        assert_eq!(t.hash_live_len(), 0);
     }
 
     #[test]

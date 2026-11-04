@@ -697,7 +697,9 @@ fn validate_references(payload: &SavePayload) -> Result<(), SnapshotError> {
         ));
     }
     validate_table_shape(payload, &payload.globals, 0, &SaveLocation::Globals)?;
-    // Pins are distinct strings, and only a sealed save has any.
+    // Pins are distinct strings by content, and only a sealed save has any.
+    // String arena ids are references, not identities: a forged payload may
+    // give equal bytes more than one id.
     let mut pins = BTreeSet::new();
     for (index, pin) in payload.global_pins.iter().enumerate() {
         let super::SavedVal::Str(id) = pin else {
@@ -715,9 +717,18 @@ fn validate_references(payload: &SavePayload) -> Result<(), SnapshotError> {
             ));
         }
         validate_value(pin, payload)?;
+        // `validate_value` has already checked the id; this lookup only
+        // borrows the bytes, so a miss reports the same corruption.
+        let Some(content) = payload.strings.get(*id as usize) else {
+            return Err(corrupt(
+                CorruptionReason::InvalidGlobalPin,
+                index,
+                SaveLocation::Globals,
+            ));
+        };
         insert_unique(
             &mut pins,
-            *id,
+            content.as_slice(),
             CorruptionReason::Duplicate {
                 entry: DuplicateEntry::GlobalPin,
                 form: KeyForm::Saved,
@@ -1532,7 +1543,7 @@ mod tests {
             validate_references(&with_globals(vec![one.clone(), two], vec![], false)),
             Err(SnapshotError::CorruptArena { .. })
         ));
-        // Pins: strings, distinct, and only in a sealed save.
+        // Pins: strings, distinct by content, and only in a sealed save.
         assert!(validate_references(&with_globals(vec![], vec![Str(0), Str(1)], true)).is_ok());
         for (pins, sealed) in [
             (vec![Str(0)], false),
@@ -1544,5 +1555,12 @@ mod tests {
                 Err(SnapshotError::CorruptArena { .. })
             ));
         }
+        let mut duplicate_pin_contents = with_globals(vec![], vec![Str(0), Str(1)], true);
+        let content = duplicate_pin_contents.strings[0].clone();
+        duplicate_pin_contents.strings[1] = content;
+        assert!(matches!(
+            validate_references(&duplicate_pin_contents),
+            Err(SnapshotError::CorruptArena { .. })
+        ));
     }
 }

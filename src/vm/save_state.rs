@@ -401,10 +401,20 @@ type PathId = usize;
 enum PathSegment {
     Global(String),
     Environment(String),
+    GlobalTableEntryKey(usize),
+    GlobalTableEntryValue(usize),
     TableKey(usize),
     TableValue(usize),
     Metatable,
     Upvalue(usize),
+}
+
+#[derive(Clone, Copy)]
+enum DiagnosticRoot<'a> {
+    Global(&'a str),
+    Environment(&'a str),
+    GlobalTableEntryKey(usize),
+    GlobalTableEntryValue(usize),
 }
 
 impl PathSegment {
@@ -460,14 +470,18 @@ impl<'a> PathFinder<'a> {
     fn find(
         mut self,
         root: Val,
-        global: &str,
-        environment: bool,
+        diagnostic_root: DiagnosticRoot<'_>,
         target_function: RustFnId,
     ) -> Option<String> {
-        let segment = if environment {
-            PathSegment::Environment(truncate_utf8(global, MAX_PATH_GLOBAL_BYTES))
-        } else {
-            PathSegment::global(global)
+        let segment = match diagnostic_root {
+            DiagnosticRoot::Global(global) => PathSegment::global(global),
+            DiagnosticRoot::Environment(token) => {
+                PathSegment::Environment(truncate_utf8(token, MAX_PATH_GLOBAL_BYTES))
+            }
+            DiagnosticRoot::GlobalTableEntryKey(index) => PathSegment::GlobalTableEntryKey(index),
+            DiagnosticRoot::GlobalTableEntryValue(index) => {
+                PathSegment::GlobalTableEntryValue(index)
+            }
         };
         let root_path = push_path(&mut self.breadcrumbs, None, segment);
         let mut tasks = vec![PathTask::Value {
@@ -613,6 +627,7 @@ fn render_path(breadcrumbs: &[Breadcrumb], path: PathId) -> String {
     let mut current = Some(path);
     let mut global_name = None;
     let mut environment = false;
+    let mut global_table_entry = None;
     let mut skipped = false;
     while let Some(id) = current {
         let breadcrumb = &breadcrumbs[id];
@@ -623,6 +638,15 @@ fn render_path(breadcrumbs: &[Breadcrumb], path: PathId) -> String {
             global_name = Some(name.as_str());
             environment = true;
         }
+        match &breadcrumb.segment {
+            PathSegment::GlobalTableEntryKey(index) => {
+                global_table_entry = Some((*index, true));
+            }
+            PathSegment::GlobalTableEntryValue(index) => {
+                global_table_entry = Some((*index, false));
+            }
+            _ => {}
+        }
         if ids.len() < MAX_RENDERED_PATH_SEGMENTS {
             ids.push(id);
         } else {
@@ -631,7 +655,11 @@ fn render_path(breadcrumbs: &[Breadcrumb], path: PathId) -> String {
         current = breadcrumb.parent;
     }
     let mut text = String::new();
-    if let Some(name) = global_name {
+    if let Some((index, is_key)) = global_table_entry {
+        text.push_str("global table entry[");
+        text.push_str(&index.to_string());
+        text.push_str(if is_key { "].key" } else { "].value" });
+    } else if let Some(name) = global_name {
         text.push_str(if environment {
             "environment "
         } else {
@@ -644,7 +672,10 @@ fn render_path(breadcrumbs: &[Breadcrumb], path: PathId) -> String {
     }
     for id in ids.into_iter().rev() {
         match &breadcrumbs[id].segment {
-            PathSegment::Global(_) | PathSegment::Environment(_) => {}
+            PathSegment::Global(_)
+            | PathSegment::Environment(_)
+            | PathSegment::GlobalTableEntryKey(_)
+            | PathSegment::GlobalTableEntryValue(_) => {}
             PathSegment::TableKey(index) => text.push_str(&format!(".key[{index}]")),
             PathSegment::TableValue(index) => text.push_str(&format!("[{index}]")),
             PathSegment::Metatable => text.push_str(".metatable"),
@@ -888,11 +919,13 @@ impl<'a> SaveBuilder<'a> {
     /// and the loaded table compacts exactly when the saving one would have.
     /// Builtins included: an unshadowed one encodes to a cheap `EnvObj`/`Fn`
     /// token, and skipping builtin names would drop user shadows such as
-    /// `print = function ... end`. Encoded first, each value as a root
+    /// `print = function ... end`. Encoded first, each named value as a root
     /// labelled by its global name, so an unregistered function is reported
-    /// by the global that reaches it. The table is marked expanded first so a
-    /// `_G` self-reference encodes as its token alone, and its rendered
-    /// identity survives whether or not any saved value still references it.
+    /// by the global that reaches it. Other entries use their physical slot
+    /// index and whether the function is in the key or value. The table is
+    /// marked expanded first so a `_G` self-reference encodes as its token
+    /// alone, and its rendered identity survives whether or not any saved
+    /// value still references it.
     fn encode_globals(&mut self) -> Result<(SavedObject, Vec<SavedVal>), SaveError> {
         let ptr = self.state.global_env.table();
         self.expanded_environment_objects.insert(ptr);
@@ -908,7 +941,7 @@ impl<'a> SaveBuilder<'a> {
         let array_slots = u32::try_from(array_slots)
             .map_err(|_| too_large(SaveCollection::TableArraySlots, array_slots))?;
         let mut saved = Vec::with_capacity(entries.len());
-        for (key, value) in entries {
+        for (entry_index, (key, value)) in entries.into_iter().enumerate() {
             // Only a UTF-8 string key reads as a global's name.
             let name = match key {
                 Val::Str(name) => match str::from_utf8(self.state.heap.get_string(name)) {
@@ -923,8 +956,8 @@ impl<'a> SaveBuilder<'a> {
                     self.encode_root(value, &name)?,
                 ),
                 None => (
-                    self.encode_environment_root(key, GLOBALS_TOKEN)?,
-                    self.encode_environment_root(value, GLOBALS_TOKEN)?,
+                    self.encode_global_entry_root(key, entry_index, true)?,
+                    self.encode_global_entry_root(value, entry_index, false)?,
                 ),
             };
             saved.push((key, value));
@@ -973,8 +1006,9 @@ impl<'a> SaveBuilder<'a> {
             // hashes and compares with runtime key equality (-0.0 equals
             // +0.0), and both sides come from table entries, so every key is
             // already a valid table key. `or_insert` keeps the first entry for
-            // a repeated key. Values are still compared with `Val::eq`
-            // directly so a NaN value stays unequal to itself.
+            // a repeated key. Values compare as Lua values except that
+            // numeric values use their saved representation: signed zero is
+            // observable in a save, while NaN remains unequal to itself.
             let mut baseline_values: DetMap<TableKey, Val> =
                 map_with_capacity(baseline.entries.len());
             for (key, value) in &baseline.entries {
@@ -996,7 +1030,7 @@ impl<'a> SaveBuilder<'a> {
             let mut upserts = Vec::new();
             for (key, value) in &live {
                 match baseline_values.get(&TableKey::from_prevalidated(*key)) {
-                    Some(base_value) if base_value == value => {}
+                    Some(base_value) if snapshot_value_eq(*base_value, *value) => {}
                     _ => upserts.push((
                         self.encode_environment_root(*key, &token)?,
                         self.encode_environment_root(*value, &token)?,
@@ -1060,7 +1094,7 @@ impl<'a> SaveBuilder<'a> {
             // transitions between live entries and tombstones. Reuse the tail
             // of the snapshot above instead of walking every physical slot
             // again.
-            let hash_slots = if slots == baseline.hash_slots.as_slice() {
+            let hash_slots = if snapshot_hash_slots_eq(slots, &baseline.hash_slots) {
                 None
             } else {
                 Some(
@@ -1112,7 +1146,7 @@ impl<'a> SaveBuilder<'a> {
     fn encode_root(&mut self, val: Val, global: &str) -> Result<SavedVal, SaveError> {
         let root = self.roots.len();
         self.roots.push(None);
-        self.run_tasks(val, global, root, false)?;
+        self.run_tasks(val, DiagnosticRoot::Global(global), root)?;
         self.roots[root]
             .take()
             .ok_or(SaveError::from(SaveFault::UnfilledRootSlot))
@@ -1121,7 +1155,26 @@ impl<'a> SaveBuilder<'a> {
     fn encode_environment_root(&mut self, val: Val, token: &str) -> Result<SavedVal, SaveError> {
         let root = self.roots.len();
         self.roots.push(None);
-        self.run_tasks(val, token, root, true)?;
+        self.run_tasks(val, DiagnosticRoot::Environment(token), root)?;
+        self.roots[root]
+            .take()
+            .ok_or(SaveError::from(SaveFault::UnfilledRootSlot))
+    }
+
+    fn encode_global_entry_root(
+        &mut self,
+        val: Val,
+        entry_index: usize,
+        is_key: bool,
+    ) -> Result<SavedVal, SaveError> {
+        let root = self.roots.len();
+        self.roots.push(None);
+        let diagnostic_root = if is_key {
+            DiagnosticRoot::GlobalTableEntryKey(entry_index)
+        } else {
+            DiagnosticRoot::GlobalTableEntryValue(entry_index)
+        };
+        self.run_tasks(val, diagnostic_root, root)?;
         self.roots[root]
             .take()
             .ok_or(SaveError::from(SaveFault::UnfilledRootSlot))
@@ -1130,9 +1183,8 @@ impl<'a> SaveBuilder<'a> {
     fn run_tasks(
         &mut self,
         root: Val,
-        global: &str,
+        diagnostic_root: DiagnosticRoot<'_>,
         root_slot: usize,
-        environment: bool,
     ) -> Result<(), SaveError> {
         let mut tasks = vec![EncodeTask::Value {
             val: root,
@@ -1149,7 +1201,7 @@ impl<'a> SaveBuilder<'a> {
                         Val::RustFn(function) => {
                             let Some(id) = self.state.rust_fns.save_id(function) else {
                                 let reachable_from = PathFinder::new(self.state, &self.env_reverse)
-                                    .find(root, global, environment, function)
+                                    .find(root, diagnostic_root, function)
                                     .ok_or(SaveError::from(
                                         SaveFault::UnregisteredFunctionPathNotFound,
                                     ))?;
@@ -1634,6 +1686,29 @@ fn saved_num_bits(n: f64) -> u64 {
     } else {
         n.to_bits()
     }
+}
+
+// Save deltas must preserve signed zero, while NaN retains Lua's never-equal
+// behavior so equal payloads do not suppress a NaN delta.
+fn snapshot_value_eq(left: Val, right: Val) -> bool {
+    match (left, right) {
+        (Val::Num(left), Val::Num(right)) if !left.is_nan() && !right.is_nan() => {
+            left.to_bits() == right.to_bits()
+        }
+        _ => left == right,
+    }
+}
+
+// Hash keys still use Lua equality; only their stored values use snapshot
+// equality, since a key's signed zero cannot distinguish table entries.
+fn snapshot_hash_slots_eq(left: &[(Val, Val)], right: &[(Val, Val)]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|((left_key, left_value), (right_key, right_value))| {
+                left_key == right_key && snapshot_value_eq(*left_value, *right_value)
+            })
 }
 
 fn corrupt_arena(reason: CorruptionReason, index: usize, location: SaveLocation) -> SnapshotError {
@@ -2135,7 +2210,7 @@ fn materialize_payload(
                     invalid_environment_table(
                         &delta.token,
                         None,
-                        TableRestoreStep::RestoreEnvironmentOrder,
+                        TableRestoreStep::RestoreEnvironmentHashSlots,
                         error,
                     )
                 })?;
@@ -3144,7 +3219,7 @@ impl SavedEnvDelta {
                 out.write_bool(true);
                 write_vec(
                     out,
-                    SaveCollection::EnvironmentUpserts,
+                    SaveCollection::EnvironmentHashSlots,
                     slots,
                     |out, (key, value)| {
                         key.encode(out)?;
@@ -3500,6 +3575,17 @@ mod tests {
 
     fn no_setup(_: &mut State) -> std::result::Result<(), Infallible> {
         Ok(())
+    }
+
+    #[test]
+    fn environment_delta_comparison_preserves_signed_zero() {
+        assert!(snapshot_value_eq(Val::Num(1.0), Val::Num(1.0)));
+        assert!(!snapshot_value_eq(Val::Num(0.0), Val::Num(-0.0)));
+        assert!(!snapshot_value_eq(Val::Num(f64::NAN), Val::Num(f64::NAN)));
+        assert!(!snapshot_hash_slots_eq(
+            &[(Val::Num(1.0), Val::Num(0.0))],
+            &[(Val::Num(1.0), Val::Num(-0.0))],
+        ));
     }
 
     #[test]

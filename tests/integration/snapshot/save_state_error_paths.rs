@@ -49,6 +49,58 @@ fn nested_unregistered_function_path_is_rendered_from_its_root() {
 }
 
 #[test]
+fn unregistered_function_in_unnameable_global_slot_has_global_table_path() {
+    let mut state = State::new();
+    state.get_global("_G").expect("global table is available");
+    let key = [0xff];
+    state
+        .push_bytes(&key[..])
+        .expect("non-UTF-8 global key allocates");
+    state
+        .push_new_rust_fn(unregistered)
+        .expect("callback fits on the stack");
+    state
+        .set_table_raw(-3)
+        .expect("callback is stored under the non-UTF-8 key");
+    state.pop(1).expect("global table is no longer needed");
+
+    let error = state
+        .save_state()
+        .expect_err("unregistered function is rejected");
+    let reachable_from = match error {
+        SaveError::UnregisteredFunction { reachable_from } => reachable_from,
+        error => panic!("unexpected save error: {error}"),
+    };
+    assert!(reachable_from.starts_with("global table entry["));
+    assert!(reachable_from.ends_with("].value"));
+    assert!(!reachable_from.starts_with("environment _G"));
+}
+
+#[test]
+fn unregistered_function_used_as_global_table_key_has_key_path() {
+    let mut state = State::new();
+    state.get_global("_G").expect("global table is available");
+    state
+        .push_new_rust_fn(unregistered)
+        .expect("callback fits on the stack");
+    state.push_boolean(true).expect("value fits on the stack");
+    state
+        .set_table_raw(-3)
+        .expect("callback is stored as a global table key");
+    state.pop(1).expect("global table is no longer needed");
+
+    let error = state
+        .save_state()
+        .expect_err("unregistered function is rejected");
+    let reachable_from = match error {
+        SaveError::UnregisteredFunction { reachable_from } => reachable_from,
+        error => panic!("unexpected save error: {error}"),
+    };
+    assert!(reachable_from.starts_with("global table entry["));
+    assert!(reachable_from.ends_with("].key"));
+}
+
+#[test]
 fn unregistered_function_path_in_closed_upvalue_is_rendered() {
     let mut state = State::new();
     state

@@ -513,7 +513,8 @@ impl GlobalEnv {
         } else {
             Phase::Initializing
         }));
-        // Distinct saved ids can intern to one string; keep the first.
+        // Setup can reinstall a saved pin; keep one interned key in the list.
+        // The save verifier has already rejected duplicate saved pin contents.
         self.pins = if sealed {
             let mut pins: IndexSet<StringPtr> = IndexSet::with_capacity_and_hasher(
                 saved_pins.len() + setup.len(),

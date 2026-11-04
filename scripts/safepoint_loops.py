@@ -28,7 +28,7 @@ import sys
 import native_calls as rust
 
 SCOPE_DIRS = ("src/lua_std/", "src/patterns/")
-SCOPE_FILES = ("src/vm/table_ops.rs",)
+SCOPE_FILES = ("src/lua_std.rs", "src/vm/table_ops.rs")
 
 # `for` not followed by `<` (a higher-ranked bound), `while` and `loop`.
 LOOP = re.compile(r"\b(?:(for)\b(?!\s*<)|while\b|loop\b)")

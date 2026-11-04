@@ -178,6 +178,19 @@ fn sequence_readers_refuse_ranges_past_exact_keys() {
 }
 
 #[test]
+fn unpack_checks_result_count_before_integer_key_range() {
+    for function in ["unpack", "table.unpack"] {
+        let source = format!("{function}({{}}, 1, 2^60)");
+        let err = expect_error(&source);
+        assert!(
+            matches!(err.kind(), ErrorKind::TooManyResults { limit }
+                if *limit == dellingr::limits::MAX_RESULTS),
+            "{source}: expected the result-count refusal, got {err}"
+        );
+    }
+}
+
+#[test]
 fn sequence_readers_accept_exact_boundaries_singletons_and_empty_ranges() {
     let mut state = State::new();
     support::try_run(

@@ -799,6 +799,8 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
                 check_registers(pc, a, 4, frame)?;
             }
             Instr::OP_FOR_LOOP => {
+                // No setup-dominance or hidden-control write proof here:
+                // dispatch must reject nonnumeric controls fallibly.
                 check_registers(pc, a, 4, frame)?;
             }
             Instr::OP_TFOR_CALL => {

@@ -152,7 +152,10 @@ impl State {
     /// because its execution is abandoned and every public entry refuses.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn collect_garbage(&mut self) {
-        // Anchors the host dropped stop rooting their values here.
+        // Anchors the host dropped stop rooting their values here, including
+        // in automatic collections during execution. Keep prompt reclamation:
+        // cross-thread drops are asynchronous host input, so replay hosts must
+        // finish and synchronize them between runs (docs/determinism.md).
         self.registry.drain_released();
         // Mark all roots
         let mut worklist = self.heap.take_mark_worklist();

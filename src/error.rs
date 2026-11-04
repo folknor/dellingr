@@ -104,6 +104,9 @@ pub(crate) enum InternalFault {
     /// open upvalue still points at. Compiled code always runs these windows
     /// above every live local; only forged bytecode can reach this.
     WindowOverlapsOpenUpvalue,
+    /// Numeric-for setup was skipped or its hidden controls were overwritten
+    /// by forged bytecode; admission does not prove runtime register types.
+    NumericForControlsNotNumeric,
 }
 
 #[derive(Debug)]
@@ -195,6 +198,9 @@ impl fmt::Display for InternalFault {
             }
             Self::ConstructorTableMissing { operation, actual } => {
                 write!(f, "{operation}: expected table, got {actual}")
+            }
+            Self::NumericForControlsNotNumeric => {
+                f.write_str("numeric for controls must remain numbers after setup")
             }
             Self::WindowOverlapsOpenUpvalue => {
                 f.write_str("a register window overlaps an open upvalue")

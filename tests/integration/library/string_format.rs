@@ -1,7 +1,12 @@
 use dellingr::error::{ErrorKind, ErrorValue};
 use dellingr::{ArgCount, RetCount, State};
 
-use crate::support;
+use crate::support::{self, PushNewRustFn};
+
+fn request_interrupt(state: &mut State) -> dellingr::Result<u8> {
+    state.interrupt().trigger();
+    Ok(0)
+}
 
 fn expect_runtime_error(code: &str, expected: &str) {
     let mut state = State::new();
@@ -77,6 +82,55 @@ fn numeric_strings_and_percent_are_supported() {
         b"100%"
     );
     assert_eq!(support::eval_bytes(r#"return string.format(12)"#), b"12");
+}
+
+#[test]
+fn string_format_preserves_full_input_charges_after_precision() {
+    for (source, expected, cost) in [
+        ("return string.format('%.1s', 'abcdef')", &b"a"[..], 11),
+        (
+            "return string.format('%q|%d', 'abc', '12')",
+            &b"\"abc\"|12"[..],
+            18,
+        ),
+    ] {
+        let mut state = State::new();
+        support::eval(&mut state, source, 1);
+        assert_eq!(
+            state.to_bytes(-1).expect("format returns a string"),
+            expected
+        );
+        assert_eq!(state.cost_used(), cost, "{source}");
+    }
+}
+
+#[test]
+fn string_format_polls_between_directives() {
+    let mut state = State::new();
+    state
+        .push_named_rust_fn("request_interrupt", request_interrupt)
+        .expect("interrupt callback fits");
+    state
+        .set_global("request_interrupt")
+        .expect("interrupt callback is installed");
+    support::load(
+        &mut state,
+        r#"
+        getmetatable("").__tostring = function()
+            getmetatable("").__tostring = nil
+            request_interrupt()
+            return "first"
+        end
+        return string.format("%s%s", "one", "two")
+        "#,
+    );
+    let error = state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect_err("the second directive sees the interrupt");
+    assert!(
+        matches!(error.kind(), ErrorKind::Interrupted),
+        "expected an interrupted format call, got {error}"
+    );
 }
 
 #[test]

@@ -320,11 +320,8 @@ impl Generator<'_> {
     }
 
     fn patch(&mut self, pc: usize, target: usize) -> Result<()> {
-        let offset = target as i64 - (pc as i64 + 1);
-        if offset > i64::from(MAX_JUMP_OFFSET) || offset < -i64::from(MAX_JUMP_OFFSET) - 1 {
-            return Err(CodegenError::JumpTooFar);
-        }
-        self.code[pc] = self.code[pc].with_offset(offset as i32);
+        let offset = Self::checked_jump_offset(pc, target)?;
+        self.code[pc] = self.code[pc].with_offset(offset);
         Ok(())
     }
 
@@ -334,6 +331,16 @@ impl Generator<'_> {
             self.patch(pc, here)?;
         }
         Ok(())
+    }
+
+    fn checked_jump_offset(pc: usize, target: usize) -> Result<i32> {
+        let offset = target as i64 - (pc as i64 + 1);
+        // The compiler contract is symmetric, even though signed 24-bit
+        // encoding has one additional negative value.
+        if offset > i64::from(MAX_JUMP_OFFSET) || offset < -i64::from(MAX_JUMP_OFFSET) {
+            return Err(CodegenError::JumpTooFar);
+        }
+        Ok(offset as i32)
     }
 
     // Statements
@@ -1442,6 +1449,28 @@ mod tests {
         assert_eq!(generator.code[pc].sj(), MAX_JUMP_OFFSET);
         assert!(matches!(
             generator.patch(pc, farthest + 1),
+            Err(CodegenError::JumpTooFar)
+        ));
+    }
+
+    #[test]
+    fn jump_offset_limit_is_symmetric() {
+        let max = usize::try_from(MAX_JUMP_OFFSET).expect("the offset is positive");
+
+        assert!(matches!(
+            Generator::checked_jump_offset(0, max + 1),
+            Ok(offset) if offset == MAX_JUMP_OFFSET
+        ));
+        assert!(matches!(
+            Generator::checked_jump_offset(max - 1, 0),
+            Ok(offset) if offset == -MAX_JUMP_OFFSET
+        ));
+        assert!(matches!(
+            Generator::checked_jump_offset(0, max + 2),
+            Err(CodegenError::JumpTooFar)
+        ));
+        assert!(matches!(
+            Generator::checked_jump_offset(max, 0),
             Err(CodegenError::JumpTooFar)
         ));
     }

@@ -276,10 +276,9 @@ fn a_gmatch_iterator_stops() {
     assert_eq!(support::global_number(&mut state, "n"), 1.0);
 }
 
-/// Raw `table.move` prepays its whole range, then polls before each copy:
-/// interrupted before the first copy, it leaves the destination empty and
-/// `cost_used` counting every copy it paid for. Two runs that differ only in
-/// the range length differ in cost by exactly that many copies.
+/// A pending interrupt stops `table.move` at callback entry, before it
+/// prepays its range or copies anything: the destination stays empty and two
+/// runs that differ only in the range length cost the same.
 #[test]
 fn an_interrupted_raw_move_keeps_its_destination_and_prepaid_cost() {
     let run = |last: u32| {
@@ -294,7 +293,7 @@ fn an_interrupted_raw_move_keeps_its_destination_and_prepaid_cost() {
         assert_eq!(state.to_number(-1).expect("a number"), 0.0, "{source}");
         charged
     };
-    assert_eq!(run(4) - run(1), 3);
+    assert_eq!(run(4), run(1));
 }
 
 #[test]

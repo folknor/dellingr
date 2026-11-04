@@ -30,8 +30,8 @@ mod upvalue;
 /// Tracks the current state, to make parsing easier.
 #[derive(Debug)]
 struct Parser<'a> {
-    // The token stream owns consumed-token line state, so the parser does not
-    // keep a second line field or update it for each token.
+    // The token stream owns consumed-token line and position state, so the
+    // parser does not keep duplicate fields or update them for each token.
     input: TokenStream<'a>,
     /// Every active function, outermost first; field access selects the last.
     funcs: FunctionStack<'a>,
@@ -139,7 +139,8 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Constructs an error of the given kind at the current position.
+    /// Constructs an error just after the last consumed token. Use `error_at`
+    /// when the error belongs to a specific token.
     #[must_use]
     fn error_here(&self, kind: impl Into<ErrorKind>) -> Error {
         let pos = self.input.pos();
@@ -485,7 +486,7 @@ impl<'a> Parser<'a> {
             self.declare(param)?;
         }
 
-        let (body, _) = self.parse_statements()?;
+        let body = self.parse_statements()?;
         self.finish_chunk(num_params, body)
     }
 
@@ -495,9 +496,11 @@ impl<'a> Parser<'a> {
     /// stack only while one function is being finished.
     #[inline(never)]
     fn finish_chunk(&mut self, num_params: u8, body: Vec<Stmt>) -> Result<Bytecode> {
-        // The implicit return belongs to the block terminator, even though
-        // the enclosing parser has not consumed that token yet.
-        let end_line = self.input.peek()?.line;
+        // The implicit return belongs to the block terminator. Keep its token
+        // position because codegen errors are reported before it is consumed.
+        let end = self.input.peek()?;
+        let end_line = end.line;
+        let end_pos = end.start;
 
         // Copy upvalues to chunk
         self.funcs.chunk.upvalues = self.funcs.upvalues.iter().map(|(_, desc)| *desc).collect();
@@ -519,7 +522,7 @@ impl<'a> Parser<'a> {
             locals: finished.decls,
         };
         codegen::generate(&mut chunk, &function).map_err(|error| match error {
-            codegen::CodegenError::JumpTooFar => self.error_here(SyntaxError::JumpTooFar),
+            codegen::CodegenError::JumpTooFar => self.error_at(SyntaxError::JumpTooFar, end_pos),
             codegen::CodegenError::TooManyRegisters { count, line } => Error::new(
                 SyntaxError::TooManyRegisters { count },
                 if line == 0 {
@@ -535,13 +538,11 @@ impl<'a> Parser<'a> {
     }
 
     /// Parses 0 or more statements, possibly separated by semicolons.
-    /// Also returns whether the block's own last statement was a `return`,
-    /// excluding returns inside nested statements (including `do` blocks).
-    fn parse_statements(&mut self) -> Result<(Vec<Stmt>, bool)> {
+    fn parse_statements(&mut self) -> Result<Vec<Stmt>> {
         self.with_syntax_level(1, Self::parse_statements_inner)
     }
 
-    fn parse_statements_inner(&mut self) -> Result<(Vec<Stmt>, bool)> {
+    fn parse_statements_inner(&mut self) -> Result<Vec<Stmt>> {
         let mut stmts = Vec::new();
         loop {
             // Every statement parser runs through `push_statement`, so this
@@ -562,17 +563,17 @@ impl<'a> Parser<'a> {
                 }
                 TokenKind::Return => {
                     self.push_statement(&mut stmts, Self::parse_return)?;
-                    break Ok((stmts, true));
+                    break Ok(stmts);
                 }
                 TokenKind::Break => {
-                    self.input.next()?; // consume 'break' keyword
+                    let token = self.input.next()?;
                     if self.funcs.loops.is_empty() {
-                        break Err(self.error_here(SyntaxError::BreakOutsideLoop));
+                        break Err(self.error_at(SyntaxError::BreakOutsideLoop, token.start));
                     }
                     stmts.push(Stmt::Break);
                     continue;
                 }
-                typ if Self::is_block_follow(typ) => break Ok((stmts, false)),
+                typ if Self::is_block_follow(typ) => break Ok(stmts),
                 // Reference Lua parses any other token as the start of an
                 // expression statement, which fails at its first token.
                 _ => {

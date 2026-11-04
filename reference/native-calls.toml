@@ -493,7 +493,7 @@ excluded = "a `%%` directive formats a literal percent sign and reads no argumen
 id = "format->format_argument:argument"
 
 [[edge]]
-id = "format_argument->tostring_bytes_unguarded"
+id = "format_argument->tostring_rendering"
 
 # src/lua_std/string.rs
 [[edge]]
@@ -808,8 +808,8 @@ name = "format"
 path = [
     "@lua", "@rust",
     "format->format_argument:argument",
-    "format_argument->tostring_bytes_unguarded",
-    "@tostring",
+    "format_argument->tostring_rendering",
+    "tostring_rendering->call_unguarded",
 ]
 
 [[scenario]]

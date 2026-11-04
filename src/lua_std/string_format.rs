@@ -5,6 +5,7 @@ use crate::cost_model::Charge;
 use crate::error::{ArgDetail, ArgError, Error, ErrorKind, LibraryError};
 use crate::limits::{MAX_FORMAT_FIELD_DIGITS, MAX_FORMAT_LEN};
 use crate::numeral::{exact_i64, parse_lua_numeral};
+use crate::vm::TostringRendering;
 use crate::{LuaType, Result, State};
 
 #[derive(Clone, Copy, Default)]
@@ -69,15 +70,15 @@ pub(crate) fn format(state: &mut State) -> Result<u8> {
     let mut argument = 1usize;
     let mut cursor = 0usize;
 
-    // bounded: one pass over the format string's bytes, each directive
-    // rendering one argument; a `__tostring` handler is a Lua call, polled
-    // at its admission.
+    // bounded: one pass over the capped format string's bytes. Each format
+    // directive polls before it is parsed and its argument rendered.
     while cursor < format_bytes.len() {
         if format_bytes[cursor] != b'%' {
             append_output(state, &mut output, &format_bytes[cursor..=cursor])?;
             cursor += 1;
             continue;
         }
+        state.poll_interrupt()?;
         if format_bytes.get(cursor + 1) == Some(&b'%') {
             let (directive, next) = parse_directive(state, &format_bytes, cursor)?;
             let formatted = crate::native_call!(
@@ -361,22 +362,50 @@ fn format_argument(state: &mut State, argument: usize, directive: &Directive) ->
             // Charge the full rendering before precision truncation. Appending
             // the formatted bytes is charged separately: the budget counts
             // both string argument bytes consumed and bytes emitted.
-            let mut bytes = crate::native_call!(
-                "format_argument->tostring_bytes_unguarded",
-                state.tostring_bytes_unguarded(idx)
+            let rendering = crate::native_call!(
+                "format_argument->tostring_rendering",
+                state.tostring_rendering(idx)
             )?;
-            state.charge(Charge::StringFormat, bytes.len() as u64)?;
-            if directive.has_modifiers && bytes.contains(&0) {
-                return Err(format_arg_error(
-                    state,
-                    argument,
-                    ArgDetail::StringContainsZeros,
-                ));
+            match rendering {
+                TostringRendering::Itself => {
+                    let len = state.to_bytes(idx)?.len();
+                    state.charge(Charge::StringFormat, len as u64)?;
+                    let bytes = state.to_bytes(idx)?;
+                    if directive.has_modifiers && bytes.contains(&0) {
+                        return Err(format_arg_error(
+                            state,
+                            argument,
+                            ArgDetail::StringContainsZeros,
+                        ));
+                    }
+                    let selected_len = directive.precision.map_or(bytes.len(), |precision| {
+                        usize::from(precision).min(bytes.len())
+                    });
+                    Ok(pad_bytes(
+                        &bytes[..selected_len],
+                        directive.width,
+                        directive.flags.left,
+                    ))
+                }
+                TostringRendering::Bytes(bytes) => {
+                    state.charge(Charge::StringFormat, bytes.len() as u64)?;
+                    if directive.has_modifiers && bytes.contains(&0) {
+                        return Err(format_arg_error(
+                            state,
+                            argument,
+                            ArgDetail::StringContainsZeros,
+                        ));
+                    }
+                    let selected_len = directive.precision.map_or(bytes.len(), |precision| {
+                        usize::from(precision).min(bytes.len())
+                    });
+                    Ok(pad_bytes(
+                        &bytes[..selected_len],
+                        directive.width,
+                        directive.flags.left,
+                    ))
+                }
             }
-            if let Some(precision) = directive.precision {
-                bytes.truncate(usize::from(precision).min(bytes.len()));
-            }
-            Ok(pad_bytes(&bytes, directive.width, directive.flags.left))
         }
         Conversion::Quoted => quote_argument(state, idx, argument),
         Conversion::Pointer => {
@@ -401,9 +430,10 @@ fn number_argument(state: &mut State, idx: isize, argument: usize) -> Result<f64
     match state.typ(idx) {
         LuaType::Number => state.to_number(idx),
         LuaType::String => {
-            let bytes = state.to_bytes(idx)?.to_vec();
-            state.charge(Charge::StringFormat, bytes.len() as u64)?;
-            parse_lua_numeral(&bytes).ok_or_else(|| {
+            let len = state.to_bytes(idx)?.len();
+            state.charge(Charge::StringFormat, len as u64)?;
+            let number = parse_lua_numeral(state.to_bytes(idx)?);
+            number.ok_or_else(|| {
                 format_arg_type_error(state, argument, LuaType::Number, Some(LuaType::String))
             })
         }
@@ -814,9 +844,9 @@ fn pad_bytes(bytes: &[u8], width: Option<u8>, left: bool) -> Vec<u8> {
 fn quote_argument(state: &mut State, idx: isize, argument: usize) -> Result<Vec<u8>> {
     match state.typ(idx) {
         LuaType::String => {
-            let bytes = state.to_bytes(idx)?.to_vec();
-            state.charge(Charge::StringFormat, bytes.len() as u64)?;
-            quote_string(&bytes)
+            let len = state.to_bytes(idx)?.len();
+            state.charge(Charge::StringFormat, len as u64)?;
+            quote_string(state.to_bytes(idx)?)
         }
         LuaType::Number => {
             let number = state.to_number(idx)?;
