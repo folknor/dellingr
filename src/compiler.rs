@@ -175,8 +175,8 @@ fn finalize(bc: &mut Bytecode) -> Result<()> {
 }
 
 fn validation_error(bc: &Bytecode, validation: verify::BytecodeValidationError) -> error::Error {
-    // Internal errors start without a location. The error representation uses
-    // 0:0 for that state; attach a line only when the verifier identifies one.
+    // Internal errors start without a location (line 0, column 0); attach a
+    // line only when the verifier identifies one.
     let line = validation
         .instruction
         .and_then(|instruction| bc.line_info.get(instruction as usize))

@@ -202,3 +202,46 @@ fn off_save_with_use_or_a_budget_is_rejected() {
         (counters, DecodeReason::InconsistentCostMeter)
     );
 }
+
+#[test]
+fn setup_can_reject_untrusted_costing_before_materialization() {
+    let mut zero_weights = State::new().save_state().unwrap().bytes;
+    let first_weight = costing_tag_offset() + 1;
+    zero_weights[first_weight..first_weight + 4 * Charge::ALL.len()].fill(0);
+
+    // A budget reset does not restore the host's prices.
+    let mut loaded = load(&zero_weights).unwrap();
+    loaded.set_cost_budget(1).unwrap();
+    support::run(&mut loaded, ONE_ADD);
+    assert_eq!(loaded.cost_used(), 0);
+    assert_eq!(loaded.cost_remaining(), 1);
+
+    let off = State::builder()
+        .costing(Costing::Off)
+        .build()
+        .save_state()
+        .unwrap()
+        .bytes;
+    let expected = Costing::default();
+    for bytes in [&zero_weights, &off] {
+        let result = State::load_state(bytes, Box::new(DefaultCallbacks), |state| {
+            if state.costing() != &expected {
+                return Err("unexpected saved costing");
+            }
+            Ok(())
+        });
+        assert!(matches!(
+            result,
+            Err(LoadError::Setup("unexpected saved costing"))
+        ));
+    }
+
+    let bytes = State::new().save_state().unwrap().bytes;
+    let accepted = State::load_state(&bytes, Box::new(DefaultCallbacks), |state| {
+        if state.costing() != &expected {
+            return Err("unexpected saved costing");
+        }
+        Ok(())
+    });
+    assert!(accepted.is_ok());
+}

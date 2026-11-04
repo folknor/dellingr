@@ -160,6 +160,21 @@ fn unnamed_functions_are_labelled_by_where_they_were_defined() {
 }
 
 #[test]
+fn defined_line_is_the_function_keyword_line_not_the_parameter_list() {
+    let error = run_error("local f = function\n(x)\n  error('x')\nend\nf()");
+    let frames: Vec<String> = error
+        .stack_trace()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        frames,
+        ["t:3: in function <t:1>", "t:5: in main chunk"],
+        "{error}"
+    );
+}
+
+#[test]
 fn immediately_invoked_function_is_not_a_main_chunk() {
     let error = run_error("(function() error('x') end)()");
     let rendered = error.to_string();

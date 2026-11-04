@@ -94,18 +94,6 @@ Fix: map level 1, absent and nil to one `PrefixLocation`, either by folding
 `TraceFrame(0)` into `Current` or by having the no-argument path produce
 `TraceFrame(0)`.
 
-## RT-010 - Lateral: global stores silently drop a write to a vacant cached slot
-
-Scope: `vm-heap`. Not a defect today; latent hazard.
-
-`GlobalEnv::write_cached` and `GlobalEnv::write` ignore `Table::write_slot`'s
-`false` (vacant or missing slot) and report the store done. Unreachable now
-because the global table revives in place and never creates `Vacant` keys, and
-`hash_slot_of` never returns one. A future policy change, or a load path that
-admits `(nil, nil)` slots into the global table, would turn a global store into
-a silent no-op. Suggested: a `debug_assert!` on the return, or make
-`write_slot` infallible for revive-in-place maps.
-
 ## RT-011 - Lateral: the release-mode upvalue pool is not defensive against double free
 
 Scope: `vm-heap`. Latent; reachable only through a root-set bug.
@@ -116,29 +104,6 @@ release, marking a freed slot flips it to `Reachable`; the next sweep sets it to
 second time, after which two allocations share one slot. The failure mode is
 silent upvalue aliasing, unlike the heap's `get`, which fails loudly on a stale
 key.
-
-## RT-012 - Lateral: GcHeap::get_mut couples every mutable access to the builtin-mirror epoch
-
-Scope: `vm-heap`. Correct today; structural smell.
-
-Every mutable access to any object compares against `watched` and bumps the
-global epoch, so the builtin mirror is invalidated by `_G.x = 1`,
-`rawset(_G, ...)` or any table-library call on `_G`, even for non-builtin keys.
-The coupling between a generic accessor and one table's cache lives in
-`object.rs`, and the one bypass (`watched_table_unmarked`) relies on a `builtin`
-bit the caller cached. A `GlobalEnv`-owned mutation API would make the epoch
-rule local.
-
-## RT-013 - Lateral: template tombstones are compacted by the first unrelated keyed insert
-
-Scope: `vm-heap`. Correct result; possibly defeats the template's purpose.
-
-`Table::with_template_keys` makes every template key a tombstone
-(`dead_count == map.len()`), so the first `INIT_INDEX` or non-pinned insert into
-a template table (live 0, dead n) compacts all reserved slots and bumps the
-version; later `INIT_FIELD_PINNED` writes then miss `init_at_index` and fall back
-to keyed inserts. That defeats templates for constructors that put computed keys
-before named ones. The hunter suggests checking codegen's emission order.
 
 ## RT-014 - Lateral: inline-cache validation is re-implemented at every consumer
 
@@ -216,16 +181,6 @@ Each literal byte of the format string goes through `append_output`
 with `charge_units`, which matches per-byte admission exactly (as
 `append_bytes_units` does in gsub). `%%` also goes through `parse_directive`,
 `format_argument` and a `Vec` allocation to emit one byte.
-
-## RT-021 - Lateral: SplitMix64 seeds a gamma apart give overlapping streams
-
-Scope: `stdlib-core`. Documentation suggestion, not a defect.
-
-Seeds differing by a multiple of the gamma constant `0x9e3779b97f4a7c15` give
-the same stream shifted by whole draws (seed `s + gamma` is seed `s` one draw
-later). Acceptable under "not cryptographic", but a host deriving per-entity
-seeds as `base + k * gamma` would get overlapping streams. A sentence in
-`set_rng_seed`'s doc would head this off.
 
 ## RT-022 - Lateral: subject and pattern are copied on every pattern call
 

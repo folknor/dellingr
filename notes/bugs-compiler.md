@@ -18,26 +18,6 @@ documents and may be wrong; verify before fixing.
    and they are never deduplicated through git history. Carry the context
    inline instead.
 
-## COMP-001 - defined_line is the line of the parameter list's paren, not the function keyword
-
-Scope: `compiler-front`. Snapshot-visible: `Bytecode::defined_line` is saved, so
-a fix must be called out.
-
-`parser/func.rs` `parse_fndef` runs `let defined_line =
-self.input.peek()?.line;` after the `function` keyword and the name have been
-consumed, so it stamps the line of the parameter list's `(`. Meanwhile:
-
-- the closure-creation stamp of a function expression is the `function`
-  keyword's line (`ExprKind::Function { line: tok.line }` in
-  `parse_expr_base`), and CHANGELOG says `function` statements and expressions
-  record their `function` keyword's line;
-- reference Lua's `linedefined` is the `function` keyword's line in 5.2 and 5.4;
-- `reference/error-reporting.md` shows an unnamed function as
-  `function <source:line>` "with the line it was defined on".
-
-For `local f = function\n(x) ... end` the traceback label says line 2 while the
-CLOSURE instruction is stamped line 1.
-
 ## COMP-002 - Error::is_recoverable misses two end-of-input cases it claims to cover
 
 Scope: `compiler-front`. Matters only to host REPLs, which are the method's sole

@@ -165,17 +165,17 @@ fn error_function_produces_error() {
 #[test]
 fn error_level_selects_or_suppresses_only_the_prefix() {
     let default = run_error("error('boom')");
-    assert!(format!("{default}").starts_with("1:0: boom"));
+    assert!(format!("{default}").starts_with("1: boom"));
 
     let zero = run_error("error('boom', 0)");
     assert!(format!("{zero}").starts_with("boom\nstack traceback:"));
 
     let one = run_error("error('boom', 1)");
-    assert!(format!("{one}").starts_with("1:0: boom"));
+    assert!(format!("{one}").starts_with("1: boom"));
 
     let two = run_error("local function f() error('boom', 2) end\nf()");
     assert_eq!(two.stack_trace().len(), 2);
-    assert!(format!("{two}").starts_with("2:0: boom"));
+    assert!(format!("{two}").starts_with("2: boom"));
 
     let out_of_range = run_error("error('boom', 99)");
     assert!(format!("{out_of_range}").starts_with("boom\nstack traceback:"));

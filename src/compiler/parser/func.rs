@@ -31,7 +31,7 @@ impl<'a> Parser<'a> {
             Variable::Global(name) => Place::Global(name),
             Variable::Builtin(builtin) => Place::Builtin(builtin),
         };
-        let nested = self.parse_fndef(Some(name.to_string()), false)?;
+        let nested = self.parse_fndef(Some(name.to_string()), false, line)?;
         Ok(Stmt::Function {
             target,
             nested,
@@ -86,7 +86,7 @@ impl<'a> Parser<'a> {
         } else {
             Expr::new(ExprKind::Suffixed(Box::new(Suffixed { base, suffixes })))
         };
-        let nested = self.parse_fndef(Some(full_name), method)?;
+        let nested = self.parse_fndef(Some(full_name), method, line)?;
         Ok(Stmt::Function {
             target: Place::Field { object, name },
             nested,
@@ -106,7 +106,7 @@ impl<'a> Parser<'a> {
         let name = self.find_or_add_string(method_name)?;
 
         // Parse the function params and body with implicit self.
-        let nested = self.parse_fndef(Some(full_name), true)?;
+        let nested = self.parse_fndef(Some(full_name), true, line)?;
         Ok(Stmt::Function {
             target: Place::Field { object, name },
             nested,
@@ -152,9 +152,14 @@ impl<'a> Parser<'a> {
     /// Parses the parameters and body of a function definition with an
     /// optional diagnostic name. A `method` (`function t:m()`) gets the
     /// implicit leading `self` parameter. Returns the new function's
-    /// nested-chunk index.
-    pub(super) fn parse_fndef(&mut self, name: Option<String>, method: bool) -> Result<u8> {
-        let defined_line = self.input.peek()?.line;
+    /// nested-chunk index. `defined_line` is the line of the `function`
+    /// keyword.
+    pub(super) fn parse_fndef(
+        &mut self,
+        name: Option<String>,
+        method: bool,
+        defined_line: u32,
+    ) -> Result<u8> {
         let (mut params, is_vararg) = self.parse_params()?;
         if method {
             params.insert(0, "self");

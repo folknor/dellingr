@@ -443,6 +443,12 @@ impl GcHeap {
             .expect("Invalid ObjectPtr: object was freed (use-after-free detected)")
     }
 
+    // Keep invalidation here: `_G` is an ordinary table and can be mutated
+    // through aliases, rawset and library operations without GlobalEnv. At
+    // this boundary the key and intended operation are unknown, so even a
+    // non-builtin write conservatively invalidates the mirror. Moving this
+    // into GlobalEnv alone misses those routes; classifying each generic
+    // table write would add key checks to ordinary table mutations.
     /// Get a mutable reference to the wrapped object.
     /// Panics if the key is invalid (use-after-free detection).
     #[inline]
@@ -462,6 +468,9 @@ impl GcHeap {
         self.watched_epoch = self.watched_epoch.wrapping_add(1);
     }
 
+    // This bypass is for version-validated global slot caches only. Their
+    // builtin bit is classified from the key when filling the cache, so the
+    // steady non-builtin store needs neither a key lookup nor an epoch bump.
     /// The watched table, mutably, without moving its epoch. Only for a
     /// store that provably cannot change what the epoch guards (the global
     /// table's cached store to a slot whose key is not a builtin name, which

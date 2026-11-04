@@ -83,10 +83,20 @@ pub trait HostCallbacks: Send {
     /// solely through the `Result`; a callback that returns one of them as its
     /// own failure reports it then, like any other callback error.
     ///
-    /// Function labels in displayed argument errors are best-effort diagnostic
-    /// text. Generic Rust callback checks can resolve a label from current
-    /// globals or, with `snapshot`, a registered function id; aliases and build
-    /// settings can affect the result. Do not treat that label as a stable id.
+    /// Other host APIs, including `concat`, `set_metatable_of`,
+    /// `table_insert_at`, `table_remove_at` and `raw_field`, return failures
+    /// without notifying at their own boundary, even when they use an error
+    /// kind also used during execution. If a Rust callback returns one of
+    /// those errors as its own failure, it is reported at the callback
+    /// boundary, like any other callback error.
+    ///
+    /// Function labels in displayed argument errors are diagnostic text, not
+    /// stable identifiers. `State::check_any` and `State::check_type` failures
+    /// use the active Rust function entry's diagnostic name, fixed when that
+    /// entry was created; a host check made outside a callback has no name.
+    /// Standard-library validators that use named helpers supply their own
+    /// explicit name. Aliases, global rebinding and the `snapshot` feature do
+    /// not change these names.
     ///
     /// # Arguments
     /// * `error` - The error that occurred (with source name and stack trace

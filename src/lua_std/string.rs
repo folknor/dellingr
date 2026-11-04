@@ -75,11 +75,13 @@ pub(crate) fn gmatch_iterator_bytecode() -> Arc<crate::compiler::Bytecode> {
 // measures units (per call, per byte, per element, per matcher step) and the
 // registry supplies the weight of the `Charge` of the function the work is
 // done for. Changing what a function charges under the default model
-// (including the pattern bytes that find/match/gsub charge twice, or the free
-// `string.len`, `print`, `tostring` and `select`) changes `cost_used` for
-// existing scripts and replays, so it still needs a COST_MODEL_VERSION bump
-// and invalidates saves. Native calls are opaque to the `analyze_cost` static
-// walk, so it cannot see these charges.
+// (including the repeated pattern-byte charge in `find`, `match`, `gsub` and
+// nonempty `gmatch`, or `gsub`'s per-application replacement-template length
+// charge in addition to emitted bytes, or the free `string.len`, `print`,
+// `tostring` and `select`) changes `cost_used` for existing scripts and
+// replays, so it still needs a COST_MODEL_VERSION bump and invalidates saves.
+// Native calls are opaque to the `analyze_cost` static walk, so it cannot see
+// these charges.
 fn charge_bytes(state: &mut State, charge: Charge, bytes: usize) -> Result<()> {
     state.charge(charge, bytes.max(1) as u64)
 }

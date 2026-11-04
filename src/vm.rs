@@ -537,6 +537,11 @@ impl State {
     }
 
     /// Sets the RNG seed for deterministic math.random() behavior.
+    ///
+    /// Adding `k * 0x9e3779b97f4a7c15` to a seed, with wrapping `u64`
+    /// arithmetic, shifts the SplitMix64 stream by `k` draws. Distinct seeds
+    /// chosen this way therefore produce overlapping streams, not independent
+    /// per-entity streams.
     pub fn set_rng_seed(&mut self, seed: u64) {
         self.rng = VmRng::seed_from_u64(seed);
     }
@@ -718,6 +723,11 @@ impl State {
         #[cfg(test)]
         {
             self.pattern_compilations = self.pattern_compilations.saturating_add(1);
+        }
+        // The cache is only an optimization. An entry that cannot fit by
+        // itself must bypass it rather than evicting every cached pattern.
+        if PATTERN_CACHE_ENTRIES == 0 || pattern_len > PATTERN_CACHE_BYTES {
+            return compiled;
         }
         while self.patterns.len() >= PATTERN_CACHE_ENTRIES
             || self.pattern_bytes.saturating_add(pattern_len) > PATTERN_CACHE_BYTES
@@ -1095,14 +1105,29 @@ impl State {
     // Host callbacks
     // ========================================================================
 
+    /// Prefer the script caller over the private `string.gmatch` shim when
+    /// reporting source context. Keep the shim when it has no script caller.
+    /// Takes the call stack rather than `&self` so the returned borrow stays
+    /// disjoint from `self.callbacks`.
+    fn host_context_frame(call_stack: &[CallInfo]) -> Option<&CallInfo> {
+        let last = call_stack.last()?;
+        if !Self::is_gmatch_wrapper(&last.bytecode) {
+            return Some(last);
+        }
+        call_stack
+            .iter()
+            .rev()
+            .skip(1)
+            .find(|info| !Self::is_gmatch_wrapper(&info.bytecode))
+            .or(Some(last))
+    }
+
     /// Called by the built-in `print()` function.
     /// Routes output, byte-exact, through host callbacks with source context.
     pub(crate) fn host_print(&mut self, message: &[u8]) {
         // Get current line from call stack (if available)
-        let line = self
-            .in_flight
-            .call_stack
-            .last()
+        let frame = Self::host_context_frame(&self.in_flight.call_stack);
+        let line = frame
             .and_then(|info| {
                 info.bytecode
                     .line_info
@@ -1111,40 +1136,27 @@ impl State {
             })
             .unwrap_or(0);
 
-        let source = self
-            .in_flight
-            .call_stack
-            .last()
-            .and_then(|info| info.bytecode.source.as_deref());
+        let source = frame.and_then(|info| info.bytecode.source.as_deref());
         self.callbacks.on_print(source, line, message);
     }
 
     /// Called when an error occurs. Notifies host callbacks.
     pub(crate) fn host_error(&mut self, error: &mut Error) {
         if error.mark_reported() {
-            // Gmatch implementation chunks are left out of error locations,
-            // so their names must not fill in an error the caller's frame
-            // located (an unnamed caller included). A shim with no script
-            // caller keeps its own name, as its trace keeps its own frame.
-            let source = self
-                .in_flight
-                .call_stack
-                .iter()
-                .rev()
-                .find(|info| !Self::is_gmatch_wrapper(&info.bytecode))
-                .or(self.in_flight.call_stack.last())
+            // Gmatch implementation chunks are omitted when a script caller
+            // can provide source context; a host-invoked shim keeps its own.
+            let source = Self::host_context_frame(&self.in_flight.call_stack)
                 .and_then(|info| info.bytecode.source.as_ref());
             error.attach_source_name_if_absent(source);
             self.callbacks.on_error(error);
         }
     }
 
-    /// Returns the active Lua frame's chunk name, byte-exact, or `None`
-    /// outside execution or in an unnamed chunk.
+    /// Returns the active script caller's chunk name, byte-exact, or `None`
+    /// outside execution or in an unnamed chunk. The private `string.gmatch`
+    /// shim is skipped when a script caller exists.
     pub fn current_source(&self) -> Option<&[u8]> {
-        self.in_flight
-            .call_stack
-            .last()
+        Self::host_context_frame(&self.in_flight.call_stack)
             .and_then(|info| info.bytecode.source.as_deref())
     }
 
@@ -1545,8 +1557,9 @@ impl State {
     /// poisoned State refuses its fallible operations with
     /// [`ErrorKind::StatePoisoned`] (snapshot saving with its own
     /// state-poisoned error). Infallible host controls and observations,
-    /// such as the cost budget, user data, counters and this method, remain
-    /// available. Dropping the State is always safe.
+    /// such as cost observations, user data, counters and this method, remain
+    /// available. Fallible operations such as `set_cost_budget` are refused.
+    /// Dropping the State is always safe.
     pub fn is_poisoned(&self) -> bool {
         self.poisoned
     }

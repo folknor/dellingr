@@ -28,8 +28,10 @@ diagnostic and may change between versions.
 If a CLI stdout write for help, `--analyze`, `--dump-bytecode` or script `print()` encounters a
 closed pipe, the CLI stops quietly with status 0. Library users of
 `DefaultCallbacks` get nonpanicking writes; that infallible callback ignores
-write errors. Stderr write failures do not panic; the command retains its
-normal result.
+write errors. Other stdout write failures are reported immediately with
+status 1. If one happens during script `print()`, the callback exits before
+the script finishes and before the cost summary can be printed. Stderr write
+failures do not panic; the command retains its normal result.
 
 The `--analyze` warning uses `CostAnalysis::caveat()` and the shared
 `cli::ANALYSIS_WARNING_PREFIX`. Library hosts can use the same caveat when
@@ -59,11 +61,13 @@ presenting an analysis.
 
 ## Exit status
 
-Bad arguments, unreadable files, parse errors, runtime errors and budget
-exhaustion exit 1. Parse errors are reported before execution and do not
-produce a cost summary; the cost summary is still attempted before an execution
-error is reported. A closed stdout pipe during CLI output exits quietly with
-status 0. The CLI's handled exit paths use 0 or 1, never 124, which `timeout(1)`
-uses for a timeout. Unhandled panics and process aborts can produce other
-statuses. The CLI is a development tool; hosts embed the library and see typed
-errors through the API.
+Bad arguments, unreadable files, compilation errors, runtime errors and budget
+exhaustion exit 1. Compilation errors are reported before execution and do not
+produce a cost summary. After the VM call returns, the cost summary is still
+attempted before an execution error is reported. A non-pipe stdout write
+failure during script output exits from the callback immediately, before the
+VM call returns, so it does not produce a cost summary. A closed stdout pipe
+during CLI output exits quietly with status 0. The CLI's handled exit paths
+use 0 or 1, never 124, which `timeout(1)` uses for a timeout. Unhandled panics
+and process aborts can produce other statuses. The CLI is a development tool;
+hosts embed the library and see typed errors through the API.

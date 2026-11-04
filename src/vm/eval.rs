@@ -149,9 +149,10 @@ impl State {
         num_args: impl CallArguments,
         num_ret_expected: RetCount,
     ) -> Result<()> {
-        // ArgCount::Dynamic is resolved by the executing Lua Frame against
-        // its own pending base. Hosts never own such a base, so the public
-        // entry point rejects Dynamic before touching any state.
+        // ArgCount::Dynamic is resolved by the executing Lua Frame from the
+        // number of stack values above the callee. A host call has no bytecode
+        // open tail to resolve, so the public entry point rejects Dynamic
+        // before touching any state.
         //
         // This and the InvalidStackIndex preflight below are returned
         // without notifying on_error: they are host misuse detected before
@@ -470,11 +471,12 @@ impl State {
         self.in_flight.metamethod_depth -= charges;
     }
 
-    /// The one place a Rust callback is invoked. Every RustFn call - `call_op`
-    /// and the generic-for fast path alike - goes through here, so the
-    /// callback ABI (frame boundary, active function and result validation)
-    /// has a single implementation. The enclosing call boundary or invocation
-    /// unwind owns error reporting.
+    /// The one place a Rust callback is invoked. Direct calls, handlers
+    /// reached through `__call`, and generic-for's Rust iterator fast path all
+    /// enter here, so the callback ABI (frame boundary, active function and
+    /// result validation) has a single implementation. The interrupt is
+    /// polled before callback bookkeeping changes; the enclosing call boundary
+    /// or invocation unwind owns error reporting.
     ///
     /// Precondition: the callee's arguments occupy `stack[call_base..]` and
     /// the function value itself is no longer on the stack. On success the

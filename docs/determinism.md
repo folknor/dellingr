@@ -189,11 +189,14 @@ identifiers, and are not a cross-build log format.
 
 - Standard-library validators that use their named helpers supply explicit
   names. These do not vary.
-- Generic Rust callbacks checked with `State::check_any` or
-  `State::check_type` get a label from the current global bindings or, with
-  the `snapshot` feature, from the registered function id.
-- The label can therefore differ between feature sets or builds, and when
-  globals are rebound.
+- Generic Rust callback checks use the active Rust function entry's diagnostic
+  name, fixed when the entry was created. `State::add_rust_fn` and
+  `State::register_rust_fn` take that name directly; the name passed to
+  `State::set_global_named_rust_fn` is used for its entry. Standard-library
+  entries use their catalog names.
+- The name does not depend on globals, aliases or the `snapshot` feature. A
+  host that registers its own function under a different name in another build
+  can produce different diagnostic text.
 
 Match on `ErrorKind`, not on `Display` text. See
 `reference/error-reporting.md` for the naming rules.

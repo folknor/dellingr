@@ -1132,6 +1132,10 @@ impl Generator<'_> {
             TableAlloc::Template(template) => Instr::new_table_template(reg, template),
         };
         self.emit_at(alloc, table.line);
+        // The parser selects templates only for unique, all-named fields, so
+        // this walk cannot put a positional batch or computed-key insert
+        // before a pinned write. Keep source order because value expressions
+        // can have visible side effects.
         for (index, item) in table.items.iter().enumerate() {
             match item {
                 TableItem::Positional(value) => {

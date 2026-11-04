@@ -56,6 +56,11 @@ cost-model decision):
   `max(1, subject + pattern)` and again as `max(1, pattern)`. `gmatch`
   charges the sum at creation and the pattern again on the first iterator
   call. An empty `gmatch` pattern charges nothing after creation.
+- A `gsub` string replacement template charges its length up front on each
+  applied match and then charges every byte it emits, so a literal template
+  `xyz` costs 6 per match while a function returning `xyz` costs 3 output
+  bytes. `docs/budget.md` now states the units; whether the asymmetry is
+  intended is open, and removing it would bump `COST_MODEL_VERSION`.
 - `table.insert` and `table.remove` charge their flat 1 before validating
   their arguments, so an argument error still costs 1.
 - `load_state` discards whatever setup charged or budgeted when it restores

@@ -1,4 +1,4 @@
-//! Lua's Standard Library
+//! Lua's base library
 
 use super::{check_any_named, check_type_named};
 use crate::LuaType;

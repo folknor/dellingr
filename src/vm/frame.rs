@@ -22,10 +22,10 @@ use crate::limits::tuning;
 ///
 /// The frame's registers are the stack slots `[stack_bottom, top)`, reserved
 /// and nil-filled at admission, with `FRAME_HEADROOM` checked free above
-/// them. While its bytecode runs the stack is at least `top` long; it is
-/// exactly `top` except between an instruction that leaves open results and
-/// the one that consumes them, and while an instruction's call window sits
-/// above the frame.
+/// them. While its bytecode runs, the stack normally has exactly `top` slots.
+/// Its length can differ while an instruction's call window is open, and
+/// between a verified open-result producer and its next-instruction consumer,
+/// when it can be shorter or longer than `top`.
 pub(super) struct Frame {
     /// The bytecode being executed (shared via Arc; cheap to clone, immutable).
     bytecode: Arc<Bytecode>,

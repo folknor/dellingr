@@ -1217,7 +1217,7 @@ mod tests {
     fn lparen_is_plain_whatever_precedes_it() {
         // A `(` is always an ordinary `LParen`, on the same line or a later
         // one, with or without comments between: the parser reads it as a
-        // call continuation, as reference Lua does.
+        // call continuation, a syntax Lua 5.4 accepts and Lua 5.2 rejects.
         for input in [
             "f(g)",
             "f (g)",

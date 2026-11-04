@@ -574,8 +574,8 @@ fn break_allows_semicolons_and_following_statements() {
 
 #[test]
 fn a_new_line_paren_continues_the_call() {
-    // A `(` on a new line continues the previous expression as a call, as in
-    // reference Lua: the program is `print()(foo)()`.
+    // Lua 5.4 accepts a `(` on a new line as a call continuation; Lua 5.2
+    // rejects it. The program is `print()(foo)()`.
     let expected = parse_unfinalized("print()(foo)()").expect("same-line form compiles");
     for text in [
         "print()\n(foo)()\n",

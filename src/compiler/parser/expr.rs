@@ -439,7 +439,7 @@ impl Parser<'_> {
             }
             TokenKind::LiteralString => self.literal_string(tok)?,
             TokenKind::Function => {
-                let nested = self.parse_fndef(None, false)?;
+                let nested = self.parse_fndef(None, false, tok.line)?;
                 Expr::new(ExprKind::Function {
                     nested,
                     line: tok.line,

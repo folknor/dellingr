@@ -29,7 +29,8 @@ impl fmt::Display for LossyBytes<'_> {
     }
 }
 
-/// A single frame in a stack trace.
+/// A single frame in a stack trace. An absent source name is omitted from its
+/// display; it does not indicate a native frame.
 #[derive(Debug, Clone)]
 pub struct StackFrame {
     /// Function name (if known), shared with the chunk that executed.
@@ -37,7 +38,7 @@ pub struct StackFrame {
     /// Chunk name exactly as given to `Program::compile`, shared with the
     /// chunk that executed. Byte-exact; `Display` renders it lossily.
     pub source: Option<Arc<[u8]>>,
-    /// Line number where the call occurred (1-indexed).
+    /// Line number where the call occurred (1-indexed), or 0 if unknown.
     pub line: u32,
     /// Line where the function was defined (1-indexed), or 0 for a main
     /// chunk. `Display` uses it to label an unnamed function that is not the
@@ -342,7 +343,6 @@ impl ErrorContext {
 
 impl fmt::Display for StackFrame {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let source = LossyBytes(self.source.as_deref().unwrap_or(b"[C]"));
         let func_desc = match (&self.function_name, self.defined_line) {
             (Some(name), _) => format!("function '{name}'"),
             (None, 0) => "main chunk".to_string(),
@@ -351,7 +351,14 @@ impl fmt::Display for StackFrame {
                 None => format!("function <?:{defined}>"),
             },
         };
-        write!(f, "{}:{}: in {}", source, self.line, func_desc)
+        match self.source.as_deref() {
+            Some(source) if self.line != 0 => {
+                write!(f, "{}:{}: in {}", LossyBytes(source), self.line, func_desc)
+            }
+            Some(source) => write!(f, "{}: in {}", LossyBytes(source), func_desc),
+            None if self.line != 0 => write!(f, "{}: in {}", self.line, func_desc),
+            None => write!(f, "in {func_desc}"),
+        }
     }
 }
 
@@ -893,13 +900,11 @@ pub enum MalformedPatternDetail {
 
 /// Argument error raised by builtins or host functions.
 ///
-/// A missing `func_name` means no name was supplied or resolved. When
-/// `State::check_any` or `State::check_type` fails inside a Rust callback, the
-/// VM looks the callback up only then: first the first current global bound to
-/// the same function pointer, then, with the `snapshot` feature, the callback's
-/// registered stable id. Callbacks found by neither remain anonymous. The name
-/// is diagnostic text and can differ between builds; see
-/// `reference/error-reporting.md`.
+/// A missing `func_name` means no name was supplied. When `State::check_any`
+/// or `State::check_type` fails inside a Rust callback, the VM uses the
+/// diagnostic name stored in that Rust function's entry when it was created.
+/// It does not look up a global or depend on the `snapshot` feature. Names are
+/// diagnostic text, not stable identifiers; see `reference/error-reporting.md`.
 #[derive(Debug)]
 pub struct ArgError {
     /// 1-based argument index that failed validation. Negative values count
@@ -1275,6 +1280,8 @@ impl Error {
 
     /// Construct an error without source-location information. Used for
     /// errors raised before any chunk has been parsed (e.g. host API misuse).
+    /// If no source name or line is later attached, `Display` adds no location
+    /// prefix.
     pub fn without_location(kind: ErrorKind) -> Self {
         Self::boxed(kind, 0, 0)
     }
@@ -1635,19 +1642,21 @@ impl fmt::Display for Error {
         };
         let suppress_prefix = matches!(prefix_location, PrefixLocation::Suppressed)
             || matches!(prefix_location, PrefixLocation::TraceFrame(_)) && prefix_frame.is_none();
-        // The line always comes from the selected frame, whether or not that
-        // frame knows its source name. Falling back to `self.0.line_num` when the
-        // source is absent would report the innermost line under an
-        // `error(msg, 2)` that deliberately selected a caller.
+        // The location always comes from the selected frame, whether or not
+        // that frame knows its source name. Falling back to `self.0.line_num`
+        // when the source is absent would report the innermost line under an
+        // `error(msg, 2)` that deliberately selected a caller. A missing
+        // source and line means there is no location prefix to render.
         if suppress_prefix {
             write!(f, "{}", self.0.kind)?;
         } else {
             match prefix_frame {
-                Some(frame) => match frame.source.as_deref() {
-                    Some(source) => {
-                        write!(f, "{}:{}: {}", LossyBytes(source), frame.line, self.0.kind)?;
+                Some(frame) => match (frame.source.as_deref(), frame.line) {
+                    (Some(source), line) if line != 0 => {
+                        write!(f, "{}:{line}: {}", LossyBytes(source), self.0.kind)?;
                     }
-                    None => {
+                    (Some(source), _) => write!(f, "{}: {}", LossyBytes(source), self.0.kind)?,
+                    (None, line) if line != 0 => {
                         // `self.0.column` belongs to the innermost error site.
                         // Pair it with the frame's line only when that frame
                         // IS the innermost site; otherwise the column is
@@ -1658,8 +1667,13 @@ impl fmt::Display for Error {
                         ) && frame.line != 0
                             && frame.line == self.0.line_num;
                         let column = if same_site { self.0.column } else { 0 };
-                        write!(f, "{}:{}: {}", frame.line, column, self.0.kind)?;
+                        if column == 0 {
+                            write!(f, "{line}: {}", self.0.kind)?;
+                        } else {
+                            write!(f, "{line}:{column}: {}", self.0.kind)?;
+                        }
                     }
+                    (None, _) => write!(f, "{}", self.0.kind)?,
                 },
                 None => match self.source_name().map(LossyBytes) {
                     Some(source) if self.0.line_num != 0 && self.0.column != 0 => write!(
@@ -1671,7 +1685,13 @@ impl fmt::Display for Error {
                         write!(f, "{source}:{}: {}", self.0.line_num, self.0.kind)?;
                     }
                     Some(source) => write!(f, "{source}: {}", self.0.kind)?,
-                    None => write!(f, "{}:{}: {}", self.0.line_num, self.0.column, self.0.kind)?,
+                    None if self.0.line_num != 0 && self.0.column != 0 => {
+                        write!(f, "{}:{}: {}", self.0.line_num, self.0.column, self.0.kind)?;
+                    }
+                    None if self.0.line_num != 0 => {
+                        write!(f, "{}: {}", self.0.line_num, self.0.kind)?;
+                    }
+                    None => write!(f, "{}", self.0.kind)?,
                 },
             }
         }

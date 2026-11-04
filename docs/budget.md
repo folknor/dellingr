@@ -175,15 +175,26 @@ String library:
 - `upper`, `lower`, `reverse`: input bytes processed, at least 1.
 - `find`, `match`, `gsub`: `max(1, subject bytes + pattern bytes)` up front,
   plus `max(1, pattern bytes)`; scanning and matcher operations charge as they
-  run. `gsub` also charges replacement text bytes. With a replacement limit
-  of zero it charges the subject length.
+  run. `find` charges returned capture bytes only on its Lua-pattern path;
+  `match` and each `gmatch` result charge returned capture bytes. `gsub`
+  charges capture bytes passed to a function replacement or used as a table
+  lookup key. Position captures have no capture bytes.
+  `gsub` also charges every byte copied into its result, including unmatched
+  subject spans and whole matches kept by a nil or false function/table
+  replacement. A string or number replacement template charges its original
+  length once per applied match, in addition to the literal and capture bytes
+  it emits. With a replacement limit of zero it charges the subject length.
 - `gmatch`: `max(1, subject bytes + pattern bytes)` when the iterator is
   created; `max(1, pattern bytes)` on the iterator's first call that reaches
   the matcher, and matching work as it runs. A leading `^`, which `gmatch`
   matches as a literal byte, counts as the one byte it is. An empty pattern
   charges nothing after creation.
-- `format`: format string bytes, at least 1, plus bytes appended to the output
-  and bytes of string arguments consumed.
+- `format`: format string bytes, at least 1, plus output bytes appended and
+  input bytes consumed from string arguments. `%s` charges the full `tostring`
+  rendering of any argument, including numbers and `__tostring` results,
+  before precision truncation. Numeric conversions charge string input bytes
+  they parse, and `%q` charges string input bytes it quotes. Output bytes,
+  including padding, are charged separately.
 
 Table library:
 

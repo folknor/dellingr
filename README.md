@@ -239,9 +239,15 @@ function must be registered with a stable id (e.g. `register_rust_fn` or
 `src/vm/save_state.rs` covers the format and design; details are in
 [docs/save-state.md](docs/save-state.md).
 
-Save files are user-editable input. Loading restores the saved cost counters,
-so hosts that load user-editable saves must call `set_cost_budget` after a
-successful load. Saves containing a Lua string larger than
+Save files are user-editable input. Loading trusts the saved costing and cost
+counters. For untrusted saves, compare `State::costing()` with the host's
+expected `Costing` at the start of load setup and return an error on mismatch,
+before executing scripts. This comparison includes every weight and Off mode;
+matching `COST_MODEL_VERSION` alone does not enforce the host's prices. After
+a successful load, call `set_cost_budget` and handle its result to replace the
+saved budget and reset use. A budget alone cannot enforce prices edited to zero.
+
+Saves containing a Lua string larger than
 `limits::MAX_STRING_BYTES` are rejected on load, including ones written by an
 earlier build using the same snapshot format version. A save from a build with
 a different snapshot format version is rejected while reading the header,

@@ -121,7 +121,9 @@ pub struct SaveState {
 /// Non-fatal information returned with a save.
 #[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
 pub struct SaveDiagnostics {
-    /// Number of live process-local anchors at save time.
+    /// Number of live process-local anchors at save time. This does not count
+    /// omitted values: anchor-only graphs are not saved, and shared graphs may
+    /// still be reached through globals or environment objects.
     pub anchor_count: usize,
 }
 
@@ -1537,7 +1539,8 @@ impl State {
     ///
     /// The VM must be quiescent: no Lua/Rust call can be in flight. Anchors are
     /// process-local and are not serialized, but their count is returned in
-    /// [`SaveDiagnostics`].
+    /// [`SaveDiagnostics`]. Values reachable only through anchors are omitted;
+    /// anchor presence does not make saving fail.
     ///
     /// A poisoned State (see [`State::is_poisoned`]) is refused with
     /// [`SaveError::StatePoisoned`], and an unsupported floating-point
@@ -1549,6 +1552,8 @@ impl State {
         if cfg!(debug_assertions) {
             // The two inventories must agree: a root the snapshot refuses as
             // in flight is empty once the lifetime inventory says quiescent.
+            // This is not a reachability check: host-owned anchors may keep
+            // graphs alive that the snapshot deliberately does not traverse.
             self.for_each_gc_root(|root| {
                 debug_assert!(
                     save_coverage(&root) != SaveCoverage::RefusedInFlight || root.is_empty(),
@@ -1567,6 +1572,13 @@ impl State {
     }
 
     /// Restore a save into a fresh [`State`].
+    ///
+    /// Saved costing and counters are trusted input. For untrusted saves,
+    /// compare [`State::costing`] with the host's expected mode and weights at
+    /// the start of setup and return an error on mismatch, before executing
+    /// scripts. After loading, set the host's budget and handle its result;
+    /// setting a budget alone cannot enforce weights edited to zero, and a
+    /// budget set during setup is replaced by the saved counters.
     ///
     /// The host supplies callbacks and re-runs its environment setup closure so
     /// registered host functions exist before saved values are resolved. A
@@ -3063,6 +3075,9 @@ impl<'a> Decoder<'a> {
 const COSTING_METERED: u8 = 0;
 const COSTING_OFF: u8 = 1;
 
+// All weights, including zero, are valid host choices. Decoding checks the
+// schema, not host policy: load setup can reject the saved costing before
+// running scripts or materializing values by comparing State::costing().
 fn read_costing(input: &mut Decoder<'_>) -> Result<Costing, SnapshotError> {
     let offset = input.pos;
     match input.read_u8()? {

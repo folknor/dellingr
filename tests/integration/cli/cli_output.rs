@@ -1,6 +1,7 @@
 use std::process::ExitStatus;
 
 use dellingr::CostAnalysis;
+use dellingr::Program;
 use dellingr::cli::ANALYSIS_WARNING_PREFIX;
 
 use crate::support::process::{ERROR_PREFIX, run_stdin, spawn_stdin};
@@ -69,7 +70,24 @@ fn analyze_warning_uses_the_library_caveat() {
 }
 
 #[test]
-fn parse_errors_share_context_and_do_not_print_a_cost_summary() {
+fn analyze_report_has_no_extra_blank_line_after_the_display() {
+    let source = "return 1 + 2\n";
+    let output = run_stdin(["--analyze", "-"], source);
+    assert!(output.status.success(), "analysis should succeed");
+
+    let program =
+        Program::compile(source, Some(b"stdin".as_slice())).expect("source should compile");
+    assert!(output.stdout.ends_with(b"\n"));
+    assert!(!output.stdout.ends_with(b"\n\n"));
+    assert_eq!(
+        output.stdout,
+        program.analyze_cost().to_string().as_bytes(),
+        "CLI output should match the Display value, including its final newline"
+    );
+}
+
+#[test]
+fn compile_errors_share_context_and_do_not_print_a_cost_summary() {
     let source = "local = \n";
     let run_output = run_stdin(["-"], source);
     let analyze_output = run_stdin(["--analyze", "-"], source);
@@ -79,9 +97,24 @@ fn parse_errors_share_context_and_do_not_print_a_cost_summary() {
         assert_eq!(output.status.code(), Some(1));
         assert!(output.stdout.is_empty());
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.starts_with("Error: parsing source: "), "{stderr}");
+        assert!(stderr.starts_with("Error: compiling source: "), "{stderr}");
         assert!(!stderr.contains("Cost used:"), "{stderr}");
     }
     assert_eq!(run_output.stderr, analyze_output.stderr);
     assert_eq!(run_output.stderr, dump_output.stderr);
+}
+
+#[test]
+fn source_size_compile_error_is_not_labeled_as_a_parse_error() {
+    let source = vec![b' '; dellingr::limits::MAX_SOURCE_BYTES + 1];
+    let output = run_stdin(["-"], source);
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.starts_with("Error: compiling source: stdin: source size "),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("parsing source:"), "{stderr}");
+    assert!(!stderr.contains("Cost used:"), "{stderr}");
 }

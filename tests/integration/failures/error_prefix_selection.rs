@@ -1,4 +1,4 @@
-//! How `Error`'s `Display` picks the `line:column:` prefix from the selected
+//! How `Error`'s `Display` picks the location prefix from the selected
 //! stack frame.
 
 use dellingr::error::{Error, ErrorKind, PrefixLocation, StackFrame};
@@ -23,7 +23,7 @@ fn selected_caller_frame_does_not_borrow_the_innermost_column() {
     // callee's column.
     let caller = Error::new(kind(PrefixLocation::TraceFrame(1)), 1, 7)
         .with_stack_trace(vec![frame(1), frame(2)]);
-    assert!(format!("{caller}").starts_with("2:0: boom"), "{caller}");
+    assert!(format!("{caller}").starts_with("2: boom"), "{caller}");
 
     // The innermost frame is the error site, so its column still applies.
     let current =
@@ -40,20 +40,41 @@ fn selected_caller_frame_does_not_borrow_the_innermost_column() {
     // Matching line numbers alone do not make a caller the error's own frame.
     let same_line = Error::new(kind(PrefixLocation::TraceFrame(1)), 1, 7)
         .with_stack_trace(vec![frame(1), frame(1)]);
-    assert!(
-        format!("{same_line}").starts_with("1:0: boom"),
-        "{same_line}"
-    );
+    assert!(format!("{same_line}").starts_with("1: boom"), "{same_line}");
 
     let different_line =
         Error::new(kind(PrefixLocation::Current), 1, 7).with_stack_trace(vec![frame(2)]);
     assert!(
-        format!("{different_line}").starts_with("2:0: boom"),
+        format!("{different_line}").starts_with("2: boom"),
         "{different_line}"
     );
 
-    // An unknown selected caller line must not fall back to the callee's site.
+    // An unknown selected caller location must not fall back to the callee's
+    // site or render a synthetic 0:0 prefix.
     let unknown = Error::new(kind(PrefixLocation::TraceFrame(1)), 1, 7)
         .with_stack_trace(vec![frame(1), frame(0)]);
-    assert!(format!("{unknown}").starts_with("0:0: boom"), "{unknown}");
+    assert!(
+        format!("{unknown}").starts_with("boom\nstack traceback:"),
+        "{unknown}"
+    );
+}
+
+#[test]
+fn unnamed_and_missing_locations_do_not_invent_source_prefixes() {
+    let runtime = Error::new(
+        ErrorKind::TypeError(dellingr::error::TypeError::Arithmetic(
+            dellingr::LuaType::Nil,
+        )),
+        3,
+        0,
+    )
+    .with_stack_trace(vec![frame(3)]);
+    assert!(format!("{runtime}").starts_with("3: "), "{runtime}");
+
+    let stack_frame = frame(3);
+    assert_eq!(stack_frame.to_string(), "3: in main chunk");
+    assert_eq!(frame(0).to_string(), "in main chunk");
+
+    let unlocated = Error::without_location(ErrorKind::InvalidStackIndex { index: -1 });
+    assert_eq!(unlocated.to_string(), "invalid stack index (-1)");
 }

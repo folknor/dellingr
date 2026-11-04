@@ -65,7 +65,7 @@ pub const MAX_SOURCE_BYTES: usize = MAX_STRING_BYTES;
 // Token lengths and the EOF line (at most source bytes + 1) must fit u32.
 const _: () = assert!(MAX_SOURCE_BYTES < u32::MAX as usize);
 
-/// Maximum UTF-8 source-name bytes attached to a compiled chunk.
+/// Maximum source-name bytes attached to a compiled chunk.
 pub const MAX_SOURCE_NAME_BYTES: usize = 256 * 1024;
 /// Maximum UTF-8 bytes retained in a diagnostic function name.
 pub const MAX_CHUNK_NAME_BYTES: usize = 4 * 1024;
@@ -170,17 +170,18 @@ pub const MAX_STACK_SIZE: usize = 1_000_000;
 /// `__newindex` is, as is a function handler or an `__index` string handler.
 /// See docs/limits.md.
 pub const MAX_METAMETHOD_DEPTH: u32 = 200;
-/// Maximum argument count accepted by the runtime call ABI. This is a runtime
-/// cap on every call, not only on Rust callbacks: a dynamic call such as
-/// `f(table.unpack(t))` or `f(...)` with more than this many values raises
-/// `TooManyArguments` in pure Lua code. The count is a `u8` because
-/// `ArgCount::Fixed` and `RetCount::Fixed` carry `u8`, and `RustFunc` returns
-/// `u8`; widening it would change those public APIs, so the cap is deliberate.
+/// Maximum argument count accepted by the runtime call ABI. A fixed prefix
+/// combined with an open tail, or a `__call` receiver added to a full call, can
+/// exceed the cap and raise `TooManyArguments`. `unpack` rejects an over-wide
+/// result range with `TooManyResults` before those values reach a call. The
+/// count is a `u8` because `ArgCount::Fixed` and `RetCount::Fixed` carry `u8`,
+/// and `RustFunc` returns `u8`; widening them would change those public APIs.
 pub const MAX_ARGUMENTS: u8 = u8::MAX;
-/// Maximum number of values a call can return. Applies to Rust callbacks and
-/// equally to Lua functions: `return table.unpack(t)` or `return ...` with more
-/// than this many values raises `TooManyResults`. See [`MAX_ARGUMENTS`] for why
-/// the width is fixed.
+/// Maximum number of values a Rust callback or Lua function can return.
+/// Oversized Lua return lists raise `TooManyResults`; `unpack` raises the same
+/// error while expanding an over-wide range. A bare vararg return contains
+/// only values received by the current function. See [`MAX_ARGUMENTS`] for
+/// why the width is fixed.
 pub const MAX_RESULTS: u8 = u8::MAX;
 
 const _: () = assert!(MAX_RESULTS == u8::MAX);

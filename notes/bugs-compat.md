@@ -83,17 +83,6 @@ misleading message is a defect for the script author. Fix options: reserve
 `goto` with an "unsupported" error as for `_ENV` and long strings, or document
 that the name is free.
 
-## COMPAT-004 - Test comments claim reference Lua continues a call across a newline
-
-Scope: `compiler-front`. The divergence itself is now documented in
-`docs/compatibility.md`; this residue is two test comments.
-
-`(` on a new line continues a call (`f\n(g)`). Lua 5.2 rejects it with
-"ambiguous syntax (function call x new statement)"; only Lua 5.4 accepts it.
-The test `a_new_line_paren_continues_the_call` (parser tests) and a matching
-newline-call comment in the lexer tests say it works "as in reference Lua" /
-"as reference Lua does", which is true only for 5.4. Reword both to name 5.4.
-
 ## COMPAT-007 - Unlisted base and table library divergences: select and empty sort
 
 Scope: `stdlib-core`. The other bullets of this entry are documented; these two

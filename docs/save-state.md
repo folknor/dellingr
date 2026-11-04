@@ -13,7 +13,11 @@ in the module doc of `src/vm/save_state.rs`.
 - Standard-library tables as deltas against the pristine environment.
 
 Not saved: call stack, program counter, open upvalues, coroutines, anchors,
-callbacks, host user-data. Saving is valid only while the VM is quiescent.
+callbacks, host user-data. Values reachable only through anchors are omitted
+from the saved graph; put game state in globals or a graph reachable from
+them if it must survive. `SaveDiagnostics::anchor_count` reports live anchors,
+not which values were omitted, and does not make the save fail. Saving is
+valid only while the VM is quiescent.
 The load setup callback configures the rebuilt environment and function
 registrations. Values it leaves on the value stack are discarded before load
 returns; the loaded State starts with an empty stack.
@@ -155,7 +159,24 @@ returns; the loaded State starts with an empty stack.
   `Costing::Off`, `set_cost_budget` is refused, here as everywhere). After a
   successful load the saved counters replace whatever setup charged or
   budgeted, so a budget that was configured at save time is still enforced.
-  Hosts that saved without a budget must call `set_cost_budget` afterwards.
+  For trusted saves taken without a budget, call `set_cost_budget` afterwards.
+- Untrusted bytes can select Off mode or arbitrary weights, including all
+  zeros. The cost-model version checks the schema, not the host's price list.
+  Compare `State::costing()` with the expected `Costing` at the start of setup,
+  before executing scripts, and reject a mismatch through `LoadError::Setup`.
+  For example, a setup closure can begin with:
+
+  ```rust,ignore
+  if state.costing() != &expected_costing {
+      return Err("unexpected saved costing");
+  }
+  ```
+
+  The comparison includes the mode and every weight. After a successful load,
+  call `set_cost_budget` and handle its result to replace the saved budget and
+  reset use. Setting a budget in setup is insufficient because materialization
+  replaces it with the saved counters. A budget alone cannot enforce weights
+  edited to zero; under Off mode, setting one is refused.
 - The payload stores a costing tag, then for a metered save one u32 weight per
   charge in `Charge` discriminant order. The count follows
   `COST_MODEL_VERSION`, which the header matches exactly. An off save stores

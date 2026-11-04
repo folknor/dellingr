@@ -287,6 +287,8 @@ fn exit_for_stdout_error(error: &io::Error) -> ! {
     if error.kind() == io::ErrorKind::BrokenPipe {
         exit(0);
     }
+    // In on_print this exits before State::call returns, so main cannot print
+    // the cost summary after a failed script-output write.
     report_error(format!("writing stdout: {error}"));
 }
 
@@ -343,11 +345,11 @@ fn main() {
 
     let program = match Program::compile(&source, Some(args.input.chunk_name())) {
         Ok(program) => program,
-        Err(error) => report_error(format!("parsing source: {error}")),
+        Err(error) => report_error(format!("compiling source: {error}")),
     };
 
     if args.analyze {
-        write_stdout_or_exit(&format!("{}\n", program.analyze_cost()));
+        write_stdout_or_exit(&program.analyze_cost().to_string());
         write_stderr(&format!(
             "{ANALYSIS_WARNING_PREFIX}{}\n",
             CostAnalysis::caveat()

@@ -154,7 +154,7 @@ impl<'a> Parser<'a> {
         // (this allows recursive calls like `local function fib(n) ... fib(n-1) ... end`)
         self.add_local(name)?;
 
-        let nested = self.parse_fndef(Some(name.to_string()), false)?;
+        let nested = self.parse_fndef(Some(name.to_string()), false, line)?;
         Ok(Stmt::LocalFunction { reg, nested, line })
     }
 

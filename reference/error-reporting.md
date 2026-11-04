@@ -5,14 +5,16 @@ trace. Their `Display` text is for diagnostics. It is not a stable identifier
 for an error or a cross-build log format.
 
 The built-in `string.gmatch` wrapper and iterator shim are omitted from runtime
-error traces when a script caller exists: lazy pattern errors use the script
-caller's call-site line. Recognition uses the shared bytecode identities for
-the outer wrapper and its iterator, so a user chunk named `string.gmatch`
-retains ordinary attribution. Snapshot load gives a restored iterator the
-shared identity: a chunk qualifies only when a closure of it captures the
-private gmatch iterator function and its contents equal this build's shim. An
-iterator saved by a build whose shim differs keeps its own bytecode and the
-shim location.
+error traces and host callback source context when a script caller exists:
+lazy pattern errors use the script caller's call-site line, and host callbacks
+receive the caller's source context. With no script caller, the shim keeps its
+own location and source context. Recognition uses the shared bytecode
+identities for the outer wrapper and its iterator, so a user chunk named
+`string.gmatch` retains ordinary attribution. Snapshot load gives a restored
+iterator the shared identity: a chunk qualifies only when a closure of it
+captures the private gmatch iterator function and its contents equal this
+build's shim. An iterator saved by a build whose shim differs keeps its own
+bytecode and location.
 
 ## Kinds and exact bytes
 
@@ -115,28 +117,32 @@ of the entry name. This includes the current `math.*` validators.
 
 Stack trace frames for Lua code use the function name stored in bytecode. An
 unnamed frame is displayed as `main chunk` only for a main chunk; any other
-unnamed function is `function <source:line>` with the line it was defined on
-(`StackFrame::defined_line`, 0 for a main chunk). Snapshots store each
-function's definition line, so labels survive save and load. Rust callbacks are not traceback
-frames, so a callback called by Lua appears only through its Lua caller frames.
-This traceback naming is separate from the optional function name in an
-`ArgError`.
+unnamed function is `function <source:line>` with the line of its `function`
+keyword (`StackFrame::defined_line`, 0 for a main chunk). Snapshots store each
+function's definition line, so labels survive save and load. Rust callbacks are
+not traceback frames, so a callback called by Lua appears only through its Lua
+caller frames. This traceback naming is separate from the optional function
+name in an `ArgError`.
+
+A location renders only what is known. A frame or error prefix of an unnamed
+chunk shows just the line (`3: in main chunk`, `3: msg`); a line of 0 is
+omitted, and an error with neither a source name nor a line, such as host API
+misuse built with `Error::without_location`, has no prefix. A column appears
+only when it is known for the selected site. There is no `[C]` marker: an
+absent source name never means a native frame.
 
 ## Panics and poisoning
 
 Errors are values; a panic is not an error and is never recoverable. A panic
 that unwinds through VM execution skips every pop and restore on its way out,
-so the call stack, stack bottom, pending bases, transient roots and open
-upvalues stop describing the live frames. The State marks itself poisoned
-instead of trying to make each site unwind-safe:
+so in-flight execution bookkeeping no longer describes the live frames. The
+State marks itself poisoned instead of trying to make each site unwind-safe:
 
-- Marking happens in `invoke_rust_fn` (every Rust callback), in the unwind
-  guards of `with_rooted_values`, `with_restricted_env` and the vararg frame,
-  and in `State::guarded`, the boundary of every public entry point that can
-  execute Lua, metamethods or host callbacks (`call`, `call_anchor`,
-  `get_table`, `to_string_with_meta`, `tostring_bytes`,
-  `with_restricted_env`). Nothing is added to the dispatch loop or the
-  recursive Lua call path.
+- Poison marking is owned by the unwind boundaries in `invoke_rust_fn`,
+  `with_rooted_values`, `with_restricted_env` and `State::guarded`. Public
+  entry points that can execute Lua, metamethods or host callbacks use
+  `State::guarded`. Nothing is added to the dispatch loop or the recursive Lua
+  call path.
 - A poisoned State refuses every public `Result`-returning operation with
   `ErrorKind::StatePoisoned` (`SaveError::StatePoisoned` for `save_state`,
   `LoadError::StatePoisoned` when a `load_state` setup
@@ -153,11 +159,11 @@ instead of trying to make each site unwind-safe:
   unguarded bodies (`call_unguarded` and kin), never the public entry points.
 - Under `panic = "abort"` there is no unwind and nothing to mark.
 
-The same entry check, `State::check_usable` (`check_save_usable` for the
-snapshot methods, which report through `SaveError`), then refuses an
-unsupported floating-point environment with
+`State::check_usable` (`check_save_usable` for the snapshot methods, which
+report through `SaveError`) refuses a poisoned State before other work and
+then refuses an unsupported floating-point environment with
 `ErrorKind::UnsupportedFloatEnvironment`; poison takes precedence.
-`scripts/poison_contract.py` checks that every public fallible method starts
-with it. Unlike poisoning, that refusal leaves the State usable once the host
-restores its environment (`docs/determinism.md`, "Floating-point
-environment").
+`scripts/poison_contract.py` checks this entry rule for every public fallible
+method. Unlike poisoning, an unsupported-environment refusal leaves the State
+usable once the host restores its environment (`docs/determinism.md`,
+"Floating-point environment").

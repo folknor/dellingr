@@ -164,9 +164,10 @@ across replay runs.
 
 ## State-local growth
 
-Beyond the limits above, these per-State structures have no fixed cap, and
-no charge tracks their size. Their slot and map storage keeps its high-water
-capacity; what a collection frees is the payloads and entries it removes.
+Beyond the limits above, these per-State structures have no per-State
+configurable quota, and no charge tracks their size. Their slot and map storage
+keeps its high-water capacity; what a collection frees is the payloads and
+entries it removes.
 
 - Reclaimed only by a collection, so with automatic collection disabled they
   grow until an explicit `gc_collect`:
@@ -220,8 +221,11 @@ capacity; what a collection frees is the payloads and entries it removes.
   `with_restricted_env` go away with that environment.
 - Never reclaimed, with the `snapshot` feature: the pins, one interned string
   per name initialization wrote, plus any a sealed load's setup adds.
-- Never reclaimed: with the `snapshot` feature, Rust function registrations
-  persist while unreachable, one per registered id.
+- Never reclaimed: Rust function table entries live for the State's lifetime,
+  whether reachable or not. Host entries come from `add_rust_fn` in every
+  build, and with the `snapshot` feature from `register_rust_fn` or
+  `set_global_named_rust_fn`. The table rejects further entries when its
+  capacity is reached.
 
 ## Value stack
 
@@ -279,10 +283,16 @@ return value are `u8`; widening them would change those public APIs.
 
 The cap applies to Lua functions as well as Rust callbacks:
 
-- `return table.unpack(t)` or `return ...` with more values raises a
-  too-many-results error;
-- `f(table.unpack(t))` or `f(...)` with more values raises a
-  too-many-arguments error.
+- `unpack` and `table.unpack` raise a too-many-results error themselves when
+  their requested range exceeds the result cap. A bare `return ...` uses only
+  values received by the current function; explicit return values combined
+  with an open tail can exceed the cap and raise too-many-results.
+- A bare `f(...)` uses only values received by the current function. A fixed
+  argument prefix combined with an open tail, such as `f(x, ...)` or
+  `f(x, table.unpack(t))`, can exceed the call cap and raise
+  too-many-arguments. An over-wide `unpack` range raises too-many-results
+  before its values reach the call, and a `__call` receiver can also push a
+  call over the argument cap.
 
 ## Native stack
 

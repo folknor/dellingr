@@ -332,9 +332,10 @@ impl ScopeCost {
         let pad = "  ".repeat(indent);
 
         if self.own_cost == 0 && self.nested.is_empty() && self.function_calls() == 0 {
-            // Open SET_LIST constructors still pay for table creation. TFOR_CALL
-            // is not an OP_CALL but can invoke a costed iterator, so zero here
-            // describes static cost only.
+            // Keep the marker on this zero-cost short form: TFOR_CALL is not
+            // an OP_CALL but can invoke a costed iterator, so zero here does
+            // not mean the scope has no runtime cost. Other scope costs are
+            // already under the static-cost report heading.
             writeln!(f, "{}{}: cost 0 (static)", pad, self.name)?;
             return Ok(());
         }
@@ -609,7 +610,7 @@ mod tests {
 
     // Keep this as a tripwire against the old "(free)" label returning.
     #[test]
-    fn zero_static_cost_generic_for_is_not_labeled_free() {
+    fn zero_static_cost_generic_for_marks_the_estimate_as_static() {
         let analysis = analyze_cost("for value in iterator do end")
             .expect("generic-for iterator program should parse");
         assert_eq!(analysis.root.own_cost, 0);

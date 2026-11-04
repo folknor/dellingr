@@ -132,6 +132,20 @@ version's meaning is wider (see below).
   `SaveCollection::EnvironmentHashSlots`), and an unregistered function under
   a global-table key that is not a UTF-8 name is reported as
   `global table entry[i].key` or `.value` instead of `environment _G`.
+- `Error` and `StackFrame` display no longer invent locations. A traceback
+  frame of an unnamed chunk renders as `3: in main chunk`, not
+  `[C]:3: in main chunk`; a runtime error in an unnamed chunk is prefixed
+  `3: msg`, not `3:0: msg`; an error with neither source nor line (host API
+  misuse such as `invalid stack index (-1)`, or an `error(msg, 2)` whose
+  selected caller has no line) has no prefix instead of `0:0:`. A known
+  column is still shown.
+- A function's defined line (`function <source:line>` in tracebacks) is the
+  line of its `function` keyword, not of its parameter list's `(`. The two
+  differ only when the `(` starts a later line. Snapshot-visible: the defined
+  line is saved, so such a function saves different bytes.
+- The CLI labels every compile failure `compiling source:` instead of
+  `parsing source:` (a source-size refusal is not a parse error), and
+  `--analyze` no longer ends its report with an extra blank line.
 - `docs/determinism.md` names the anchor release queue as a second
   asynchronous host input: a cross-thread `Anchor` drop concurrent with a run
   can change which collection frees its value.

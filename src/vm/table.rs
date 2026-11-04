@@ -528,6 +528,12 @@ impl Table {
     }
 
     pub(super) fn with_template_keys(key_ids: &[u16], literals: &[Val]) -> Self {
+        // Source compilation selects this layout only for unique, all-named
+        // constructors, whose bytecode initializes slots with pinned writes
+        // in source order. Such a constructor has no positional or computed
+        // key insert to compact the reserved tombstones before those writes.
+        // The general insert path still handles other table mutations and a
+        // missed pinned lookup.
         let mut map = map_with_capacity(key_ids.len());
         for key_id in key_ids {
             let key = literals[*key_id as usize];

@@ -149,6 +149,9 @@ impl GlobalEnv {
             .expect("the global table lives as long as the State")
     }
 
+    // Generic table writes through aliases of `_G` do not enter this API.
+    // Their invalidation belongs at the heap mutable-access boundary; making
+    // this the sole epoch owner would leave the builtin mirror stale.
     #[inline(always)]
     fn contents_mut<'h>(&self, heap: &'h mut GcHeap) -> &'h mut Table {
         heap.as_table(self.table)
@@ -275,7 +278,10 @@ impl GlobalEnv {
             // tombstone accounting.
             GlobalLookupIndex::Present(index) => {
                 if matches!(val, Val::Nil) || !table.set_at_index(index, *val) {
-                    table.write_slot(index, val);
+                    // A rejected slot must take the keyed fallback, never
+                    // report a completed store. Current global slot policy
+                    // preserves keys until a version change.
+                    return table.write_slot(index, val);
                 }
                 true
             }
@@ -296,7 +302,10 @@ impl GlobalEnv {
     ) {
         let table = self.contents_mut(heap);
         if let Some((index, _)) = table.hash_slot_of(&key) {
-            table.write_slot(index, &val);
+            assert!(
+                table.write_slot(index, &val),
+                "a slot found by its key under the current version remains writable"
+            );
             if let Some(cache) = cache {
                 cache.set(GlobalLookupCacheEntry {
                     version: table.version(),
@@ -571,7 +580,7 @@ mod tests {
     use crate::State;
     use crate::instr::{ArgCount, Builtin, RetCount};
     use crate::vm::Val;
-    use crate::vm::caches::GlobalLookupCacheSlot;
+    use crate::vm::caches::{GlobalLookupCacheEntry, GlobalLookupCacheSlot, GlobalLookupIndex};
     use std::sync::Arc;
 
     fn key(state: &mut State, name: &str) -> Val {
@@ -645,6 +654,45 @@ mod tests {
             state.global_env.get(&state.heap, "cache_target"),
             Some(Val::Num(4.0))
         );
+    }
+
+    #[test]
+    fn a_missing_cached_global_slot_requests_the_keyed_fallback() {
+        let mut state = State::raw();
+        let cache = GlobalLookupCacheSlot::default();
+        cache.set(GlobalLookupCacheEntry {
+            version: state.global_env.contents(&state.heap).version(),
+            index: GlobalLookupIndex::Present(usize::MAX),
+            builtin: false,
+        });
+        assert!(
+            !state
+                .global_env
+                .write_cached(&mut state.heap, &cache, &Val::Num(1.0))
+        );
+        assert!(
+            !state
+                .global_env
+                .write_cached(&mut state.heap, &cache, &Val::Nil)
+        );
+    }
+
+    #[test]
+    fn generic_global_table_mutation_invalidates_the_builtin_mirror() {
+        let mut state = State::raw();
+        let slot = Builtin::Print as u8;
+        let env = &state.global_env;
+        env.write_builtin(&mut state.heap, slot, &Val::Num(1.0));
+        assert_eq!(env.read_builtin(&state.heap, slot), Val::Num(1.0));
+        let epoch = state.heap.watched_epoch();
+        state
+            .heap
+            .as_table(env.table())
+            .expect("global table")
+            .insert(env.builtin_key(slot), Val::Num(2.0))
+            .expect("string key fits the hash part");
+        assert_ne!(state.heap.watched_epoch(), epoch);
+        assert_eq!(env.read_builtin(&state.heap, slot), Val::Num(2.0));
     }
 
     #[test]

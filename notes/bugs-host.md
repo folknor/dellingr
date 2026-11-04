@@ -42,51 +42,9 @@ something like `SetupInRestrictedEnv { api }`), or document the split on both
 methods. Plain `register_rust_fn`/`add_rust_fn` are fine inside `f`: they
 install nothing into the environment.
 
-## HOST-003 - Unnamed chunks and location-less errors render misleading prefixes
-
-Scope: `vm-state`. Misleading messages; no determinism or cost effect.
-
-In `Error`'s and `StackFrame`'s `Display` (`src/error.rs`):
-
-- A traceback frame of an unnamed Lua chunk renders as `[C]:3: in main chunk`.
-  `[C]` is reference Lua's marker for a C function; here it never means a native
-  frame, since Rust callbacks are never traceback frames
-  (`reference/error-reporting.md`). `Program::compile` says an unnamed chunk's
-  "locations render without a name".
-- The prefix for a runtime error in an unnamed chunk is `3:0: msg`. Runtime
-  errors never have a column, so `:0` is noise, and the named-chunk arm
-  (`a.lua:3: msg`) omits the column: the two disagree.
-- An error with no location at all, which covers every host-misuse error
-  (`InvalidStackIndex`, `InvalidAnchor`, `AnchorNil`, `CostingOff`,
-  `StatePoisoned`, `DynamicArgumentsUnsupported`, ...), renders as
-  `0:0: invalid stack index (-1)`. `Error::without_location` is documented as
-  "without source-location information", but `Display` presents one.
-
-Fix the hunter gave: render an unnamed frame as `?:3:` (or `[string]:3:`), omit
-`:column` when the column is 0, and print no prefix when both line and source
-are absent. The one test pinning `0:0:`
-(`tests/integration/failures/error_prefix_selection.rs`, the unknown-caller
-case) covers a selected caller with line 0, which would become "no prefix" under
-that rule, consistent with the existing `TraceFrame` past-the-end rule.
-
-## HOST-004 - Latent panic: pattern-cache eviction relies on an uncoupled tuning constant
-
-Scope: `vm-state`. Smell; unreachable today.
-
-`State::cached_pattern_at` evicts with `while len >= ENTRIES || bytes +
-pattern_len > PATTERN_CACHE_BYTES { shift_remove_index(0).expect("a nonempty
-pattern cache has an oldest entry") }`. If one pattern is longer than
-`PATTERN_CACHE_BYTES`, the loop empties the cache and then panics on the empty
-map. Today `tuning::PATTERN_CACHE_BYTES = MAX_STRING_BYTES` and every string is
-capped there, but nothing ties the two; lowering the constant, which its doc
-presents as free tuning, would turn a long pattern into a panic that poisons the
-State. Fix: a `const { assert!(PATTERN_CACHE_BYTES >= MAX_STRING_BYTES) }`, or
-better, skip caching (return the compiled program) when `pattern_len >
-PATTERN_CACHE_BYTES`, which removes the invariant.
-
 ## HOST-005 - The cost-analysis report hides operation counts depending on the model
 
-Raised by both `vm-state` and `cost-cli`.
+Raised by both `vm-state` and `cost-cli`; re-confirmed by a later fix wave.
 
 Claim broken: `Program::analyze_cost_with` and `docs/budget.md` ("Static
 analysis"): "Operation counts do not depend on the model; costs do."
@@ -104,7 +62,10 @@ contains a call: one `OP_CALL` makes every zero-weighted category appear. The
 accessors are right; the `Display` is wrong.
 
 Fix: gate the breakdown, and the `(static)` short form, on any category count
-being non-zero, not on `own_cost`.
+being non-zero, not on `own_cost`. A later wave kept the `(static)` marker on
+the zero-cost short form on purpose (a zero static estimate can still have
+runtime cost, for example a generic-for iterator call); the comment beside it in
+`src/lib.rs` says why.
 
 ## HOST-006 - ScopeCost field and accessor docs say something other than what they hold
 
@@ -122,22 +83,6 @@ Scope: `cost-cli`.
   constructor keyed fields (`INIT_FIELD`, `INIT_FIELD_PINNED`, `INIT_INDEX`, all
   of class `TableWrite`). The report label `Table writes (t[k]=v)` has the same
   gap.
-
-## HOST-007 - A failed stdout write during print exits 1 without the cost summary
-
-Scope: `cost-cli`.
-
-Claim at stake: `docs/cli.md`, "the cost summary is still attempted before an
-execution error is reported".
-
-`CliCallbacks::on_print` calls `write_stdout_line_or_exit`. A non-EPIPE write
-error (ENOSPC, EIO, a full redirected file) goes through `exit_for_stdout_error`
-to `report_error`, which calls `exit(1)` from inside the running callback. No
-`Cost used:` line is printed, and the script's own error, if any, is never
-reached. Whether that is an "execution error" is a matter of wording, but it is
-a run that started and failed with exit 1, and the ordering promise does not
-hold. Fix options: document that a stdout failure ends the run immediately, or
-latch the failure in the callbacks and have `main` report it after the summary.
 
 ## HOST-008 - The CLI does not provision the native-stack envelope it relies on
 
@@ -159,28 +104,6 @@ host guaranteed to hit it. Fix: run compile plus call on a
 `std::thread::Builder` thread with an explicit stack size (for example 8 MiB),
 and drop the "usually" sentence.
 
-## HOST-009 - The CLI labels every compile failure "parsing source:"
-
-Scope: `cost-cli`.
-
-`main` wraps every `Program::compile` error as `parsing source: {error}`, and
-`docs/cli.md` calls them all "parse errors". Errors that are not parse errors
-get the same label: `SourceSizeExceeded`, an over-long chunk name (the path),
-`UnsupportedFloatEnvironment`, and compiler internal faults and
-self-verification failures (reported as compile errors by design). The
-underlying text names the real cause, so the effect is a misleading prefix, not
-lost information. `compiling:` or no prefix would be accurate.
-
-## HOST-010 - CLI rendering nits in the analysis output
-
-Scope: `cost-cli`.
-
-- `--analyze` writes `format!("{}\n", analysis)`, but `CostAnalysis`'s `Display`
-  already ends every line with `\n`, so the report ends in a blank line.
-  `--dump-bytecode` writes `to_string()` and does not.
-- `(static)` appears only on zero-cost leaf scopes, though every number in the
-  report is static: a leftover of the old "(free)" fix (see the tripwire test).
-
 ## HOST-011 - The CLI reads unbounded input before rejecting it
 
 Scope: `cost-cli`. Robustness.
@@ -189,27 +112,6 @@ Scope: `cost-cli`. Robustness.
 `Program::compile` reject anything over `MAX_SOURCE_BYTES`. A huge file or an
 endless stdin is buffered in full first, or exhausts memory. Reading at most
 `MAX_SOURCE_BYTES + 1` bytes would fail fast with the same error.
-
-## HOST-012 - Lateral: the on_error contract does not say which other host APIs are unreported
-
-Scope: `vm-state`. Probably intended; the contract is silent.
-
-`HostCallbacks::on_error` lists the APIs whose errors are reported (`call`,
-`call_anchor`, `get_table`, `set_table`, `tostring_bytes`,
-`to_string_with_meta`) and the misuse that is not. `State::concat` (type errors,
-`StringSizeExceeded`), `set_metatable_of`, `table_insert_at`/`table_remove_at`
-and `raw_field` fail with execution-like kinds, are in neither list, and are not
-reported. One sentence would settle it ("other host API failures are returned
-only").
-
-## HOST-013 - Lateral: host_print and current_source do not skip the gmatch shim
-
-Scope: `vm-state`. Unreachable today.
-
-`host_error` and `build_stack_trace` skip the gmatch wrapper frame;
-`host_print` and `current_source` do not. Unreachable because the shim only
-calls the private iterator, which runs no host code or `print`. If the shim ever
-calls user or host code, `print` locations would name `string.gmatch`.
 
 ## HOST-014 - Lateral: every State allocates names for the whole function catalog
 
@@ -228,14 +130,13 @@ Scope: `vm-state`. Structural.
 
 Whether a public method needs `guarded` (because it can run Lua) or only
 `check_usable` is decided by hand and checked by `scripts/poison_contract.py`
-plus the native-calls inventory. The hunter traces the stale guard list in
-`reference/error-reporting.md` (filed in `notes/bugs-docs.md`) and HOST-001 to
-that hand-maintained split drifting.
-Structural option: route every Lua-reaching public method through one
-`HostEntry` wrapper, or make `call_unguarded` and kin take a zero-sized
-`Reentry` token that only `guarded` and `invoke_rust_fn` can mint. "Public entry
-that can run Lua but is not guarded" then becomes a compile error, and the
-reference docs can point at the type instead of listing methods.
+plus the native-calls inventory. The hunter traced a stale guard list in
+`reference/error-reporting.md` (since corrected) and HOST-001 to that
+hand-maintained split drifting. Structural option: route every Lua-reaching
+public method through one `HostEntry` wrapper, or make `call_unguarded` and kin
+take a zero-sized `Reentry` token that only `guarded` and `invoke_rust_fn` can
+mint. "Public entry that can run Lua but is not guarded" then becomes a compile
+error, and the reference docs can point at the type instead of listing methods.
 
 ## HOST-016 - Lateral: the static cost analysis lives in the crate root and counts per category, not per charge
 

@@ -56,7 +56,7 @@ fn crlf_followed_by_cr_is_two_line_breaks() {
     // Reference Lua 5.2 and 5.4 both report line 3 here.
     let err = support::run_error("local x = 1\r\n\rerror('boom')");
     assert_eq!(err.stack_trace()[0].line, 3);
-    assert!(format!("{err}").starts_with("3:0: boom"), "{err}");
+    assert!(format!("{err}").starts_with("3: boom"), "{err}");
 
     let err = support::run_error("local x = 1\n\r\nerror('boom')");
     assert_eq!(err.stack_trace()[0].line, 3);

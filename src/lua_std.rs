@@ -114,15 +114,16 @@ pub(crate) const STDLIB_INTERNED_TABLE_KEYS: usize = MATH_LIBRARY_CAPACITY
 /// preflight accounts for values already on the stack. The largest setup
 /// overlap is `_G` in `open_base`: its table, metatable, `__metatable` key
 /// and protection value occupy exactly four slots at once.
-/// Reserving up front keeps the operation all-or-nothing: without it, a stack
-/// near the cap could install part of the standard library (and, under
-/// `snapshot`, part of the function registry) before failing partway through.
-/// Under `snapshot`, a separate registry preflight also rejects conflicting
-/// registrations before setup, extending the guarantee to the function registry.
+/// The current setup fits this reservation, so a stack-cap refusal happens
+/// before any library or catalog mutation. Under `snapshot`, catalog conflicts
+/// are also rejected before the catalog is bound. These checks make setup
+/// all-or-nothing for those refusal conditions; a later setup error can still
+/// leave the catalog bound or some libraries installed because setup is not
+/// transactional.
 ///
 /// The per-push checks remain the backstop if a future library ever exceeds
-/// this; they would report the overflow correctly, just without the
-/// all-or-nothing guarantee.
+/// this reservation; they would report the overflow correctly, but setup
+/// could already be partially installed.
 const STDLIB_SETUP_HEADROOM: usize = 4;
 
 pub(crate) fn open_libs(state: &mut State) -> Result<()> {

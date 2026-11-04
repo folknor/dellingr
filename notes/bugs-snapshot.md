@@ -17,37 +17,6 @@ before fixing.
    and they are never deduplicated through git history. Carry the context
    inline instead.
 
-## SNAP-001 - A tampered save can price every charge at zero, and the documented mitigation no longer holds
-
-Scope: `snapshot`. Hunter's label: medium.
-
-Claim broken: README "Save state": "Save files are user-editable input. Loading
-restores the saved cost counters, so hosts that load user-editable saves must
-call `set_cost_budget` after a successful load." `docs/save-state.md` gives the
-same advice ("Hosts that saved without a budget must call `set_cost_budget`
-afterwards").
-
-Since format 14 the payload also carries the costing, and `load_state` builds
-the State under it (`State::builder().costing(costing)`; "a load takes it from
-the save, not from the host"). `read_costing` accepts any tag-0 weight list via
-`CostModel::from_weights` without validation (fine for host-built models). An
-edited save can therefore:
-
-- set every weight to 0: `set_cost_budget` succeeds, but no script charge ever
-  drains the budget, so the documented mitigation silently does nothing;
-- choose `Costing::Off`: `set_cost_budget` is refused with `CostingOff`, so the
-  host learns of it only if it checks that result.
-
-The budget is the game-design instrument, which makes it the first thing a
-cheating player would edit. The README describes the older threat model
-(counters only).
-
-Fix options the hunter gave: at minimum, tell hosts in README and save-state.md
-to compare `State::costing()` with their expected costing after loading
-untrusted bytes. Better: let `load_state` take an expected `Costing` (or a
-predicate) and reject a mismatch as a `SnapshotError`, so the saved costing is a
-consistency check and is never trusted blindly.
-
 ## SNAP-002 - Environment deltas are not deltas: any slot change in a library table re-imposes every field's saved value
 
 Scope: `snapshot`. Hunter's label: medium.
