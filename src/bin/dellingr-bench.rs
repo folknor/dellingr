@@ -1,5 +1,5 @@
 //! Bench harness for dellingr: the binary `brokkr bench` runs for the
-//! `wall`, `hotpath` and `alloc` benches (brokkr.d/bench.toml). Built only
+//! `wall`, `kernel` and `alloc` benches (brokkr.d/bench.toml). Built only
 //! under the `bench-harness` feature, so `cargo install` skips it.
 //!
 //! Loads a bench script that must define a global `_bench` function, then
@@ -426,7 +426,7 @@ fn main() {
     // (`for i = 1, N do _bench() end`). That footer is deliberate: it is what
     // `brokkr bench` measures. The stored wall is the whole process, so for
     // a seconds-scale bench/ file the footer is most of the verdict wall, and
-    // under the `hotpath` and `alloc` benches the examples/ footer supplies most
+    // under `brokkr bench --hotpath` the examples/ footer supplies most
     // of the profiled events next to the few warm iterations below. Do not
     // treat it as untimed warm-up overhead to trim.
     emit_marker("SETUP_START");

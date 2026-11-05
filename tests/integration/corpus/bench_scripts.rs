@@ -526,8 +526,8 @@ fn bench_scripts_parse_and_follow_the_standalone_footer_contract() {
     // the test suite deliberately pays for it. The bench harness runs the
     // chunk's top level in its SETUP phase, so a bench/ file's footer is most
     // of the seconds-scale wall that `brokkr bench wall` stores (the stored
-    // wall is the whole harness process, SETUP included). Under the `hotpath`
-    // and `alloc` benches the examples/ footer (calibrated per file, 20 to
+    // wall is the whole harness process, SETUP included). Under
+    // `brokkr bench --hotpath` the examples/ footer (calibrated per file, 20 to
     // 2500 calls, not 30) supplies most of the profiled events, against only
     // a few warm iterations. The standalone run is also what
     // scripts/bench.sh times under hyperfine.

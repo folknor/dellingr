@@ -1,13 +1,18 @@
-# Benchmarks: `brokkr bench <wall|hotpath|alloc> --workload <name>`.
+# Benchmarks: `brokkr bench wall --workload <name>` for verdict walls,
+# `brokkr bench --hotpath <kernel|alloc> --workload <name>` to profile.
 # Included from brokkr.toml; `brokkr man bench-config` documents the tables.
 #
-# Every bench builds the harness bin (`dellingr-bench`, examples/hotpath.rs,
-# gated behind the `bench-harness` feature) and runs brokkr.d/bench.lua over
-# one pinned workload file:
+# Every bench builds the harness bin (`dellingr-bench`,
+# src/bin/dellingr-bench.rs, gated behind the `bench-harness` feature) and
+# runs brokkr.d/bench.lua over one pinned workload file:
 #
-# - `wall` builds it bare: the uninstrumented walls, the ones worth comparing.
-# - `hotpath` adds the `hotpath` feature (function-level timing).
-# - `alloc` adds `hotpath-alloc` (per-function allocation tracking).
+# - `wall` times the seconds-scale file: the uninstrumented walls, the ones
+#   worth comparing. It declares no `hotpath_features`, so brokkr refuses
+#   `--hotpath` on it.
+# - `kernel` times the ms-scale file; under `--hotpath` it adds the `hotpath`
+#   feature (function-level timing).
+# - `alloc` is `kernel` with `hotpath-alloc` under `--hotpath` (per-function
+#   allocation tracking). Without `--hotpath` it is a plain `kernel` run.
 #
 # Workloads are content-addressed: the file is part of the measurement's
 # identity, so editing a workload file REQUIRES updating its `xxhash` here -
@@ -20,11 +25,12 @@
 # - `data.workloads.bench`: the bench/ seconds-scale port, what `wall` binds.
 #   Seconds-scale so wall deltas resolve above launch noise.
 # - `data.workloads.hotpath`: the examples/ ms-scale kernel, the only scale
-#   `hotpath` and `alloc` can bind. The hotpath crate queues one event per
+#   the profilable benches can bind. The hotpath crate queues one event per
 #   instrumented call in an unbounded per-thread queue that its 50ms sweep
 #   drains at ~1.3M events/s, far below the VM's production rate; a
 #   seconds-scale file backlogs 30+ GB of RAM before the run ends (observed
-#   2026-07-26 on plantasjen). The `from` path makes that unrepresentable.
+#   2026-07-26 on plantasjen). Binding only this scale, and `wall` carrying no
+#   `hotpath_features`, makes that unrepresentable.
 #
 # Paired files carry the same kernel, so hotpath percentages read across to
 # the bench walls. `large_source` is a parse/codegen probe, not an execution
@@ -46,18 +52,20 @@ profile = "release"
 features = ["bench-harness"]
 params.workload = { from = "data.workloads.bench", required = true, help = "seconds-scale workload from bench/" }
 
-[bench.hotpath]
+[bench.kernel]
 script_file = "bench.lua"
 target = "dellingr-bench"
 profile = "release"
-features = ["bench-harness", "hotpath"]
+features = ["bench-harness"]
+hotpath_features = ["hotpath"]
 params.workload = { from = "data.workloads.hotpath", required = true, help = "ms-scale workload from examples/" }
 
 [bench.alloc]
 script_file = "bench.lua"
 target = "dellingr-bench"
 profile = "release"
-features = ["bench-harness", "hotpath-alloc"]
+features = ["bench-harness"]
+hotpath_features = ["hotpath-alloc"]
 params.workload = { from = "data.workloads.hotpath", required = true, help = "ms-scale workload from examples/" }
 
 [data.workloads.bench.benchmark]

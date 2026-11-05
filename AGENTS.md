@@ -74,12 +74,12 @@ Invariants that are easy to break:
 
 ## Benchmarks
 
-Benchmarks are script benches in `brokkr.d/bench.toml` (included from `brokkr.toml`; `brokkr man bench-config`). Each workload name is registered at both scales: `[data.workloads.bench.<W>]` is the seconds-scale `bench/` file (wall-clock verdicts), `[data.workloads.hotpath.<W>]` its ms-scale `examples/` counterpart (profiling). The `wall`, `hotpath` and `alloc` benches run `brokkr.d/bench.lua`, which drives the harness bin `dellingr-bench` (`src/bin/dellingr-bench.rs`, behind the `bench-harness` feature; it documents its phases and output) and stores its KV report as the run's record. `brokkr man bench`, `brokkr results --help` and `brokkr sidecar --help` cover the rest.
+Benchmarks are script benches in `brokkr.d/bench.toml` (included from `brokkr.toml`; `brokkr man bench-config`). Each workload name is registered at both scales: `[data.workloads.bench.<W>]` is the seconds-scale `bench/` file (wall-clock verdicts), `[data.workloads.hotpath.<W>]` its ms-scale `examples/` counterpart (profiling). `wall` binds the first, `kernel` and `alloc` the second; all three run `brokkr.d/bench.lua`, which drives the harness bin `dellingr-bench` (`src/bin/dellingr-bench.rs`, behind the `bench-harness` feature; it documents its phases and output), stores its KV report as the run's record and marks the call as the `harness` hotpath stage, so brokkr captures the profile under `--hotpath`. `brokkr man bench`, `brokkr results --help` and `brokkr sidecar --help` cover the rest.
 
 ```sh
 brokkr bench wall --workload <W>                     # best of 3, stored
-brokkr bench hotpath --workload <W>                  # function-level timing
-brokkr bench alloc --workload <W>                    # allocation tracking
+brokkr bench --hotpath kernel --workload <W>         # function-level timing
+brokkr bench --hotpath alloc --workload <W>          # allocation tracking
 brokkr bench --commit <ref> wall --workload <W>      # old VM, current workload file
 brokkr bench --iterations 5 wall --workload a,b      # one stored run per workload
 ```
@@ -88,7 +88,7 @@ brokkr bench --iterations 5 wall --workload a,b      # one stored run per worklo
 - **Never run benchmark or profiling commands in parallel.**
 - **Interleave matched A/B cells** and compare medians with sign consistency across pairs; `--iterations N` is best-of-N within one cell and cannot cancel drift. A same-day matched pair beats any historical number.
 - **Suspect code layout before mechanism**: binaries whose executed path is identical have measured about 11% apart. Run a five-launch same-binary control before trusting a small delta.
-- Never point instrumentation (the `hotpath` and `alloc` benches, any `--features hotpath` build) at a seconds-scale `bench/` file: its event queue is unbounded and backlogs tens of GB. Those benches bind only `data.workloads.hotpath`, so they cannot.
+- Never point instrumentation (`--hotpath`, any `--features hotpath` build) at a seconds-scale `bench/` file: its event queue is unbounded and backlogs tens of GB. `wall` declares no `hotpath_features`, so brokkr refuses `--hotpath` on it, and the profilable benches bind only `data.workloads.hotpath`; keep it that way.
 - Read instrumented runs as distributions (call counts, % of total), never as absolute times. When a result's iteration walls disagree, don't read it as one number. Before calling a delta a regression, read `brokkr sidecar`: SETUP is the standalone footer, WARM is the verdict phase.
 - A run of a tree with source changes is stored marked dirty and never compared.
 - Performance numbers in markdown include commit hash and hostname.
