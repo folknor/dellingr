@@ -113,6 +113,38 @@ cycles in reference/native-calls.md moved with `LuaPattern`'s layout:
 release `gsub_pattern_function` went from 3184 (3248 with snapshot) at
 58e2808 to 3168 (3216).
 
+## `string.format` literal runs batched, 2026-11-05
+
+`string.format` appended every literal byte of its format string as its own
+growth check and atomic charge, and sent `%%` through the directive parser
+and `format_argument` to emit one byte. The change appends each run of
+literal text between `%`s in one copy charged unit-exactly
+(`append_bytes_units`, already gsub's appender for template literals), reads
+`%%` as literal text, and gives gsub's first template application the same
+batched appender its later applications had. Costs, the exhaustion point and
+the cap boundary are unchanged (pinned by
+`format_literal_bytes_stop_at_the_first_byte_that_starts_with_no_budget` and
+`format_literal_run_across_the_size_cap_charges_the_bytes_that_fit`).
+
+Plantasjen (as above), default release profile, `brokkr dellingr --bench`
+cells (best of 3 launches, the harness's elapsed ms), base and change
+interleaved:
+
+| Workload | d98e154 | Change |
+|---|---|---|
+| `format_literals` | 1847, 1847, 1861 | 1204, 1186, 1262 |
+| `patterns` | 2162, 2153, 2168 | 2134, 2138, 2141 |
+| `failed_scan` | 4502, 4498, 4501 | 4521, 4457, 4462 |
+
+`format_literals` is a probe registered for this change: templates of mostly
+literal text with a few `%d`, `%s` and `%%`. It is 35% faster (medians);
+`patterns` and `failed_scan` move within their spread. The `format` native
+cycle shrank (release 1520 to 1472, 1488 with snapshot; dev 12912 to
+12528). Release default `gsub_*` cycles grew 16 bytes (`gsub_pattern_function`
+3168 to 3184, back to its 58e2808 figure); dev and release + snapshot are
+unchanged. The cause of the gsub move is unproven; marking the appender
+`#[inline(never)]` did not change it, so it was left inlinable.
+
 ## Native stack frames and cycles
 
 The log behind reference/native-calls.md's current table: the frame-size
@@ -145,6 +177,7 @@ Hosts: plantasjen from 4a722cf on; the 2026-10-23 rows name x86-64 Linux only.
 | host interrupt safepoints on top of that | 16064 | 3296 | 3312 |
 | proper tail calls on top of 2a566c8 | 16304 | 3296 | 3312 |
 | matcher capture state per search on top of 58e2808 | 16096 | 3168 | 3216 |
+| `string.format` literal runs batched on top of d98e154 | 16096 | 3184 | 3216 |
 
 ### 2026-11-05: proper tail calls
 

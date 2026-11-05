@@ -86,7 +86,7 @@ Each edge is either covered or excluded:
   `leaves` it names (the metamethod chain kinds and deepest-point work in
   `tests/native_stack.rs`, for edges that only those reach);
 - or `excluded`, with the reason the call can never reach Lua from that site
-  (the default sort comparison, a raw `table.move` copy, the `%%` directive)
+  (the default sort comparison, a raw `table.move` copy)
   or why it lies outside the envelope (the CLI's own call).
 
 A scenario's path is one recursion cycle: it starts at an edge out of
@@ -199,8 +199,8 @@ that it is not listed. Then:
    kind or a deepest-point item reaches it, name those on the edge instead.
 3. If the call can never reach Lua, or is outside the envelope, mark the
    edge `excluded` with the reason.
-4. Run `brokkr test native_bytes_per_level` with `--debug` and `--release`
-   to see the new path's bytes per level, and `brokkr check`, which runs the
+4. Run `brokkr test native_bytes_per_level`, whose sweeps cover both
+   profiles, to see the new path's bytes per level, and `brokkr check`, which runs the
    envelope in both profiles. Add the new row to the table below when you
    re-measure it (see "Current native bytes per level").
 
@@ -221,11 +221,12 @@ marker, which is the quickest way to see what a change touched.
 ## Current native bytes per level
 
 The recurring native stack of each scenario's cycle, as printed by the
-on-demand probe `brokkr test native_bytes_per_level` (dev) and
-`brokkr test native_bytes_per_level --release` (release), which run the
-default and snapshot configurations of each profile. Measured on the tree of
-the commit that builds the matcher's capture state once per search (parent
-58e2808), on
+on-demand probe `brokkr test native_bytes_per_level`: its `default` and
+`snapshot` sweeps run the dev profile, its `release-native-stack` and
+`release-native-stack-snapshot` sweeps run release. (Adding `--release`
+forces release onto every sweep, and the sweeps whose features require
+debug assertions then fail to build.) Measured on the tree of the commit
+that batches `string.format` literal runs (parent d98e154), on
 plantasjen (x86-64 Linux), `rustc 1.101.0-nightly (e9bbadf68 2026-10-12)`,
 with that host's global rustflags (`-Ctarget-cpu=native`, the `wild` linker
 through clang). Release is Cargo's default release profile (the repository
@@ -267,7 +268,7 @@ separately.
 | `host_to_string_with_meta` | 11536 | 1200 | 1200 |
 | `tostring` | 10752 | 1024 | 1024 |
 | `print` | 11136 | 1200 | 1184 |
-| `format` | 12912 | 1520 | 1520 |
+| `format` | 12528 | 1472 | 1488 |
 | `error_tostring` | 11312 | 1312 | 1312 |
 | `sort_comparator` | 12464 | 1488 | 1488 |
 | `sort_comparator_right` | 12464 | 1488 | 1488 |
@@ -294,13 +295,13 @@ separately.
 | `move_write` | 11472 | 1008 | 1008 |
 | `unpack_length` | 10704 | 992 | 992 |
 | `unpack_read` | 11008 | 960 | 960 |
-| `gsub_empty_function` | 12800 | 1520 | 1536 |
-| `gsub_plain_function` | 12784 | 1536 | 1552 |
-| `gsub_pattern_function` | 16096 | 3168 | 3216 |
-| `gsub_pattern_captures` | 16096 | 3168 | 3216 |
-| `gsub_empty_table` | 12672 | 1472 | 1488 |
-| `gsub_plain_table` | 12656 | 1488 | 1504 |
-| `gsub_pattern_table` | 15968 | 3120 | 3168 |
+| `gsub_empty_function` | 12800 | 1536 | 1536 |
+| `gsub_plain_function` | 12784 | 1552 | 1552 |
+| `gsub_pattern_function` | 16096 | 3184 | 3216 |
+| `gsub_pattern_captures` | 16096 | 3184 | 3216 |
+| `gsub_empty_table` | 12672 | 1488 | 1488 |
+| `gsub_plain_table` | 12656 | 1504 | 1504 |
+| `gsub_pattern_table` | 15968 | 3136 | 3168 |
 | `tfor_lua` | 9584 | 688 | 688 |
 | `tfor_ipairs` | 11152 | 976 | 976 |
 | `tfor_host_iterator` | 11024 | 944 | 944 |

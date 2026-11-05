@@ -413,6 +413,12 @@ xxh128 = "343ca033b4b5ac40c9a2cff1904dac7f"
 hotpath_file = "examples/strings/failed_scan.lua"
 hotpath_xxh128 = "20d62957347ab59ead0ec4c6eb89a5f1"
 
+[dellingr.workloads.format_literals]
+file = "bench/format_literals.lua"
+xxh128 = "7eae0d9472643385ecdd9d8d9d1bf6b3"
+hotpath_file = "examples/strings/format_literals.lua"
+hotpath_xxh128 = "ab951754e92c34654003b4893b4161aa"
+
 [dellingr.workloads.same_obj_read]
 file = "bench/same_obj_read.lua"
 xxh128 = "cdb6bfdf21a72c08d4b1d683d7d85d07"

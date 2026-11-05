@@ -32,9 +32,9 @@
 //!   a script chooses by a number (`table.concat`, `table.move`, the
 //!   metamethod paths of `table.insert`, `table.remove` and `table.sort`),
 //!   each subject position of the empty-pattern `string.gsub`, and each
-//!   `string.format` directive, before it is parsed and its argument
-//!   rendered (the literal bytes between directives are one pass over the
-//!   format string, a string capped by `MAX_STRING_BYTES`).
+//!   `string.format` directive and `%%` escape, before a directive is parsed
+//!   and its argument rendered (the literal bytes between them are one pass
+//!   over the format string, a string capped by `MAX_STRING_BYTES`).
 //!
 //! Between two polls the work is bounded by the VM's fixed limits, never by
 //! the script: a run of instructions with no backward jump and no call

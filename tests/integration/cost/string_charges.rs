@@ -1,6 +1,7 @@
 //! Cost-model invariants for data-dependent native library work.
 
 use dellingr::error::{Error, ErrorKind, LibraryError};
+use dellingr::limits::MAX_STRING_BYTES;
 use dellingr::{ArgCount, LuaType, RetCount, State};
 
 use super::cost_golden::pinned_cost;
@@ -86,6 +87,35 @@ fn basic_native_charges_are_exact() {
     ] {
         assert_eq!(support::cost_of(source), expected, "{source}");
     }
+}
+
+/// A literal run that crosses the string size cap charges the bytes that fit
+/// and then refuses the first byte that does not, as charging each literal
+/// byte on its own would: neither the whole run nor none of it.
+#[test]
+fn format_literal_run_across_the_size_cap_charges_the_bytes_that_fit() {
+    fn after_format(format: &str) -> (dellingr::Result<()>, u64) {
+        let mut state = State::new();
+        state
+            .push_bytes(vec![b'a'; MAX_STRING_BYTES - 2])
+            .expect("a string under the cap fits");
+        state.set_global("s").expect("global set");
+        let before = state.cost_used();
+        let result = support::try_run(&mut state, format!("string.format('{format}', s)"));
+        (result, state.cost_used() - before)
+    }
+
+    let (fits, fitting_cost) = after_format("%sxy");
+    fits.expect("output exactly at the cap fits");
+    let (crosses, crossing_cost) = after_format("%sxyzw");
+    let error = crosses.expect_err("output past the cap is refused");
+    assert!(
+        matches!(error.kind(), ErrorKind::StringSizeExceeded { size, limit }
+            if *size == MAX_STRING_BYTES + 1 && *limit == MAX_STRING_BYTES),
+        "{error}"
+    );
+    // Two more format bytes up front; the same two literal bytes charged.
+    assert_eq!(crossing_cost, fitting_cost + 2);
 }
 
 #[test]

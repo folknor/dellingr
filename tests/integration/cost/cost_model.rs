@@ -450,6 +450,79 @@ fn table_move_stops_at_the_first_element_that_starts_with_no_budget() {
     assert_eq!(after_move(10), (false, vec![1.0, 1.0, 2.0, 3.0, 4.0], 12));
 }
 
+/// `string.format` charges its format bytes as one atomic charge, each
+/// literal output byte (a `%%` escape's `%` included) as its own charge, and
+/// a directive's rendered output as one atomic charge. Every budget across
+/// the call must stop where that charge sequence does, however the
+/// implementation batches the literal bytes.
+#[test]
+fn format_literal_bytes_stop_at_the_first_byte_that_starts_with_no_budget() {
+    const WEIGHT: u32 = 3;
+    enum Step {
+        Atomic(u64),
+        PerByte(u64),
+    }
+    // One charge: refused only when it starts with no budget left.
+    fn charge(remaining: &mut i64, used: &mut u64, cost: u64) -> bool {
+        if *remaining <= 0 {
+            return false;
+        }
+        *remaining -= i64::try_from(cost).expect("a small cost");
+        *used += cost;
+        true
+    }
+    // Where the charge sequence stops under `budget`: (refused, cost used).
+    fn expected(steps: &[Step], budget: i64) -> (bool, u64) {
+        let (mut remaining, mut used) = (budget, 0u64);
+        let weight = u64::from(WEIGHT);
+        for step in steps {
+            let admitted = match *step {
+                Step::Atomic(units) => charge(&mut remaining, &mut used, units * weight),
+                Step::PerByte(units) => {
+                    (0..units).all(|_| charge(&mut remaining, &mut used, weight))
+                }
+            };
+            if !admitted {
+                return (true, used);
+            }
+        }
+        (false, used)
+    }
+
+    for (source, steps) in [
+        (
+            "string.format('ab%%cd')",
+            vec![Step::Atomic(6), Step::PerByte(5)],
+        ),
+        (
+            "string.format('ab%dcd%%', 42)",
+            vec![
+                Step::Atomic(8),
+                Step::PerByte(2),
+                Step::Atomic(2),
+                Step::PerByte(3),
+            ],
+        ),
+    ] {
+        let full = expected(&steps, i64::MAX).1;
+        assert_eq!(
+            cost_under(&only(Charge::StringFormat, WEIGHT), source),
+            full,
+            "{source}"
+        );
+        for budget in 0..=i64::try_from(full).expect("a small cost") {
+            let mut state = metered(only(Charge::StringFormat, WEIGHT));
+            state.set_cost_budget(budget).expect("metered");
+            let result = support::try_run(&mut state, source);
+            assert_eq!(
+                (is_budget_exceeded(&result), state.cost_used()),
+                expected(&steps, budget),
+                "{source} under budget {budget}"
+            );
+        }
+    }
+}
+
 #[test]
 fn scans_and_matchers_stop_mid_way_at_a_weight_above_one() {
     let subject = "a".repeat(200);

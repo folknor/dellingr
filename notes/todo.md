@@ -18,6 +18,18 @@ get deleted as they ship or stop being worth tracking.
 - Possible CORE-MATH bug: `is_exact` in pow.c measures the bit length of `m`
   rather than `m^y`. Ported as is; unobservable here (the sweeps pass).
 
+### Housekeeping left from the `string.format` literal-run change (2026-11-05)
+
+- AGENTS.md (Benchmarks, measurement sites) says to measure
+  `brokkr test native_bytes_per_level` "dev and `--release`". `--release`
+  forces release onto every sweep, so the debug-assertion-only sweeps
+  (`instrumentation-faults`, `inline-cache-differential`,
+  `cost-check-interval-differential`, `native-call-coverage`) fail to build
+  and the run exits 1, though the release rows still print. The plain
+  invocation already runs both profiles (`release-native-stack*` sweeps);
+  reference/native-calls.md now says so. The AGENTS.md line is the owner's
+  to reword.
+
 ### Housekeeping left from the `_G`-as-real-table change (2026-10-23)
 
 - Several `bench/` verdict headers (arithmetic, pairs, fill, queue, mixed,

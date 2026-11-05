@@ -137,8 +137,8 @@ let mut state = State::builder().interrupt(stop.clone()).build();
   at constant depth, still stops), entry to every Rust callback (including library
   functions and Rust metamethod handlers), and the library work that could
   otherwise run without bound: pattern-matcher steps, plain substring search
-  candidates, heap-sort steps, `string.format` directives, and the iterations
-  of `table.concat`, `table.move`, the metamethod paths of `table.insert`,
+  candidates, heap-sort steps, `string.format` directives and `%%` escapes,
+  and the iterations of `table.concat`, `table.move`, the metamethod paths of `table.insert`,
   `table.remove` and `table.sort`, and the empty-pattern `string.gsub`.
   `vm/interrupt.rs` lists them.
 - **Latency.** Nothing a script can repeat without bound avoids a safepoint,
@@ -206,7 +206,10 @@ String library:
   rendering of any argument, including numbers and `__tostring` results,
   before precision truncation. Numeric conversions charge string input bytes
   they parse, and `%q` charges string input bytes it quotes. Output bytes,
-  including padding, are charged separately.
+  including padding, are charged separately. The format string bytes are one
+  atomic charge, and so is each directive's output; literal text, including
+  the `%` a `%%` escape emits, is charged per byte, so a budget can run out
+  part way through it.
 
 Table library:
 

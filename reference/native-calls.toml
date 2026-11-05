@@ -499,11 +499,7 @@ id = "unpack_values->get_table_unguarded"
 
 # src/lua_std/string_format.rs
 [[edge]]
-id = "format->format_argument:percent"
-excluded = "a `%%` directive formats a literal percent sign and reads no argument"
-
-[[edge]]
-id = "format->format_argument:argument"
+id = "format->format_argument"
 
 [[edge]]
 id = "format_argument->tostring_rendering"
@@ -819,7 +815,7 @@ path = ["@lua", "@rust", "lib:print->tostring_bytes_unguarded", "@tostring"]
 name = "format"
 path = [
     "@lua", "@rust",
-    "format->format_argument:argument",
+    "format->format_argument",
     "format_argument->tostring_rendering",
     "tostring_rendering->call_unguarded",
 ]

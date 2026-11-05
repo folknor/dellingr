@@ -76,6 +76,7 @@ examples! {
     strings: "examples/strings.lua",
     strings_class_membership: "examples/strings/class_membership.lua",
     strings_failed_scan: "examples/strings/failed_scan.lua",
+    strings_format_literals: "examples/strings/format_literals.lua",
     strings_g14_reference: "examples/strings/g14_reference.lua",
     strings_large_subject: "examples/strings/large_subject.lua",
     strings_literal_find: "examples/strings/literal_find.lua",

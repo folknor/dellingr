@@ -861,7 +861,18 @@ in todo.md's workload-registry entry).
   promote-to-8 capacity shipped 2026-09-03.)
 - **Stdlib micro (E):** `string.format` should format into one output buffer
   instead of per-directive Vec round-trips (invasive across ~15 helper
-  functions for a micro win; measure before bothering).
+  functions). Literal runs and `%%` are already batched; what is left is per
+  directive: one rendered-output Vec (`format_integer_parts`, `pad_bytes`),
+  a digit `String` per integer (`unsigned_abs().to_string()`) and the
+  `Directive.raw` Vec. On the `format_literals` probe that is about 1900
+  short-lived allocations per `_bench()` (source-derived counts, unmeasured).
+  Exactness constraint, from the spar on the literal-run change: each
+  directive must stay one transaction - its input charges and validation
+  errors in today's order, then the aggregate cap check, then exactly one
+  atomic output charge, then the bytes. Charging output per fragment, before
+  validation (`%.1s` of a string with a zero), or checking the aggregate cap
+  inside `%q`'s own quoting each changes an exhaustion point or an error.
+  Doing only `%s` and `%d` would split directive output into two regimes.
   The plain-pattern classifier treats `-` as magic even though a leading `-`
   with no preceding class item is literal; conservative is fine, just noting
   the fast path misses needles like `"-foo"`.

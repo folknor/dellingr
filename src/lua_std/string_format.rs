@@ -1,6 +1,7 @@
 //! Lua 5.4-compatible `string.format`.
 
 use super::exact_integer_value;
+use super::string::{append_bytes, append_bytes_units};
 use crate::cost_model::Charge;
 use crate::error::{ArgDetail, ArgError, Error, ErrorKind, LibraryError};
 use crate::limits::{MAX_FORMAT_FIELD_DIGITS, MAX_FORMAT_LEN};
@@ -30,7 +31,6 @@ struct Directive {
 
 #[derive(Clone, Copy)]
 enum Conversion {
-    Percent,
     Char,
     SignedDecimal,
     UnsignedDecimal,
@@ -68,25 +68,35 @@ pub(crate) fn format(state: &mut State) -> Result<u8> {
     let argument_count = state.get_top();
     let mut output = Vec::new();
     let mut argument = 1usize;
+    // Literal bytes are output bytes charged 1 each (docs/budget.md). The
+    // pending run `literal_start..cursor` is appended unit-exactly
+    // (`append_bytes_units`), which stops and fails exactly where charging
+    // each byte on its own would, at the budget and at the size cap. It is
+    // flushed before every `%` polls and at the end, so each poll, argument
+    // check and directive error sees the same bytes charged as it would
+    // byte by byte. A `%%` escape is literal text: after its poll the run
+    // restarts at its second `%`, so that byte is charged where a lone
+    // literal `%` would be, and it never becomes a directive.
+    let mut literal_start = 0usize;
     let mut cursor = 0usize;
 
-    // bounded: one pass over the capped format string's bytes. Each format
-    // directive polls before it is parsed and its argument rendered.
+    // bounded: one pass over the capped format string's bytes. Each `%`
+    // polls before its directive is parsed and its argument rendered.
     while cursor < format_bytes.len() {
         if format_bytes[cursor] != b'%' {
-            append_output(state, &mut output, &format_bytes[cursor..=cursor])?;
             cursor += 1;
             continue;
         }
+        append_bytes_units(
+            state,
+            Charge::StringFormat,
+            &mut output,
+            &format_bytes[literal_start..cursor],
+        )?;
         state.poll_interrupt()?;
         if format_bytes.get(cursor + 1) == Some(&b'%') {
-            let (directive, next) = parse_directive(state, &format_bytes, cursor)?;
-            let formatted = crate::native_call!(
-                "format->format_argument:percent",
-                format_argument(state, 0, &directive)
-            )?;
-            append_output(state, &mut output, &formatted)?;
-            cursor = next;
+            literal_start = cursor + 1;
+            cursor += 2;
             continue;
         }
 
@@ -98,24 +108,23 @@ pub(crate) fn format(state: &mut State) -> Result<u8> {
         let (directive, next) = parse_directive(state, &format_bytes, cursor)?;
         validate_directive(state, &directive)?;
         let formatted = crate::native_call!(
-            "format->format_argument:argument",
+            "format->format_argument",
             format_argument(state, argument, &directive)
         )?;
-        append_output(state, &mut output, &formatted)?;
+        append_bytes(state, Charge::StringFormat, &mut output, &formatted)?;
+        literal_start = next;
         cursor = next;
     }
+    append_bytes_units(
+        state,
+        Charge::StringFormat,
+        &mut output,
+        &format_bytes[literal_start..],
+    )?;
 
     state.set_top(0)?;
     state.push_bytes(output)?;
     Ok(1)
-}
-
-fn append_output(state: &mut State, output: &mut Vec<u8>, bytes: &[u8]) -> Result<()> {
-    let next = crate::limits::checked_string_growth(output.len(), bytes.len())?;
-    state.charge(Charge::StringFormat, bytes.len() as u64)?;
-    output.reserve(next - output.len());
-    output.extend_from_slice(bytes);
-    Ok(())
 }
 
 fn parse_directive(state: &State, bytes: &[u8], start: usize) -> Result<(Directive, usize)> {
@@ -186,9 +195,6 @@ fn parse_directive(state: &State, bytes: &[u8], start: usize) -> Result<(Directi
     let raw = bytes[start..cursor].to_vec();
     let conversion = classify_conversion(conversion_byte)
         .ok_or_else(|| invalid_conversion_error(state, &raw))?;
-    if matches!(conversion, Conversion::Percent) && raw != b"%%" {
-        return Err(invalid_conversion_error(state, &raw));
-    }
     let has_modifiers = raw.len() > 2;
 
     Ok((
@@ -224,8 +230,11 @@ fn parse_decimal_field(bytes: &[u8]) -> Option<u8> {
 }
 
 fn classify_conversion(byte: u8) -> Option<Conversion> {
+    // No `%`: `format` consumes a `%%` escape as literal text before any
+    // directive is parsed, so a `%` conversion here carries flags, width or
+    // precision (`%5%`) or ends the string, and is invalid like any other
+    // unknown conversion.
     let conversion = match byte {
-        b'%' => Conversion::Percent,
         b'c' => Conversion::Char,
         b'd' | b'i' => Conversion::SignedDecimal,
         // %u is deprecated, not removed: 5.2 and 5.4 both still accept it and
@@ -261,7 +270,7 @@ fn validate_directive(state: &State, directive: &Directive) -> Result<()> {
 
     let flags = directive.flags;
     let flags_valid = match directive.conversion {
-        Conversion::Float(_) | Conversion::Quoted | Conversion::Percent => true,
+        Conversion::Float(_) | Conversion::Quoted => true,
         Conversion::SignedDecimal => !flags.alternate,
         Conversion::UnsignedDecimal => !flags.plus && !flags.space && !flags.alternate,
         Conversion::Octal | Conversion::HexLower | Conversion::HexUpper => {
@@ -273,7 +282,7 @@ fn validate_directive(state: &State, directive: &Directive) -> Result<()> {
     };
     let precision_valid = !matches!(
         directive.conversion,
-        Conversion::Percent | Conversion::Char | Conversion::Pointer | Conversion::Quoted
+        Conversion::Char | Conversion::Pointer | Conversion::Quoted
     );
     if !flags_valid
         || (!precision_valid && directive.precision.is_some())
@@ -307,7 +316,6 @@ fn format_argument(state: &mut State, argument: usize, directive: &Directive) ->
     let idx =
         isize::try_from(argument).map_err(|_| invalid_specification(state, &directive.raw))?;
     match directive.conversion {
-        Conversion::Percent => Ok(b"%".to_vec()),
         Conversion::Char => {
             let integer = integer_argument(state, idx, argument)?;
             let byte = u8::try_from(integer.rem_euclid(256))

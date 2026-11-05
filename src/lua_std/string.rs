@@ -385,7 +385,15 @@ fn append_subject_range(
     Ok(())
 }
 
-fn append_bytes(state: &mut State, charge: Charge, out: &mut Vec<u8>, bytes: &[u8]) -> Result<()> {
+/// Append `bytes` as one atomic charge of 1 per byte: the size cap is checked
+/// for the whole append first, and a charge that crosses the budget
+/// completes. Literal text goes through [`append_bytes_units`] instead.
+pub(super) fn append_bytes(
+    state: &mut State,
+    charge: Charge,
+    out: &mut Vec<u8>,
+    bytes: &[u8],
+) -> Result<()> {
     let next = crate::limits::checked_string_growth(out.len(), bytes.len())?;
     state.charge(charge, bytes.len() as u64)?;
     out.reserve(next - out.len());
@@ -467,10 +475,17 @@ fn compile_replacement_template(repl: &[u8]) -> ReplTemplate {
     }
 }
 
-/// Append literal bytes, charging 1 per byte with unit-exact batching. Falls
-/// back to the byte-at-a-time appender when the result would cross the string
-/// size cap, so cap-boundary charging matches the unbatched path too.
-fn append_bytes_units(
+/// Append literal bytes (gsub replacement-template text, `string.format`
+/// text between directives), each byte its own charge of 1, batched: the
+/// outcome is that of calling [`append_bytes`] once per byte. On a finite
+/// budget the run stops at the first byte that starts with no budget left
+/// (`State::charge_units`). When the run would cross the string size cap
+/// it falls back to the byte-at-a-time appender, so the bytes that fit are
+/// charged and the first that does not reports the cap. The per-byte
+/// path's poison check is not repeated per unit: nothing runs between two
+/// bytes of a run, and a callback that returns with the State poisoned is
+/// abandoned by `invoke_rust_fn` before library code resumes.
+pub(super) fn append_bytes_units(
     state: &mut State,
     charge: Charge,
     out: &mut Vec<u8>,
@@ -505,14 +520,8 @@ fn append_templated_replacement(
     // per application (`gsub_empty_pattern`, the matcher, `find_subslice`).
     for segment in &template.segments {
         match segment {
-            ReplSegment::Literal(literal) if !first_application => {
-                append_bytes_units(state, Charge::StringGsub, out, literal)?;
-            }
             ReplSegment::Literal(literal) => {
-                // bounded: one pass over a literal of the template.
-                for byte in literal {
-                    append_bytes(state, Charge::StringGsub, out, std::slice::from_ref(byte))?;
-                }
+                append_bytes_units(state, Charge::StringGsub, out, literal)?;
             }
             ReplSegment::Capture(idx) => {
                 let capture = if *idx == 0 || (captures.len() == 1 && *idx == 1) {

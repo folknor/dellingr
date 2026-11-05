@@ -81,6 +81,10 @@ fn numeric_strings_and_percent_are_supported() {
         support::eval_bytes(r#"return string.format("100%%")"#),
         b"100%"
     );
+    assert_eq!(
+        support::eval_bytes(r#"return string.format("%%%%a%%%d%%", 7)"#),
+        b"%%a%7%"
+    );
     assert_eq!(support::eval_bytes(r#"return string.format(12)"#), b"12");
 }
 
@@ -281,6 +285,14 @@ fn format_errors_have_exact_lua_54_payloads() {
         (
             r#"return string.format("%5%", 1)"#,
             "invalid conversion '%5%' to 'format'",
+        ),
+        (
+            r#"return string.format("100%%%", 1)"#,
+            "invalid conversion '%' to 'format'",
+        ),
+        (
+            r#"return string.format("100%%%")"#,
+            "bad argument #2 to 'format' (no value)",
         ),
         (
             r#"return string.format("%0000000000000000000000d", 1)"#,

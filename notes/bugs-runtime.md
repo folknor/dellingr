@@ -21,20 +21,6 @@ The entries below marked Performance describe work the hunters saw in the
 code. None has been measured; any change goes through a registered
 `brokkr dellingr` workload first.
 
-## RT-020 - string.format appends literal bytes one at a time
-
-Scope: `stdlib-strings`. Performance. Raised by the hunt and again by a fix
-wave.
-
-Each literal byte of a format string goes through `append_output`, which runs
-`checked_string_growth` and an atomic `state.charge` of 1 per byte. `%%` goes
-through `parse_directive`, `format_argument` and a `Vec` allocation to emit one
-byte.
-
-Approaches raised so far (not exhaustive): batch literal runs with
-`charge_units`, which admits charges exactly as per-byte charging does (the
-technique `append_bytes_units` uses in gsub).
-
 ## RT-023 - A global-cache unit test fails under the inline-cache differential sweep
 
 Scope: `vm-heap`. Unverified; observed in passing on 2026-11-05 during the
