@@ -1,12 +1,12 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeSet, VecDeque};
 
 use crate::compiler::verify::{self, BytecodeView};
 
 use super::super::table::{MAX_ARRAY_LEN, array_index, integer_index, is_append_key};
 use super::{
-    CorruptionReason, DuplicateEntry, EnvironmentCorruption, GmatchCorruption,
-    InvalidBytecodeReason, KeyForm, SaveLocation, SavePayload, SavedBytecode, SavedObject,
-    SavedReference, SnapshotError, TableCorruption, corrupt_arena as corrupt,
+    CorruptionReason, DuplicateEntry, GmatchCorruption, InvalidBytecodeReason, KeyForm,
+    SaveLocation, SavePayload, SavedBytecode, SavedObject, SavedReference, SnapshotError,
+    TableCorruption, corrupt_arena as corrupt,
 };
 
 use crate::gmatch_schema;
@@ -235,262 +235,6 @@ fn validate_value(value: &super::SavedVal, payload: &SavePayload) -> Result<(), 
     }
 }
 
-fn validate_environment_deltas(payload: &SavePayload) -> Result<(), SnapshotError> {
-    let mut tokens = BTreeSet::new();
-    for (delta_index, delta) in payload.env_deltas.iter().enumerate() {
-        insert_unique(
-            &mut tokens,
-            &delta.token,
-            CorruptionReason::Duplicate {
-                entry: DuplicateEntry::EnvironmentToken,
-                form: KeyForm::Saved,
-            },
-            delta_index,
-            SaveLocation::EnvironmentDeltas,
-        )?;
-        // This pass checks the saved representation (`Fn` ids, environment
-        // tokens). Uniqueness of the saved form does not by itself prove the
-        // resolved runtime keys unique (tokens resolve through the loading
-        // State's environment), so `materialize_payload` repeats the checks
-        // on runtime values. Distinct `Fn` ids always resolve to distinct
-        // function table entries.
-        let mut deleted = BTreeSet::new();
-        for (key_index, key) in delta.deleted.iter().enumerate() {
-            validate_value(key, payload)?;
-            let resolved = key.table_key(
-                &payload.strings,
-                key_index,
-                SaveLocation::EnvironmentDeleted(delta_index),
-            )?;
-            insert_unique(
-                &mut deleted,
-                resolved,
-                CorruptionReason::Duplicate {
-                    entry: DuplicateEntry::DeletedEnvironmentKey,
-                    form: KeyForm::Saved,
-                },
-                key_index,
-                SaveLocation::EnvironmentDeleted(delta_index),
-            )?;
-        }
-        let mut upserts = BTreeSet::new();
-        for (entry_index, (key, value)) in delta.upserts.iter().enumerate() {
-            validate_value(key, payload)?;
-            validate_value(value, payload)?;
-            if matches!(value, super::SavedVal::Nil) {
-                return Err(corrupt(
-                    CorruptionReason::Environment(EnvironmentCorruption::UpsertStoresNil),
-                    entry_index,
-                    SaveLocation::EnvironmentUpserts(delta_index),
-                ));
-            }
-            let resolved = key.table_key(
-                &payload.strings,
-                entry_index,
-                SaveLocation::EnvironmentUpserts(delta_index),
-            )?;
-            insert_unique(
-                &mut upserts,
-                resolved,
-                CorruptionReason::Duplicate {
-                    entry: DuplicateEntry::EnvironmentUpsertKey,
-                    form: KeyForm::Saved,
-                },
-                entry_index,
-                SaveLocation::EnvironmentUpserts(delta_index),
-            )?;
-        }
-        if !deleted.is_disjoint(&upserts) {
-            return Err(corrupt(
-                CorruptionReason::Environment(EnvironmentCorruption::KeyDeletedAndUpserted(
-                    KeyForm::Saved,
-                )),
-                delta_index,
-                SaveLocation::EnvironmentDeltas,
-            ));
-        }
-        if let Some(order) = &delta.order {
-            let mut order_keys = BTreeSet::new();
-            for (key_index, key) in order.iter().enumerate() {
-                validate_value(key, payload)?;
-                let key = key.table_key(
-                    &payload.strings,
-                    key_index,
-                    SaveLocation::EnvironmentOrder(delta_index),
-                )?;
-                if deleted.contains(&key) {
-                    return Err(corrupt(
-                        CorruptionReason::Environment(
-                            EnvironmentCorruption::OrderContainsDeletedKey(KeyForm::Saved),
-                        ),
-                        key_index,
-                        SaveLocation::EnvironmentOrder(delta_index),
-                    ));
-                }
-                insert_unique(
-                    &mut order_keys,
-                    key,
-                    CorruptionReason::Duplicate {
-                        entry: DuplicateEntry::EnvironmentOrderKey,
-                        form: KeyForm::Saved,
-                    },
-                    key_index,
-                    SaveLocation::EnvironmentOrder(delta_index),
-                )?;
-            }
-            if !upserts.is_subset(&order_keys) {
-                return Err(corrupt(
-                    CorruptionReason::Environment(EnvironmentCorruption::OrderOmitsUpsertedKey(
-                        KeyForm::Saved,
-                    )),
-                    delta_index,
-                    SaveLocation::EnvironmentDeltas,
-                ));
-            }
-        }
-        if let Some(slots) = &delta.hash_slots {
-            let shape = super::SavedObject::Table {
-                array_len: delta.array.as_ref().map_or(0, |(len, _)| *len),
-                array_slots: 0,
-                entries: slots.clone(),
-                metatable: None,
-            };
-            // Slots share the table-shape key validation below, including
-            // reference bounds, nil/NaN rejection and duplicate keys. Only
-            // the map marker and vacant controls bypass table_key.
-            validate_table_shape(
-                payload,
-                &shape,
-                delta_index,
-                &SaveLocation::EnvironmentHashSlots(delta_index),
-            )?;
-        }
-        let (array_len, array) = delta
-            .array
-            .as_ref()
-            .map_or((0, &[][..]), |(len, entries)| (*len, entries.as_slice()));
-        let shape = super::SavedObject::Table {
-            array_len,
-            array_slots: u32::try_from(array.len()).map_err(|_| {
-                corrupt(
-                    CorruptionReason::Table(TableCorruption::ArraySlotWrongKey),
-                    delta_index,
-                    SaveLocation::EnvironmentArray(delta_index),
-                )
-            })?,
-            entries: array.to_vec(),
-            metatable: None,
-        };
-        // Share ordinary tables' length, canonical span, key and reference
-        // checks before using the length as a native index below.
-        validate_table_shape(
-            payload,
-            &shape,
-            delta_index,
-            &SaveLocation::EnvironmentArray(delta_index),
-        )?;
-        let array_len = usize::try_from(array_len).map_err(|_| {
-            corrupt(
-                CorruptionReason::Table(TableCorruption::ArraySlotWrongKey),
-                delta_index,
-                SaveLocation::EnvironmentArray(delta_index),
-            )
-        })?;
-        // Array shape is not an independent set of writes: every live slot
-        // must agree with its upsert, and no upsert may hide outside the span.
-        let mut array_upserts = BTreeMap::new();
-        for (entry_index, (key, value)) in delta.upserts.iter().enumerate() {
-            if let super::SavedVal::Num(bits) = key {
-                if is_append_key(f64::from_bits(*bits), array_len) {
-                    return Err(corrupt(
-                        CorruptionReason::Environment(
-                            EnvironmentCorruption::HashEntryBelongsInArray,
-                        ),
-                        entry_index,
-                        SaveLocation::EnvironmentUpserts(delta_index),
-                    ));
-                }
-                let n = f64::from_bits(*bits);
-                if let Some(slot) = array_index(n, array_len) {
-                    array_upserts.insert(slot, value);
-                }
-            }
-        }
-        for (key, value) in array {
-            let super::SavedVal::Num(bits) = key else {
-                unreachable!("verified span keys are numeric");
-            };
-            let slot = array_index(f64::from_bits(*bits), array_len)
-                .expect("verified span keys lie inside the logical array");
-            let upsert = array_upserts.remove(&slot);
-            if (matches!(value, super::SavedVal::Nil) && upsert.is_some())
-                || (!matches!(value, super::SavedVal::Nil) && upsert != Some(value))
-            {
-                return Err(corrupt(
-                    CorruptionReason::Environment(EnvironmentCorruption::ArrayDisagreesWithUpserts),
-                    slot,
-                    SaveLocation::EnvironmentArray(delta_index),
-                ));
-            }
-        }
-        if !array_upserts.is_empty() {
-            return Err(corrupt(
-                CorruptionReason::Environment(EnvironmentCorruption::ArrayDisagreesWithUpserts),
-                delta_index,
-                SaveLocation::EnvironmentArray(delta_index),
-            ));
-        }
-        if let Some(order) = &delta.order {
-            let mut ordered = order.iter();
-            for (slot, (key, value)) in array.iter().enumerate() {
-                if !matches!(value, super::SavedVal::Nil) && ordered.next() != Some(key) {
-                    return Err(corrupt(
-                        CorruptionReason::Environment(
-                            EnvironmentCorruption::OrderDisagreesWithArray,
-                        ),
-                        slot,
-                        SaveLocation::EnvironmentArray(delta_index),
-                    ));
-                }
-            }
-            for key in ordered {
-                if let super::SavedVal::Num(bits) = key {
-                    let n = f64::from_bits(*bits);
-                    if array_index(n, array_len).is_some() || is_append_key(n, array_len) {
-                        return Err(corrupt(
-                            CorruptionReason::Environment(
-                                EnvironmentCorruption::HashOrderBelongsInArray,
-                            ),
-                            delta_index,
-                            SaveLocation::EnvironmentDeltas,
-                        ));
-                    }
-                }
-            }
-        }
-        if let super::SavedMetatableDelta::Set(value) = &delta.metatable {
-            if !matches!(value, super::SavedVal::Obj(_) | super::SavedVal::EnvObj(_)) {
-                return Err(corrupt(
-                    CorruptionReason::Environment(EnvironmentCorruption::MetatableNotObject),
-                    delta_index,
-                    SaveLocation::EnvironmentDeltas,
-                ));
-            }
-            validate_value(value, payload)?;
-            validate_metatable(
-                value,
-                payload,
-                CorruptionReason::Environment(EnvironmentCorruption::MetatableNotTable(
-                    KeyForm::Saved,
-                )),
-                delta_index,
-                SaveLocation::EnvironmentMetatable(delta_index),
-            )?;
-        }
-    }
-    Ok(())
-}
-
 /// A metatable is always a table at runtime (`setmetatable` refuses anything
 /// else, and `getmetatable` plus every metamethod lookup assume it). A saved
 /// `Obj` metatable must therefore name a saved table, not a closure.
@@ -688,32 +432,70 @@ fn validate_references(payload: &SavePayload) -> Result<(), SnapshotError> {
             },
         )?;
     }
-    // The global table is a table in the arena's form, but not in the arena.
-    if !matches!(payload.globals, SavedObject::Table { .. }) {
+    validate_env_table(
+        payload,
+        &payload.globals,
+        &payload.global_pins,
+        0,
+        &SaveLocation::Globals,
+    )?;
+    let mut tokens = BTreeSet::new();
+    for (index, record) in payload.env_tables.iter().enumerate() {
+        insert_unique(
+            &mut tokens,
+            record.token.as_str(),
+            CorruptionReason::Duplicate {
+                entry: DuplicateEntry::EnvironmentToken,
+                form: KeyForm::Saved,
+            },
+            index,
+            SaveLocation::EnvironmentTables,
+        )?;
+        validate_env_table(
+            payload,
+            &record.table,
+            &record.pins,
+            index,
+            &SaveLocation::EnvironmentTable(index),
+        )?;
+    }
+    Ok(())
+}
+
+/// The global table or one environment table: a table in the arena's form,
+/// but not in the arena, and its pins.
+fn validate_env_table(
+    payload: &SavePayload,
+    table: &SavedObject,
+    pins: &[super::SavedVal],
+    index: usize,
+    location: &SaveLocation,
+) -> Result<(), SnapshotError> {
+    if !matches!(table, SavedObject::Table { .. }) {
         return Err(corrupt(
             CorruptionReason::Table(TableCorruption::MaterializedWrongType),
-            0,
-            SaveLocation::Globals,
+            index,
+            location.clone(),
         ));
     }
-    validate_table_shape(payload, &payload.globals, 0, &SaveLocation::Globals)?;
+    validate_table_shape(payload, table, index, location)?;
     // Pins are distinct strings by content, and only a sealed save has any.
     // String arena ids are references, not identities: a forged payload may
     // give equal bytes more than one id.
-    let mut pins = BTreeSet::new();
-    for (index, pin) in payload.global_pins.iter().enumerate() {
+    let mut seen = BTreeSet::new();
+    for (pin_index, pin) in pins.iter().enumerate() {
         let super::SavedVal::Str(id) = pin else {
             return Err(corrupt(
-                CorruptionReason::InvalidGlobalPin,
-                index,
-                SaveLocation::Globals,
+                CorruptionReason::InvalidPin,
+                pin_index,
+                location.clone(),
             ));
         };
         if !payload.globals_sealed {
             return Err(corrupt(
-                CorruptionReason::InvalidGlobalPin,
-                index,
-                SaveLocation::Globals,
+                CorruptionReason::InvalidPin,
+                pin_index,
+                location.clone(),
             ));
         }
         validate_value(pin, payload)?;
@@ -721,20 +503,20 @@ fn validate_references(payload: &SavePayload) -> Result<(), SnapshotError> {
         // borrows the bytes, so a miss reports the same corruption.
         let Some(content) = payload.strings.get(*id as usize) else {
             return Err(corrupt(
-                CorruptionReason::InvalidGlobalPin,
-                index,
-                SaveLocation::Globals,
+                CorruptionReason::InvalidPin,
+                pin_index,
+                location.clone(),
             ));
         };
         insert_unique(
-            &mut pins,
+            &mut seen,
             content.as_slice(),
             CorruptionReason::Duplicate {
-                entry: DuplicateEntry::GlobalPin,
+                entry: DuplicateEntry::Pin,
                 form: KeyForm::Saved,
             },
-            index,
-            SaveLocation::Globals,
+            pin_index,
+            location.clone(),
         )?;
     }
     Ok(())
@@ -1083,7 +865,6 @@ pub(super) fn verify_payload(payload: SavePayload) -> Result<VerifiedSavePayload
     validate_closures(&payload)?;
     validate_references(&payload)?;
     validate_gmatch_iterators(&payload)?;
-    validate_environment_deltas(&payload)?;
     validate_pointer_ids(&payload)?;
     Ok(VerifiedSavePayload(payload))
 }
@@ -1092,12 +873,118 @@ pub(super) fn verify_payload(payload: SavePayload) -> Result<VerifiedSavePayload
 mod tests {
     use super::*;
 
-    fn payload(delta: super::super::SavedEnvDelta) -> SavePayload {
+    fn env_record(
+        token: &str,
+        entries: Vec<(super::super::SavedVal, super::super::SavedVal)>,
+        pins: Vec<super::super::SavedVal>,
+    ) -> super::super::SavedEnvRecord {
+        super::super::SavedEnvRecord {
+            token: token.to_string(),
+            table: SavedObject::Table {
+                array_len: 0,
+                array_slots: 0,
+                entries,
+                metatable: None,
+            },
+            pins,
+        }
+    }
+
+    fn payload(records: Vec<super::super::SavedEnvRecord>, sealed: bool) -> SavePayload {
         SavePayload {
             strings: vec![b"same".to_vec(), b"same".to_vec()],
-            env_deltas: vec![delta],
+            globals_sealed: sealed,
+            env_tables: records,
             ..SavePayload::empty(true)
         }
+    }
+
+    #[test]
+    fn environment_tables_share_the_global_table_checks() {
+        use super::super::SavedVal;
+        let live = SavedVal::Bool(true);
+        assert!(
+            verify_payload(payload(
+                vec![env_record(
+                    "math",
+                    vec![(SavedVal::Str(0), live.clone())],
+                    vec![SavedVal::Str(0)]
+                )],
+                true,
+            ))
+            .is_ok()
+        );
+        // Invalid keys name the environment table that holds them.
+        for key in [SavedVal::Num(f64::NAN.to_bits()), SavedVal::Nil] {
+            let entries = vec![(key, SavedVal::Num(1.0f64.to_bits()))];
+            assert!(matches!(
+                verify_payload(payload(
+                    vec![env_record("math", entries, Vec::new())],
+                    false
+                )),
+                Err(SnapshotError::CorruptArena {
+                    location: SaveLocation::EnvironmentTable(0),
+                    ..
+                })
+            ));
+        }
+        // Two saved ids with equal bytes are one runtime key.
+        let duplicate_keys = vec![
+            (SavedVal::Str(0), live.clone()),
+            (SavedVal::Str(1), live.clone()),
+        ];
+        assert!(matches!(
+            verify_payload(payload(
+                vec![env_record("math", duplicate_keys, Vec::new())],
+                false
+            )),
+            Err(SnapshotError::CorruptArena {
+                location: SaveLocation::EnvironmentTable(0),
+                ..
+            })
+        ));
+        // Tokens are unique.
+        assert!(matches!(
+            verify_payload(payload(
+                vec![
+                    env_record("math", Vec::new(), Vec::new()),
+                    env_record("math", Vec::new(), Vec::new()),
+                ],
+                false,
+            )),
+            Err(SnapshotError::CorruptArena {
+                location: SaveLocation::EnvironmentTables,
+                index: 1,
+                ..
+            })
+        ));
+        // Only a sealed save carries pins, and they are distinct strings.
+        for (pins, sealed) in [
+            (vec![SavedVal::Str(0)], false),
+            (vec![SavedVal::Bool(true)], true),
+            (vec![SavedVal::Str(0), SavedVal::Str(1)], true),
+        ] {
+            assert!(matches!(
+                verify_payload(payload(vec![env_record("math", Vec::new(), pins)], sealed)),
+                Err(SnapshotError::CorruptArena {
+                    location: SaveLocation::EnvironmentTable(0),
+                    ..
+                })
+            ));
+        }
+        // A record is a table.
+        let mut closure = env_record("math", Vec::new(), Vec::new());
+        closure.table = SavedObject::Closure {
+            chunk: 0,
+            upvalues: Vec::new(),
+        };
+        assert!(matches!(
+            verify_payload(payload(vec![closure], false)),
+            Err(SnapshotError::CorruptArena {
+                location: SaveLocation::EnvironmentTable(0),
+                ..
+            })
+        ));
     }
 
     fn gmatch_payload(empty_pattern: bool, position: super::super::SavedVal) -> SavePayload {
@@ -1165,138 +1052,6 @@ mod tests {
                 },
             ],
             ..SavePayload::empty(true)
-        }
-    }
-
-    #[test]
-    fn invalid_environment_hash_slot_keys_name_the_delta() {
-        use super::super::{SavedEnvDelta, SavedMetatableDelta, SavedVal};
-        for key in [SavedVal::Num(f64::NAN.to_bits()), SavedVal::Nil] {
-            let delta = SavedEnvDelta {
-                token: "math".to_string(),
-                deleted: Vec::new(),
-                upserts: Vec::new(),
-                order: None,
-                array: None,
-                hash_slots: Some(vec![(key, SavedVal::Num(1.0f64.to_bits()))]),
-                metatable: SavedMetatableDelta::Unchanged,
-            };
-            assert!(matches!(
-                verify_payload(payload(delta)),
-                Err(SnapshotError::CorruptArena {
-                    location: SaveLocation::EnvironmentHashSlots(0),
-                    ..
-                })
-            ));
-        }
-    }
-
-    #[test]
-    fn environment_delta_keys_use_runtime_equality_and_reject_invalid_forms() {
-        let unchanged = super::super::SavedMetatableDelta::Unchanged;
-        let duplicate_strings = super::super::SavedEnvDelta {
-            token: "math".to_string(),
-            deleted: vec![super::super::SavedVal::Str(0)],
-            upserts: vec![(
-                super::super::SavedVal::Str(1),
-                super::super::SavedVal::Bool(true),
-            )],
-            order: None,
-            array: None,
-            hash_slots: None,
-            metatable: unchanged.clone(),
-        };
-        assert!(matches!(
-            verify_payload(payload(duplicate_strings)),
-            Err(SnapshotError::CorruptArena { .. })
-        ));
-
-        let negative_zero = super::super::SavedEnvDelta {
-            token: "math".to_string(),
-            deleted: vec![super::super::SavedVal::Num(0)],
-            upserts: vec![(
-                super::super::SavedVal::Num((-0.0f64).to_bits()),
-                super::super::SavedVal::Bool(true),
-            )],
-            order: None,
-            array: None,
-            hash_slots: None,
-            metatable: unchanged.clone(),
-        };
-        assert!(matches!(
-            verify_payload(payload(negative_zero)),
-            Err(SnapshotError::CorruptArena { .. })
-        ));
-
-        let invalid_order = super::super::SavedEnvDelta {
-            token: "math".to_string(),
-            deleted: Vec::new(),
-            upserts: vec![(
-                super::super::SavedVal::Bool(true),
-                super::super::SavedVal::Nil,
-            )],
-            order: Some(Vec::new()),
-            array: None,
-            hash_slots: None,
-            metatable: unchanged,
-        };
-        assert!(matches!(
-            verify_payload(payload(invalid_order)),
-            Err(SnapshotError::CorruptArena { .. })
-        ));
-    }
-
-    #[test]
-    fn environment_array_must_agree_with_delta_membership_values_and_order() {
-        let num = |n: f64| super::super::SavedVal::Num(n.to_bits());
-        let live = super::super::SavedVal::Bool(true);
-        let valid = super::super::SavedEnvDelta {
-            token: "math".into(),
-            deleted: Vec::new(),
-            upserts: vec![(num(1.0), live.clone()), (num(3.0), live.clone())],
-            order: Some(vec![num(1.0), num(3.0)]),
-            array: Some((
-                3,
-                vec![
-                    (num(1.0), live.clone()),
-                    (num(2.0), super::super::SavedVal::Nil),
-                    (num(3.0), live.clone()),
-                ],
-            )),
-            hash_slots: None,
-            metatable: super::super::SavedMetatableDelta::Unchanged,
-        };
-        assert!(verify_payload(payload(valid.clone())).is_ok());
-
-        let mut missing = valid.clone();
-        missing.upserts.remove(0);
-        let mut wrong_value = valid.clone();
-        wrong_value.upserts[0].1 = super::super::SavedVal::Bool(false);
-        let mut hole_upsert = valid.clone();
-        hole_upsert.upserts.push((num(2.0), live.clone()));
-        hole_upsert.order = None;
-        let mut append_upsert = valid.clone();
-        append_upsert.upserts.push((num(4.0), live.clone()));
-        append_upsert.order = None;
-        let mut wrong_order = valid.clone();
-        wrong_order.order = Some(vec![num(3.0), num(1.0)]);
-        let mut hole_order = valid.clone();
-        hole_order.order = Some(vec![num(1.0), num(3.0), num(2.0)]);
-        let mut no_array = valid;
-        no_array.array = None;
-        for delta in [
-            missing,
-            wrong_value,
-            hole_upsert,
-            append_upsert,
-            wrong_order,
-            hole_order,
-            no_array,
-        ] {
-            assert!(matches!(
-                verify_payload(payload(delta)),
-                Err(SnapshotError::CorruptArena { .. })
-            ));
         }
     }
 
@@ -1479,21 +1234,20 @@ mod tests {
             ));
         }
 
-        let mut env = payload(super::super::SavedEnvDelta {
-            token: "math".to_string(),
-            deleted: Vec::new(),
-            upserts: Vec::new(),
-            order: None,
-            array: None,
-            hash_slots: None,
-            metatable: super::super::SavedMetatableDelta::Set(super::super::SavedVal::Obj(0)),
-        });
+        let mut record = env_record("math", Vec::new(), Vec::new());
+        record.table = SavedObject::Table {
+            array_len: 0,
+            array_slots: 0,
+            entries: Vec::new(),
+            metatable: Some(super::super::SavedVal::Obj(0)),
+        };
+        let mut env = payload(vec![record], false);
         env.objects = vec![super::super::SavedObject::Closure {
             chunk: 0,
             upvalues: Vec::new(),
         }];
         assert!(matches!(
-            validate_environment_deltas(&env),
+            validate_references(&env),
             Err(SnapshotError::CorruptArena { .. })
         ));
     }

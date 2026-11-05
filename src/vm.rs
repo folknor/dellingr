@@ -43,16 +43,14 @@ pub(crate) use rust_fn::RustFnId;
 use rust_fn::RustFnTable;
 #[cfg(feature = "snapshot")]
 pub use save_state::{
-    CorruptionReason, DecodeReason, DuplicateEntry, EnvironmentCorruption, GmatchCorruption,
-    InvalidBytecodeReason, KeyForm, LoadError, MaterializedPart, SaveCollection, SaveDiagnostics,
-    SaveError, SaveInternalError, SaveState, SavedReference, SnapshotError, SnapshotField,
-    TableCorruption, TableLoadLocation, TableRestoreFailure, TableRestoreStep,
+    CorruptionReason, DecodeReason, DuplicateEntry, GmatchCorruption, InvalidBytecodeReason,
+    KeyForm, LoadError, MaterializedPart, SaveCollection, SaveDiagnostics, SaveError,
+    SaveInternalError, SaveState, SavedReference, SnapshotError, SnapshotField, TableCorruption,
+    TableLoadLocation, TableRestoreFailure,
 };
 pub(crate) use table_ops::TostringRendering;
 
 use crate::det_hash::IndexMap;
-#[cfg(feature = "snapshot")]
-use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -70,7 +68,7 @@ use super::instr::{ArgCount, Builtin, RetCount};
 use super::patterns::{AnchorMode, LuaPattern, SharedPattern};
 
 use anchor::Registry;
-use global_env::{GlobalEnv, SuspendedEnv};
+use global_env::{EnvRole, GlobalEnv, SuspendedEnv};
 use inventory::InFlight;
 #[cfg(any(debug_assertions, feature = "snapshot"))]
 use inventory::RestState;
@@ -94,10 +92,6 @@ use caches::RuntimeCaches;
 const STDLIB_NON_BUILTIN_GLOBALS: usize = crate::lua_std::STDLIB_NON_BUILTIN_GLOBALS;
 const STDLIB_HEAP_TABLES: usize = crate::lua_std::STDLIB_HEAP_TABLES;
 const STDLIB_INTERNED_TABLE_KEYS: usize = crate::lua_std::STDLIB_INTERNED_TABLE_KEYS;
-/// Snapshot environment token of the shared string metatable. Like
-/// `_G.metatable`, it lives in the token namespace, not the global one.
-#[cfg(feature = "snapshot")]
-const STRING_METATABLE_TOKEN: &str = save_state::STRING_METATABLE_TOKEN;
 
 struct PatternCacheEntry {
     pattern: SharedPattern,
@@ -305,20 +299,6 @@ pub struct State {
     /// still resolve its stable id. An unregister API would need an explicit
     /// host lifetime contract.
     pub(super) rust_fns: RustFnTable,
-    /// Canonical environment objects (library tables, `_G`'s metatable, and
-    /// the shared string metatable; the global table's token is permanent and
-    /// not kept here) captured after each successful open_libs,
-    /// each mapped to its save token. The public `open_libs` refreshes this map,
-    /// and building a State with the standard library uses that same helper.
-    /// Keyed on the objects `open_libs` built, so user shadowing of a builtin
-    /// slot (`math = {}`) cannot make the save classifier mistake a user table
-    /// for an environment object. See `vm/save_state.rs`.
-    #[cfg(feature = "snapshot")]
-    pub(super) env_tokens: BTreeMap<ObjectPtr, String>,
-    /// Pristine ordered contents captured alongside `env_tokens`. These are
-    /// compared at save time so mutations of rebuilt library tables persist.
-    #[cfg(feature = "snapshot")]
-    pub(super) env_baselines: BTreeMap<ObjectPtr, EnvBaseline>,
 }
 
 /// Unwind payload that abandons execution on a State poisoned by a panic a
@@ -328,15 +308,6 @@ pub struct State {
 /// bookkeeping the swallowed panic left inconsistent. `State::guarded`
 /// turns it into `ErrorKind::StatePoisoned` at the host boundary.
 pub(crate) struct PoisonUnwind;
-
-#[cfg(feature = "snapshot")]
-pub(super) struct EnvBaseline {
-    pub(super) entries: Vec<(Val, Val)>,
-    /// Physical hash slots (`Table::snapshot_hash_slots`) at capture, which
-    /// a save compares against to decide whether hash history needs a delta.
-    pub(super) hash_slots: Vec<(Val, Val)>,
-    pub(super) metatable: Option<Val>,
-}
 
 // Important note on how the stack is tracked:
 // A State uses a single stack for all local variables, temporary values,
@@ -469,54 +440,40 @@ impl State {
         StateBuilder::new()
     }
 
-    /// Record the canonical environment objects right after `open_libs`, before
-    /// any user code can shadow a builtin slot. Both save (object -> token) and
-    /// load (token -> object) resolve through this snapshot.
-    #[cfg(feature = "snapshot")]
-    pub(crate) fn capture_env_tokens(&mut self) {
-        // Later writes can alias a captured environment object; saves use its
-        // existing token instead of rebuilding this map from live builtin slots.
-        let mut map = BTreeMap::new();
-        for &(slot, token) in save_state::BUILTIN_ENV_TOKENS {
-            if let Val::Obj(ptr) = self.global_env.read_builtin(&self.heap, slot as u8) {
-                map.insert(ptr, token.to_string());
+    /// Record the environment tables right after `open_libs`, before any user
+    /// code can shadow a builtin slot (`GlobalEnv::adopt_env_tables`). The
+    /// seal and the snapshot (object -> token on save, token -> object on
+    /// load) both go through this record, never the live builtin slots, so
+    /// `math = {}` cannot make a user table an environment table.
+    pub(crate) fn capture_env_tables(&mut self) {
+        let mut tables: Vec<(ObjectPtr, EnvRole)> = Vec::new();
+        // One object holding two roles keeps the last one captured.
+        let mut add = |ptr: ObjectPtr, role: EnvRole| {
+            tables.retain(|(existing, _)| *existing != ptr);
+            tables.push((ptr, role));
+        };
+        for (builtin, role) in global_env::LIBRARY_BUILTINS {
+            if let Val::Obj(ptr) = self.global_env.read_builtin(&self.heap, builtin.to_u8()) {
+                add(ptr, role);
             }
         }
-        // The global table itself is not an environment object: its token is
-        // permanent (see `save_state::GLOBALS_TOKEN`) and its contents are
-        // saved whole. Its protected metatable is rebuilt by `open_libs`.
+        // The global table itself is not an environment table: it exists in
+        // every State, raw ones included. Its protected metatable is rebuilt
+        // by `open_libs`.
         if let Some(mt) = self
             .heap
             .as_table_ref(self.global_env.table())
             .and_then(Table::get_metatable)
         {
-            map.insert(mt, save_state::GLOBAL_METATABLE_TOKEN.to_string());
+            add(mt, EnvRole::GlobalMetatable);
         }
         // The shared string metatable is rebuilt by `open_libs` too, so a
         // script holding it (`local mt = getmetatable("")`) reloads it as the
-        // live object, and a change to its `__index` persists as a delta.
+        // live object.
         if let Some(mt) = self.string_metatable {
-            map.insert(mt, STRING_METATABLE_TOKEN.to_string());
+            add(mt, EnvRole::StringMetatable);
         }
-        let baselines = map
-            .keys()
-            .map(|ptr| {
-                let table = self
-                    .heap
-                    .as_table_ref(*ptr)
-                    .expect("canonical environment object is a table");
-                (
-                    *ptr,
-                    EnvBaseline {
-                        entries: table.entries(),
-                        hash_slots: table.snapshot_hash_slots(),
-                        metatable: table.get_metatable().map(Val::Obj),
-                    },
-                )
-            })
-            .collect();
-        self.env_tokens = map;
-        self.env_baselines = baselines;
+        self.global_env.adopt_env_tables(&mut self.heap, tables);
     }
 
     /// Creates a raw state, without opening any of the standard libraries:
@@ -562,10 +519,6 @@ impl State {
             format_pointer_ids: IndexMap::default(),
             next_format_pointer_id: 1,
             rust_fns: RustFnTable::new(state_id),
-            #[cfg(feature = "snapshot")]
-            env_tokens: BTreeMap::new(),
-            #[cfg(feature = "snapshot")]
-            env_baselines: BTreeMap::new(),
         }
     }
 
@@ -1284,7 +1237,9 @@ impl State {
     /// nil. After sealing, globals set to nil are reclaimed as in any table,
     /// so a script that writes computed names through `_G` stays bounded;
     /// with the `snapshot` feature, sealing records the names written until
-    /// then, so a load still keeps a deleted one deleted.
+    /// then, so a load still keeps a deleted one deleted. The library tables
+    /// `open_libs` built (`math`, `string`, `table`, the global and string
+    /// metatables) keep the same rule and are sealed with the globals.
     ///
     /// Call it once the host has installed its environment (libraries, host
     /// functions, any setup Lua) and before gameplay scripts run. With the
@@ -2406,9 +2361,11 @@ mod snapshot_env_alias_tests {
             Val::Obj(shared_table)
         );
 
-        state.capture_env_tokens();
+        state.capture_env_tables();
         assert_eq!(
-            state.env_tokens.get(&shared_table).map(String::as_str),
+            super::save_state::environment_tokens(&state)
+                .get(&shared_table)
+                .copied(),
             Some("string")
         );
 

@@ -231,12 +231,17 @@ entries it removes.
   The table's allocated capacity stays at its peak. Clearing and redefining
   the same global always reuses its slot before sealing; after sealing, it
   keeps the slot until a later new global compacts its tombstone, after which
-  redefining it appends it at the end. Globals created inside
+  redefining it appends it at the end. The library tables `open_libs` built
+  (`math`, `string`, `table`, the global table's metatable and the string
+  metatable) follow the same rule for the same reason, keys of any type
+  included; a library table a later `open_libs` replaces becomes an ordinary
+  table. Globals created inside
   `with_restricted_env` go away with that environment. For that reason,
   `set_global_named_rust_fn` is refused there: its function-table entry would
   outlive the discarded global and prevent the host from retrying the id.
 - Never reclaimed, with the `snapshot` feature: the pins, one interned string
-  per name initialization wrote, plus any a sealed load's setup adds.
+  per name initialization wrote into the global table or a library table,
+  plus any a sealed load's setup adds.
 - Never reclaimed: Rust function table entries live for the State's lifetime,
   whether reachable or not. Host entries come from `add_rust_fn` in every
   build, and with the `snapshot` feature from `register_rust_fn` or

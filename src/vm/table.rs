@@ -354,7 +354,7 @@ pub(super) struct SlotPolicy {
 /// Iterates occupied hash slots in insertion order, yielding only keys whose
 /// values are live. The index is the original physical slot, including any
 /// tombstones skipped before it.
-#[cfg(any(test, feature = "snapshot"))]
+#[cfg(test)]
 enum LiveHashEntries<'a> {
     Inline {
         entries: &'a [(Val, Val)],
@@ -367,7 +367,7 @@ enum LiveHashEntries<'a> {
     },
 }
 
-#[cfg(any(test, feature = "snapshot"))]
+#[cfg(test)]
 impl Iterator for LiveHashEntries<'_> {
     type Item = (usize, Val, Val);
 
@@ -1229,7 +1229,7 @@ impl Table {
 
     /// Iterate live hash entries in insertion order with their physical slots.
     /// Dead keys (tombstones and vacant slots) are never yielded.
-    #[cfg(any(test, feature = "snapshot"))]
+    #[cfg(test)]
     pub(super) fn live_hash_entries(&self) -> impl Iterator<Item = (usize, Val, Val)> + '_ {
         match &self.storage {
             TableStorage::Inline { entries, len } => LiveHashEntries::Inline {
@@ -1242,14 +1242,6 @@ impl Table {
                 index: 0,
             },
         }
-    }
-
-    /// Live entries in `pairs()` order: the array part, then the hash part.
-    #[cfg(feature = "snapshot")]
-    pub(super) fn entries(&self) -> Vec<(Val, Val)> {
-        let mut out = self.array_entries();
-        self.extend_with_live_hash_entries(&mut out);
-        out
     }
 
     /// The snapshot form: the logical array length, the number of leading
@@ -1298,21 +1290,6 @@ impl Table {
                 )
                 .collect(),
         }
-    }
-
-    #[cfg(feature = "snapshot")]
-    fn array_entries(&self) -> Vec<(Val, Val)> {
-        self.array
-            .iter()
-            .enumerate()
-            .filter(|(_, value)| !matches!(value, Val::Nil))
-            .map(|(position, value)| (Val::Num((self.base + position + 1) as f64), *value))
-            .collect()
-    }
-
-    #[cfg(feature = "snapshot")]
-    fn extend_with_live_hash_entries(&self, out: &mut Vec<(Val, Val)>) {
-        out.extend(self.live_hash_entries().map(|(_, key, value)| (key, value)));
     }
 
     /// Rebuild from `snapshot_entries` output: `vlen` is the logical array

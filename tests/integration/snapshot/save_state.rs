@@ -798,7 +798,7 @@ fn anchor_count_is_diagnostic_not_persisted() {
 }
 
 #[test]
-fn environment_deltas_preserve_mutations_cycles_order_and_metatables() {
+fn environment_tables_preserve_mutations_cycles_order_and_metatables() {
     let mut original = State::new();
     support::run(
         &mut original,
@@ -816,9 +816,7 @@ fn environment_deltas_preserve_mutations_cycles_order_and_metatables() {
     "#,
     );
     let mut loaded = support::reload(&original);
-    support::run(
-        &mut loaded,
-        r#"
+    let check = r#"
         floor_value = math.floor(9)
         if math.ceil ~= nil then error("the deleted math.ceil came back") end
         if math.user.back ~= math then error("the math cycle was not restored") end
@@ -827,12 +825,19 @@ fn environment_deltas_preserve_mutations_cycles_order_and_metatables() {
         for key in pairs(math) do
             if key == "second" or key == "first" then order = order .. key .. "," end
         end
-    "#,
-    );
+    "#;
+    support::run(&mut original, check);
+    support::run(&mut loaded, check);
     assert_eq!(support::global_number(&mut loaded, "floor_value"), 42.0);
+    // Like a global, a library key cleared and set again before sealing
+    // keeps its slot, and the loaded table iterates as the saving one does.
     assert_eq!(
         support::global_string(&mut loaded, "order"),
-        "second,first,"
+        "first,second,"
+    );
+    assert_eq!(
+        support::global_string(&mut loaded, "order"),
+        support::global_string(&mut original, "order")
     );
     // A loaded state remains quiescent and can be saved immediately.
     loaded.save_state().expect("loaded state resaves");
@@ -968,19 +973,14 @@ fn replaying_setup_keeps_its_anchored_identities() {
 }
 
 #[test]
-fn ordered_environment_replay_preserves_setup_additions_and_metatable() {
+fn environment_restore_keeps_setup_additions_and_the_saved_metatable() {
     let mut original = State::new();
-    // Deleting and re-adding a STOCK key is what forces an explicit order
-    // vector: `floor` moves to the end of the live table, whereas plain
-    // delete/upsert replay would restore it in its original baseline position.
-    // Adding only new keys replays in order naturally and emits no vector, so
-    // it would not exercise this path at all.
     support::run(&mut original, "math.floor = nil; math.floor = 7");
     let save = original.save_state().expect("state saves");
     let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |state| {
         support::run(
             state,
-            "math.future = 99; local mt = { setup = true }; setmetatable(math, mt)",
+            "math.future = 99; math.floor = 1; local mt = { setup = true }; setmetatable(math, mt)",
         );
         Ok::<(), std::convert::Infallible>(())
     })
@@ -988,14 +988,14 @@ fn ordered_environment_replay_preserves_setup_additions_and_metatable() {
     support::run(
         &mut loaded,
         "floor = math.floor; future = math.future; order = ''; for key in pairs(math) do if key == 'floor' or key == 'future' then order = order .. key .. ',' end end; \
-         if not getmetatable(math).setup then error('the metatable installed by setup was dropped') end",
+         if getmetatable(math) ~= nil then error('the save holds no metatable for math') end",
     );
+    // The save is authoritative for every key it holds, setup's value
+    // discarded, and for the metatable (the script above raises otherwise).
     assert_eq!(support::global_number(&mut loaded, "floor"), 7.0);
-    // A key the save never saw survives replay instead of failing the load.
+    // A key the save never saw survives instead of failing the load.
     assert_eq!(support::global_number(&mut loaded, "future"), 99.0);
-    // Rebuilding the entry list must not drop a metatable installed by setup;
-    // the script above raises if it did.
-    // Saved keys keep their saved order; setup-only keys are appended after.
+    // Saved keys keep their saved slots; setup-only keys follow them.
     assert_eq!(
         support::global_string(&mut loaded, "order"),
         "floor,future,"
@@ -1003,11 +1003,91 @@ fn ordered_environment_replay_preserves_setup_additions_and_metatable() {
 }
 
 #[test]
-fn ordered_environment_replay_invalidates_setup_field_caches() {
+fn library_override_in_setup_gives_way_to_the_save_whether_or_not_the_table_changed() {
+    // Whether a setup value for a key the save holds survives must not depend
+    // on unrelated edits to the same table: the save wins in both.
+    fn host_floor(state: &mut State) -> dellingr::Result<u8> {
+        state.push_number(-1.0)?;
+        Ok(1)
+    }
+    for script in ["untouched = true", "math.myconst = 42"] {
+        let mut original = State::new();
+        support::run(&mut original, script);
+        let save = original.save_state().expect("state saves");
+        let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |state| {
+            state.get_global("math")?;
+            state.push_string("floor")?;
+            state.push_new_rust_fn(host_floor)?;
+            state.set_table_raw(-3)?;
+            state.pop(1)
+        })
+        .expect("state loads");
+        support::run(&mut loaded, "floored = math.floor(2.5)");
+        assert_eq!(
+            support::global_number(&mut loaded, "floored"),
+            2.0,
+            "{script}"
+        );
+    }
+}
+
+#[test]
+fn replayed_initialization_continues_library_tables_exactly() {
+    // Initialization changes a library table; the script then deletes the
+    // added key, compacts it away after sealing, and restores a stock value
+    // initialization had replaced. A setup replaying the initialization must
+    // reproduce all of it, and the loaded State must save the same bytes.
+    const INIT: &str = "math.extra = 17; stock_pi = math.pi; math.pi = 3";
+    const SCRIPT: &str = "math.extra = nil; math.pi = stock_pi; \
+                          for i = 1, 200 do math['k' .. i] = true; math['k' .. i] = nil end";
+    const CHECK: &str = "extra = tostring(math.extra); pi = math.pi; \
+                         order = ''; for k in pairs(math) do order = order .. tostring(k) .. ',' end";
+    for sealed in [false, true] {
+        let init = |state: &mut State| {
+            support::run(state, INIT);
+            if sealed {
+                state.seal_globals();
+            }
+        };
+        let mut original = State::new();
+        init(&mut original);
+        support::run(&mut original, SCRIPT);
+        let save = original.save_state().expect("state saves");
+        let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |state| {
+            init(state);
+            Ok::<(), std::convert::Infallible>(())
+        })
+        .expect("state loads");
+        assert_eq!(
+            loaded.save_state().expect("loaded state saves").bytes,
+            save.bytes,
+            "sealed={sealed}"
+        );
+        support::run(&mut original, CHECK);
+        support::run(&mut loaded, CHECK);
+        assert_eq!(support::global_string(&mut loaded, "extra"), "nil");
+        assert_eq!(
+            support::global_number(&mut loaded, "pi"),
+            std::f64::consts::PI
+        );
+        assert_eq!(
+            support::global_string(&mut loaded, "order"),
+            support::global_string(&mut original, "order")
+        );
+    }
+}
+
+#[test]
+fn environment_restore_invalidates_setup_field_caches() {
     let mut original = State::new();
-    // Moving a stock key to the end forces ordered replay. Other stock keys
-    // then move to different indices, even though their values stay unchanged.
-    support::run(&mut original, "math.floor = nil; math.floor = 7");
+    // After sealing, deleting `floor` and compacting its tombstone away makes
+    // the re-added key append at the end, so the restored table holds it at
+    // another index than the one setup's fresh library warmed a cache for.
+    original.seal_globals();
+    support::run(
+        &mut original,
+        "math.floor = nil; for i = 1, 100 do math['k' .. i] = true; math['k' .. i] = nil end; math.floor = 7",
+    );
     let save = original.save_state().expect("state saves");
     let mut probe = None;
     let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), |state| {
@@ -1030,18 +1110,15 @@ fn ordered_environment_replay_invalidates_setup_field_caches() {
             ArgCount::Fixed(0),
             RetCount::Fixed(1),
         )
-        .expect("retained probe runs after ordered replay");
+        .expect("retained probe runs after the restore");
     assert_eq!(loaded.to_number(-1).expect("saved floor is numeric"), 7.0);
     loaded.pop(1).unwrap();
 }
 
 #[test]
-fn unordered_environment_replay_places_setup_additions_before_new_keys() {
-    // The counterpart to the test above: when replay reproduces the saved order
-    // naturally, no order vector is emitted and a setup-added key simply sits
-    // where it was inserted - ahead of keys the delta appends. Lua does not
-    // specify `pairs` order, so what is pinned here is only that saved keys keep
-    // their relative order and the setup addition survives.
+fn environment_restore_places_setup_additions_after_saved_slots() {
+    // Saved keys keep their saved slots (a revived key its old one) and a
+    // setup-only key follows them, as for globals.
     let mut original = State::new();
     support::run(
         &mut original,
@@ -1060,7 +1137,7 @@ fn unordered_environment_replay_places_setup_additions_before_new_keys() {
     assert_eq!(support::global_number(&mut loaded, "future"), 99.0);
     assert_eq!(
         support::global_string(&mut loaded, "order"),
-        "second,first,future,"
+        "first,second,future,"
     );
 }
 
@@ -1843,7 +1920,9 @@ fn array_part_shape_survives_round_trip() {
 }
 
 #[test]
-fn environment_order_replay_preserves_setup_array_holes() {
+fn environment_restore_discards_setup_non_string_keys() {
+    // As for the global table: setup contributes only string keys the save
+    // mentions nowhere, so its array part gives way to the saved one.
     let mut original = State::new();
     support::run(&mut original, "math.floor = nil; math.floor = 7");
     let save = original.save_state().unwrap();
@@ -1854,19 +1933,20 @@ fn environment_order_replay_preserves_setup_array_holes() {
         );
         Ok::<(), std::convert::Infallible>(())
     })
-    .expect("order replay preserves setup slots");
+    .expect("setup array keys do not fail the load");
     support::run(
         &mut loaded,
-        "math[2] = 2; order = ''; for k in pairs(math) do if type(k) == 'number' then order = order .. k end end",
+        "math[2] = 2; order = ''; for k in pairs(math) do if type(k) == 'number' then order = order .. k end end; floor = math.floor",
     );
-    assert_eq!(support::global_string(&mut loaded, "order"), "123");
+    assert_eq!(support::global_string(&mut loaded, "order"), "2");
+    assert_eq!(support::global_number(&mut loaded, "floor"), 7.0);
 }
 
 #[test]
-fn environment_order_replay_with_hash_only_numeric_keys() {
+fn environment_restore_with_hash_only_numeric_keys() {
     // An environment table with no array part but numeric hash keys 3 and 2,
-    // a forced reorder, and an entry only the load-time setup adds. The
-    // replay rebuilds it with an empty array, so key 1 written afterwards
+    // a revived stock key, and an entry only the load-time setup adds. The
+    // restore rebuilds it with an empty array, so key 1 written afterwards
     // must still start the array exactly as it does without a save.
     let setup = "math[3] = 3; math[2] = 2; math.floor = nil; math.floor = 7";
     let after = "math[1] = 1; order = ''; for k in pairs(math) do \
@@ -1896,7 +1976,9 @@ fn environment_order_replay_with_hash_only_numeric_keys() {
 }
 
 #[test]
-fn environment_array_replay_preserves_setup_append_keys() {
+fn environment_restore_keeps_the_saved_array_shape() {
+    // A setup write at the saved array's append key is a non-string key, so
+    // the loaded table continues exactly as the saving one.
     let mut original = State::new();
     support::run(&mut original, "math[1] = 1; math[2] = 2; math[2] = nil");
     let save = original.save_state().unwrap();
@@ -1904,14 +1986,21 @@ fn environment_array_replay_preserves_setup_append_keys() {
         support::run(state, "math[3] = 3");
         Ok::<(), std::convert::Infallible>(())
     })
-    .expect("setup append key can extend the saved array");
-    support::run(
-        &mut loaded,
-        "value = math[3]; length = #math; math[2] = 2; order = ''; for k in pairs(math) do if type(k) == 'number' then order = order .. k end end",
+    .expect("setup append key does not fail the load");
+    let after = "value = tostring(math[3]); length = #math; math[2] = 2; order = ''; for k in pairs(math) do if type(k) == 'number' then order = order .. k end end";
+    support::run(&mut original, after);
+    support::run(&mut loaded, after);
+    assert_eq!(support::global_string(&mut loaded, "value"), "nil");
+    for name in ["value", "order"] {
+        assert_eq!(
+            support::global_string(&mut loaded, name),
+            support::global_string(&mut original, name)
+        );
+    }
+    assert_eq!(
+        support::global_number(&mut loaded, "length"),
+        support::global_number(&mut original, "length")
     );
-    assert_eq!(support::global_number(&mut loaded, "value"), 3.0);
-    assert_eq!(support::global_number(&mut loaded, "length"), 3.0);
-    assert_eq!(support::global_string(&mut loaded, "order"), "123");
 }
 
 #[test]
@@ -1941,12 +2030,13 @@ fn dead_environment_function_keys_have_reachability_paths() {
             support::run(&mut state, "string = nil");
         }
         match state.save_state().unwrap_err() {
+            // The string table is saved whole under its token whether or
+            // not a global still names it, so the path starts there.
             SaveError::UnregisteredFunction { reachable_from } => {
-                if shadow {
-                    assert_eq!(reachable_from, "environment string");
-                } else {
-                    assert!(reachable_from.starts_with("global string.key["));
-                }
+                assert!(
+                    reachable_from.starts_with("environment string.key["),
+                    "{reachable_from}"
+                );
             }
             error => panic!("unexpected save error: {error}"),
         }

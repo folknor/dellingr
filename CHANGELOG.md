@@ -105,6 +105,42 @@ version's meaning is wider (see below).
   per charge too (`+: 3`, `table write: 2`). The merged
   `Arithmetic (+,-,*,/,%,^)` and other category rows are gone.
 
+### Changed (breaking): library tables follow the global table's rule
+
+- Snapshots save every library table (`math`, `string`, `table`, the global
+  table's metatable and the string metatable) whole, like the global table,
+  instead of as a delta against the freshly opened library, and a load
+  restores each by the global table's rule: the save is authoritative for
+  every key it holds, its array part and its metatable, and load setup
+  contributes only string keys the save mentions nowhere. Before, a setup
+  value for a library key survived only while the script left the whole
+  table untouched (any change wrote every slot with its value), and a delta
+  could not tell a key never changed from one restored to its stock value
+  after initialization changed it, so a load that replayed initialization
+  could diverge from the saving State. Replay-visible: save bytes change for
+  every standard-library save (every save now carries the stock contents), a
+  setup override of a stock field or a setup metatable on a
+  library table no longer survives a load, setup's numeric and other
+  non-string keys in a library table are discarded, and a build that drops a
+  stock function cannot load a save from one that had it. Format 14 has not
+  shipped, so the version is unchanged.
+- At run time, in every build, those tables take the global table's slot
+  policy: until `State::seal_globals` they keep every tombstone, and a key
+  cleared and set again keeps its slot instead of moving to the end, which
+  changes `pairs` order over a library table for scripts that do that
+  (replay-visible). Sealing records their pins under `snapshot`. A library
+  table a later `open_libs` replaces becomes an ordinary table again.
+- Snapshot error enums lose the delta-only variants: `EnvironmentCorruption`
+  and `TableRestoreStep` are gone (`SnapshotError::InvalidTable` has no
+  `step`), `TableLoadLocation::Environment` has no `entry`, the per-delta
+  locations are replaced by `EnvironmentTables` and `EnvironmentTable(i)`,
+  `SaveCollection` has `EnvironmentTables` and `EnvironmentPins`,
+  `DecodeReason::InvalidEnvironmentMetatableMode` is gone, and
+  `CorruptionReason::InvalidGlobalPin` and `DuplicateEntry::GlobalPin` are
+  `InvalidPin` and `Pin`, covering library pins too. An unregistered function
+  found in a library table is reported as `environment string.key[i]` (or
+  `[i]`, `.metatable`), whether or not a global still names the table.
+
 ### Changed (breaking): host function names
 
 - `State::add_rust_fn` and, under `snapshot`, `State::register_rust_fn` take a
@@ -138,14 +174,9 @@ version's meaning is wider (see below).
   representable.
 - Snapshot loads reject global pins whose strings have equal contents under
   different arena ids, as documented, instead of merging them.
-- An environment delta records a library number that changed between `0`
-  and `-0`; before, the change was dropped as equal. No current library
-  baseline holds a zero, so no existing save changes.
-- Save and load diagnostics name the environment hash-slot step and
-  collection (new `TableRestoreStep::RestoreEnvironmentHashSlots` and
-  `SaveCollection::EnvironmentHashSlots`), and an unregistered function under
-  a global-table key that is not a UTF-8 name is reported as
-  `global table entry[i].key` or `.value` instead of `environment _G`.
+- An unregistered function under a global-table key that is not a UTF-8 name
+  is reported as `global table entry[i].key` or `.value` instead of
+  `environment _G`.
 - `Error` and `StackFrame` display no longer invent locations. A traceback
   frame of an unnamed chunk renders as `3: in main chunk`, not
   `[C]:3: in main chunk`; a runtime error in an unnamed chunk is prefixed

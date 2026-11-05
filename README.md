@@ -228,10 +228,11 @@ The optional `snapshot` feature adds `State::save_state()` and
 deterministic binary codec (no `serde`/`bincode`). This is a data snapshot of a
 quiescent VM: globals, reachable tables/closures/upvalues/strings, the
 deterministic RNG stream, cost counters, and the state-local identities behind
-`tostring`/`%p` are persisted. Changes you make to the standard library tables
-themselves - `math.myconst = 42`, `string.trim = f`, or deleting a stock
-entry - are persisted as a delta against the pristine environment and replayed
-on load, so extending a library table does not silently lose data.
+`tostring`/`%p` are persisted. The standard library tables are saved whole,
+like the global table, so changes you make to them - `math.myconst = 42`,
+`string.trim = f`, or deleting a stock entry - survive a load. The save is
+authoritative for every key it holds; load setup contributes only keys the save
+never mentions, such as a field a later build adds.
 
 It is not a continuation capture; no paused call stack, program counter,
 coroutine, callback, or host user-data handle survives a save/load, and

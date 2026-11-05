@@ -26,20 +26,33 @@
 //!   (`math.sin`, ...) during `open_libs`. An id names one entry, so no build
 //!   difference (optimizer or linker merging of identical functions) can
 //!   change which id a value saves as.
-//! - **Environment objects are rebuilt, not copied.** `math`/`string`/`table`,
+//! - **Environment objects keep their identity.** `math`/`string`/`table`,
 //!   `_G`'s metatable and the shared string metatable are reconstructed by
 //!   `open_libs` on load and referenced by token. The object->token map is
-//!   refreshed at each successful `open_libs` (`State.env_tokens`), not read
-//!   from the live builtin bindings,
-//!   so shadowing a builtin global (`math = {}`) can't misclassify the
-//!   user's table as an environment object. Adding `math.foo` in a later build
-//!   therefore doesn't corrupt old saves.
-//! - **The global table is persisted whole.** Every State has one, so its
-//!   token `_G` is permanent rather than an `open_libs` capture, and its
-//!   contents are a payload section of their own: every slot, tombstones
-//!   included, plus the pins sealing recorded. An unshadowed builtin encodes
-//!   to a cheap `EnvObj`/`Fn` token; a *shadow* (`print = ...`) is preserved
-//!   as the user's value. Skipping builtin names would silently drop shadows.
+//!   the environment-table record each successful `open_libs` refreshes
+//!   (`GlobalEnv::env_tables`), not read from the live builtin bindings, so
+//!   shadowing a builtin global (`math = {}`) can't misclassify the user's
+//!   table as an environment object.
+//! - **Every environment table is persisted whole, by one rule.** The global
+//!   table (permanent token `_G`, a raw State has one too) and each
+//!   environment table save every slot, tombstones included, their
+//!   metatable and the pins sealing recorded; `GlobalEnv::restore` restores
+//!   each by the same rule (`restore_environment_table`): the save is
+//!   authoritative for every key it holds, and load setup contributes only
+//!   string keys it mentions nowhere. Environment tables therefore keep the
+//!   global table's slot policy and seal at run time too (`EnvTable`). An
+//!   unshadowed builtin or stock library function encodes to a cheap
+//!   `EnvObj`/`Fn` token; a *shadow* (`print = ...`, `math.floor = ...`) is
+//!   preserved as the user's value. A later build adding `math.foo` does not
+//!   corrupt old saves: setup contributes the unmentioned key. A build that
+//!   drops a stock function cannot load a save naming it, as for any other
+//!   registered function id. An earlier design saved library tables as
+//!   deltas against the freshly opened library and let setup values win for
+//!   unchanged keys; whether a setup value survived then depended on
+//!   unrelated edits to the same table (any slot change wrote every slot),
+//!   and a delta against the pristine library cannot tell "never changed"
+//!   from "restored to the pristine value after initialization changed it",
+//!   so a load could not continue the saving State exactly.
 //! - **In-crate codec.** Little-endian, length-prefixed, `f64` by bit pattern
 //!   (NaNs canonicalized, -0.0 exact), explicit enum tags, bounds-checked with
 //!   initial vector reservations capped in bytes at remaining input. No
@@ -55,16 +68,14 @@ use std::sync::Arc;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::det_hash::{FixedState, IndexMap as DetMap, IndexSet as DetSet, map_with_capacity};
+use crate::det_hash::{IndexMap as DetMap, map_with_capacity};
 
 use super::RustFnId;
+use super::global_env::{EnvRole, SavedEnvTable};
 use super::inventory::GcRoot;
 use super::object::{GcHeap, RawObject, StringPtr, Upvalue, UpvalueRef};
 use super::rng::VmRng;
-use super::table::{
-    InvalidTableKey, NormalizedTableKey, TableError, TableKey, TableKeyInput, array_index,
-    normalize_table_key,
-};
+use super::table::{InvalidTableKey, NormalizedTableKey, TableKeyInput, normalize_table_key};
 use super::{ObjectPtr, PointerIdKey, State, Val};
 use crate::COST_MODEL_VERSION;
 use crate::compiler::{Bytecode, UpvalueDesc};
@@ -81,26 +92,41 @@ mod verify;
 
 use error::SaveFault;
 pub use error::{
-    CorruptionReason, DecodeReason, DuplicateEntry, EnvironmentCorruption, GmatchCorruption,
-    InvalidBytecodeReason, KeyForm, LoadError, MaterializedPart, SaveCollection, SaveError,
-    SaveInternalError, SavedReference, SnapshotError, SnapshotField, TableCorruption,
-    TableLoadLocation, TableRestoreFailure, TableRestoreStep,
+    CorruptionReason, DecodeReason, DuplicateEntry, GmatchCorruption, InvalidBytecodeReason,
+    KeyForm, LoadError, MaterializedPart, SaveCollection, SaveError, SaveInternalError,
+    SavedReference, SnapshotError, SnapshotField, TableCorruption, TableLoadLocation,
+    TableRestoreFailure,
 };
 
-// Token spellings belong to the snapshot schema, not the global-name API.
-// Keep the order stable: aliases are classified by the last captured token.
-pub(super) const BUILTIN_ENV_TOKENS: &[(crate::instr::Builtin, &str)] = &[
-    (crate::instr::Builtin::Math, "math"),
-    (crate::instr::Builtin::String, "string"),
-    (crate::instr::Builtin::Table, "table"),
-];
-/// The global table's token. Unlike the environment objects above it is
-/// permanent (a raw State has a global table too), so it is not in
-/// `State.env_tokens`: the save walker and loader add it themselves, and its
-/// contents travel in the payload's `globals` section, not as a delta.
+/// The global table's token. Unlike the environment tables it is permanent
+/// (a raw State has a global table too), so it is not in
+/// `GlobalEnv::env_tables`: the save walker and loader add it themselves, and
+/// its contents travel in the payload's `globals` section.
 pub(super) const GLOBALS_TOKEN: &str = "_G";
-pub(super) const GLOBAL_METATABLE_TOKEN: &str = "_G.metatable";
-pub(super) const STRING_METATABLE_TOKEN: &str = "string.metatable";
+const GLOBAL_METATABLE_TOKEN: &str = "_G.metatable";
+const STRING_METATABLE_TOKEN: &str = "string.metatable";
+
+/// The token an environment table saves under. Token spellings belong to the
+/// snapshot schema, not the global-name API.
+fn env_token(role: EnvRole) -> &'static str {
+    match role {
+        EnvRole::Math => "math",
+        EnvRole::String => "string",
+        EnvRole::Table => "table",
+        EnvRole::GlobalMetatable => GLOBAL_METATABLE_TOKEN,
+        EnvRole::StringMetatable => STRING_METATABLE_TOKEN,
+    }
+}
+
+/// Object -> token for the environment tables (not the global table).
+pub(super) fn environment_tokens(state: &State) -> BTreeMap<ObjectPtr, &'static str> {
+    state
+        .global_env
+        .env_tables()
+        .iter()
+        .map(|env| (env.table, env_token(env.role)))
+        .collect()
+}
 
 const MAGIC: [u8; 4] = *b"DLGS";
 use crate::limits::tuning::{
@@ -252,7 +278,8 @@ struct SavePayload {
     /// Whether the saving State had sealed its globals; the loaded one takes
     /// the same phase.
     globals_sealed: bool,
-    env_deltas: Vec<SavedEnvDelta>,
+    /// Every environment table, whole, in token order.
+    env_tables: Vec<SavedEnvRecord>,
     next_format_pointer_id: u64,
     format_pointer_ids: Vec<(SavedVal, u64)>,
 }
@@ -272,7 +299,7 @@ impl SavePayload {
             globals: SavedObject::empty_table(),
             global_pins: Vec::new(),
             globals_sealed: false,
-            env_deltas: Vec::new(),
+            env_tables: Vec::new(),
             next_format_pointer_id: 1,
             format_pointer_ids: Vec::new(),
         }
@@ -299,11 +326,17 @@ impl SavePayload {
                 })
             })
             .saturating_add(self.upvalues.len())
-            .saturating_add(match &self.globals {
-                SavedObject::Table { entries, .. } => entries.len().saturating_mul(2),
-                SavedObject::Closure { .. } => 0,
-            })
-            .saturating_add(self.global_pins.len());
+            .saturating_add(
+                std::iter::once((&self.globals, &self.global_pins))
+                    .chain(self.env_tables.iter().map(|env| (&env.table, &env.pins)))
+                    .fold(0usize, |sum, (table, pins)| {
+                        sum.saturating_add(match table {
+                            SavedObject::Table { entries, .. } => entries.len().saturating_mul(2),
+                            SavedObject::Closure { .. } => 0,
+                        })
+                        .saturating_add(pins.len())
+                    }),
+            );
         let bytecode_bytes = self.bytecode.iter().fold(0usize, |sum, chunk| {
             let literal_bytes = chunk.string_literals.iter().fold(0usize, |sum, literal| {
                 sum.saturating_add(literal.len()).saturating_add(4)
@@ -333,25 +366,14 @@ impl SavePayload {
     }
 }
 
-type SavedArraySpan = (u64, Vec<(SavedVal, SavedVal)>);
-
+/// One environment table, saved whole like the global table.
 #[derive(Clone, Debug, PartialEq)]
-struct SavedEnvDelta {
+struct SavedEnvRecord {
     token: String,
-    deleted: Vec<SavedVal>,
-    upserts: Vec<(SavedVal, SavedVal)>,
-    order: Option<Vec<SavedVal>>,
-    /// Logical length and canonical live array span, including interior holes.
-    array: Option<SavedArraySpan>,
-    hash_slots: Option<Vec<(SavedVal, SavedVal)>>,
-    metatable: SavedMetatableDelta,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-enum SavedMetatableDelta {
-    Unchanged,
-    Cleared,
-    Set(SavedVal),
+    /// Always the `Table` variant (the verifier rejects anything else).
+    table: SavedObject,
+    /// String ids, empty unless sealed (`EnvTable::pins`).
+    pins: Vec<SavedVal>,
 }
 
 struct SaveBuilder<'a> {
@@ -372,7 +394,6 @@ struct SaveBuilder<'a> {
     object_ids: BTreeMap<ObjectPtr, u32>,
     roots: Vec<Option<SavedVal>>,
     reachable_pointer_values: BTreeSet<SavedVal>,
-    expanded_environment_objects: BTreeSet<ObjectPtr>,
 }
 
 #[derive(Clone, Copy)]
@@ -382,7 +403,6 @@ enum ValueDestination {
     TableValue { object: u32, entry: usize },
     Metatable { object: u32 },
     Upvalue(u32),
-    Discard,
 }
 enum EncodeTask {
     Value {
@@ -414,9 +434,18 @@ enum PathSegment {
 #[derive(Clone, Copy)]
 enum DiagnosticRoot<'a> {
     Global(&'a str),
-    Environment(&'a str),
+    /// A part of the environment table with this token: an entry's key or
+    /// value by physical slot, or its metatable.
+    Environment(&'a str, EnvironmentPart),
     GlobalTableEntryKey(usize),
     GlobalTableEntryValue(usize),
+}
+
+#[derive(Clone, Copy)]
+enum EnvironmentPart {
+    Key(usize),
+    Value(usize),
+    Metatable,
 }
 
 impl PathSegment {
@@ -449,8 +478,8 @@ enum PathObjectChildren {
 // Earlier roots have encoded successfully, so a shared object cannot hide the
 // first unregistered function from this root's fresh visited sets.
 // This finds a reachability witness, not the encoder's exact traversal route:
-// the fresh environment set expands even _G, which encode_globals marks
-// expanded before walking its entries. A path can therefore pass through _G
+// the finder expands environment objects, which the encoder writes as tokens
+// and saves as records of their own. A path can therefore pass through _G
 // or another environment alias to the same function. That is intentional for
 // the best-effort diagnostic; reproducing encoder history is unnecessary to
 // identify a reachable function that needs a save id.
@@ -481,17 +510,34 @@ impl<'a> PathFinder<'a> {
         diagnostic_root: DiagnosticRoot<'_>,
         target_function: RustFnId,
     ) -> Option<String> {
-        let segment = match diagnostic_root {
-            DiagnosticRoot::Global(global) => PathSegment::global(global),
-            DiagnosticRoot::Environment(token) => {
-                PathSegment::Environment(truncate_utf8(token, MAX_PATH_GLOBAL_BYTES))
+        let root_path = match diagnostic_root {
+            DiagnosticRoot::Global(global) => {
+                push_path(&mut self.breadcrumbs, None, PathSegment::global(global))
             }
-            DiagnosticRoot::GlobalTableEntryKey(index) => PathSegment::GlobalTableEntryKey(index),
-            DiagnosticRoot::GlobalTableEntryValue(index) => {
-                PathSegment::GlobalTableEntryValue(index)
+            DiagnosticRoot::Environment(token, part) => {
+                let table = push_path(
+                    &mut self.breadcrumbs,
+                    None,
+                    PathSegment::Environment(truncate_utf8(token, MAX_PATH_GLOBAL_BYTES)),
+                );
+                let segment = match part {
+                    EnvironmentPart::Key(index) => PathSegment::TableKey(index),
+                    EnvironmentPart::Value(index) => PathSegment::TableValue(index),
+                    EnvironmentPart::Metatable => PathSegment::Metatable,
+                };
+                push_path(&mut self.breadcrumbs, Some(table), segment)
             }
+            DiagnosticRoot::GlobalTableEntryKey(index) => push_path(
+                &mut self.breadcrumbs,
+                None,
+                PathSegment::GlobalTableEntryKey(index),
+            ),
+            DiagnosticRoot::GlobalTableEntryValue(index) => push_path(
+                &mut self.breadcrumbs,
+                None,
+                PathSegment::GlobalTableEntryValue(index),
+            ),
         };
-        let root_path = push_path(&mut self.breadcrumbs, None, segment);
         let mut tasks = vec![PathTask::Value {
             val: root,
             path: root_path,
@@ -714,7 +760,7 @@ enum PendingObject {
 struct SaveWalk {
     globals: SavedObject,
     global_pins: Vec<SavedVal>,
-    env_deltas: Vec<SavedEnvDelta>,
+    env_tables: Vec<SavedEnvRecord>,
     format_pointer_ids: Vec<(SavedVal, u64)>,
 }
 
@@ -740,23 +786,18 @@ pub(super) enum SaveCoverage {
 /// it.
 pub(super) fn save_coverage(root: &GcRoot<'_>) -> SaveCoverage {
     match root {
-        // Globals: encoded whole, every slot in physical order (tombstones
-        // included), its metatable and the seal pins (`encode_globals`).
-        // StringMetatable and EnvObject: a token for the object's identity,
-        // plus its current contents expanded and diffed against the
-        // baseline (`encode_env_deltas`).
-        GcRoot::Globals(_) | GcRoot::StringMetatable(_) | GcRoot::EnvObject(_) => {
-            SaveCoverage::Serialized
-        }
+        // Globals: the global table and every environment table, each
+        // encoded whole: every slot in physical order (tombstones included),
+        // its metatable and its seal pins (`encode_globals`,
+        // `encode_env_tables`), environment tables under a token for their
+        // identity. StringMetatable: the string metatable is an environment
+        // table, so it is encoded with them.
+        GcRoot::Globals(_) | GcRoot::StringMetatable(_) => SaveCoverage::Serialized,
         // MetaNames: interned again when the loaded State is built.
         // ChunkLiterals: literals of saved bytecode are re-interned by load,
         // carrying their `%p` identities; literals of cache-only chunks need
-        // not survive. EnvBaseline: recaptured by `open_libs` on load, which
-        // holds because `capture_env_tokens` records only freshly opened
-        // library tables.
-        GcRoot::MetaNames(_) | GcRoot::ChunkLiterals(_) | GcRoot::EnvBaseline(_) => {
-            SaveCoverage::Rebuilt
-        }
+        // not survive.
+        GcRoot::MetaNames(_) | GcRoot::ChunkLiterals(_) => SaveCoverage::Rebuilt,
         GcRoot::Stack(_)
         | GcRoot::RootedValues(_)
         | GcRoot::SuspendedEnv(_)
@@ -783,7 +824,6 @@ impl<'a> SaveBuilder<'a> {
             object_ids: BTreeMap::new(),
             roots: Vec::new(),
             reachable_pointer_values: BTreeSet::new(),
-            expanded_environment_objects: BTreeSet::new(),
         }
     }
 
@@ -796,20 +836,7 @@ impl<'a> SaveBuilder<'a> {
     /// arena id is assigned here; `into_payload` only finalizes.
     fn walk(&mut self) -> Result<SaveWalk, SaveError> {
         let (globals, global_pins) = self.encode_globals()?;
-        let env_deltas = self.encode_env_deltas()?;
-        // Every canonical environment object is rebuilt on load, even when
-        // globals are shadowed. Expand these roots in token order so their
-        // strings and rendered identities survive too.
-        let mut environment: Vec<_> = self
-            .state
-            .env_tokens
-            .iter()
-            .map(|(ptr, token)| (token.clone(), *ptr))
-            .collect();
-        environment.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-        for (token, ptr) in environment {
-            self.encode_environment_root(Val::Obj(ptr), &token)?;
-        }
+        let env_tables = self.encode_env_tables()?;
         // Some strings stay observable without the saved graph reaching them
         // as values: metamethod event and builtin names are State roots for
         // its whole lifetime, and a string literal of a saved chunk is
@@ -865,7 +892,7 @@ impl<'a> SaveBuilder<'a> {
         Ok(SaveWalk {
             globals,
             global_pins,
-            env_deltas,
+            env_tables,
             format_pointer_ids,
         })
     }
@@ -874,7 +901,7 @@ impl<'a> SaveBuilder<'a> {
         let SaveWalk {
             globals,
             global_pins,
-            env_deltas,
+            env_tables,
             format_pointer_ids,
         } = walk;
         let objects = self
@@ -891,7 +918,7 @@ impl<'a> SaveBuilder<'a> {
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(SavePayload {
-            has_standard_environment: !self.state.env_tokens.is_empty(),
+            has_standard_environment: !self.state.global_env.env_tables().is_empty(),
             rng_state: self.state.rng.state(),
             cost: self.state.cost.clone(),
             strings: self.strings,
@@ -901,7 +928,7 @@ impl<'a> SaveBuilder<'a> {
             globals,
             global_pins,
             globals_sealed: self.state.global_env.is_sealed(),
-            env_deltas,
+            env_tables,
             next_format_pointer_id: self.state.next_format_pointer_id,
             format_pointer_ids,
         })
@@ -935,13 +962,11 @@ impl<'a> SaveBuilder<'a> {
     /// `print = function ... end`. Encoded first, each named value as a root
     /// labelled by its global name, so an unregistered function is reported
     /// by the global that reaches it. Other entries use their physical slot
-    /// index and whether the function is in the key or value. The table is
-    /// marked expanded first so a `_G` self-reference encodes as its token
-    /// alone, and its rendered identity survives whether or not any saved
-    /// value still references it.
+    /// index and whether the function is in the key or value. A `_G`
+    /// self-reference encodes as its token alone, and its rendered identity
+    /// survives whether or not any saved value still references it.
     fn encode_globals(&mut self) -> Result<(SavedObject, Vec<SavedVal>), SaveError> {
         let ptr = self.state.global_env.table();
-        self.expanded_environment_objects.insert(ptr);
         self.reachable_pointer_values
             .insert(SavedVal::EnvObj(GLOBALS_TOKEN.to_owned()));
         let table = self
@@ -976,15 +1001,16 @@ impl<'a> SaveBuilder<'a> {
             saved.push((key, value));
         }
         let metatable = metatable
-            .map(|mt| self.encode_environment_root(Val::Obj(mt), GLOBALS_TOKEN))
+            .map(|mt| {
+                self.encode_environment_root(
+                    Val::Obj(mt),
+                    GLOBALS_TOKEN,
+                    EnvironmentPart::Metatable,
+                )
+            })
             .transpose()?;
-        let mut pins = Vec::with_capacity(self.state.global_env.pins().len());
-        for pin in self.state.global_env.pins() {
-            let pin = SavedVal::Str(self.string_id(*pin)?);
-            // A pin can outlive every slot naming it, and stays a root.
-            self.reachable_pointer_values.insert(pin.clone());
-            pins.push(pin);
-        }
+        let state = self.state;
+        let pins = self.encode_pins(state.global_env.pins())?;
         Ok((
             SavedObject::Table {
                 // MAX_ARRAY_LEN keeps the logical length below 2^53.
@@ -997,151 +1023,81 @@ impl<'a> SaveBuilder<'a> {
         ))
     }
 
-    fn encode_env_deltas(&mut self) -> Result<Vec<SavedEnvDelta>, SaveError> {
-        let mut canonical: BTreeMap<String, ObjectPtr> = BTreeMap::new();
-        for (ptr, token) in &self.state.env_tokens {
-            canonical.insert(token.clone(), *ptr);
-        }
-        let mut deltas = Vec::new();
+    /// Every environment table, whole, in token order, by the global table's
+    /// rule: every slot in physical order (tombstones and vacant slots
+    /// included), the metatable and the pins. Each value is a root labelled
+    /// by the table's token. A saved value is authoritative on load, a stock
+    /// function included, so a save that leaves a library untouched still
+    /// carries it: that is what keeps a setup value for a key the save holds
+    /// from silently winning in some saves and losing in others.
+    fn encode_env_tables(&mut self) -> Result<Vec<SavedEnvRecord>, SaveError> {
+        let canonical: BTreeMap<&'static str, ObjectPtr> = self
+            .state
+            .global_env
+            .env_tables()
+            .iter()
+            .map(|env| (env_token(env.role), env.table))
+            .collect();
+        let mut records = Vec::with_capacity(canonical.len());
         for (token, ptr) in canonical {
+            // The table's rendered identity survives whether or not any saved
+            // value still references it, as for the global table.
+            self.reachable_pointer_values
+                .insert(SavedVal::EnvObj(token.to_owned()));
             let table = self
                 .state
                 .heap
                 .as_table_ref(ptr)
                 .ok_or(SaveError::from(SaveFault::EnvironmentObjectNotTable))?;
-            let baseline = self
-                .state
-                .env_baselines
-                .get(&ptr)
-                .ok_or(SaveError::from(SaveFault::MissingEnvironmentBaseline))?;
-            let live = table.entries();
-            // One membership map per side, built once per table. `TableKey`
-            // hashes and compares with runtime key equality (-0.0 equals
-            // +0.0), and both sides come from table entries, so every key is
-            // already a valid table key. `or_insert` keeps the first entry for
-            // a repeated key. Values compare as Lua values except that
-            // numeric values use their saved representation: signed zero is
-            // observable in a save, while NaN remains unequal to itself.
-            let mut baseline_values: DetMap<TableKey, Val> =
-                map_with_capacity(baseline.entries.len());
-            for (key, value) in &baseline.entries {
-                baseline_values
-                    .entry(TableKey::from_prevalidated(*key))
-                    .or_insert(*value);
+            let (array_len, array_slots, entries) = table.snapshot_entries();
+            let metatable = table.get_metatable();
+            let array_slots = u32::try_from(array_slots)
+                .map_err(|_| too_large(SaveCollection::TableArraySlots, array_slots))?;
+            let mut saved = Vec::with_capacity(entries.len());
+            for (index, (key, value)) in entries.into_iter().enumerate() {
+                saved.push((
+                    self.encode_environment_root(key, token, EnvironmentPart::Key(index))?,
+                    self.encode_environment_root(value, token, EnvironmentPart::Value(index))?,
+                ));
             }
-            let mut live_keys: DetSet<TableKey> =
-                DetSet::with_capacity_and_hasher(live.len(), FixedState::default());
-            for (key, _) in &live {
-                live_keys.insert(TableKey::from_prevalidated(*key));
-            }
-            let mut deleted = Vec::new();
-            for (key, _) in &baseline.entries {
-                if !live_keys.contains(&TableKey::from_prevalidated(*key)) {
-                    deleted.push(self.encode_environment_root(*key, &token)?);
-                }
-            }
-            let mut upserts = Vec::new();
-            for (key, value) in &live {
-                match baseline_values.get(&TableKey::from_prevalidated(*key)) {
-                    Some(base_value) if snapshot_value_eq(*base_value, *value) => {}
-                    _ => upserts.push((
-                        self.encode_environment_root(*key, &token)?,
-                        self.encode_environment_root(*value, &token)?,
-                    )),
-                }
-            }
-            let replayed_order: Vec<Val> = baseline
-                .entries
-                .iter()
-                .filter(|(key, _)| live_keys.contains(&TableKey::from_prevalidated(*key)))
-                .map(|(key, _)| *key)
-                .chain(live.iter().filter_map(|(key, _)| {
-                    (!baseline_values.contains_key(&TableKey::from_prevalidated(*key)))
-                        .then_some(*key)
-                }))
-                .collect();
-            let order = (replayed_order != live.iter().map(|(key, _)| *key).collect::<Vec<_>>())
-                .then(|| {
-                    live.iter()
-                        .map(|(key, _)| self.encode_environment_root(*key, &token))
-                        .collect::<Result<Vec<_>, SaveError>>()
+            let metatable = metatable
+                .map(|mt| {
+                    self.encode_environment_root(Val::Obj(mt), token, EnvironmentPart::Metatable)
                 })
                 .transpose()?;
-            let metatable = match (baseline.metatable, table.get_metatable().map(Val::Obj)) {
-                (before, after) if before == after => SavedMetatableDelta::Unchanged,
-                (_, None) => SavedMetatableDelta::Cleared,
-                (_, Some(value)) => {
-                    SavedMetatableDelta::Set(self.encode_environment_root(value, &token)?)
-                }
-            };
-            // The array part's shape (its logical length and the canonical
-            // live span, interior nil slots included) decides where later
-            // integer writes land, so it must round-trip; replaying the
-            // upserts alone would rebuild only its live prefix.
-            let (array_len, array_slots, entries) = table.snapshot_entries();
-            let (array_entries, slots) = entries.split_at(array_slots);
-            let array = if array_len == 0 {
-                None
-            } else {
-                Some((
-                    array_len as u64,
-                    array_entries
-                        .iter()
-                        .copied()
-                        .map(|(key, value)| {
-                            Ok((
-                                self.encode_environment_root(key, &token)?,
-                                self.encode_environment_root(value, &token)?,
-                            ))
-                        })
-                        .collect::<Result<Vec<_>, SaveError>>()?,
-                ))
-            };
-            // Preserve physical hash history even when the live contents match
-            // the baseline: a cleared traversal cursor can name a dead slot.
-            // Compare like with like: the baseline's own physical slots, not
-            // its live `pairs` entries, which never carry the map marker.
-            // Values are part of this comparison deliberately: restore applies
-            // these slots after upserts, including their values. Comparing only
-            // keys would require a different restore contract, especially for
-            // transitions between live entries and tombstones. Reuse the tail
-            // of the snapshot above instead of walking every physical slot
-            // again.
-            let hash_slots = if snapshot_hash_slots_eq(slots, &baseline.hash_slots) {
-                None
-            } else {
-                Some(
-                    slots
-                        .iter()
-                        .copied()
-                        .map(|(key, value)| {
-                            Ok((
-                                self.encode_environment_root(key, &token)?,
-                                self.encode_environment_root(value, &token)?,
-                            ))
-                        })
-                        .collect::<Result<Vec<_>, SaveError>>()?,
-                )
-            };
-            if !deleted.is_empty()
-                || !upserts.is_empty()
-                || order.is_some()
-                || array.is_some()
-                || hash_slots.is_some()
-                || !matches!(metatable, SavedMetatableDelta::Unchanged)
-            {
-                deltas.push(SavedEnvDelta {
-                    token,
-                    deleted,
-                    upserts,
-                    order,
-                    array,
-                    hash_slots,
+            let state = self.state;
+            let env = state
+                .global_env
+                .env_tables()
+                .iter()
+                .find(|env| env.table == ptr)
+                .expect("the token map was built from the environment tables");
+            let pins = self.encode_pins(&env.pins)?;
+            records.push(SavedEnvRecord {
+                token: token.to_owned(),
+                table: SavedObject::Table {
+                    // MAX_ARRAY_LEN keeps the logical length below 2^53.
+                    array_len: array_len as u64,
+                    array_slots,
+                    entries: saved,
                     metatable,
-                });
-            }
+                },
+                pins,
+            });
         }
-        Ok(deltas)
+        Ok(records)
+    }
+
+    /// A pin list as string ids. A pin can outlive every slot naming it, and
+    /// stays a root, so its string is reachable.
+    fn encode_pins(&mut self, pins: &[StringPtr]) -> Result<Vec<SavedVal>, SaveError> {
+        let mut saved = Vec::with_capacity(pins.len());
+        for pin in pins {
+            let pin = SavedVal::Str(self.string_id(*pin)?);
+            self.reachable_pointer_values.insert(pin.clone());
+            saved.push(pin);
+        }
+        Ok(saved)
     }
 
     /// The string-arena id of `ptr`, adding its single content copy on first use.
@@ -1165,10 +1121,15 @@ impl<'a> SaveBuilder<'a> {
             .ok_or(SaveError::from(SaveFault::UnfilledRootSlot))
     }
 
-    fn encode_environment_root(&mut self, val: Val, token: &str) -> Result<SavedVal, SaveError> {
+    fn encode_environment_root(
+        &mut self,
+        val: Val,
+        token: &str,
+        part: EnvironmentPart,
+    ) -> Result<SavedVal, SaveError> {
         let root = self.roots.len();
         self.roots.push(None);
-        self.run_tasks(val, DiagnosticRoot::Environment(token), root)?;
+        self.run_tasks(val, DiagnosticRoot::Environment(token, part), root)?;
         self.roots[root]
             .take()
             .ok_or(SaveError::from(SaveFault::UnfilledRootSlot))
@@ -1234,34 +1195,8 @@ impl<'a> SaveBuilder<'a> {
                     if matches!(val, Val::Str(_) | Val::RustFn(_) | Val::Obj(_)) {
                         self.reachable_pointer_values.insert(saved.clone());
                     }
-                    if let Val::Obj(ptr) = val
-                        && self.env_reverse.contains_key(&ptr)
-                        && self.expanded_environment_objects.insert(ptr)
-                    {
-                        let table = self
-                            .state
-                            .heap
-                            .as_table_ref(ptr)
-                            .ok_or(SaveError::from(SaveFault::EnvironmentObjectNotTable))?;
-                        if let Some(metatable) = table.get_metatable() {
-                            tasks.push(EncodeTask::Value {
-                                val: Val::Obj(metatable),
-                                destination: ValueDestination::Discard,
-                            });
-                        }
-                        // Dead hash keys are retained and serialized too.
-                        let (_, _, entries) = table.snapshot_entries();
-                        for (key, value) in entries.into_iter().rev() {
-                            tasks.push(EncodeTask::Value {
-                                val: value,
-                                destination: ValueDestination::Discard,
-                            });
-                            tasks.push(EncodeTask::Value {
-                                val: key,
-                                destination: ValueDestination::Discard,
-                            });
-                        }
-                    }
+                    // An environment object is a token here; its contents
+                    // are a record of their own (`encode_env_tables`).
                     self.write_value(destination, saved)?;
                 }
                 EncodeTask::Object { ptr, id } => {
@@ -1432,7 +1367,6 @@ impl<'a> SaveBuilder<'a> {
                 };
                 *metatable = Some(Some(value));
             }
-            ValueDestination::Discard => {}
         }
         Ok(())
     }
@@ -1675,23 +1609,25 @@ fn encode_save(payload: &SavePayload) -> Result<Vec<u8>, SaveError> {
 }
 
 /// Object -> token map for the save-time environment. Sourced from the
-/// canonical snapshot captured at construction, so a shadowed builtin slot
+/// environment tables `open_libs` recorded, so a shadowed builtin slot
 /// (`math = {}`) never causes a user table to be misread as an env object.
 fn build_env_reverse(state: &State) -> BTreeMap<ObjectPtr, String> {
-    let mut reverse = state.env_tokens.clone();
+    let mut reverse: BTreeMap<ObjectPtr, String> = environment_tokens(state)
+        .into_iter()
+        .map(|(ptr, token)| (ptr, token.to_owned()))
+        .collect();
     reverse.insert(state.global_env.table(), GLOBALS_TOKEN.to_owned());
     reverse
 }
 
 /// Token -> object map for the load-time environment, inverting the freshly
-/// rebuilt snapshot so saved `EnvObj` tokens resolve to the new objects.
+/// rebuilt record so saved `EnvObj` tokens resolve to the new objects.
 /// Loading does not reconstruct token names from builtin names or literals;
 /// capture uses this module's token schema on both sides of the round trip.
 fn build_env_forward(state: &State) -> BTreeMap<String, ObjectPtr> {
-    let mut forward: BTreeMap<String, ObjectPtr> = state
-        .env_tokens
-        .iter()
-        .map(|(ptr, token)| (token.clone(), *ptr))
+    let mut forward: BTreeMap<String, ObjectPtr> = environment_tokens(state)
+        .into_iter()
+        .map(|(ptr, token)| (token.to_owned(), ptr))
         .collect();
     forward.insert(GLOBALS_TOKEN.to_owned(), state.global_env.table());
     forward
@@ -1711,59 +1647,11 @@ fn saved_num_bits(n: f64) -> u64 {
     }
 }
 
-// Save deltas must preserve signed zero, while NaN retains Lua's never-equal
-// behavior so equal payloads do not suppress a NaN delta.
-fn snapshot_value_eq(left: Val, right: Val) -> bool {
-    match (left, right) {
-        (Val::Num(left), Val::Num(right)) if !left.is_nan() && !right.is_nan() => {
-            left.to_bits() == right.to_bits()
-        }
-        _ => left == right,
-    }
-}
-
-// Hash keys still use Lua equality; only their stored values use snapshot
-// equality, since a key's signed zero cannot distinguish table entries.
-fn snapshot_hash_slots_eq(left: &[(Val, Val)], right: &[(Val, Val)]) -> bool {
-    left.len() == right.len()
-        && left
-            .iter()
-            .zip(right)
-            .all(|((left_key, left_value), (right_key, right_value))| {
-                left_key == right_key && snapshot_value_eq(*left_value, *right_value)
-            })
-}
-
 fn corrupt_arena(reason: CorruptionReason, index: usize, location: SaveLocation) -> SnapshotError {
     SnapshotError::CorruptArena {
         reason,
         index,
         location,
-    }
-}
-
-// Retain the table's precise failure as well as the environment token. The
-// optional entry index belongs to the deletion or upsert collection.
-fn invalid_environment_table(
-    token: &str,
-    entry: Option<usize>,
-    step: TableRestoreStep,
-    error: TableError,
-) -> SnapshotError {
-    SnapshotError::InvalidTable {
-        location: TableLoadLocation::Environment {
-            token: token.to_owned(),
-            entry,
-        },
-        step,
-        failure: error.into(),
-    }
-}
-
-fn runtime_array_slot(key: Val, array_len: usize) -> Option<usize> {
-    match key {
-        Val::Num(n) => array_index(n, array_len),
-        _ => None,
     }
 }
 
@@ -1906,7 +1794,6 @@ fn materialize_payload(
                     .rebuild_from_snapshot(array_len, *array_slots as usize, entries)
                     .map_err(|error| SnapshotError::InvalidTable {
                         location: TableLoadLocation::Object(idx),
-                        step: TableRestoreStep::ObjectRebuild,
                         failure: error.into(),
                     })?;
                 if metatable.is_some() {
@@ -1917,363 +1804,7 @@ fn materialize_payload(
         }
     }
 
-    for (delta_index, delta) in payload.env_deltas.iter().enumerate() {
-        let ptr = *env_forward
-            .get(&delta.token)
-            .ok_or_else(|| SnapshotError::UnknownEnvObject(delta.token.clone()))?;
-        // Deliberately repeats the verifier's duplicate and disjointness
-        // checks, now on resolved runtime values. The verifier compares saved
-        // keys, and environment tokens resolve through the loading State, so
-        // saved uniqueness alone does not prove runtime uniqueness. (Two `Fn`
-        // ids never name one value: each id names its own function table
-        // entry.) The reason strings differ because this pass reports the
-        // materialized form.
-        let mut deleted_keys = BTreeSet::new();
-        for (key_index, key) in delta.deleted.iter().enumerate() {
-            insert_runtime_key(
-                &mut deleted_keys,
-                decode_val(key, &ctx)?,
-                &state.heap,
-                key_index,
-                CorruptionReason::Duplicate {
-                    entry: DuplicateEntry::DeletedEnvironmentKey,
-                    form: KeyForm::Materialized,
-                },
-                SaveLocation::EnvironmentDeleted(delta_index),
-            )?;
-        }
-        let mut upsert_keys = BTreeSet::new();
-        for (entry_index, (key, _)) in delta.upserts.iter().enumerate() {
-            insert_runtime_key(
-                &mut upsert_keys,
-                decode_val(key, &ctx)?,
-                &state.heap,
-                entry_index,
-                CorruptionReason::Duplicate {
-                    entry: DuplicateEntry::EnvironmentUpsertKey,
-                    form: KeyForm::Materialized,
-                },
-                SaveLocation::EnvironmentUpserts(delta_index),
-            )?;
-        }
-        if !deleted_keys.is_disjoint(&upsert_keys) {
-            return Err(corrupt_arena(
-                CorruptionReason::Environment(EnvironmentCorruption::KeyDeletedAndUpserted(
-                    KeyForm::Materialized,
-                )),
-                delta_index,
-                SaveLocation::EnvironmentDeltas,
-            ));
-        }
-        if let Some(order) = &delta.order {
-            let mut order_keys = BTreeSet::new();
-            for (key_index, key) in order.iter().enumerate() {
-                insert_runtime_key(
-                    &mut order_keys,
-                    decode_val(key, &ctx)?,
-                    &state.heap,
-                    key_index,
-                    CorruptionReason::Duplicate {
-                        entry: DuplicateEntry::EnvironmentOrderKey,
-                        form: KeyForm::Materialized,
-                    },
-                    SaveLocation::EnvironmentOrder(delta_index),
-                )?;
-            }
-            if !deleted_keys.is_disjoint(&order_keys) {
-                return Err(corrupt_arena(
-                    CorruptionReason::Environment(EnvironmentCorruption::OrderContainsDeletedKey(
-                        KeyForm::Materialized,
-                    )),
-                    delta_index,
-                    SaveLocation::EnvironmentDeltas,
-                ));
-            }
-            if !upsert_keys.is_subset(&order_keys) {
-                return Err(corrupt_arena(
-                    CorruptionReason::Environment(EnvironmentCorruption::OrderOmitsUpsertedKey(
-                        KeyForm::Materialized,
-                    )),
-                    delta_index,
-                    SaveLocation::EnvironmentDeltas,
-                ));
-            }
-        }
-        {
-            let table = state.heap.as_table(ptr).ok_or_else(|| {
-                corrupt_arena(
-                    CorruptionReason::Environment(EnvironmentCorruption::TokenNotTable),
-                    delta_index,
-                    SaveLocation::EnvironmentDeltas,
-                )
-            })?;
-            for (key_index, key) in delta.deleted.iter().enumerate() {
-                table
-                    .insert(decode_val(key, &ctx)?, Val::Nil)
-                    .map_err(|error| {
-                        invalid_environment_table(
-                            &delta.token,
-                            Some(key_index),
-                            TableRestoreStep::DeleteEnvironmentKey,
-                            error,
-                        )
-                    })?;
-            }
-            for (entry_index, (key, value)) in delta.upserts.iter().enumerate() {
-                table
-                    .insert(decode_val(key, &ctx)?, decode_val(value, &ctx)?)
-                    .map_err(|error| {
-                        invalid_environment_table(
-                            &delta.token,
-                            Some(entry_index),
-                            TableRestoreStep::UpsertEnvironmentEntry,
-                            error,
-                        )
-                    })?;
-            }
-        }
-        if let Some(order) = &delta.order {
-            let (current, array_len, array_slots, array, metatable) = {
-                let table = state.heap.as_table(ptr).ok_or_else(|| {
-                    corrupt_arena(
-                        CorruptionReason::Environment(EnvironmentCorruption::TokenNotTable),
-                        delta_index,
-                        SaveLocation::EnvironmentDeltas,
-                    )
-                })?;
-                let (len, slots, mut entries) = table.snapshot_entries();
-                entries.truncate(slots);
-                (table.entries(), len, slots, entries, table.get_metatable())
-            };
-            let mut current_by_key = BTreeMap::new();
-            for (key_index, (key, value)) in current.iter().copied().enumerate() {
-                current_by_key.insert(
-                    runtime_table_key(
-                        key,
-                        &state.heap,
-                        key_index,
-                        SaveLocation::EnvironmentOrder(delta_index),
-                    )?,
-                    (key, value),
-                );
-            }
-            let mut ordered = Vec::with_capacity(current.len());
-            for (key_index, key) in order.iter().enumerate() {
-                let key = decode_val(key, &ctx)?;
-                let Some((current_key, value)) = current_by_key.remove(&runtime_table_key(
-                    key,
-                    &state.heap,
-                    key_index,
-                    SaveLocation::EnvironmentOrder(delta_index),
-                )?) else {
-                    return Err(corrupt_arena(
-                        CorruptionReason::Environment(EnvironmentCorruption::OrderKeyAbsent),
-                        key_index,
-                        SaveLocation::EnvironmentOrder(delta_index),
-                    ));
-                };
-                ordered.push((current_key, value));
-            }
-            // A newer library or load setup may have added entries unknown to
-            // the save. Preserve them after the saved order in their current
-            // insertion order.
-            for (key_index, (key, value)) in current.into_iter().enumerate() {
-                if current_by_key
-                    .remove(&runtime_table_key(
-                        key,
-                        &state.heap,
-                        key_index,
-                        SaveLocation::EnvironmentOrder(delta_index),
-                    )?)
-                    .is_some()
-                {
-                    ordered.push((key, value));
-                }
-            }
-            let table = state.heap.as_table(ptr).ok_or_else(|| {
-                corrupt_arena(
-                    CorruptionReason::Environment(EnvironmentCorruption::TokenNotTable),
-                    delta_index,
-                    SaveLocation::EnvironmentDeltas,
-                )
-            })?;
-            // Preserve the canonical array span while reordering hash entries.
-            let mut entries = array;
-            entries.extend(
-                ordered
-                    .into_iter()
-                    .filter(|(key, _)| runtime_array_slot(*key, array_len).is_none()),
-            );
-            table
-                .rebuild_from_snapshot(array_len, array_slots, entries)
-                .map_err(|error| {
-                    invalid_environment_table(
-                        &delta.token,
-                        None,
-                        TableRestoreStep::RestoreEnvironmentOrder,
-                        error,
-                    )
-                })?;
-            // Rebuilding entries replaces the table shell. An unchanged delta
-            // must retain a metatable that setup or a later library installed.
-            table.set_metatable(metatable);
-        }
-        if let Some((array_len, span)) = &delta.array {
-            let array_len = usize::try_from(*array_len).map_err(|_| {
-                corrupt_arena(
-                    CorruptionReason::Table(TableCorruption::ArraySlotWrongKey),
-                    delta_index,
-                    SaveLocation::EnvironmentArray(delta_index),
-                )
-            })?;
-            let mut entries = span
-                .iter()
-                .map(|(key, value)| Ok((decode_val(key, &ctx)?, decode_val(value, &ctx)?)))
-                .collect::<Result<Vec<_>, SnapshotError>>()?;
-            let table = state.heap.as_table(ptr).ok_or_else(|| {
-                corrupt_arena(
-                    CorruptionReason::Environment(EnvironmentCorruption::TokenNotTable),
-                    delta_index,
-                    SaveLocation::EnvironmentDeltas,
-                )
-            })?;
-            let metatable = table.get_metatable();
-            // Keep setup-only keys beyond the saved range as normal writes.
-            // Do not reconstruct setup's discarded prefix or logical nil tail.
-            let append_key = Val::Num((array_len + 1) as f64);
-            let append_value = table.get(&append_key);
-            entries.extend(table.entries().into_iter().filter(|(key, _)| {
-                runtime_array_slot(*key, array_len).is_none() && *key != append_key
-            }));
-            table
-                .rebuild_from_snapshot(array_len, span.len(), entries)
-                .map_err(|error| {
-                    invalid_environment_table(
-                        &delta.token,
-                        None,
-                        TableRestoreStep::RestoreEnvironmentArray,
-                        error,
-                    )
-                })?;
-            if !matches!(append_value, Val::Nil) {
-                table.insert(append_key, append_value).map_err(|error| {
-                    invalid_environment_table(
-                        &delta.token,
-                        None,
-                        TableRestoreStep::SetupEnvironmentAppend,
-                        error,
-                    )
-                })?;
-            }
-            table.set_metatable(metatable);
-        }
-        if let Some(slots) = &delta.hash_slots {
-            let saved = slots
-                .iter()
-                .map(|(key, value)| Ok((decode_val(key, &ctx)?, decode_val(value, &ctx)?)))
-                .collect::<Result<Vec<_>, SnapshotError>>()?;
-            // Repeat the verifier's uniqueness check on resolved runtime keys,
-            // as for the other delta parts: two saved keys can name one runtime
-            // key, and a duplicate slot would corrupt the tombstone count.
-            let mut runtime_keys = BTreeSet::new();
-            for (entry_index, (key, _)) in saved.iter().enumerate() {
-                if !matches!(key, Val::Nil) {
-                    insert_runtime_key(
-                        &mut runtime_keys,
-                        *key,
-                        &state.heap,
-                        entry_index,
-                        CorruptionReason::Duplicate {
-                            entry: DuplicateEntry::TableKey,
-                            form: KeyForm::Materialized,
-                        },
-                        SaveLocation::EnvironmentHashSlots(delta_index),
-                    )?;
-                }
-            }
-            let table = state.heap.as_table(ptr).ok_or_else(|| {
-                corrupt_arena(
-                    CorruptionReason::Environment(EnvironmentCorruption::TokenNotTable),
-                    delta_index,
-                    SaveLocation::EnvironmentDeltas,
-                )
-            })?;
-            let metatable = table.get_metatable();
-            let (array_len, array_slots, mut entries) = table.snapshot_entries();
-            // Keep setup-only fields after the saved slots, as for order deltas.
-            // Compact those fields in the physical hash snapshot in place so
-            // its slots are not rebuilt in a second table walk.
-            let mut saved_keys: DetSet<TableKey> =
-                DetSet::with_capacity_and_hasher(saved.len(), FixedState::default());
-            for (key, _) in &saved {
-                if !matches!(key, Val::Nil) {
-                    saved_keys.insert(TableKey::from_prevalidated(*key));
-                }
-            }
-            let mut extra_end = array_slots;
-            for read in array_slots..entries.len() {
-                let (key, value) = entries[read];
-                if !matches!(key, Val::Nil)
-                    && !matches!(value, Val::Nil)
-                    && !saved_keys.contains(&TableKey::from_prevalidated(key))
-                {
-                    entries[extra_end] = (key, value);
-                    extra_end += 1;
-                }
-            }
-            let extra_count = extra_end - array_slots;
-            entries.truncate(extra_end);
-            entries.extend(saved);
-            // Compaction leaves setup-only fields before saved slots; restore
-            // the required saved-then-extra order without allocating a buffer.
-            entries[array_slots..].rotate_left(extra_count);
-            table
-                .rebuild_from_snapshot(array_len, array_slots, entries)
-                .map_err(|error| {
-                    invalid_environment_table(
-                        &delta.token,
-                        None,
-                        TableRestoreStep::RestoreEnvironmentHashSlots,
-                        error,
-                    )
-                })?;
-            table.set_metatable(metatable);
-        }
-        let new_metatable = match &delta.metatable {
-            SavedMetatableDelta::Unchanged => None,
-            SavedMetatableDelta::Cleared => Some(None),
-            SavedMetatableDelta::Set(saved) => match decode_val(saved, &ctx)? {
-                Val::Obj(mt_ptr) if state.heap.as_table_ref(mt_ptr).is_some() => Some(Some(mt_ptr)),
-                _ => {
-                    return Err(corrupt_arena(
-                        CorruptionReason::Environment(EnvironmentCorruption::MetatableNotTable(
-                            KeyForm::Materialized,
-                        )),
-                        delta_index,
-                        SaveLocation::EnvironmentDeltas,
-                    ));
-                }
-            },
-        };
-        let table = state.heap.as_table(ptr).ok_or_else(|| {
-            corrupt_arena(
-                CorruptionReason::Environment(EnvironmentCorruption::TokenNotTable),
-                delta_index,
-                SaveLocation::EnvironmentDeltas,
-            )
-        })?;
-        if let Some(metatable) = new_metatable {
-            table.set_metatable(metatable);
-        }
-    }
-
-    restore_globals(
-        state,
-        &payload.globals,
-        &payload.global_pins,
-        payload.globals_sealed,
-        &ctx,
-    )?;
+    restore_environment(state, &payload, &ctx)?;
     state.rng = VmRng::from_state(payload.rng_state);
     // Discards whatever setup charged or budgeted. The saved costing equals
     // the one the State was built with, so only the counters change.
@@ -2348,30 +1879,92 @@ fn materialize_payload(
     Ok(())
 }
 
-/// Decode the saved global table and pins and restore them into the loaded
-/// State's global table (`GlobalEnv::restore` owns the merge with setup).
-fn restore_globals(
+/// Decode the saved global table and every environment table with their
+/// pins, and restore them into the loaded State (`GlobalEnv::restore` owns
+/// the one rule that merges each with setup).
+fn restore_environment(
     state: &mut State,
-    globals: &SavedObject,
-    pins: &[SavedVal],
-    sealed: bool,
+    payload: &SavePayload,
     ctx: &DecodeCtx<'_>,
 ) -> Result<(), SnapshotError> {
+    let globals = decode_env_table(
+        state,
+        &payload.globals,
+        &payload.global_pins,
+        SaveLocation::Globals,
+        ctx,
+    )?;
+    let mut env = Vec::with_capacity(payload.env_tables.len());
+    for (index, record) in payload.env_tables.iter().enumerate() {
+        let ptr = *ctx
+            .env_forward
+            .get(&record.token)
+            .filter(|ptr| **ptr != state.global_env.table())
+            .ok_or_else(|| SnapshotError::UnknownEnvObject(record.token.clone()))?;
+        env.push((
+            ptr,
+            decode_env_table(
+                state,
+                &record.table,
+                &record.pins,
+                SaveLocation::EnvironmentTable(index),
+                ctx,
+            )?,
+        ));
+    }
+    // Two tokens can resolve to one object only through a corrupt save; the
+    // verifier has rejected duplicate tokens already.
+    let mut seen = BTreeSet::new();
+    for (index, (ptr, _)) in env.iter().enumerate() {
+        if !seen.insert(*ptr) {
+            return Err(corrupt_arena(
+                CorruptionReason::Duplicate {
+                    entry: DuplicateEntry::EnvironmentToken,
+                    form: KeyForm::Materialized,
+                },
+                index,
+                SaveLocation::EnvironmentTables,
+            ));
+        }
+    }
+    let tokens = environment_tokens(state);
+    state
+        .global_env
+        .restore(&mut state.heap, globals, env, payload.globals_sealed)
+        .map_err(|(table, error)| SnapshotError::InvalidTable {
+            location: match table.and_then(|ptr| tokens.get(&ptr)) {
+                Some(token) => TableLoadLocation::Environment {
+                    token: (*token).to_owned(),
+                },
+                None => TableLoadLocation::Globals,
+            },
+            failure: error.into(),
+        })
+}
+
+/// Decode one saved environment table: its entries, with resolved hash keys
+/// checked for uniqueness (the verifier can only check them in saved form),
+/// its metatable and its pins.
+fn decode_env_table(
+    state: &State,
+    table: &SavedObject,
+    pins: &[SavedVal],
+    location: SaveLocation,
+    ctx: &DecodeCtx<'_>,
+) -> Result<SavedEnvTable, SnapshotError> {
     let SavedObject::Table {
         array_len,
         array_slots,
         entries,
         metatable,
-    } = globals
+    } = table
     else {
         return Err(corrupt_arena(
             CorruptionReason::Table(TableCorruption::MaterializedWrongType),
             0,
-            SaveLocation::Globals,
+            location,
         ));
     };
-    // As for arena tables: uniqueness of the resolved hash keys, which the
-    // verifier can only check in saved form.
     let mut runtime_keys = BTreeSet::new();
     let hash_start = *array_slots as usize;
     let mut decoded = Vec::with_capacity(entries.len());
@@ -2387,7 +1980,7 @@ fn restore_globals(
                     entry: DuplicateEntry::TableKey,
                     form: KeyForm::Materialized,
                 },
-                SaveLocation::Globals,
+                location.clone(),
             )?;
         }
         decoded.push((key, decode_val(value, ctx)?));
@@ -2400,7 +1993,7 @@ fn restore_globals(
                 return Err(corrupt_arena(
                     CorruptionReason::Table(TableCorruption::MetatableNotTable),
                     0,
-                    SaveLocation::Globals,
+                    location,
                 ));
             }
         },
@@ -2410,11 +2003,7 @@ fn restore_globals(
         match decode_val(pin, ctx)? {
             Val::Str(ptr) => saved_pins.push(ptr),
             _ => {
-                return Err(corrupt_arena(
-                    CorruptionReason::InvalidGlobalPin,
-                    index,
-                    SaveLocation::Globals,
-                ));
+                return Err(corrupt_arena(CorruptionReason::InvalidPin, index, location));
             }
         }
     }
@@ -2423,20 +2012,11 @@ fn restore_globals(
         Ok(len) => len,
         Err(_) => usize::MAX,
     };
-    state
-        .global_env
-        .restore(
-            &mut state.heap,
-            (array_len, hash_start, decoded),
-            metatable,
-            sealed,
-            saved_pins,
-        )
-        .map_err(|error| SnapshotError::InvalidTable {
-            location: TableLoadLocation::Globals,
-            step: TableRestoreStep::ObjectRebuild,
-            failure: error.into(),
-        })
+    Ok(SavedEnvTable {
+        entries: (array_len, hash_start, decoded),
+        metatable,
+        pins: saved_pins,
+    })
 }
 
 /// Merge the identities load setup rendered into the restored ones.
@@ -3147,9 +2727,9 @@ impl SavePayload {
         out.write_bool(self.globals_sealed);
         write_vec(
             out,
-            SaveCollection::EnvironmentDeltas,
-            &self.env_deltas,
-            |out, delta| delta.encode(out),
+            SaveCollection::EnvironmentTables,
+            &self.env_tables,
+            |out, record| record.encode(out),
         )?;
         out.write_u64(self.next_format_pointer_id);
         write_vec(
@@ -3188,7 +2768,7 @@ impl SavePayload {
             globals: SavedObject::decode(input)?,
             global_pins: read_vec(input, SavedVal::decode)?,
             globals_sealed: input.read_bool()?,
-            env_deltas: read_vec(input, SavedEnvDelta::decode)?,
+            env_tables: read_vec(input, SavedEnvRecord::decode)?,
             next_format_pointer_id: input.read_u64()?,
             format_pointer_ids: read_vec(input, |input| {
                 Ok((SavedVal::decode(input)?, input.read_u64()?))
@@ -3197,125 +2777,24 @@ impl SavePayload {
     }
 }
 
-impl SavedEnvDelta {
+impl SavedEnvRecord {
     fn encode(&self, out: &mut Encoder) -> Result<(), SaveError> {
         out.write_string(&self.token, SnapshotField::EnvironmentToken)?;
+        self.table.encode(out)?;
         write_vec(
             out,
-            SaveCollection::EnvironmentDeletedKeys,
-            &self.deleted,
-            |out, key| key.encode(out),
-        )?;
-        write_vec(
-            out,
-            SaveCollection::EnvironmentUpserts,
-            &self.upserts,
-            |out, (key, value)| {
-                key.encode(out)?;
-                value.encode(out)
-            },
-        )?;
-        match &self.order {
-            Some(order) => {
-                out.write_bool(true);
-                write_vec(out, SaveCollection::EnvironmentOrder, order, |out, key| {
-                    key.encode(out)
-                })?;
-            }
-            None => out.write_bool(false),
-        }
-        match &self.array {
-            Some((array_len, array)) => {
-                out.write_bool(true);
-                out.write_u64(*array_len);
-                write_vec(
-                    out,
-                    SaveCollection::EnvironmentArray,
-                    array,
-                    |out, (key, value)| {
-                        key.encode(out)?;
-                        value.encode(out)
-                    },
-                )?;
-            }
-            None => out.write_bool(false),
-        }
-        match &self.hash_slots {
-            Some(slots) => {
-                out.write_bool(true);
-                write_vec(
-                    out,
-                    SaveCollection::EnvironmentHashSlots,
-                    slots,
-                    |out, (key, value)| {
-                        key.encode(out)?;
-                        value.encode(out)
-                    },
-                )?;
-            }
-            None => out.write_bool(false),
-        }
-        self.metatable.encode(out)
+            SaveCollection::EnvironmentPins,
+            &self.pins,
+            |out, pin| pin.encode(out),
+        )
     }
 
     fn decode(input: &mut Decoder<'_>) -> Result<Self, SnapshotError> {
         Ok(Self {
             token: input.read_string(SnapshotField::EnvironmentToken)?,
-            deleted: read_vec(input, SavedVal::decode)?,
-            upserts: read_vec(input, |input| {
-                Ok((SavedVal::decode(input)?, SavedVal::decode(input)?))
-            })?,
-            order: input
-                .read_bool()?
-                .then(|| read_vec(input, SavedVal::decode))
-                .transpose()?,
-            array: input
-                .read_bool()?
-                .then(|| {
-                    let len = input.read_u64()?;
-                    let entries = read_vec(input, |input| {
-                        Ok((SavedVal::decode(input)?, SavedVal::decode(input)?))
-                    })?;
-                    Ok::<_, SnapshotError>((len, entries))
-                })
-                .transpose()?,
-            hash_slots: input
-                .read_bool()?
-                .then(|| {
-                    read_vec(input, |input| {
-                        Ok((SavedVal::decode(input)?, SavedVal::decode(input)?))
-                    })
-                })
-                .transpose()?,
-            metatable: SavedMetatableDelta::decode(input)?,
+            table: SavedObject::decode(input)?,
+            pins: read_vec(input, SavedVal::decode)?,
         })
-    }
-}
-
-impl SavedMetatableDelta {
-    fn encode(&self, out: &mut Encoder) -> Result<(), SaveError> {
-        match self {
-            Self::Unchanged => out.write_u8(0),
-            Self::Cleared => out.write_u8(1),
-            Self::Set(value) => {
-                out.write_u8(2);
-                value.encode(out)?;
-            }
-        }
-        Ok(())
-    }
-
-    fn decode(input: &mut Decoder<'_>) -> Result<Self, SnapshotError> {
-        let tag_offset = input.pos;
-        match input.read_u8()? {
-            0 => Ok(Self::Unchanged),
-            1 => Ok(Self::Cleared),
-            2 => Ok(Self::Set(SavedVal::decode(input)?)),
-            tag => Err(input.decode_error_at(
-                tag_offset,
-                DecodeReason::InvalidEnvironmentMetatableMode(tag),
-            )),
-        }
     }
 }
 
@@ -3601,17 +3080,6 @@ mod tests {
 
     fn no_setup(_: &mut State) -> std::result::Result<(), Infallible> {
         Ok(())
-    }
-
-    #[test]
-    fn environment_delta_comparison_preserves_signed_zero() {
-        assert!(snapshot_value_eq(Val::Num(1.0), Val::Num(1.0)));
-        assert!(!snapshot_value_eq(Val::Num(0.0), Val::Num(-0.0)));
-        assert!(!snapshot_value_eq(Val::Num(f64::NAN), Val::Num(f64::NAN)));
-        assert!(!snapshot_hash_slots_eq(
-            &[(Val::Num(1.0), Val::Num(0.0))],
-            &[(Val::Num(1.0), Val::Num(-0.0))],
-        ));
     }
 
     #[test]
@@ -4915,23 +4383,24 @@ mod tests {
     }
 
     #[test]
-    fn saved_environment_delta_and_pointer_ids_round_trip() {
+    fn saved_environment_table_round_trips() {
         roundtrip!(
-            SavedEnvDelta,
-            SavedEnvDelta {
+            SavedEnvRecord,
+            SavedEnvRecord {
                 token: "math".to_string(),
-                deleted: vec![SavedVal::Str(1)],
-                upserts: vec![(SavedVal::Str(2), SavedVal::Obj(3))],
-                order: Some(vec![SavedVal::Str(2)]),
-                array: Some((
-                    2,
-                    vec![(SavedVal::Num(2.0f64.to_bits()), SavedVal::Bool(true))],
-                )),
-                hash_slots: Some(vec![(SavedVal::Str(2), SavedVal::Nil)]),
-                metatable: SavedMetatableDelta::Set(SavedVal::EnvObj("table".to_string())),
+                table: SavedObject::Table {
+                    array_len: 2,
+                    array_slots: 1,
+                    entries: vec![
+                        (SavedVal::Num(2.0f64.to_bits()), SavedVal::Bool(true)),
+                        (SavedVal::Str(2), SavedVal::Nil),
+                        (SavedVal::Str(1), SavedVal::Obj(3)),
+                    ],
+                    metatable: Some(SavedVal::EnvObj("table".to_string())),
+                },
+                pins: vec![SavedVal::Str(1), SavedVal::Str(2)],
             }
         );
-        roundtrip!(SavedMetatableDelta, SavedMetatableDelta::Cleared);
     }
 
     #[test]
@@ -5106,10 +4575,24 @@ mod tests {
         assert_eq!(state.object_count(), reached.len() + 2);
     }
 
+    /// The math table's value for `key`, through its environment token.
+    fn math_field(state: &State, key: &[u8]) -> Val {
+        let (math, _) = environment_tokens(state)
+            .into_iter()
+            .find(|(_, token)| *token == "math")
+            .expect("math is an environment table");
+        let key = Val::Str(state.heap.find_string(key).expect("the key is interned"));
+        state
+            .heap
+            .as_table_ref(math)
+            .expect("math is a table")
+            .get(&key)
+    }
+
     #[test]
-    fn load_setup_does_not_enter_environment_baselines() {
+    fn setup_library_addition_survives_load_and_resave() {
         let state = State::new();
-        let save = state.save_state().expect("pristine state saves");
+        let save = state.save_state().expect("fresh state saves");
         let loaded = State::load_state(
             &save.bytes,
             Box::new(crate::DefaultCallbacks),
@@ -5121,65 +4604,31 @@ mod tests {
                 Ok(())
             },
         )
-        .expect("setup mutation loads");
-        assert_eq!(
-            loaded.env_tokens.keys().copied().collect::<BTreeSet<_>>(),
-            loaded
-                .env_baselines
-                .keys()
-                .copied()
-                .collect::<BTreeSet<_>>()
-        );
-
-        let math = *loaded
-            .env_tokens
-            .iter()
-            .find(|(_, token)| token.as_str() == "math")
-            .expect("math has a canonical environment token")
-            .0;
-        let setup_key = Val::Str(
-            loaded
-                .heap
-                .find_string(b"setup_only")
-                .expect("setup interns its key"),
-        );
-        let baseline = loaded
-            .env_baselines
-            .get(&math)
-            .expect("math has a fresh environment baseline");
-        assert!(!baseline.entries.iter().any(|(key, _)| *key == setup_key));
-        assert_eq!(
-            loaded
-                .heap
-                .as_table_ref(math)
-                .expect("math is a table")
-                .get(&setup_key),
-            Val::Bool(true)
-        );
-
-        let resave = loaded.save_state().expect("setup mutation resaves");
+        .expect("setup addition loads");
+        // A key the save mentions nowhere is setup's to contribute.
+        assert_eq!(math_field(&loaded, b"setup_only"), Val::Bool(true));
+        let resave = loaded.save_state().expect("setup addition resaves");
         let restored =
             State::load_state(&resave.bytes, Box::new(crate::DefaultCallbacks), no_setup)
-                .expect("setup mutation survives a round trip");
-        let math = *restored
-            .env_tokens
-            .iter()
-            .find(|(_, token)| token.as_str() == "math")
-            .expect("restored math has a canonical environment token")
-            .0;
-        let setup_key = Val::Str(
-            restored
-                .heap
-                .find_string(b"setup_only")
-                .expect("resaved setup key is interned"),
-        );
-        assert_eq!(
-            restored
-                .heap
-                .as_table_ref(math)
-                .expect("restored math is a table")
-                .get(&setup_key),
-            Val::Bool(true)
-        );
+                .expect("setup addition survives a round trip");
+        assert_eq!(math_field(&restored, b"setup_only"), Val::Bool(true));
+    }
+
+    #[test]
+    fn library_signed_zero_survives_load() {
+        let mut state = State::new();
+        crate::Program::compile("math.zero = -0.0", None)
+            .and_then(|program| state.load(&program))
+            .expect("source compiles");
+        state
+            .call(crate::ArgCount::Fixed(0), crate::RetCount::Fixed(0))
+            .expect("source runs");
+        let save = state.save_state().expect("state saves");
+        let loaded = State::load_state(&save.bytes, Box::new(crate::DefaultCallbacks), no_setup)
+            .expect("state loads");
+        let Val::Num(zero) = math_field(&loaded, b"zero") else {
+            panic!("math.zero is a number");
+        };
+        assert_eq!(zero.to_bits(), (-0.0f64).to_bits());
     }
 }

@@ -5,7 +5,8 @@
 use dellingr::{ArgCount, RetCount, State};
 
 /// Covers graph sharing, cycles, table storage history, iterator state and
-/// environment deltas. The codec's unit test checks the decoded coverage.
+/// changed environment tables. The codec's unit test checks the decoded
+/// coverage.
 const GOLDEN_PROGRAM: &str = r#"
     shared = { tag = "shared" }
 
@@ -134,26 +135,9 @@ pub(crate) fn golden_text(bytes: &[u8]) -> String {
     lines.push(format!("global_pins={:?}", reader.values()));
     lines.push(format!("globals_sealed={}", reader.flag()));
     for id in 0..reader.count() {
-        lines.push(format!("delta[{id}] token={}", reader.string()));
-        lines.push(format!("  deleted={:?}", reader.values()));
-        reader.entries("  upsert", &mut lines);
-        if reader.flag() {
-            lines.push(format!("  order={:?}", reader.values()));
-        }
-        if reader.flag() {
-            lines.push(format!("  array_len={}", reader.number(8)));
-            reader.entries("  array", &mut lines);
-        }
-        if reader.flag() {
-            reader.entries("  hash_slot", &mut lines);
-        }
-        let metatable = match reader.number(1) {
-            0 => "unchanged".to_owned(),
-            1 => "cleared".to_owned(),
-            2 => reader.value(),
-            _ => panic!("unknown metatable delta in fixture"),
-        };
-        lines.push(format!("  metatable={metatable}"));
+        let token = reader.string();
+        reader.object(&format!("environment[{id}] token={token}"), &mut lines);
+        lines.push(format!("  pins={:?}", reader.values()));
     }
     lines.push(format!("next_pointer_id={}", reader.number(8)));
     for id in 0..reader.count() {

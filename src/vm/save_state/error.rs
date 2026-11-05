@@ -123,7 +123,6 @@ pub(super) enum SaveFault {
     MissingUpvalueSlot,
     MissingClosureUpvalueSlot,
     MissingTableEntrySlot,
-    MissingEnvironmentBaseline,
     EnvironmentObjectNotTable,
     UpvalueDestinationNotClosure,
     TableDestinationNotTable,
@@ -146,7 +145,6 @@ impl fmt::Display for SaveFault {
             Self::MissingUpvalueSlot => "missing upvalue slot",
             Self::MissingClosureUpvalueSlot => "missing closure upvalue slot",
             Self::MissingTableEntrySlot => "missing table entry slot",
-            Self::MissingEnvironmentBaseline => "missing environment baseline",
             Self::EnvironmentObjectNotTable => "environment object is not a table",
             Self::UpvalueDestinationNotClosure => "upvalue destination is not a closure",
             Self::TableDestinationNotTable => "table destination is not a table",
@@ -179,20 +177,12 @@ pub enum SaveCollection {
     Objects,
     /// The global table's pins.
     Globals,
-    /// The environment deltas.
-    EnvironmentDeltas,
+    /// The environment tables.
+    EnvironmentTables,
     /// The rendered pointer identity records.
     FormatPointerIds,
-    /// An environment delta's deleted keys.
-    EnvironmentDeletedKeys,
-    /// An environment delta's upserts.
-    EnvironmentUpserts,
-    /// An environment delta's physical hash slots.
-    EnvironmentHashSlots,
-    /// An environment delta's key order.
-    EnvironmentOrder,
-    /// An environment delta's array slots.
-    EnvironmentArray,
+    /// An environment table's pins.
+    EnvironmentPins,
     /// A table's stored array slots.
     TableArraySlots,
     /// A table's stored entries.
@@ -225,13 +215,9 @@ impl fmt::Display for SaveCollection {
             Self::Upvalues => "upvalues",
             Self::Objects => "objects",
             Self::Globals => "globals",
-            Self::EnvironmentDeltas => "environment deltas",
+            Self::EnvironmentTables => "environment tables",
             Self::FormatPointerIds => "format pointer ids",
-            Self::EnvironmentDeletedKeys => "environment deleted keys",
-            Self::EnvironmentUpserts => "environment upserts",
-            Self::EnvironmentHashSlots => "environment hash slots",
-            Self::EnvironmentOrder => "environment order",
-            Self::EnvironmentArray => "environment array",
+            Self::EnvironmentPins => "environment pins",
             Self::TableArraySlots => "table array slots",
             Self::TableEntries => "table entries",
             Self::ClosureUpvalues => "closure upvalues",
@@ -439,10 +425,9 @@ pub enum SnapshotError {
     },
     /// A runtime table rejected entries while restoring a save.
     InvalidTable {
-        /// Object arena index, or environment delta token and local operation index.
+        /// Object arena index, the global table, or an environment table's
+        /// token.
         location: TableLoadLocation,
-        /// The restore operation that failed.
-        step: TableRestoreStep,
         /// Why the table rejected it.
         failure: TableRestoreFailure,
     },
@@ -497,16 +482,8 @@ impl fmt::Display for SnapshotError {
             } => {
                 write!(f, "corrupt save {location} at index {index}: {reason}")
             }
-            SnapshotError::InvalidTable {
-                location,
-                step,
-                failure,
-            } => {
-                write!(f, "invalid saved table at {location}: ")?;
-                if *step != TableRestoreStep::ObjectRebuild {
-                    write!(f, "{step}: ")?;
-                }
-                write!(f, "{failure}")
+            SnapshotError::InvalidTable { location, failure } => {
+                write!(f, "invalid saved table at {location}: {failure}")
             }
             SnapshotError::InvalidBytecode {
                 chunk,
@@ -543,8 +520,6 @@ pub enum DecodeReason {
     InconsistentCostMeter,
     /// The costing mode byte is unknown.
     InvalidCostingTag(u8),
-    /// An environment delta's metatable mode byte is unknown.
-    InvalidEnvironmentMetatableMode(u8),
     /// A value's tag byte is unknown.
     InvalidValueTag(u8),
     /// An object's tag byte is unknown.
@@ -563,7 +538,6 @@ impl fmt::Display for DecodeReason {
             Self::StringNotUtf8 => "string is not UTF-8",
             Self::InconsistentCostMeter => "inconsistent cost meter",
             Self::InvalidCostingTag(_) => "invalid costing tag",
-            Self::InvalidEnvironmentMetatableMode(_) => "invalid environment metatable mode",
             Self::InvalidValueTag(_) => "invalid value tag",
             Self::InvalidObjectTag(_) => "invalid object tag",
             Self::InvalidUpvalueTag(_) => "invalid upvalue tag",
@@ -613,12 +587,11 @@ pub enum CorruptionReason {
     NotMaterialized(MaterializedPart),
     /// A saved table object is malformed.
     Table(TableCorruption),
-    /// An environment delta is malformed.
-    Environment(EnvironmentCorruption),
     /// A saved `string.gmatch` iterator is malformed.
     Gmatch(GmatchCorruption),
-    /// A global pin is not a string, or an unsealed save carries pins.
-    InvalidGlobalPin,
+    /// A pin of the global table or an environment table is not a string,
+    /// or an unsealed save carries pins.
+    InvalidPin,
 }
 
 impl fmt::Display for CorruptionReason {
@@ -633,9 +606,8 @@ impl fmt::Display for CorruptionReason {
             Self::NestedChunkCycle => f.write_str("nested chunk graph contains a cycle"),
             Self::NotMaterialized(part) => write!(f, "{part} was not materialized"),
             Self::Table(reason) => fmt::Display::fmt(reason, f),
-            Self::Environment(reason) => fmt::Display::fmt(reason, f),
             Self::Gmatch(reason) => fmt::Display::fmt(reason, f),
-            Self::InvalidGlobalPin => f.write_str("invalid global pin"),
+            Self::InvalidPin => f.write_str("invalid pin"),
         }
     }
 }
@@ -646,16 +618,10 @@ fn duplicate_text(f: &mut fmt::Formatter<'_>, entry: DuplicateEntry, form: KeyFo
     f.write_str(match (entry, form) {
         (E::TableKey, Saved) => "duplicate saved table key",
         (E::TableKey, Materialized) => "duplicate materialized table key",
-        (E::DeletedEnvironmentKey, Saved) => "duplicate deleted environment key",
-        (E::DeletedEnvironmentKey, Materialized) => "duplicate materialized deleted key",
-        (E::EnvironmentUpsertKey, Saved) => "duplicate environment upsert key",
-        (E::EnvironmentUpsertKey, Materialized) => "duplicate materialized upsert key",
-        (E::EnvironmentOrderKey, Saved) => "duplicate environment order key",
-        (E::EnvironmentOrderKey, Materialized) => "duplicate materialized environment order key",
         (E::EnvironmentToken, Saved) => "duplicate environment token",
         (E::EnvironmentToken, Materialized) => "duplicate materialized environment token",
-        (E::GlobalPin, Saved) => "duplicate saved global pin",
-        (E::GlobalPin, Materialized) => "duplicate materialized global pin",
+        (E::Pin, Saved) => "duplicate saved pin",
+        (E::Pin, Materialized) => "duplicate materialized pin",
         (E::FormatPointerValue, Saved) => "duplicate format pointer value",
         (E::FormatPointerValue, Materialized) => "duplicate materialized format pointer value",
         (E::FormatPointerId, Saved) => "duplicate format pointer id",
@@ -708,16 +674,10 @@ impl fmt::Display for SavedReference {
 pub enum DuplicateEntry {
     /// A saved table's keys.
     TableKey,
-    /// An environment delta's deleted keys.
-    DeletedEnvironmentKey,
-    /// An environment delta's upsert keys.
-    EnvironmentUpsertKey,
-    /// An environment delta's key order.
-    EnvironmentOrderKey,
-    /// The environment deltas' tokens.
+    /// The environment tables' tokens.
     EnvironmentToken,
-    /// The sealed global table's pinned names.
-    GlobalPin,
+    /// The pinned names of the sealed global table or an environment table.
+    Pin,
     /// The values given rendered pointer identities.
     FormatPointerValue,
     /// The rendered pointer identities.
@@ -780,69 +740,6 @@ impl fmt::Display for TableCorruption {
             Self::EntryStoresNil => "saved table entry stores nil",
             Self::MetatableNotTable => "saved table metatable is not a table",
             Self::MaterializedWrongType => "materialized table object has wrong type",
-        })
-    }
-}
-
-/// Why an environment delta is malformed, named by
-/// [`CorruptionReason::Environment`].
-#[non_exhaustive]
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum EnvironmentCorruption {
-    /// An upsert stores nil.
-    UpsertStoresNil,
-    /// A key is both deleted and upserted.
-    KeyDeletedAndUpserted(KeyForm),
-    /// The key order contains a deleted key.
-    OrderContainsDeletedKey(KeyForm),
-    /// The key order omits an upserted key.
-    OrderOmitsUpsertedKey(KeyForm),
-    /// An upsert's key belongs to the array part.
-    HashEntryBelongsInArray,
-    /// The array slots disagree with the upserts.
-    ArrayDisagreesWithUpserts,
-    /// The key order disagrees with the array slots.
-    OrderDisagreesWithArray,
-    /// A hash key in the order belongs to the array part.
-    HashOrderBelongsInArray,
-    /// The metatable is not an object.
-    MetatableNotObject,
-    /// The metatable is not a table.
-    MetatableNotTable(KeyForm),
-    /// The token names an environment object that is not a table.
-    TokenNotTable,
-    /// A key in the saved order is not in the table.
-    OrderKeyAbsent,
-}
-
-impl fmt::Display for EnvironmentCorruption {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        use KeyForm::{Materialized, Saved};
-        f.write_str(match self {
-            Self::UpsertStoresNil => "environment upsert stores nil",
-            Self::KeyDeletedAndUpserted(Saved) => "environment key is both deleted and upserted",
-            Self::KeyDeletedAndUpserted(Materialized) => {
-                "materialized key is both deleted and upserted"
-            }
-            Self::OrderContainsDeletedKey(Saved) => "environment order contains a deleted key",
-            Self::OrderContainsDeletedKey(Materialized) => {
-                "materialized environment order contains a deleted key"
-            }
-            Self::OrderOmitsUpsertedKey(Saved) => "environment order omits an upserted key",
-            Self::OrderOmitsUpsertedKey(Materialized) => {
-                "materialized environment order omits an upserted key"
-            }
-            Self::HashEntryBelongsInArray => "environment hash entry belongs in the array",
-            Self::ArrayDisagreesWithUpserts => "environment array disagrees with upserts",
-            Self::OrderDisagreesWithArray => "environment order disagrees with array",
-            Self::HashOrderBelongsInArray => "environment hash order belongs in the array",
-            Self::MetatableNotObject => "environment metatable is not an object",
-            Self::MetatableNotTable(Saved) => "environment metatable is not a table",
-            Self::MetatableNotTable(Materialized) => {
-                "materialized environment metatable is not a table"
-            }
-            Self::TokenNotTable => "environment token does not resolve to a table",
-            Self::OrderKeyAbsent => "environment order key is absent from the table",
         })
     }
 }
@@ -911,40 +808,6 @@ impl fmt::Display for GmatchCorruption {
             Self::CompileFlagKeyOutOfRange => "gmatch compile flag key is out of range",
             Self::CompileFlagKeyInvalid => "gmatch compile flag key is invalid",
             Self::CompileFlagInvalid => "gmatch compile flag is invalid",
-        })
-    }
-}
-
-/// The table-restore operation named by [`SnapshotError::InvalidTable`].
-#[non_exhaustive]
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum TableRestoreStep {
-    /// Rebuilding a saved table object from its entries.
-    ObjectRebuild,
-    /// Deleting a key from an environment table.
-    DeleteEnvironmentKey,
-    /// Writing an environment upsert.
-    UpsertEnvironmentEntry,
-    /// Restoring an environment table's key order.
-    RestoreEnvironmentOrder,
-    /// Restoring an environment table's physical hash slots.
-    RestoreEnvironmentHashSlots,
-    /// Restoring an environment table's array shape.
-    RestoreEnvironmentArray,
-    /// Re-adding an entry the load setup put at the array's append key.
-    SetupEnvironmentAppend,
-}
-
-impl fmt::Display for TableRestoreStep {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::ObjectRebuild => "saved table is invalid",
-            Self::DeleteEnvironmentKey => "deleted environment key is invalid",
-            Self::UpsertEnvironmentEntry => "environment upsert is invalid",
-            Self::RestoreEnvironmentOrder => "saved environment order is invalid",
-            Self::RestoreEnvironmentHashSlots => "saved environment hash slots are invalid",
-            Self::RestoreEnvironmentArray => "saved environment array is invalid",
-            Self::SetupEnvironmentAppend => "setup environment append is invalid",
         })
     }
 }
@@ -1055,28 +918,16 @@ pub enum TableLoadLocation {
         /// Owner in the object arena.
         object: usize,
     },
-    /// Ordered environment deltas.
-    EnvironmentDeltas,
-    /// Deleted keys of the environment delta at this index.
-    EnvironmentDeleted(usize),
-    /// Upserts of the environment delta at this index.
-    EnvironmentUpserts(usize),
-    /// Key order of the environment delta at this index.
-    EnvironmentOrder(usize),
-    /// Array slots of the environment delta at this index.
-    EnvironmentArray(usize),
-    /// Physical hash slots of the environment delta at this index.
-    EnvironmentHashSlots(usize),
-    /// Metatable of the environment delta at this index.
-    EnvironmentMetatable(usize),
+    /// The saved environment tables, in order.
+    EnvironmentTables,
+    /// Entries, metatable or pins of the environment table at this index.
+    EnvironmentTable(usize),
     /// A table in the saved object arena.
     Object(usize),
-    /// A library or host environment table.
+    /// A library environment table, by its stable token.
     Environment {
         /// Stable environment-object token.
         token: String,
-        /// Entry index for a deletion or upsert; absent for a whole-table rebuild.
-        entry: Option<usize>,
     },
 }
 
@@ -1084,13 +935,9 @@ impl fmt::Display for TableLoadLocation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Object(index) => write!(f, "object[{index}]"),
-            Self::Environment { token, entry } => {
+            Self::Environment { token } => {
                 f.write_str("environment ")?;
-                write_bounded_user_text(f, token)?;
-                if let Some(entry) = entry {
-                    write!(f, " entry[{entry}]")?;
-                }
-                Ok(())
+                write_bounded_user_text(f, token)
             }
             Self::Strings => f.write_str("string arena"),
             Self::Objects => f.write_str("object arena"),
@@ -1099,15 +946,8 @@ impl fmt::Display for TableLoadLocation {
             Self::Globals => f.write_str("globals"),
             Self::PointerIds => f.write_str("format pointer ids"),
             Self::TableEntries { object } => write!(f, "object[{object}] entries"),
-            Self::EnvironmentDeltas => f.write_str("environment deltas"),
-            Self::EnvironmentDeleted(delta) => write!(f, "environment delta[{delta}] deleted keys"),
-            Self::EnvironmentUpserts(delta) => write!(f, "environment delta[{delta}] upserts"),
-            Self::EnvironmentOrder(delta) => write!(f, "environment delta[{delta}] order"),
-            Self::EnvironmentArray(delta) => write!(f, "environment delta[{delta}] array"),
-            Self::EnvironmentHashSlots(delta) => write!(f, "environment delta[{delta}] hash slots"),
-            Self::EnvironmentMetatable(delta) => {
-                write!(f, "environment delta[{delta}] metatable")
-            }
+            Self::EnvironmentTables => f.write_str("environment tables"),
+            Self::EnvironmentTable(index) => write!(f, "environment table[{index}]"),
         }
     }
 }
@@ -1183,48 +1023,6 @@ mod tests {
             ),
             (
                 CorruptionReason::Duplicate {
-                    entry: DuplicateEntry::DeletedEnvironmentKey,
-                    form: KeyForm::Saved,
-                },
-                "duplicate deleted environment key",
-            ),
-            (
-                CorruptionReason::Duplicate {
-                    entry: DuplicateEntry::DeletedEnvironmentKey,
-                    form: KeyForm::Materialized,
-                },
-                "duplicate materialized deleted key",
-            ),
-            (
-                CorruptionReason::Duplicate {
-                    entry: DuplicateEntry::EnvironmentUpsertKey,
-                    form: KeyForm::Saved,
-                },
-                "duplicate environment upsert key",
-            ),
-            (
-                CorruptionReason::Duplicate {
-                    entry: DuplicateEntry::EnvironmentUpsertKey,
-                    form: KeyForm::Materialized,
-                },
-                "duplicate materialized upsert key",
-            ),
-            (
-                CorruptionReason::Duplicate {
-                    entry: DuplicateEntry::EnvironmentOrderKey,
-                    form: KeyForm::Saved,
-                },
-                "duplicate environment order key",
-            ),
-            (
-                CorruptionReason::Duplicate {
-                    entry: DuplicateEntry::EnvironmentOrderKey,
-                    form: KeyForm::Materialized,
-                },
-                "duplicate materialized environment order key",
-            ),
-            (
-                CorruptionReason::Duplicate {
                     entry: DuplicateEntry::EnvironmentToken,
                     form: KeyForm::Saved,
                 },
@@ -1232,10 +1030,10 @@ mod tests {
             ),
             (
                 CorruptionReason::Duplicate {
-                    entry: DuplicateEntry::GlobalPin,
+                    entry: DuplicateEntry::Pin,
                     form: KeyForm::Saved,
                 },
-                "duplicate saved global pin",
+                "duplicate saved pin",
             ),
             (
                 CorruptionReason::Duplicate {
@@ -1316,86 +1114,7 @@ mod tests {
                 CorruptionReason::Table(TableCorruption::MaterializedWrongType),
                 "materialized table object has wrong type",
             ),
-            (
-                CorruptionReason::Environment(EnvironmentCorruption::UpsertStoresNil),
-                "environment upsert stores nil",
-            ),
-            (
-                CorruptionReason::Environment(EnvironmentCorruption::KeyDeletedAndUpserted(
-                    KeyForm::Saved,
-                )),
-                "environment key is both deleted and upserted",
-            ),
-            (
-                CorruptionReason::Environment(EnvironmentCorruption::KeyDeletedAndUpserted(
-                    KeyForm::Materialized,
-                )),
-                "materialized key is both deleted and upserted",
-            ),
-            (
-                CorruptionReason::Environment(EnvironmentCorruption::OrderContainsDeletedKey(
-                    KeyForm::Saved,
-                )),
-                "environment order contains a deleted key",
-            ),
-            (
-                CorruptionReason::Environment(EnvironmentCorruption::OrderContainsDeletedKey(
-                    KeyForm::Materialized,
-                )),
-                "materialized environment order contains a deleted key",
-            ),
-            (
-                CorruptionReason::Environment(EnvironmentCorruption::OrderOmitsUpsertedKey(
-                    KeyForm::Saved,
-                )),
-                "environment order omits an upserted key",
-            ),
-            (
-                CorruptionReason::Environment(EnvironmentCorruption::OrderOmitsUpsertedKey(
-                    KeyForm::Materialized,
-                )),
-                "materialized environment order omits an upserted key",
-            ),
-            (
-                CorruptionReason::Environment(EnvironmentCorruption::HashEntryBelongsInArray),
-                "environment hash entry belongs in the array",
-            ),
-            (
-                CorruptionReason::Environment(EnvironmentCorruption::ArrayDisagreesWithUpserts),
-                "environment array disagrees with upserts",
-            ),
-            (
-                CorruptionReason::Environment(EnvironmentCorruption::OrderDisagreesWithArray),
-                "environment order disagrees with array",
-            ),
-            (
-                CorruptionReason::Environment(EnvironmentCorruption::HashOrderBelongsInArray),
-                "environment hash order belongs in the array",
-            ),
-            (
-                CorruptionReason::Environment(EnvironmentCorruption::MetatableNotObject),
-                "environment metatable is not an object",
-            ),
-            (
-                CorruptionReason::Environment(EnvironmentCorruption::MetatableNotTable(
-                    KeyForm::Saved,
-                )),
-                "environment metatable is not a table",
-            ),
-            (
-                CorruptionReason::Environment(EnvironmentCorruption::MetatableNotTable(
-                    KeyForm::Materialized,
-                )),
-                "materialized environment metatable is not a table",
-            ),
-            (
-                CorruptionReason::Environment(EnvironmentCorruption::TokenNotTable),
-                "environment token does not resolve to a table",
-            ),
-            (
-                CorruptionReason::Environment(EnvironmentCorruption::OrderKeyAbsent),
-                "environment order key is absent from the table",
-            ),
+            (CorruptionReason::InvalidPin, "invalid pin"),
             (
                 CorruptionReason::Gmatch(GmatchCorruption::ClosureUpvalueOutOfRange),
                 "gmatch closure upvalue is out of range",
@@ -1486,10 +1205,6 @@ mod tests {
                 "inconsistent cost meter",
             ),
             (DecodeReason::InvalidCostingTag(9), "invalid costing tag"),
-            (
-                DecodeReason::InvalidEnvironmentMetatableMode(9),
-                "invalid environment metatable mode",
-            ),
             (DecodeReason::InvalidValueTag(9), "invalid value tag"),
             (DecodeReason::InvalidObjectTag(9), "invalid object tag"),
             (DecodeReason::InvalidUpvalueTag(9), "invalid upvalue tag"),
@@ -1507,35 +1222,20 @@ mod tests {
     }
 
     #[test]
-    fn invalid_table_renders_step_and_failure() {
-        let environment = |step| SnapshotError::InvalidTable {
-            location: TableLoadLocation::Environment {
-                token: "math".to_owned(),
-                entry: Some(2),
-            },
-            step,
-            failure: TableRestoreFailure::NilKey,
-        };
-        assert_eq!(
-            environment(TableRestoreStep::UpsertEnvironmentEntry).to_string(),
-            "invalid saved table at environment math entry[2]: environment upsert is invalid: table index was nil"
-        );
+    fn invalid_table_renders_location_and_failure() {
         assert_eq!(
             SnapshotError::InvalidTable {
                 location: TableLoadLocation::Environment {
                     token: "math".to_owned(),
-                    entry: None,
                 },
-                step: TableRestoreStep::RestoreEnvironmentHashSlots,
                 failure: TableRestoreFailure::NilKey,
             }
             .to_string(),
-            "invalid saved table at environment math: saved environment hash slots are invalid: table index was nil"
+            "invalid saved table at environment math: table index was nil"
         );
         assert_eq!(
             SnapshotError::InvalidTable {
                 location: TableLoadLocation::Object(3),
-                step: TableRestoreStep::ObjectRebuild,
                 failure: TableRestoreFailure::HashEntryBelongsInArray,
             }
             .to_string(),
@@ -1573,12 +1273,12 @@ mod tests {
         );
         assert_eq!(
             SaveError::TooLarge {
-                collection: SaveCollection::EnvironmentHashSlots,
+                collection: SaveCollection::EnvironmentPins,
                 count: 5,
                 limit: 4,
             }
             .to_string(),
-            "save environment hash slots count 5 exceeds the supported limit"
+            "save environment pins count 5 exceeds the supported limit"
         );
         assert_eq!(
             SaveError::FieldSizeExceeded {

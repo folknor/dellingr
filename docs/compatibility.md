@@ -173,8 +173,9 @@ does.
 - In `pairs(_G)`, a global set to nil and later redefined keeps its earlier
   place before `State::seal_globals`. After sealing, it keeps that place only
   until a later new global triggers compaction of its tombstone; redefining it
-  after compaction puts it at the end, as with an ordinary table. Order is
-  deterministic either way; reference Lua's is unspecified.
+  after compaction puts it at the end, as with an ordinary table. The library
+  tables (`math`, `string`, `table`) and the string metatable follow the same
+  rule. Order is deterministic either way; reference Lua's is unspecified.
 - All strings share one metatable, as in reference Lua.
   - `getmetatable("")` returns it.
   - Its `__index` is the string library by default.

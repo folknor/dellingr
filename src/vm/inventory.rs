@@ -163,7 +163,9 @@ pub(super) enum GcRoot<'a> {
     /// The value stack: host-pushed values and every live Lua register,
     /// executing closures included (each sits in its function slot).
     Stack(&'a [Val]),
-    /// The global table, its builtin names and mirror.
+    /// The global table, its builtin names and mirror, and the environment
+    /// tables `open_libs` built, kept even when user code reaches none of
+    /// them, with their pins.
     Globals(&'a GlobalEnv),
     /// The interned literals of one runtime-cache entry.
     ChunkLiterals(&'a [Val]),
@@ -189,13 +191,6 @@ pub(super) enum GcRoot<'a> {
     ActiveChunk(&'a Arc<Bytecode>),
     /// A runtime-cache identity being turned into a closure shell.
     PendingChunk(usize),
-    /// A canonical environment object captured by `open_libs`, kept even
-    /// when user code reaches none of it: save/load diffs against it.
-    #[cfg(feature = "snapshot")]
-    EnvObject(ObjectPtr),
-    /// The pristine contents captured with an environment object.
-    #[cfg(feature = "snapshot")]
-    EnvBaseline(&'a super::EnvBaseline),
 }
 
 impl GcRoot<'_> {
@@ -304,10 +299,6 @@ impl State {
             format_pointer_ids,
             next_format_pointer_id: _,
             rust_fns: _,
-            #[cfg(feature = "snapshot")]
-                env_tokens: _,
-            #[cfg(feature = "snapshot")]
-                env_baselines: _,
         } = self;
 
         visit(GcCleanup::WeakTable(
@@ -355,10 +346,6 @@ impl State {
             format_pointer_ids: _, // Weak: pruned by for_each_gc_cleanup after sweep.
             next_format_pointer_id: _,
             rust_fns: _, // Function pointers and ids, not heap values; never pruned.
-            #[cfg(feature = "snapshot")]
-            env_tokens,
-            #[cfg(feature = "snapshot")]
-            env_baselines,
             in_flight,
         } = self;
         let InFlight {
@@ -399,15 +386,6 @@ impl State {
         for identity in pending_bytecode_caches {
             visit(GcRoot::PendingChunk(*identity));
         }
-        #[cfg(feature = "snapshot")]
-        {
-            for ptr in env_tokens.keys() {
-                visit(GcRoot::EnvObject(*ptr));
-            }
-            for baseline in env_baselines.values() {
-                visit(GcRoot::EnvBaseline(baseline));
-            }
-        }
     }
 
     /// Classify the State by the lifetime of what its fields hold. A new
@@ -442,10 +420,6 @@ impl State {
             format_pointer_ids: _,
             next_format_pointer_id: _,
             rust_fns: _, // Persistent: entries live as long as the State.
-            #[cfg(feature = "snapshot")]
-                env_tokens: _,
-            #[cfg(feature = "snapshot")]
-                env_baselines: _,
             in_flight,
         } = self;
         // The pool itself persists (capacity); only its stacks' frames are

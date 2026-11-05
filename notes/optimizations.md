@@ -568,8 +568,8 @@ Sketch: build the standard environment once into a template and give
 new States a copy of it. Watch out: the library tables, `_G` and the
 interned key strings all live in one State's heap, so a copy has to
 rebuild them in the new heap (or the heap has to support cloning), and
-the snapshot environment tokens (`env_tokens`, `env_baselines`) are
-captured right after `open_libs` and must match the copy.
+the environment-table record (`GlobalEnv::env_tables`, with each table's
+slot policy) is captured right after `open_libs` and must match the copy.
 
 Shipped smaller step on 2026-05-11: stdlib globals and module tables now
 install Rust functions through direct `Val`/string-key insertion helpers

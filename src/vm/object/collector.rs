@@ -130,18 +130,6 @@ impl State {
                     State::retain_bytecode_tree(&mut live_chunks.trees, bytecode);
                 }
                 GcRoot::PendingChunk(identity) => live_chunks.pending.push(identity),
-                #[cfg(feature = "snapshot")]
-                GcRoot::EnvObject(ptr) => heap.mark(ptr, worklist),
-                #[cfg(feature = "snapshot")]
-                GcRoot::EnvBaseline(baseline) => {
-                    for (key, value) in baseline.entries.iter().chain(&baseline.hash_slots) {
-                        key.mark_reachable(heap, worklist);
-                        value.mark_reachable(heap, worklist);
-                    }
-                    if let Some(metatable) = &baseline.metatable {
-                        metatable.mark_reachable(heap, worklist);
-                    }
-                }
             }
         });
     }

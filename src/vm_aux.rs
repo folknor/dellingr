@@ -148,8 +148,7 @@ impl State {
             return Err(self.error(ErrorKind::OpenLibsInRestrictedEnv));
         }
         lua_std::open_libs(self)?;
-        #[cfg(feature = "snapshot")]
-        self.capture_env_tokens();
+        self.capture_env_tables();
         Ok(())
     }
 }

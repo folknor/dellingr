@@ -42,7 +42,7 @@ format string's bytes, and chunk names (`Error::source_name`,
 The same holds for save and load (`dellingr::snapshot`): every reason inside
 a `SaveError` or `SnapshotError` is an enum (`CorruptionReason`,
 `DecodeReason`, `InvalidBytecodeReason` with the verifier's
-`ValidationReason`, `TableRestoreStep` and `TableRestoreFailure`,
+`ValidationReason`, `TableRestoreFailure`,
 `SaveCollection`, `SnapshotField`), and `SaveError::Internal` wraps an opaque
 `SaveInternalError`, an encoder bug. The strings that remain in either surface
 are data: function names and ids, environment tokens, chunk names, and the

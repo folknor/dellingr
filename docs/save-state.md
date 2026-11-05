@@ -10,7 +10,7 @@ in the module doc of `src/vm/save_state.rs`.
   either metered, with the weight of every charge in `Charge` order, or off.
 - State-local object identities that `tostring` and `%p` have rendered,
   including those of the environment objects `open_libs` rebuilds on load.
-- Standard-library tables as deltas against the pristine environment.
+- The standard-library tables, whole, by the same rule as the global table.
 
 Not saved: call stack, program counter, open upvalues, coroutines, anchors,
 callbacks, host user-data. Values reachable only through anchors are omitted
@@ -22,34 +22,39 @@ The load setup callback configures the rebuilt environment and function
 registrations. Values it leaves on the value stack are discarded before load
 returns; the loaded State starts with an empty stack.
 
-## Environment objects and deltas
+## Environment tables
 
 - `math`, `string`, `table`, the metatable of `_G` and the shared string
   metatable are rebuilt by `open_libs` on load and referenced by token. The
   string metatable's token is `string.metatable`.
 - The global table, which `_G` names, exists in every State (a raw one
   included). A reference to it is saved as the token `_G` and resolves to the
-  loaded State's global table; its contents are saved whole (see Globals
-  below), not as a delta.
+  loaded State's global table.
 - The object-to-token map is refreshed at each successful `open_libs`, not
   read from the live builtin slots. Shadowing a builtin (`math = {}`) cannot
-  misclassify the user's table as an environment object.
-- Per environment table, a delta records:
-  - keys deleted from the baseline;
-  - keys added or changed;
-  - the key order, only when replaying the first two would not reproduce it;
-  - the logical array length and the canonical span from its first live
-    array key to its last, including interior nil slots, just as for ordinary
-    tables (see Byte stability);
-  - hash-slot history when it differs from the baseline, including dead keys,
-    vacant positions and the map storage marker;
-  - the metatable: unchanged, cleared, or replaced.
-- The array shape is saved because it decides where later integer writes
-  land. For a saved array delta, that saved shape is authoritative. Setup-only
-  live keys beyond its logical length survive as ordinary writes, including
-  an append key; setup-only nil tails are not merged into the saved shape.
-- Adding a field to a library table in a later build does not corrupt old
-  saves.
+  misclassify the user's table as an environment object. A library table a
+  later `open_libs` replaces is an ordinary table from then on.
+- The global table and every environment table follow one rule, set out for
+  globals below: each is saved whole, the save is authoritative for what it
+  holds, and load setup contributes only string keys the save mentions
+  nowhere. They share the slot policy that makes this exact (see Sealed
+  globals): until sealing they keep every tombstone and a re-added key takes
+  its old slot back, and sealing records each table's pins.
+- So a load setup value for a library key the save holds is discarded,
+  whether or not the script changed that table: a stock function included, a
+  host override of `math.floor` made in setup gives way to the saved one.
+  Change such a field after `load_state` returns. A setup metatable on a
+  library table gives way to the saved one too, as for the global table.
+- A later build adding a field to a library table does not corrupt old
+  saves: setup contributes the field the save never mentions. A build that
+  drops a stock function cannot load a save naming it (`UnknownFunction`), as
+  for any registered function id; every save names every stock function.
+- A delta against the freshly opened library, the earlier design, could not
+  make a load continue the saving State exactly: it cannot tell a key never
+  changed from one restored to its stock value after initialization had
+  changed it, and whether setup's value won depended on unrelated edits to
+  the same table.
+
 ## Globals
 
 - The global table is saved whole, like any table: its array part and every
@@ -58,18 +63,23 @@ returns; the loaded State starts with an empty stack.
   encodes as a token; a shadow is preserved as the user's value. Keys of any
   type are kept, non-UTF-8 strings included.
 - The save is authoritative for every key it holds, tombstones included, and
-  for the array part. Load setup contributes only string-keyed globals the
-  save mentions nowhere (neither as a slot nor as a pin); they follow the
-  saved slots, in setup order. Setup's other keys (numbers, booleans, tables,
-  functions) are discarded.
+  for the array part and metatable. Load setup contributes only string-keyed
+  globals the save mentions nowhere (neither as a slot nor as a pin); they
+  follow the saved slots, in setup order. Setup's other keys (numbers,
+  booleans, tables, functions) are discarded.
+- Each environment table is saved and restored the same way, with its own
+  pins.
 
 ## Sealed globals
 
 - `State::seal_globals` ends global initialization (see
-  [limits](limits.md)). Until then the global table keeps every tombstone.
-  Sealing records the pins: every string key with a slot at that moment,
-  which is every name initialization wrote, including ones it set and then
-  cleared. After sealing, tombstones compact as in any table.
+  [limits](limits.md)). Until then the global table and every environment
+  table keep every tombstone. Sealing records each one's pins: every string
+  key with a slot at that moment, which is every name initialization wrote,
+  including ones it set and then cleared. After sealing, tombstones compact
+  as in any table. A library table `open_libs` builds after sealing is pinned
+  at once. The rest of this section says "globals", and holds for each
+  environment table in the same way.
 - The save records whether the State was sealed, and its pins. The loaded
   State takes that phase: a call to `seal_globals` inside the load setup is
   deferred to it. A pinned name absent from the saved table was deleted and
@@ -183,7 +193,8 @@ returns; the loaded State starts with an empty stack.
   only the tag. Decoding is strict: an unknown tag, a truncated weight list,
   and an off save with use or a budget are rejected as decode errors.
 - Allocation during snapshot materialization never runs GC. Its collection
-  happens after all globals, deltas and setup anchors are in place. The setup
+  happens after all globals, environment tables and setup anchors are in
+  place. The setup
   callback runs before materialization and may trigger automatic or explicit GC.
 - GC policy and the current threshold are host configuration, not snapshot
   data. A loaded State starts with the default automatic policy unless its
@@ -267,7 +278,7 @@ build to the fixture alongside the dev sweeps. Engine and cost-model header meta
 participate in this pin. The load probe uses the current cost-model header on
 this payload; released archives always retain strict, original headers.
 The generated text companion lists string, bytecode, upvalue and object arenas
-in id order, table slots in storage order, globals, deltas and rendered
+in id order, table slots in storage order, globals, environment tables and rendered
 identities. Each bytecode record is summarized by encoded length and FNV-1a
 hash so compiler changes stay local in the diff. The reader is test tooling,
 not the production decoder; complete consumption is checked. Both the

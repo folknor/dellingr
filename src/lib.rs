@@ -172,10 +172,10 @@ pub mod snapshot {
         BytecodeOperand, BytecodePool, CacheFamily, ValidationReason,
     };
     pub use crate::vm::{
-        CorruptionReason, DecodeReason, DuplicateEntry, EnvironmentCorruption, GmatchCorruption,
-        InvalidBytecodeReason, KeyForm, LoadError, MaterializedPart, SaveCollection,
-        SaveDiagnostics, SaveError, SaveInternalError, SaveState, SavedReference, SnapshotError,
-        SnapshotField, TableCorruption, TableLoadLocation, TableRestoreFailure, TableRestoreStep,
+        CorruptionReason, DecodeReason, DuplicateEntry, GmatchCorruption, InvalidBytecodeReason,
+        KeyForm, LoadError, MaterializedPart, SaveCollection, SaveDiagnostics, SaveError,
+        SaveInternalError, SaveState, SavedReference, SnapshotError, SnapshotField,
+        TableCorruption, TableLoadLocation, TableRestoreFailure,
     };
 }
 

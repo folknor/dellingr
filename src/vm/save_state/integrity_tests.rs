@@ -74,29 +74,49 @@ fn empty_payload() -> SavePayload {
     SavePayload::empty(false)
 }
 
-fn empty_delta(token: &str) -> SavedEnvDelta {
-    SavedEnvDelta {
+fn env_record(
+    token: &str,
+    array_len: u64,
+    array_slots: u32,
+    entries: Vec<(SavedVal, SavedVal)>,
+) -> SavedEnvRecord {
+    SavedEnvRecord {
         token: token.to_owned(),
-        deleted: Vec::new(),
-        upserts: Vec::new(),
-        order: None,
-        array: None,
-        hash_slots: None,
-        metatable: SavedMetatableDelta::Unchanged,
+        table: SavedObject::Table {
+            array_len,
+            array_slots,
+            entries,
+            metatable: None,
+        },
+        pins: Vec::new(),
     }
 }
 
+/// The environment table `token` of `state`.
+fn env_table(state: &State, token: &str) -> ObjectPtr {
+    environment_tokens(state)
+        .into_iter()
+        .find(|(_, name)| *name == token)
+        .expect("the token names an environment table")
+        .0
+}
+
 #[test]
-fn corrupt_environment_key_names_its_delta_and_section() {
+fn corrupt_environment_key_names_its_table() {
     let mut payload = empty_payload();
-    let mut delta = empty_delta("second");
-    delta.deleted.push(SavedVal::Nil);
-    payload.env_deltas = vec![empty_delta("first"), delta];
+    let entries = vec![
+        (SavedVal::Nil, SavedVal::Bool(true)),
+        (SavedVal::Nil, SavedVal::Bool(true)),
+    ];
+    payload.env_tables = vec![
+        env_record("first", 0, 0, Vec::new()),
+        env_record("second", 0, 0, entries),
+    ];
     assert!(matches!(
         verify::verify_payload(payload),
         Err(SnapshotError::CorruptArena {
-            index: 0,
-            location: SaveLocation::EnvironmentDeleted(1),
+            index: 1,
+            location: SaveLocation::EnvironmentTable(1),
             reason: CorruptionReason::NilKey,
         })
     ));
@@ -185,7 +205,7 @@ fn reset_clears_in_flight_and_host_held_state() {
 #[test]
 fn canonical_environment_tokens_survive_load_without_renaming() {
     let state = State::new();
-    let names: BTreeSet<&str> = state.env_tokens.values().map(String::as_str).collect();
+    let names: BTreeSet<&str> = environment_tokens(&state).into_values().collect();
     assert_eq!(
         names,
         BTreeSet::from([
@@ -213,12 +233,7 @@ fn canonical_environment_tokens_survive_load_without_renaming() {
 #[test]
 fn environment_fifo_snapshot_is_compact_and_byte_stable() {
     let mut original = State::new();
-    let ptr = *original
-        .env_tokens
-        .iter()
-        .find(|(_, token)| token.as_str() == "math")
-        .expect("math has an environment token")
-        .0;
+    let ptr = env_table(&original, "math");
     let table = original.heap.as_table(ptr).expect("math is a table");
     for key in 1..=10_000 {
         table
@@ -240,12 +255,7 @@ fn environment_fifo_snapshot_is_compact_and_byte_stable() {
         loaded.save_state().expect("restored FIFO saves").bytes,
         before
     );
-    let ptr = *loaded
-        .env_tokens
-        .iter()
-        .find(|(_, token)| token.as_str() == "math")
-        .expect("loaded math has an environment token")
-        .0;
+    let ptr = env_table(&loaded, "math");
     let table = loaded
         .heap
         .as_table_ref(ptr)
@@ -259,12 +269,7 @@ fn environment_fifo_snapshot_is_compact_and_byte_stable() {
 #[test]
 fn environment_empty_array_span_retains_logical_length() {
     let mut original = State::new();
-    let ptr = *original
-        .env_tokens
-        .iter()
-        .find(|(_, token)| token.as_str() == "math")
-        .expect("math has an environment token")
-        .0;
+    let ptr = env_table(&original, "math");
     let table = original.heap.as_table(ptr).expect("math is a table");
     for key in 1..=10_000 {
         table
@@ -291,26 +296,22 @@ fn environment_empty_array_span_retains_logical_length() {
 fn environment_array_span_rejects_noncanonical_or_inconsistent_shapes() {
     let num = |n: f64| SavedVal::Num(n.to_bits());
     let live = SavedVal::Bool(true);
-    let mut valid = empty_delta("math");
-    valid.array = Some((1000, vec![(num(1000.0), live.clone())]));
-    valid.upserts = vec![(num(1000.0), live.clone())];
-    let payload = |delta| {
+    let payload = |record| {
         let mut payload = empty_payload();
-        payload.env_deltas.push(delta);
+        payload.env_tables.push(record);
         payload
     };
-    assert!(verify::verify_payload(payload(valid.clone())).is_ok());
-    let mut omitted = valid.clone();
-    omitted.upserts.push((num(999.0), live.clone()));
-    let mut wrong_key = valid.clone();
-    wrong_key.array = Some((1000, vec![(num(1001.0), live.clone())]));
-    let mut nil_endpoint = valid.clone();
-    nil_endpoint.array = Some((1000, vec![(num(1000.0), SavedVal::Nil)]));
-    let mut too_long = valid;
-    too_long.array = Some((u64::MAX, Vec::new()));
-    for delta in [omitted, wrong_key, nil_endpoint, too_long] {
+    let valid = env_record("math", 1000, 1, vec![(num(1000.0), live.clone())]);
+    assert!(verify::verify_payload(payload(valid)).is_ok());
+    // A live hash entry inside the logical array, a span key that is not its
+    // position, a nil endpoint, and a length past the array limit.
+    let in_array = env_record("math", 1000, 0, vec![(num(999.0), live.clone())]);
+    let wrong_key = env_record("math", 1000, 1, vec![(num(1001.0), live.clone())]);
+    let nil_endpoint = env_record("math", 1000, 1, vec![(num(1000.0), SavedVal::Nil)]);
+    let too_long = env_record("math", u64::MAX, 0, Vec::new());
+    for record in [in_array, wrong_key, nil_endpoint, too_long] {
         assert!(matches!(
-            verify::verify_payload(payload(delta)),
+            verify::verify_payload(payload(record)),
             Err(SnapshotError::CorruptArena { .. })
         ));
     }
@@ -343,7 +344,7 @@ fn golden_payload_covers_persisted_graph_shapes() {
         globals: _,
         global_pins: _,
         globals_sealed: _,
-        env_deltas: _,
+        env_tables: _,
         next_format_pointer_id,
         format_pointer_ids: _,
     } = &payload;
@@ -368,6 +369,7 @@ fn golden_payload_covers_persisted_graph_shapes() {
         .objects
         .iter()
         .chain(std::iter::once(&payload.globals))
+        .chain(payload.env_tables.iter().map(|record| &record.table))
     {
         match object {
             SavedObject::Table {
@@ -425,38 +427,48 @@ fn golden_payload_covers_persisted_graph_shapes() {
             .iter()
             .any(|(value, _)| matches!(value, SavedVal::Fn(_)))
     );
-    let mut metatables = [false; 3];
-    for delta in &payload.env_deltas {
-        metatables[match &delta.metatable {
-            SavedMetatableDelta::Unchanged => 0,
-            SavedMetatableDelta::Cleared => 1,
-            SavedMetatableDelta::Set(_) => 2,
-        }] = true;
-    }
-    // Pristine tokenized library tables have no metatable to clear. The
-    // global table has one, but is saved whole rather than as an env delta.
-    // Cleared remains a wire variant; it cannot arise from this baseline.
-    assert!(metatables[0] && metatables[2]);
-    assert!(payload.env_deltas.iter().any(|delta| delta.array.is_some()));
+    // Every environment table is saved, whole: with and without a metatable,
+    // with an array part, with tombstones, and with pins.
+    let tokens: BTreeSet<&str> = payload
+        .env_tables
+        .iter()
+        .map(|record| record.token.as_str())
+        .collect();
+    assert_eq!(
+        tokens,
+        BTreeSet::from([
+            "math",
+            "string",
+            "table",
+            "_G.metatable",
+            "string.metatable"
+        ])
+    );
+    let shapes = |record: &SavedEnvRecord| match &record.table {
+        SavedObject::Table {
+            array_slots,
+            entries,
+            metatable,
+            ..
+        } => (
+            metatable.is_some(),
+            *array_slots > 0,
+            entries[*array_slots as usize..].iter().any(|(key, value)| {
+                !matches!(key, SavedVal::Nil) && matches!(value, SavedVal::Nil)
+            }),
+        ),
+        SavedObject::Closure { .. } => panic!("an environment table is saved as a table"),
+    };
+    assert!(payload.env_tables.iter().any(|record| shapes(record).0));
+    assert!(payload.env_tables.iter().any(|record| !shapes(record).0));
+    assert!(payload.env_tables.iter().any(|record| shapes(record).1));
+    assert!(payload.env_tables.iter().any(|record| shapes(record).2));
     assert!(
         payload
-            .env_deltas
+            .env_tables
             .iter()
-            .any(|delta| delta.hash_slots.is_some())
+            .all(|record| !record.pins.is_empty())
     );
-    assert!(
-        payload
-            .env_deltas
-            .iter()
-            .any(|delta| !delta.deleted.is_empty())
-    );
-    assert!(
-        payload
-            .env_deltas
-            .iter()
-            .any(|delta| !delta.upserts.is_empty())
-    );
-    assert!(payload.env_deltas.iter().any(|delta| delta.order.is_some()));
     let verified = verify::verify_payload(payload).expect("golden verifies");
     // Both wrapper kinds must be recognized, not merely round-trip through
     // the same runtime spelling. A missing capture must fail this check.

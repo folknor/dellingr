@@ -22,6 +22,10 @@
 //! the pin list: a load must keep a pinned name deleted even after its
 //! tombstone compacts away, because load setup reinstalls it (see
 //! docs/save-state.md).
+//!
+//! The library tables `open_libs` builds are environment tables (`EnvTable`):
+//! load setup reinstalls them too, so they keep the same slot policy, seal
+//! with this table, and save and restore by the same rule.
 
 use std::cell::Cell;
 
@@ -81,6 +85,52 @@ pub(super) struct GlobalEnv {
     /// while initializing: the retained tombstones remember those names then.
     #[cfg(feature = "snapshot")]
     pins: Vec<StringPtr>,
+    /// The environment tables the last successful `open_libs` built, which
+    /// follow this table's slot policy and seal (see `EnvTable`).
+    env_tables: Vec<EnvTable>,
+}
+
+/// What an environment table is to the standard library. The snapshot token
+/// each role saves under belongs to `save_state`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum EnvRole {
+    /// The `math` library table.
+    Math,
+    /// The `string` library table.
+    String,
+    /// The `table` library table.
+    Table,
+    /// The global table's protected metatable.
+    GlobalMetatable,
+    /// The metatable every string shares.
+    StringMetatable,
+}
+
+/// The builtin globals `open_libs` binds to library tables, with their
+/// roles, in capture order.
+pub(super) const LIBRARY_BUILTINS: [(Builtin, EnvRole); 3] = [
+    (Builtin::Math, EnvRole::Math),
+    (Builtin::String, EnvRole::String),
+    (Builtin::Table, EnvRole::Table),
+];
+
+/// An environment table: one the standard library built and owns, which
+/// keeps the global table's rule for the life of its role. Until the State
+/// is sealed it retains every tombstone and revives a re-added key in its
+/// old slot; sealing makes it compact and, under `snapshot`, records its
+/// pins. A snapshot saves it whole and a load restores it by the global
+/// table's rule (`restore_environment_table`), so a load setup that replays
+/// the saving State's initialization continues it exactly. A table that a
+/// later `open_libs` replaces goes back to the default policy: from then on
+/// it is an ordinary table, which is how a snapshot saves it.
+pub(super) struct EnvTable {
+    pub(super) table: ObjectPtr,
+    pub(super) role: EnvRole,
+    /// Every string key with a slot when the State sealed (or when this
+    /// table was adopted after sealing), then those load setup added; empty
+    /// while initializing.
+    #[cfg(feature = "snapshot")]
+    pub(super) pins: Vec<StringPtr>,
 }
 
 /// An environment suspended by `with_restricted_env`: the global table's
@@ -137,6 +187,56 @@ impl GlobalEnv {
             phase: Phase::Initializing,
             #[cfg(feature = "snapshot")]
             pins: Vec::new(),
+            env_tables: Vec::new(),
+        }
+    }
+
+    /// The environment tables, in capture order.
+    #[cfg(feature = "snapshot")]
+    pub(super) fn env_tables(&self) -> &[EnvTable] {
+        &self.env_tables
+    }
+
+    /// Make `tables` the environment tables, after a successful `open_libs`.
+    /// A table that keeps a role keeps its policy and pins; a table no longer
+    /// in the set goes back to the default policy. A new one takes the
+    /// current phase's policy, and when the State is already sealed it is
+    /// pinned at once, as sealing would have done.
+    pub(super) fn adopt_env_tables(
+        &mut self,
+        heap: &mut GcHeap,
+        tables: Vec<(ObjectPtr, EnvRole)>,
+    ) {
+        let mut previous = std::mem::take(&mut self.env_tables);
+        for retired in previous
+            .iter()
+            .filter(|old| !tables.iter().any(|(ptr, _)| *ptr == old.table))
+        {
+            if let Some(table) = heap.as_table(retired.table) {
+                table.set_slot_policy(SlotPolicy::default());
+            }
+        }
+        for (ptr, role) in tables {
+            if let Some(index) = previous.iter().position(|old| old.table == ptr) {
+                let mut kept = previous.swap_remove(index);
+                kept.role = role;
+                self.env_tables.push(kept);
+                continue;
+            }
+            let table = heap
+                .as_table(ptr)
+                .expect("an environment object is a table");
+            table.set_slot_policy(slot_policy(self.phase));
+            self.env_tables.push(EnvTable {
+                table: ptr,
+                role,
+                #[cfg(feature = "snapshot")]
+                pins: if self.phase == Phase::Sealed {
+                    string_slot_keys(table).collect()
+                } else {
+                    Vec::new()
+                },
+            });
         }
     }
 
@@ -169,8 +269,10 @@ impl GlobalEnv {
         self.phase == Phase::Sealed
     }
 
-    /// Stop retaining tombstones and, under `snapshot`, record the pins.
-    /// One-way; deferred while load setup runs.
+    /// Stop retaining tombstones and, under `snapshot`, record the pins, for
+    /// the global table and every environment table. One-way; deferred while
+    /// load setup runs, and a restricted environment is sealed already, so
+    /// neither moves the environment tables.
     pub(super) fn seal(&mut self, heap: &mut GcHeap) {
         if self.phase != Phase::Initializing {
             return;
@@ -182,6 +284,16 @@ impl GlobalEnv {
             self.pins = string_slot_keys(table).collect();
         }
         table.set_slot_policy(slot_policy(Phase::Sealed));
+        for env in &mut self.env_tables {
+            let table = heap
+                .as_table(env.table)
+                .expect("an environment table is rooted by the global environment");
+            #[cfg(feature = "snapshot")]
+            {
+                env.pins = string_slot_keys(table).collect();
+            }
+            table.set_slot_policy(slot_policy(Phase::Sealed));
+        }
     }
 
     #[cfg(feature = "snapshot")]
@@ -448,71 +560,123 @@ impl GlobalEnv {
         &self.pins
     }
 
-    /// Replace load setup's environment with a saved one.
-    ///
-    /// `entries` is the saved table in `Table::snapshot_entries` form, which
-    /// is authoritative for its array part and every key it holds, tombstones
-    /// included. Setup contributes only string-keyed slots (live or dead) the
-    /// save mentions nowhere, neither as a slot nor as a pin; they follow the
-    /// saved slots in setup order. A sealed load pins the saved pins followed
-    /// by every other string key setup gave a slot, so a deletion inherited
-    /// from the save survives a setup that no longer installs the name.
+    /// Replace load setup's environment with a saved one: the global table
+    /// from `globals`, each environment table from its entry in `env` (keyed
+    /// by object), every one by `restore_environment_table`. An environment
+    /// table the save holds no record for (a library a later build added)
+    /// keeps setup's contents and takes the saved phase, pinning setup's keys
+    /// when sealed. On error, the object whose restore failed (`None` for the
+    /// global table); the State is discarded then.
     pub(super) fn restore(
         &mut self,
         heap: &mut GcHeap,
-        (array_len, array_slots, mut entries): (usize, usize, Vec<(Val, Val)>),
-        metatable: Option<ObjectPtr>,
+        globals: SavedEnvTable,
+        mut env: Vec<(ObjectPtr, SavedEnvTable)>,
         sealed: bool,
-        saved_pins: Vec<StringPtr>,
-    ) -> Result<(), super::table::TableError> {
-        use super::table::TableKey;
-        use crate::det_hash::{FixedState, IndexSet};
-
-        let table = self.contents_mut(heap);
-        let setup: Vec<StringPtr> = string_slot_keys(table).collect();
-        let setup_slots = table.snapshot_hash_slots();
-        let mut mentioned: IndexSet<TableKey> = IndexSet::with_capacity_and_hasher(
-            entries.len() + saved_pins.len(),
-            FixedState::default(),
+    ) -> Result<(), (Option<ObjectPtr>, super::table::TableError)> {
+        let phase = if sealed {
+            Phase::Sealed
+        } else {
+            Phase::Initializing
+        };
+        for env_table in &mut self.env_tables {
+            let table = heap
+                .as_table(env_table.table)
+                .expect("an environment table is rooted by the global environment");
+            env_table.pins = match env.iter().position(|(ptr, _)| *ptr == env_table.table) {
+                Some(index) => {
+                    let (_, saved) = env.swap_remove(index);
+                    restore_environment_table(table, saved, phase)
+                        .map_err(|error| (Some(env_table.table), error))?
+                }
+                None => {
+                    table.set_slot_policy(slot_policy(phase));
+                    if sealed {
+                        string_slot_keys(table).collect()
+                    } else {
+                        Vec::new()
+                    }
+                }
+            };
+        }
+        debug_assert!(
+            env.is_empty(),
+            "the loader resolves every record to an environment table"
         );
-        for (key, _) in &entries {
-            if !matches!(key, Val::Nil) {
-                mentioned.insert(TableKey::from_prevalidated(*key));
-            }
-        }
-        for pin in &saved_pins {
-            mentioned.insert(TableKey::from_prevalidated(Val::Str(*pin)));
-        }
-        entries.extend(setup_slots.into_iter().filter(|(key, _)| {
-            matches!(key, Val::Str(_)) && !mentioned.contains(&TableKey::from_prevalidated(*key))
-        }));
-        table.rebuild_from_snapshot(array_len, array_slots, entries)?;
-        table.set_metatable(metatable);
-        table.set_slot_policy(slot_policy(if sealed {
-            Phase::Sealed
-        } else {
-            Phase::Initializing
-        }));
-        // Setup can reinstall a saved pin; keep one interned key in the list.
-        // The save verifier has already rejected duplicate saved pin contents.
-        self.pins = if sealed {
-            let mut pins: IndexSet<StringPtr> = IndexSet::with_capacity_and_hasher(
-                saved_pins.len() + setup.len(),
-                FixedState::default(),
-            );
-            pins.extend(saved_pins);
-            pins.extend(setup);
-            pins.into_iter().collect()
-        } else {
-            Vec::new()
-        };
-        self.phase = if sealed {
-            Phase::Sealed
-        } else {
-            Phase::Initializing
-        };
+        let table = self.contents_mut(heap);
+        self.pins =
+            restore_environment_table(table, globals, phase).map_err(|error| (None, error))?;
+        self.phase = phase;
         Ok(())
     }
+}
+
+/// A saved environment table, decoded: `Table::snapshot_entries` form, its
+/// metatable and its pins.
+#[cfg(feature = "snapshot")]
+pub(super) struct SavedEnvTable {
+    pub(super) entries: (usize, usize, Vec<(Val, Val)>),
+    pub(super) metatable: Option<ObjectPtr>,
+    pub(super) pins: Vec<StringPtr>,
+}
+
+/// Replace load setup's contents of one environment table (the global table
+/// or a library one) with saved ones, returning the loaded pins.
+///
+/// The saved entries are authoritative for the array part and every key they
+/// hold, tombstones included, and the saved metatable replaces setup's.
+/// Setup contributes only string-keyed slots (live or dead) the save mentions
+/// nowhere, neither as a slot nor as a pin; they follow the saved slots in
+/// setup order. A setup value for a key the save holds is discarded: a host
+/// that wants to change one does so after the load. A sealed load pins the
+/// saved pins followed by every other string key setup gave a slot, so a
+/// deletion inherited from the save survives a setup that no longer installs
+/// the name. The table takes `phase`'s slot policy.
+#[cfg(feature = "snapshot")]
+fn restore_environment_table(
+    table: &mut Table,
+    saved: SavedEnvTable,
+    phase: Phase,
+) -> Result<Vec<StringPtr>, super::table::TableError> {
+    use super::table::TableKey;
+    use crate::det_hash::{FixedState, IndexSet};
+
+    let SavedEnvTable {
+        entries: (array_len, array_slots, mut entries),
+        metatable,
+        pins: saved_pins,
+    } = saved;
+    let setup: Vec<StringPtr> = string_slot_keys(table).collect();
+    let setup_slots = table.snapshot_hash_slots();
+    let mut mentioned: IndexSet<TableKey> =
+        IndexSet::with_capacity_and_hasher(entries.len() + saved_pins.len(), FixedState::default());
+    for (key, _) in &entries {
+        if !matches!(key, Val::Nil) {
+            mentioned.insert(TableKey::from_prevalidated(*key));
+        }
+    }
+    for pin in &saved_pins {
+        mentioned.insert(TableKey::from_prevalidated(Val::Str(*pin)));
+    }
+    entries.extend(setup_slots.into_iter().filter(|(key, _)| {
+        matches!(key, Val::Str(_)) && !mentioned.contains(&TableKey::from_prevalidated(*key))
+    }));
+    table.rebuild_from_snapshot(array_len, array_slots, entries)?;
+    table.set_metatable(metatable);
+    table.set_slot_policy(slot_policy(phase));
+    // Setup can reinstall a saved pin; keep one interned key in the list.
+    // The save verifier has already rejected duplicate saved pin contents.
+    Ok(if phase == Phase::Sealed {
+        let mut pins: IndexSet<StringPtr> = IndexSet::with_capacity_and_hasher(
+            saved_pins.len() + setup.len(),
+            FixedState::default(),
+        );
+        pins.extend(saved_pins);
+        pins.extend(setup);
+        pins.into_iter().collect()
+    } else {
+        Vec::new()
+    })
 }
 
 impl Markable for GlobalEnv {
@@ -541,6 +705,15 @@ impl Markable for GlobalEnv {
         #[cfg(feature = "snapshot")]
         for pin in &self.pins {
             heap.mark_string(*pin);
+        }
+        // Kept even when no script reaches one (`math = {}` shadows it): the
+        // seal still moves its policy, and a snapshot saves it by token.
+        for env in &self.env_tables {
+            heap.mark(env.table, worklist);
+            #[cfg(feature = "snapshot")]
+            for pin in &env.pins {
+                heap.mark_string(*pin);
+            }
         }
     }
 }
