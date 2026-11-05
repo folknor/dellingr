@@ -21,17 +21,6 @@ The entries below marked Performance describe work the hunters saw in the
 code. None has been measured; any change goes through a registered
 `brokkr dellingr` workload first.
 
-## RT-018 - gmatch construction re-interns strings already on the stack
-
-Scope: `stdlib-strings`. Performance.
-
-`gmatch` copies `s` and `pattern` into `Vec`s, then `push_bytes(&s)` re-interns
-them, hashing up to 16 MiB to find the string that is already at stack slot 1 or
-2.
-
-Approaches raised so far (not exhaustive): when the argument is a string, push
-the existing stack value (`push_value(1)`) instead of re-interning.
-
 ## RT-019 - str_match builds a fresh MatchState for every start position
 
 Scope: `stdlib-strings`. Performance.
@@ -59,20 +48,6 @@ byte.
 Approaches raised so far (not exhaustive): batch literal runs with
 `charge_units`, which admits charges exactly as per-byte charging does (the
 technique `append_bytes_units` uses in gsub).
-
-## RT-022 - Subject and pattern are copied on every pattern call
-
-Scope: `stdlib-strings`. Performance. The code documents the copy as
-deliberate.
-
-`string_or_number_bytes` copies the subject and pattern on every `find`,
-`match`, `gsub` and `gmatch` call. Its doc comment calls the copy deliberate and
-names shared ownership of heap string bytes (an `Rc<[u8]>`-style handle) as the
-way to remove it. `string.format` already borrows plain string arguments since a
-fix wave.
-
-Approaches raised so far (not exhaustive): the shared-ownership handle the doc
-comment names, which would let `find`, `match` and `gsub` borrow.
 
 ## RT-023 - A global-cache unit test fails under the inline-cache differential sweep
 

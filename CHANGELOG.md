@@ -366,7 +366,14 @@ Re-measure tick budgets and re-record replays.
   per State; registers keep values alive until overwritten; a cleared hash key
   stays alive, and a valid `next` control, until its slot compacts; a dropped
   `Anchor` releases its value. Each can move collections and with them
-  `%p`/`tostring` ids.
+  `%p`/`tostring` ids. `string.find`, `match`, `gsub` and `gmatch` read a
+  string subject and pattern in place instead of copying them (on a 64 KB
+  subject a call that matches only a few bytes takes half the time): `gmatch`
+  construction and `gsub` with a limit of 0 no longer re-intern a string
+  argument, which removes an allocation point, and `find`, `match` and
+  `gmatch` keep a string subject rooted in its argument slot until their
+  results or iterator hold what they need, so a collection during that window
+  no longer frees and rebuilds it.
 - Global `unpack` and `table.unpack` are distinct functions in every build
   (release LTO used to merge them), and one host function registered under two
   ids is two functions.

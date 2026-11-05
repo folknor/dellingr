@@ -401,6 +401,12 @@ xxh128 = "c23da899a8d2925a4f1ec6ea872160d7"
 hotpath_file = "examples/strings/literal_find.lua"
 hotpath_xxh128 = "7b6bbdcb62ed6124c1393ab54363b92b"
 
+[dellingr.workloads.large_subject]
+file = "bench/large_subject.lua"
+xxh128 = "21878ee46042ea3cba3c546a14622a78"
+hotpath_file = "examples/strings/large_subject.lua"
+hotpath_xxh128 = "9f4c6b26f375b932a1b4df86c09ab426"
+
 [dellingr.workloads.same_obj_read]
 file = "bench/same_obj_read.lua"
 xxh128 = "cdb6bfdf21a72c08d4b1d683d7d85d07"

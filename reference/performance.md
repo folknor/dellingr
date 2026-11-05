@@ -48,6 +48,31 @@ signs, so they show no effect. No same-binary control was run for these
 cells; binary layout differences between the two builds are part of what
 this measures.
 
+## Pattern arguments read in place, 2026-11-05
+
+`string.find`, `match`, `gsub` and `gmatch` stopped copying a string subject
+and pattern into owned buffers on every call (and `gmatch` stopped
+re-interning them); they read them in their stack slots (`vm/string_arg.rs`).
+The change against its parent ca5f49f on plantasjen (as above), default
+release profile, `brokkr dellingr --bench` cells (best of 3 launches, the
+harness's elapsed ms), base and change interleaved:
+
+| Workload | ca5f49f | Change |
+|---|---|---|
+| `large_subject` | 4901 | 2274 |
+| `literal_find` | 4469, 4468, 4446 | 4466, 4466, 4473, 4436 |
+| `patterns` | 2277, 2268, 2265 | 2274, 2262 |
+
+`large_subject` is a probe registered for this change: a 64 KB subject and
+calls that stop after a few bytes of matching, so the per-call copy is most
+of the work. On the short subjects of `literal_find` and `patterns` the
+removed copies are below the noise. A first version of the change validated
+the gsub subject's slot twice per matcher run and measured `patterns` at
+2288, 2313 and 2300; reading one argument through its own helper removed
+that. An early `find`-only prototype measured `literal_find` at 4156 and
+4124, which the full change does not reproduce; it was not a same-binary
+control, so treat that gap as layout.
+
 ## Native stack frames and cycles
 
 The log behind reference/native-calls.md's current table: the frame-size

@@ -638,6 +638,23 @@ impl GcHeap {
         self.strings.insert_with_hash(bytes.into(), hash)
     }
 
+    /// Intern `range` of the pooled string `source`, reading the bytes in
+    /// place: a hit copies nothing, a miss boxes the range once. `None` when
+    /// the range lies outside the source.
+    fn alloc_string_from_range_raw(
+        &mut self,
+        source: StringPtr,
+        range: std::ops::Range<usize>,
+    ) -> Option<StringPtr> {
+        let bytes = self.strings.get(source).get(range)?;
+        let hash = crate::det_hash::hash_bytes(bytes);
+        if let Some(ptr) = self.strings.find_by_hash(bytes, hash) {
+            return Some(ptr);
+        }
+        let boxed: Box<[u8]> = bytes.into();
+        Some(self.strings.insert_with_hash(boxed, hash))
+    }
+
     // ========================================================================
     // Garbage Collection
     // ========================================================================

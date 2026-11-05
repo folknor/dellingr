@@ -76,6 +76,7 @@ examples! {
     strings: "examples/strings.lua",
     strings_class_membership: "examples/strings/class_membership.lua",
     strings_g14_reference: "examples/strings/g14_reference.lua",
+    strings_large_subject: "examples/strings/large_subject.lua",
     strings_literal_find: "examples/strings/literal_find.lua",
     strings_mixed: "examples/strings/mixed.lua",
     strings_number_coercion: "examples/strings/number_coercion.lua",

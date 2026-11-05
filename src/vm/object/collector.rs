@@ -53,6 +53,14 @@ impl NoGcAllocator<'_> {
     pub(in crate::vm) fn alloc_string(self, bytes: &[u8]) -> StringPtr {
         self.heap.alloc_string_raw(bytes)
     }
+
+    pub(in crate::vm) fn alloc_string_from_range(
+        self,
+        source: StringPtr,
+        range: std::ops::Range<usize>,
+    ) -> Option<StringPtr> {
+        self.heap.alloc_string_from_range_raw(source, range)
+    }
 }
 
 /// Runtime-cache identities the root visit retained, for

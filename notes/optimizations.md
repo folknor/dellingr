@@ -624,6 +624,20 @@ Why deferred: it fits the envelope with room to spare and nothing is
 failing; this buys margin, not correctness. Signal: the envelope tests
 tightening, or a reason to raise `MAX_NATIVE_CALL_DEPTH`.
 
+### Owned result buffers are copied again when interned
+
+Found 2026-11-05 while removing the pattern functions' argument copies.
+`push_bytes(vec)` takes a `Vec<u8>` by value, but `alloc_string` interns
+through `&[u8]` and `alloc_string_raw` boxes a fresh copy on a miss, so every
+library result built in an owned buffer is copied twice: `gsub` output,
+`upper`, `lower`, `reverse`, `sub`, `table.concat`, `string.format` (which
+also copies its format string with `to_bytes(1)?.to_vec()` before
+rendering). Sketch: an owned interning entry that hashes the buffer, looks it
+up, and on a miss moves it into the pool (`into_boxed_slice`, which
+reallocates only when capacity exceeds length; shrink or build with exact
+capacity). Unmeasured; `large_subject`'s `gsub` would show it on a large
+subject, `mixed` and `patterns` on short ones.
+
 ### gmatch: drop the Lua-side wrapper and table-backed iterator state (E-O2)
 
 Partially shipped as of 2026-07-25 - the per-iteration subject/pattern

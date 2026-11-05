@@ -26,6 +26,7 @@ mod rust_fn;
 #[cfg(feature = "snapshot")]
 mod save_state;
 mod stack;
+mod string_arg;
 mod table;
 mod table_ops;
 
@@ -48,6 +49,7 @@ pub use save_state::{
     SaveInternalError, SaveState, SavedReference, SnapshotError, SnapshotField, TableCorruption,
     TableLoadLocation, TableRestoreFailure,
 };
+pub(crate) use string_arg::StringArg;
 pub(crate) use table_ops::TostringRendering;
 
 use crate::det_hash::IndexMap;
@@ -620,15 +622,6 @@ impl State {
         self.error(ErrorKind::Interrupted)
     }
 
-    /// A meter for the pattern matcher, with the interrupt flag it polls
-    /// per step.
-    pub(crate) fn pattern_meter(
-        &mut self,
-        charge: Charge,
-    ) -> (CostMeter<'_>, &std::sync::atomic::AtomicBool) {
-        (self.cost.charge_meter(charge), self.interrupt.flag())
-    }
-
     /// Test instrumentation for the compiled-pattern cache.
     #[cfg(test)]
     pub(crate) fn pattern_compilations(&self) -> u64 {
@@ -768,27 +761,16 @@ impl State {
         ) -> T,
     ) -> Result<T> {
         // Preserve the argument-type contract before touching the cache.
-        let subject_idx = self.expect_string_at(subject_idx)?;
+        self.expect_string_at(subject_idx)?;
         let pattern_idx = self.expect_string_at(pattern_idx)?;
         let mut matcher = self
             .cached_pattern_at(pattern_idx, AnchorMode::Literal)
             .matcher();
-        let State {
-            stack,
-            heap,
-            cost,
-            interrupt,
-            ..
-        } = self;
-        let subject = stack[subject_idx]
-            .as_string(heap)
-            .expect("expect_string_at validated the subject's string type");
-        Ok(operation(
-            subject,
-            &mut matcher,
-            cost.charge_meter(Charge::StringGmatch),
-            interrupt.flag(),
-        ))
+        self.with_string_arg(
+            &StringArg::Slot(subject_idx),
+            Charge::StringGmatch,
+            |subject, meter, interrupt| operation(subject, &mut matcher, meter, interrupt),
+        )
     }
 
     pub(crate) fn budget_exceeded_error(&self) -> Error {

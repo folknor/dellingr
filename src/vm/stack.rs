@@ -149,27 +149,40 @@ impl State {
         Ok(())
     }
 
-    /// Copies a byte range from a string already on the stack into a new Lua
-    /// string. The source stack value remains rooted if allocation collects.
+    /// Pushes a byte range of a string already on the stack as a Lua string,
+    /// interned straight from the pooled source bytes: an existing string
+    /// copies nothing, a new one is copied once into the pool.
+    ///
+    /// One collection point, as `push_bytes` has: the allocation policy runs
+    /// while the source is rooted in its slot, and nothing collects between
+    /// the lookup and the push, so a hit on an otherwise unrooted string is
+    /// rooted before any later collection.
     pub(crate) fn push_bytes_from_stack_range(
         &mut self,
         idx: isize,
         range: std::ops::Range<usize>,
     ) -> Result<()> {
-        let bytes = self.to_bytes(idx)?;
-        // The copy is not redundant: `bytes` borrows `self.heap`, and pushing
-        // needs `&mut self`. Copying out first ends the borrow, and it also
-        // keeps the source rooted on the stack if the allocation collects.
-        let mut copied = Vec::new();
-        match bytes.get(range) {
-            Some(slice) => copied.extend_from_slice(slice),
-            None => {
-                return Err(super::Error::internal_fault(
-                    InternalFault::CaptureRangeOutsideString,
-                ));
-            }
+        self.check_usable()?;
+        let slot = self.expect_string_at(idx)?;
+        let source = self.stack[slot]
+            .as_string_ptr()
+            .expect("expect_string_at validated the value's string type");
+        // A bad range, then a full stack, are refused before the allocation
+        // policy can collect, leaving the pool untouched.
+        if self.heap.get_string(source).get(range.clone()).is_none() {
+            return Err(super::Error::internal_fault(
+                InternalFault::CaptureRangeOutsideString,
+            ));
         }
-        self.push_bytes(copied)
+        self.check_stack_slot()?;
+        let ptr = self
+            .allocator()
+            .alloc_string_from_range(source, range)
+            .ok_or_else(|| {
+                super::Error::internal_fault(InternalFault::CaptureRangeOutsideString)
+            })?;
+        self.push_unchecked(Val::Str(ptr));
+        Ok(())
     }
 
     /// Pushes the Rust function a handle names (see [`State::add_rust_fn`]).
