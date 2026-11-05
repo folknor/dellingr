@@ -1,6 +1,6 @@
 //! Compiled, byte-oriented Lua patterns.
 
-use core::result;
+use core::{ops, result};
 use std::collections::BTreeMap;
 use std::sync::atomic::AtomicBool;
 
@@ -52,6 +52,37 @@ enum CapLen {
 struct Capture {
     init: usize,
     len: CapLen,
+}
+
+/// The captures a successful search publishes: its program's slots, copied
+/// out of the search's own `MatchState` when it succeeds. Slots past the
+/// program's capture count keep their initial value and are never exposed.
+pub(super) struct CaptureSlots([Capture; LUA_MAXCAPTURES]);
+
+impl CaptureSlots {
+    pub(super) fn new() -> Self {
+        Self(
+            [Capture {
+                init: 0,
+                len: CapLen::Len(0),
+            }; LUA_MAXCAPTURES],
+        )
+    }
+
+    /// Capture `index` (zero-based, not counting the whole match) as the
+    /// latest successful search left it. Meaningful only for an index below
+    /// that search's program's capture count; the caller enforces it.
+    pub(super) fn get(&self, index: usize) -> LuaCapture {
+        let capture = self.0[index];
+        match capture.len {
+            CapLen::Len(length) => LuaCapture::Bytes {
+                start: capture.init,
+                end: capture.init + length,
+            },
+            CapLen::Position => LuaCapture::Position(capture.init),
+            CapLen::Unfinished => LuaCapture::Unfinished,
+        }
+    }
 }
 
 #[derive(Copy, Clone)]
@@ -258,6 +289,12 @@ impl CompiledPattern {
     /// Whether a match may start only at the initial position.
     pub(super) fn is_anchored(&self) -> bool {
         self.anchored
+    }
+
+    /// How many captures a successful match reports, not counting the whole
+    /// match.
+    pub(super) fn capture_count(&self) -> usize {
+        self.captures
     }
 }
 
@@ -533,27 +570,32 @@ struct MatchState<'data, 'meter, 'cost> {
     /// The host's interrupt request, polled every step: backtracking can
     /// repeat bounded passes over the subject without bound.
     interrupt: &'data AtomicBool,
+    /// The search's working slots, initialised once per search and shared by
+    /// every start position it tries, never cleared between them.
+    ///
+    /// None needs clearing: every slot a path reads, it wrote earlier on the
+    /// same path. Pattern items are strictly linear, so a successful path
+    /// executes every capture item the program holds, in order:
+    /// `CaptureStart` and `PositionCapture` overwrite the whole slot, and
+    /// `CaptureEnd` (which reads `init`) and `Backref` come after their
+    /// slot's start, the compiler turning a backreference to a capture that
+    /// is open or absent at that point into an `Item::Fail`. Backtracking
+    /// retries a suffix of the items and keeps the slots its retained prefix
+    /// wrote, which are still that path's own; any slot an abandoned suffix
+    /// changed is overwritten before a later path reads it, because reaching
+    /// a read of it means executing its capture items again. A new start
+    /// position retains no prefix, so every slot it reads it writes itself.
+    /// That is also why a failed `CaptureEnd` does not restore its slot.
+    ///
+    /// The slots live here, inline, rather than behind a borrow of the
+    /// matcher's `CaptureSlots`: the second pointer live across `match_at`'s
+    /// native recursion grew its frame and measured slower than copying the
+    /// program's slots out once on success (reference/performance.md,
+    /// "Matcher capture state per search").
     captures: [Capture; LUA_MAXCAPTURES],
 }
 
-impl<'data, 'meter, 'cost> MatchState<'data, 'meter, 'cost> {
-    fn new(
-        subject: &'data [u8],
-        pattern: &'data CompiledPattern,
-        meter: &'meter mut CostMeter<'cost>,
-        interrupt: &'data AtomicBool,
-    ) -> Self {
-        Self {
-            subject,
-            pattern,
-            meter,
-            interrupt,
-            captures: [Capture {
-                init: 0,
-                len: CapLen::Len(0),
-            }; LUA_MAXCAPTURES],
-        }
-    }
+impl MatchState<'_, '_, '_> {
     /// Take one matcher step: an interrupt safepoint, then its charge at the
     /// meter's unit cost.
     #[inline(always)]
@@ -674,11 +716,10 @@ impl<'data, 'meter, 'cost> MatchState<'data, 'meter, 'cost> {
                 Item::CaptureEnd { slot } => {
                     let slot = usize::from(slot);
                     self.captures[slot].len = CapLen::Len(pos - self.captures[slot].init);
-                    let result = self.recurse(pos, item + 1, depth)?;
-                    if result.is_none() {
-                        self.captures[slot].len = CapLen::Unfinished;
-                    }
-                    return Ok(result);
+                    // No restore on failure: a later read of this slot
+                    // re-executes this item or its `CaptureStart` first
+                    // (`MatchState::captures`).
+                    return self.recurse(pos, item + 1, depth);
                 }
                 Item::PositionCapture { slot } => {
                     self.captures[usize::from(slot)] = Capture {
@@ -786,35 +827,27 @@ impl<'data, 'meter, 'cost> MatchState<'data, 'meter, 'cost> {
             }
         }
     }
-    fn captures(&self, start: usize, end: usize, out: &mut [LuaCapture; LUA_MAXMATCHES]) -> usize {
-        out[0] = LuaCapture::Bytes { start, end };
-        // bounded: one step per capture, at most LUA_MAXCAPTURES.
-        for index in 0..self.pattern.captures {
-            out[index + 1] = match self.captures[index].len {
-                CapLen::Len(length) => LuaCapture::Bytes {
-                    start: self.captures[index].init,
-                    end: self.captures[index].init + length,
-                },
-                CapLen::Position => LuaCapture::Position(self.captures[index].init),
-                CapLen::Unfinished => LuaCapture::Unfinished,
-            };
-        }
-        self.pattern.captures + 1
-    }
 }
 
 pub(super) fn compile(pattern: &[u8], mode: AnchorMode) -> CompiledPattern {
     Compiler::new(pattern).compile(mode)
 }
 
+/// Search `subject` from `init`, returning the whole match's range. On
+/// success the program's captures are copied into `captures`; on failure or
+/// error `captures` is left as it was.
+///
+/// One `MatchState` serves every start position: its slots need no reset
+/// between positions (`MatchState::captures`), and building the state
+/// charges nothing, so the cost and safepoints are those of `match_at` alone.
 pub(super) fn str_match(
     subject: &[u8],
     pattern: &CompiledPattern,
     init: usize,
-    out: &mut [LuaCapture; LUA_MAXMATCHES],
+    captures: &mut CaptureSlots,
     meter: &mut CostMeter<'_>,
     interrupt: &AtomicBool,
-) -> MatchResult<usize> {
+) -> MatchResult<Option<ops::Range<usize>>> {
     // `""`, and `"^"` under `AnchorMode::Honour`, compile to no items and
     // match the empty range at `init` without consulting the
     // matcher, so they charge no matcher step (`match_at` charges one on
@@ -823,21 +856,25 @@ pub(super) fn str_match(
     // `string.match` has no empty-pattern special case of its own because
     // this one is free; removing it is a cost change.
     if pattern.items.is_empty() {
-        out[0] = LuaCapture::Bytes {
-            start: init,
-            end: init,
-        };
-        return Ok(1);
+        return Ok(Some(init..init));
     }
+    let mut state = MatchState {
+        subject,
+        pattern,
+        meter,
+        interrupt,
+        captures: CaptureSlots::new().0,
+    };
     let mut pos = init;
     // safepoint: every start position enters `match_at`, which polls.
     loop {
-        let mut state = MatchState::new(subject, pattern, meter, interrupt);
         if let Some(end) = state.match_at(pos, 0, 0)? {
-            return Ok(state.captures(pos, end, out));
+            let published = pattern.captures;
+            captures.0[..published].copy_from_slice(&state.captures[..published]);
+            return Ok(Some(pos..end));
         }
         if pattern.is_anchored() || pos == subject.len() {
-            return Ok(0);
+            return Ok(None);
         }
         pos += 1;
     }

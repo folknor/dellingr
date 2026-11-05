@@ -73,6 +73,46 @@ that. An early `find`-only prototype measured `literal_find` at 4156 and
 4124, which the full change does not reproduce; it was not a same-binary
 control, so treat that gap as layout.
 
+## Matcher capture state per search, 2026-11-05
+
+`str_match` built a fresh `MatchState` for every start position it tried,
+and with it a 768-byte capture array (32 slots of 24 bytes): the release
+build called `memset` for 768 bytes before every `match_at` entry, so a
+failed search over n bytes paid it n times, and gsub and gmatch paid it
+again on every match. The change builds one `MatchState` per search, shares
+its slots across start positions without a reset (sound because a path
+reads only slots it wrote itself; `MatchState::captures` states the rule),
+drops `CaptureEnd`'s restore on failure for the same reason, and on success
+copies the program's slots into the matcher (`CaptureSlots`), which
+converts a slot when it is read and refuses reads after a failed search.
+
+A first version kept no per-search array at all: the matcher's own slots,
+reached from `MatchState` through a `&mut` borrow. In release that second
+live pointer grew `match_at`, which recurses natively up to `MAXCCALLS`,
+from 168 to 200 bytes per level (and `min_expand` from 72 to 120), and it
+measured slower than the shipped shape, which keeps `match_at` at 168 and
+`min_expand` at 72. `str_match`'s own frame stays 888 bytes; it is one
+level, not part of the recursion, and returns before gsub calls a
+replacement.
+
+Plantasjen (as above), default release profile, `brokkr dellingr --bench`
+cells (best of 3 launches, the harness's elapsed ms), base and both shapes
+interleaved:
+
+| Workload | 58e2808 | Matcher-owned slots | Per-search slots (shipped) |
+|---|---|---|---|
+| `failed_scan` | 4938, 4940, 4946 | 4582, 4557, 4556, 4572 | 4518, 4495, 4506 |
+| `patterns` | 2256, 2269, 2258 | 2184, 2190, 2189, 2189 | 2160, 2161, 2176 |
+| `large_subject` | 2308, 2264, 2302 | 2298, 2273, 2276, 2280 | 2260, 2247, 2267 |
+
+`failed_scan` is a probe registered for this change: searches over a
+few-hundred-byte subject that try nearly every start position. The shipped
+shape is 8.8% faster there and 4.3% faster on `patterns` (medians); `large_subject`,
+whose searches stop after a few bytes, moves within its spread. The native
+cycles in reference/native-calls.md moved with `LuaPattern`'s layout:
+release `gsub_pattern_function` went from 3184 (3248 with snapshot) at
+58e2808 to 3168 (3216).
+
 ## Native stack frames and cycles
 
 The log behind reference/native-calls.md's current table: the frame-size
@@ -104,6 +144,7 @@ Hosts: plantasjen from 4a722cf on; the 2026-10-23 rows name x86-64 Linux only.
 | 912c2d5 with the dependency bumps that followed it | 15856 | 3280 | 3296 |
 | host interrupt safepoints on top of that | 16064 | 3296 | 3312 |
 | proper tail calls on top of 2a566c8 | 16304 | 3296 | 3312 |
+| matcher capture state per search on top of 58e2808 | 16096 | 3168 | 3216 |
 
 ### 2026-11-05: proper tail calls
 

@@ -68,6 +68,7 @@ examples/stress_tables.lua|450a59b2ec76f5f0ef6b72eae2a59fb3|43001
 examples/string_metatable.lua|8c39013739bbd2dfcbbfe796cbf36854|11
 examples/strings.lua|b417d01657953f4c78ae70efdc3b773f|465
 examples/strings/class_membership.lua|8debd2005ba3eab6b385bdc64c23ad5d|131695
+examples/strings/failed_scan.lua|20d62957347ab59ead0ec4c6eb89a5f1|941325
 examples/strings/g14_reference.lua|4d8b076da375ec4341f0eec591dd78e6|2
 examples/strings/large_subject.lua|9f4c6b26f375b932a1b4df86c09ab426|70963442
 examples/strings/literal_find.lua|7b6bbdcb62ed6124c1393ab54363b92b|13332006

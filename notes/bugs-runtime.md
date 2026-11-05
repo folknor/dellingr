@@ -21,20 +21,6 @@ The entries below marked Performance describe work the hunters saw in the
 code. None has been measured; any change goes through a registered
 `brokkr dellingr` workload first.
 
-## RT-019 - str_match builds a fresh MatchState for every start position
-
-Scope: `stdlib-strings`. Performance.
-
-`str_match` builds a new `MatchState` for each start position, which initialises
-a 32-entry capture array (about 512 bytes). A failed search over an n-byte
-subject does this n times. The hunter observed that every path writes a capture
-slot before reading it and that `captures()` reads only slots the successful
-path set, and that the `SharedPattern` doc requires state to be fresh per
-search, not per start position.
-
-Approaches raised so far (not exhaustive): build the state once per search and
-reuse it across start positions.
-
 ## RT-020 - string.format appends literal bytes one at a time
 
 Scope: `stdlib-strings`. Performance. Raised by the hunt and again by a fix

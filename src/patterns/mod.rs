@@ -13,7 +13,9 @@ pub(crate) mod errors;
 use self::errors::MalformedPattern;
 
 mod luapat;
-use self::luapat::{CompiledPattern, LUA_MAXMATCHES, compile, str_match};
+#[cfg(test)]
+use self::luapat::LUA_MAXMATCHES;
+use self::luapat::{CaptureSlots, CompiledPattern, compile, str_match};
 
 pub(crate) use self::errors::{MatchError, PatternError};
 pub(crate) use self::luapat::AnchorMode;
@@ -38,7 +40,10 @@ pub(crate) fn is_plain_for_find(pattern: &[u8]) -> bool {
 ///
 /// Matching never mutates the program: every search builds fresh scratch
 /// state, so a cached program behaves exactly like a freshly compiled one,
-/// including where lazily encoded malformed points raise.
+/// including where lazily encoded malformed points raise. The state is fresh
+/// per search, not per start position: the start positions of one search
+/// share it, which is sound because a path reads only capture slots it wrote
+/// itself (`luapat::MatchState::captures` states the rule).
 #[derive(Clone)]
 pub(crate) struct SharedPattern(Arc<CompiledPattern>);
 
@@ -58,9 +63,15 @@ impl SharedPattern {
 ///
 /// Compilation copies everything the matcher needs into `compiled`, so the
 /// pattern bytes are not borrowed past construction.
+///
+/// A successful search copies its program's capture slots here, and
+/// `capture` converts a slot when it is read. Only a successful search
+/// publishes: `n_match` is zero from the start of every search until it
+/// succeeds, and `capture` and `range` refuse to read past it.
 pub(crate) struct LuaPattern {
     compiled: Arc<CompiledPattern>,
-    matches: [LuaCapture; LUA_MAXMATCHES],
+    slots: CaptureSlots,
+    whole: ops::Range<usize>,
     n_match: usize,
 }
 
@@ -68,7 +79,8 @@ impl LuaPattern {
     fn from_compiled(compiled: Arc<CompiledPattern>) -> LuaPattern {
         LuaPattern {
             compiled,
-            matches: [LuaCapture::Bytes { start: 0, end: 0 }; LUA_MAXMATCHES],
+            slots: CaptureSlots::new(),
+            whole: 0..0,
             n_match: 0,
         }
     }
@@ -117,24 +129,39 @@ impl LuaPattern {
         meter: &mut CostMeter<'_>,
         interrupt: &AtomicBool,
     ) -> Result<bool, MatchError> {
-        let n_match = str_match(s, &self.compiled, init, &mut self.matches, meter, interrupt)?;
-        self.n_match = n_match;
-        Ok(n_match > 0)
+        self.n_match = 0;
+        let Some(whole) = str_match(s, &self.compiled, init, &mut self.slots, meter, interrupt)?
+        else {
+            return Ok(false);
+        };
+        self.whole = whole;
+        self.n_match = self.compiled.capture_count() + 1;
+        Ok(true)
     }
 
     /// The full match range from the latest successful match.
     pub(crate) fn range(&self) -> ops::Range<usize> {
-        match self.capture(0) {
-            LuaCapture::Bytes { start, end } => start..end,
-            LuaCapture::Position(_) | LuaCapture::Unfinished => {
-                unreachable!("the full match is always a byte range")
-            }
-        }
+        assert!(
+            self.n_match > 0,
+            "only a successful search publishes a match range"
+        );
+        self.whole.clone()
     }
 
-    /// The nth capture range from the latest successful match.
+    /// The nth capture from the latest successful match, 0 being the whole
+    /// match.
     pub(crate) fn capture(&self, i: usize) -> LuaCapture {
-        self.matches[i]
+        assert!(
+            i < self.n_match,
+            "the latest successful search published captures 0..n_match"
+        );
+        match i {
+            0 => LuaCapture::Bytes {
+                start: self.whole.start,
+                end: self.whole.end,
+            },
+            _ => self.slots.get(i - 1),
+        }
     }
 
     /// Number of captures from the latest successful match, including the full match.
@@ -265,6 +292,50 @@ mod tests {
         );
         assert_eq!(pattern.capture(1), LuaCapture::Bytes { start: 1, end: 4 });
         assert_eq!(pattern.capture(2), LuaCapture::Bytes { start: 7, end: 12 });
+    }
+
+    /// A search's start positions share capture slots that are never
+    /// cleared, so this pins that nothing an abandoned branch or an earlier
+    /// start position wrote is read: the first start position closes both
+    /// captures before `z` fails. The later searches run on the same matcher.
+    #[test]
+    fn captures_carry_nothing_across_start_positions_or_searches() {
+        let mut used = 0;
+        let mut meter = count_only(&mut used);
+        let mut pattern = LuaPattern::new(b"(x)(y?)()z");
+        assert!(pattern.matches_bytes(b"xyq xz", &mut meter).unwrap());
+        assert_eq!(pattern.range(), 4..6);
+        assert_eq!(pattern.capture(1), LuaCapture::Bytes { start: 4, end: 5 });
+        assert_eq!(pattern.capture(2), LuaCapture::Bytes { start: 5, end: 5 });
+        assert_eq!(pattern.capture(3), LuaCapture::Position(5));
+        assert!(pattern.matches_bytes(b"xyz", &mut meter).unwrap());
+        assert_eq!(pattern.capture(2), LuaCapture::Bytes { start: 1, end: 2 });
+        assert_eq!(pattern.capture(3), LuaCapture::Position(2));
+
+        // A retry keeps what its retained prefix wrote: `b?` fails to consume,
+        // and the retried suffix reads capture 1 without rewriting it.
+        let mut prefix = LuaPattern::new(b"(a)b?%1");
+        assert!(prefix.matches_bytes(b"aa", &mut meter).unwrap());
+        assert_eq!(prefix.range(), 0..2);
+        assert_eq!(prefix.capture(1), LuaCapture::Bytes { start: 0, end: 1 });
+
+        let mut unclosed = LuaPattern::new(b"(a)(b%a*c");
+        assert!(!unclosed.matches_bytes(b"abd ab", &mut meter).unwrap());
+        assert!(unclosed.matches_bytes(b"abc", &mut meter).unwrap());
+        assert_eq!(unclosed.capture(1), LuaCapture::Bytes { start: 0, end: 1 });
+        assert_eq!(unclosed.capture(2), LuaCapture::Unfinished);
+    }
+
+    /// A failed search publishes nothing, even though it wrote the slots.
+    #[test]
+    #[should_panic(expected = "the latest successful search published captures 0..n_match")]
+    fn a_failed_search_publishes_no_captures() {
+        let mut used = 0;
+        let mut meter = count_only(&mut used);
+        let mut pattern = LuaPattern::new(b"(a)b");
+        assert!(pattern.matches_bytes(b"ab", &mut meter).unwrap());
+        assert!(!pattern.matches_bytes(b"ac", &mut meter).unwrap());
+        let _ = pattern.capture(1);
     }
 
     #[test]
