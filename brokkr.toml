@@ -599,13 +599,3 @@ expect = "ok"
 match = "last-line"
 stream = "stdout"
 stage = "pre-clippy"
-
-# Inert: brokkr still refuses a dellingr project's config without a
-# `[dellingr]` section naming a harness and one workload, a leftover of the
-# retired `brokkr dellingr` driver (benchmarks are brokkr.d/bench.toml now,
-# and no `hotpath` example exists). Delete this once brokkr drops that check.
-[dellingr]
-example = "hotpath"
-[dellingr.workloads.stub]
-file = "bench/sort.lua"
-xxh128 = "3186097866519fa8829611bd9b74512b"
