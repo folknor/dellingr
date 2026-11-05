@@ -344,7 +344,14 @@ class Source:
 
 
 def source_files():
-    return [Source(path) for path in sorted(SRC.rglob("*.rs"))]
+    # src/bin/ holds separate host binaries (the bench harness), built only
+    # under their own features; they call the public State API from outside
+    # the VM, like src/main.rs, but are not the CLI's binary root.
+    return [
+        Source(path)
+        for path in sorted(SRC.rglob("*.rs"))
+        if not path.relative_to(SRC).parts[0] == "bin"
+    ]
 
 
 def production_sources(sources=None):

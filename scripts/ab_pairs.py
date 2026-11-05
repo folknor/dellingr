@@ -2,9 +2,9 @@
 """Interleaved A/B benchmark cells through brokkr.
 
 For each workload, ROUNDS alternating A/B and B/A pairs of
-`--bench --commit` runs, one at a time, so drift between cells lands on
-both arms. Results land in .brokkr/results.db; read them with
-`brokkr results -n <cells>`.
+`brokkr bench --commit <ref> wall --workload <w>` runs, one at a time, so
+drift between cells lands on both arms. Results land in the bench store;
+read them with `brokkr results` (Script benches).
 
     python3 scripts/ab_pairs.py <commit-a> <commit-b> <rounds> <workload>...
 """
@@ -27,7 +27,7 @@ def main() -> int:
             for commit in commits:
                 print(f"== {workload} round {i} @ {commit}", flush=True)
                 proc = subprocess.run(
-                    ["brokkr", "dellingr", "--lua", workload, "--bench", "--commit", commit],
+                    ["brokkr", "bench", "--commit", commit, "wall", "--workload", workload],
                     cwd=ROOT,
                 )
                 if proc.returncode != 0:

@@ -3,7 +3,7 @@
 # https://github.com/ianm199/omnilua, in its default 5.4 mode), reference Lua
 # 5.5 / 5.4 / 5.2 and LuaJIT, run on request to regenerate the README's
 # comparison table (it is not how dellingr's own performance is measured; that
-# goes through `brokkr dellingr`). Each run records host, commits and dirty
+# goes through `brokkr bench`). Each run records host, commits and dirty
 # state in its banner and in provenance.txt beside the JSON. Requires
 # hyperfine, lua5.2, lua5.4, lua5.5, luajit, jq on PATH, plus an omniLua
 # release binary (path in OMNILUA below) built from a local clone in the

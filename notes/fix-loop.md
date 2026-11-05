@@ -65,7 +65,7 @@ Notes:
   comes back cannot be placed. Worktrees are not an escape hatch here - they
   are banned project-wide.
   - Concretely: baseline benchmarking that edits the tree (`git stash` ->
-    `brokkr dellingr` -> `git stash pop`) must happen *before* launching the
+    `brokkr bench` -> `git stash pop`) must happen *before* launching the
     reviewer or *after* it returns, never alongside it.
   - The overlap in step 5 is read-only work only. Reading is fine; writing is
     not.

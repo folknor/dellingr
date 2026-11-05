@@ -1,5 +1,6 @@
-//! Bench harness for dellingr: the binary brokkr invokes for `--bench` /
-//! `--hotpath` / `--alloc` runs.
+//! Bench harness for dellingr: the binary `brokkr bench` runs for the
+//! `wall`, `hotpath` and `alloc` benches (brokkr.d/bench.toml). Built only
+//! under the `bench-harness` feature, so `cargo install` skips it.
 //!
 //! Loads a bench script that must define a global `_bench` function, then
 //! runs phases on one `State`:
@@ -10,10 +11,11 @@
 //!     `--iterations N`
 //!
 //! A script path is required and is resolved from the caller's working
-//! directory. brokkr passes the registered file path.
+//! directory. brokkr passes the bound workload's pinned file path.
 //!
 //! Output:
-//!   - KV pairs on stderr for phase timings and heap/object brackets.
+//!   - KV pairs on stderr for phase timings and heap/object brackets, which
+//!     brokkr.d/bench.lua stores as the iteration's record.
 //!   - Optionally, the brokkr sidecar stream: when `BROKKR_MARKER_FIFO`
 //!     names a writable path, phase markers (`PARSE_START`/`PARSE_END`,
 //!     `SETUP_*`, `COLD_*`, `WARM_*`, plus batched `WARM_BLOCK_*` sub-spans)
@@ -26,9 +28,9 @@
 //! so a cost change between runs of the "same" bench means the workload or
 //! the compiler changed, not the VM's speed.
 //!
-//! Run through a brokkr workload command (`brokkr dellingr --lua <workload>`),
-//! which resolves a `brokkr.toml` workload registration to the script path
-//! this harness requires.
+//! Run through `brokkr bench <bench> --workload <name>`, which resolves the
+//! `[data.workloads.*]` registration to the script path this harness
+//! requires.
 
 #![expect(
     clippy::disallowed_methods,
@@ -422,9 +424,9 @@ fn main() {
     // Phase 2: run the chunk to register `_bench` (and any per-script setup).
     // This runs the script's whole top level, including its standalone footer
     // (`for i = 1, N do _bench() end`). That footer is deliberate: it is what
-    // `brokkr dellingr` measures. The stored `elapsed` is the whole process,
-    // so for a seconds-scale bench/ file the footer is most of the verdict
-    // wall, and under `--hotpath`/`--alloc` the examples/ footer supplies most
+    // `brokkr bench` measures. The stored wall is the whole process, so for
+    // a seconds-scale bench/ file the footer is most of the verdict wall, and
+    // under the `hotpath` and `alloc` benches the examples/ footer supplies most
     // of the profiled events next to the few warm iterations below. Do not
     // treat it as untimed warm-up overhead to trim.
     emit_marker("SETUP_START");

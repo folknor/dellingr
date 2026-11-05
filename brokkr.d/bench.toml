@@ -1,0 +1,312 @@
+# Benchmarks: `brokkr bench <wall|hotpath|alloc> --workload <name>`.
+# Included from brokkr.toml; `brokkr man bench-config` documents the tables.
+#
+# Every bench builds the harness bin (`dellingr-bench`, examples/hotpath.rs,
+# gated behind the `bench-harness` feature) and runs brokkr.d/bench.lua over
+# one pinned workload file:
+#
+# - `wall` builds it bare: the uninstrumented walls, the ones worth comparing.
+# - `hotpath` adds the `hotpath` feature (function-level timing).
+# - `alloc` adds `hotpath-alloc` (per-function allocation tracking).
+#
+# Workloads are content-addressed: the file is part of the measurement's
+# identity, so editing a workload file REQUIRES updating its `xxhash` here -
+# that re-registration is the deliberate signal that older stored runs no
+# longer compare against new ones (`brokkr bench` refuses on drift). Not
+# hostname-keyed: these files are in git, identical on every host.
+#
+# Each workload name is registered at both scales, scale outer:
+#
+# - `data.workloads.bench`: the bench/ seconds-scale port, what `wall` binds.
+#   Seconds-scale so wall deltas resolve above launch noise.
+# - `data.workloads.hotpath`: the examples/ ms-scale kernel, the only scale
+#   `hotpath` and `alloc` can bind. The hotpath crate queues one event per
+#   instrumented call in an unbounded per-thread queue that its 50ms sweep
+#   drains at ~1.3M events/s, far below the VM's production rate; a
+#   seconds-scale file backlogs 30+ GB of RAM before the run ends (observed
+#   2026-07-26 on plantasjen). The `from` path makes that unrepresentable.
+#
+# Paired files carry the same kernel, so hotpath percentages read across to
+# the bench walls. `large_source` is a parse/codegen probe, not an execution
+# workload; interpret its timing as a parse/codegen diagnostic, so both scales
+# use the same generated source.
+#
+# tests/integration/corpus/bench_scripts.rs checks matching bytecode and
+# literal pools for each pair's kernel and shared helpers as well as cost
+# fingerprints, the pins, and that both scales register the same names.
+# Top-level setup and the verdict wrapper's repeat count (`K`, or a literal
+# bound in a wrapper without one) are not compared: the count is calibrated
+# per kernel for wall time, and setup is re-checked by eye when either file
+# changes.
+
+[bench.wall]
+script_file = "bench.lua"
+target = "dellingr-bench"
+profile = "release"
+features = ["bench-harness"]
+params.workload = { from = "data.workloads.bench", required = true, help = "seconds-scale workload from bench/" }
+
+[bench.hotpath]
+script_file = "bench.lua"
+target = "dellingr-bench"
+profile = "release"
+features = ["bench-harness", "hotpath"]
+params.workload = { from = "data.workloads.hotpath", required = true, help = "ms-scale workload from examples/" }
+
+[bench.alloc]
+script_file = "bench.lua"
+target = "dellingr-bench"
+profile = "release"
+features = ["bench-harness", "hotpath-alloc"]
+params.workload = { from = "data.workloads.hotpath", required = true, help = "ms-scale workload from examples/" }
+
+[data.workloads.bench.benchmark]
+file = "bench/benchmark.lua"
+xxhash = "14bf617d8736c9c3fa6f93242cd231f5"
+
+[data.workloads.bench.arithmetic]
+file = "bench/arithmetic.lua"
+xxhash = "5b241180b776f94825c7bc316347f1f4"
+
+[data.workloads.bench.constants]
+file = "bench/constants.lua"
+xxhash = "468576a94bddba291b96b604288b988c"
+
+[data.workloads.bench.math]
+file = "bench/math.lua"
+xxhash = "3f1ae9f39d8bc1d7a5136967d7d46900"
+
+[data.workloads.bench.pairs]
+file = "bench/pairs.lua"
+xxhash = "40f694a23ec14829b96e0403b9a0b6dd"
+
+[data.workloads.bench.fill]
+file = "bench/fill.lua"
+xxhash = "2d409aa1bb5f82a2a841f80aa69f54a5"
+
+# Never bench --commit a ref older than 2bcc71e: before that commit the VM
+# walks the queue's whole push history on every pairs start, and this file
+# runs for hours. Use the hotpath scale across it.
+[data.workloads.bench.queue]
+file = "bench/queue.lua"
+xxhash = "b02dfb55c808e62f08a1311046988351"
+
+[data.workloads.bench.sort]
+file = "bench/sort.lua"
+xxhash = "3186097866519fa8829611bd9b74512b"
+
+[data.workloads.bench.mixed]
+file = "bench/mixed.lua"
+xxhash = "4193f315750f157ff7fb2b1ec6f30165"
+
+[data.workloads.bench.patterns]
+file = "bench/patterns.lua"
+xxhash = "42d9c2249ebdda7440c60d344725d9fb"
+
+[data.workloads.bench.literal_find]
+file = "bench/literal_find.lua"
+xxhash = "c23da899a8d2925a4f1ec6ea872160d7"
+
+[data.workloads.bench.large_subject]
+file = "bench/large_subject.lua"
+xxhash = "21878ee46042ea3cba3c546a14622a78"
+
+[data.workloads.bench.failed_scan]
+file = "bench/failed_scan.lua"
+xxhash = "343ca033b4b5ac40c9a2cff1904dac7f"
+
+[data.workloads.bench.format_literals]
+file = "bench/format_literals.lua"
+xxhash = "7eae0d9472643385ecdd9d8d9d1bf6b3"
+
+[data.workloads.bench.same_obj_read]
+file = "bench/same_obj_read.lua"
+xxhash = "cdb6bfdf21a72c08d4b1d683d7d85d07"
+
+[data.workloads.bench.method]
+file = "bench/method.lua"
+xxhash = "04d0824886560a272b218449d5fbdd96"
+
+[data.workloads.bench.method_chain]
+file = "bench/method_chain.lua"
+xxhash = "592fe9284df75909e4e2ea2386da19b1"
+
+[data.workloads.bench.method_polymorphic]
+file = "bench/method_polymorphic.lua"
+xxhash = "9a54ab4456ea475ecbb9335505a1a329"
+
+[data.workloads.bench.write]
+file = "bench/write.lua"
+xxhash = "5b7919b3243dd95d587bdc10b38f3a46"
+
+[data.workloads.bench.global]
+file = "bench/global.lua"
+xxhash = "1b5839ba84a8fdec0d702af4d3a16d64"
+
+[data.workloads.bench.tail_call]
+file = "bench/tail_call.lua"
+xxhash = "6705dacaef8104a740405265665aa1a5"
+
+[data.workloads.bench.many_literals]
+file = "bench/many_literals.lua"
+xxhash = "595df87ab2324092ce74b20a95818ec2"
+
+[data.workloads.bench.loop_beside_closure]
+file = "bench/loop_beside_closure.lua"
+xxhash = "d3641fef08461158df9f383cee08cd7b"
+
+[data.workloads.bench.closure]
+file = "bench/closure.lua"
+xxhash = "5befb079865e20e3343cd9beaa8e84be"
+
+[data.workloads.bench.record_tables]
+file = "bench/record_tables.lua"
+xxhash = "9ebd1f3da641203c82de3ee42b0c251c"
+
+[data.workloads.bench.list_literals]
+file = "bench/list_literals.lua"
+xxhash = "69948cfa2e1cb8ea44e935f481d3fa16"
+
+[data.workloads.bench.gc_churn]
+file = "bench/gc_churn.lua"
+xxhash = "1ed1ab2e97827b61e317a94d3f197a5a"
+
+[data.workloads.bench.result_adjust]
+file = "bench/result_adjust.lua"
+xxhash = "fc03bdf3c2faafa7c72e56ee78bab09b"
+
+[data.workloads.bench.sequence_len]
+file = "bench/sequence_len.lua"
+xxhash = "93b8e0633008bb396b87f09fed52470f"
+
+[data.workloads.bench.large_source]
+file = "examples/parse/large_source.lua"
+xxhash = "3d87b6e87edaa28e17783d5c9a89b3d3"
+
+[data.workloads.bench.rust_boundary]
+file = "bench/rust_boundary.lua"
+xxhash = "488c7cc9b818ba7a69cdede59b518cfd"
+
+[data.workloads.hotpath.benchmark]
+file = "examples/composite/benchmark.lua"
+xxhash = "fd1b898cc308645a3135b078c4fd180a"
+
+[data.workloads.hotpath.arithmetic]
+file = "examples/numerics/arithmetic.lua"
+xxhash = "6377d75406074f15184e1f03a00f15b8"
+
+[data.workloads.hotpath.constants]
+file = "examples/numerics/constants.lua"
+xxhash = "04a3cab7b19967cd1f71ad224c5a5ea6"
+
+[data.workloads.hotpath.math]
+file = "examples/numerics/math.lua"
+xxhash = "ae2f33864c810825e2b6ec753ece6b21"
+
+[data.workloads.hotpath.pairs]
+file = "examples/iter/pairs.lua"
+xxhash = "92432fb93c475cc93053539e2fd235ae"
+
+[data.workloads.hotpath.fill]
+file = "examples/tables/fill.lua"
+xxhash = "79bb664bac707da02ad807c7e4f71f39"
+
+[data.workloads.hotpath.queue]
+file = "examples/tables/queue.lua"
+xxhash = "0a3e2b4117a7ba5dfbb360c72feba99f"
+
+[data.workloads.hotpath.sort]
+file = "examples/tables/sort.lua"
+xxhash = "bf77465635b1c608fdd83f7614de9bff"
+
+[data.workloads.hotpath.mixed]
+file = "examples/strings/mixed.lua"
+xxhash = "245208e07e6a7073a04075ee83f09964"
+
+[data.workloads.hotpath.patterns]
+file = "examples/strings/patterns.lua"
+xxhash = "b30f9fbcb791eadddf21de1e129e1e79"
+
+[data.workloads.hotpath.literal_find]
+file = "examples/strings/literal_find.lua"
+xxhash = "7b6bbdcb62ed6124c1393ab54363b92b"
+
+[data.workloads.hotpath.large_subject]
+file = "examples/strings/large_subject.lua"
+xxhash = "9f4c6b26f375b932a1b4df86c09ab426"
+
+[data.workloads.hotpath.failed_scan]
+file = "examples/strings/failed_scan.lua"
+xxhash = "20d62957347ab59ead0ec4c6eb89a5f1"
+
+[data.workloads.hotpath.format_literals]
+file = "examples/strings/format_literals.lua"
+xxhash = "ab951754e92c34654003b4893b4161aa"
+
+[data.workloads.hotpath.same_obj_read]
+file = "examples/fields/same_obj_read.lua"
+xxhash = "0e00bfb5521a2b4f2e9c48b48581a2e5"
+
+[data.workloads.hotpath.method]
+file = "examples/calls/method.lua"
+xxhash = "c0c9ba6ea8af339cedc61dab0d12cc26"
+
+[data.workloads.hotpath.method_chain]
+file = "examples/calls/method_chain.lua"
+xxhash = "141a5a7aa1d8453a36135afe9b714c44"
+
+[data.workloads.hotpath.method_polymorphic]
+file = "examples/calls/method_polymorphic.lua"
+xxhash = "6b6609c4b16cb1e7910c06fd99cd3d5f"
+
+[data.workloads.hotpath.write]
+file = "examples/globals/write.lua"
+xxhash = "d1ae7f006614656eec29a9c4d8adcb28"
+
+[data.workloads.hotpath.global]
+file = "examples/calls/global.lua"
+xxhash = "c2dbedfee234dd0fef1acb770d658e5b"
+
+[data.workloads.hotpath.tail_call]
+file = "examples/calls/tail_call.lua"
+xxhash = "d6093b8c5e88d2806c8d5faa4fdfafc3"
+
+[data.workloads.hotpath.many_literals]
+file = "examples/calls/many_literals.lua"
+xxhash = "c2e5719005d74bfbad110836376f3d11"
+
+[data.workloads.hotpath.loop_beside_closure]
+file = "examples/calls/loop_beside_closure.lua"
+xxhash = "7dcad64f975e95ca6305fb01738c91db"
+
+[data.workloads.hotpath.closure]
+file = "examples/alloc/closure.lua"
+xxhash = "6c3b54c67fadaa55c51db6f64916d331"
+
+[data.workloads.hotpath.record_tables]
+file = "examples/alloc/record_tables.lua"
+xxhash = "759fd927309e69e0623bf3eff2fcff13"
+
+[data.workloads.hotpath.list_literals]
+file = "examples/alloc/list_literals.lua"
+xxhash = "f1242d5988d552fa7c7f3d23855f9696"
+
+[data.workloads.hotpath.gc_churn]
+file = "examples/alloc/gc_churn.lua"
+xxhash = "9c89ca315d197f5c3bd4c31cfd79d065"
+
+[data.workloads.hotpath.result_adjust]
+file = "examples/calls/result_adjust.lua"
+xxhash = "0a6667c4ac5e50ab10967e31497c9abe"
+
+[data.workloads.hotpath.sequence_len]
+file = "examples/tables/sequence_len.lua"
+xxhash = "52dfdaed38435144b82ffd50ee11342e"
+
+[data.workloads.hotpath.large_source]
+file = "examples/parse/large_source.lua"
+xxhash = "3d87b6e87edaa28e17783d5c9a89b3d3"
+
+[data.workloads.hotpath.rust_boundary]
+file = "examples/calls/rust_boundary.lua"
+xxhash = "0443637fb717226cb1239958b85ee341"

@@ -143,8 +143,9 @@ verdict port yet: the `calls/` family (`local`, `global`, `method`,
 and closure-clone rewrites), `fields/polymorphic` / `same_obj_cached` /
 `same_obj_write`, `tables/numeric_index` / `mixed`, `alloc/short_tables`,
 `iter/ipairs`. Port with the same recipe (kernel + calibrated repeat
-loop, ~100ms/call, footer 30) and register both pins (the bench/ port
-as `file`, the examples/ original as `hotpath_file`).
+loop, ~100ms/call, footer 30) and register both pins in
+`brokkr.d/bench.toml` (the bench/ port under `data.workloads.bench`, the
+examples/ original under `data.workloads.hotpath`).
 
 Also open: a seconds-scale parse
 workload (`large_source` at a second, larger size), and a Rust-driven

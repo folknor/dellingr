@@ -16,8 +16,10 @@ const SAME_FILE_WORKLOAD_ALLOWLIST: &[(&str, &str)] =
     &[("large_source", "examples/parse/large_source.lua")];
 
 // Keep the expected function name tied to the constant used by the harness.
-const HOTPATH_SOURCE: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/hotpath.rs"));
+const HOTPATH_SOURCE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/src/bin/dellingr-bench.rs"
+));
 
 fn hotpath_bench_function() -> &'static str {
     const PREFIX: &str = "const BENCH_FUNCTION: &str = \"";
@@ -84,44 +86,59 @@ struct WorkloadPair {
     hotpath_xxh128: String,
 }
 
+/// Every workload name registered at both scales of brokkr.d/bench.toml:
+/// `data.workloads.bench` (the seconds-scale verdict file) and
+/// `data.workloads.hotpath` (its ms-scale profiling counterpart). A name at
+/// only one scale fails here, so each bench file keeps its pair.
 fn workload_pairs() -> Vec<WorkloadPair> {
-    let config = support::brokkr_config();
-    let workloads = config
-        .get("dellingr")
-        .and_then(|dellingr| dellingr.get("workloads"))
-        .and_then(toml::Value::as_table)
-        .unwrap_or_else(|| panic!("brokkr.toml has no [dellingr.workloads] table"));
+    let config = support::bench_config();
+    let scale = |scale: &str| {
+        config
+            .get("data")
+            .and_then(|data| data.get("workloads"))
+            .and_then(|workloads| workloads.get(scale))
+            .and_then(toml::Value::as_table)
+            .unwrap_or_else(|| panic!("brokkr.d/bench.toml has no [data.workloads.{scale}] table"))
+    };
+    let bench = scale("bench");
+    let hotpath = scale("hotpath");
 
     assert!(
-        !workloads.is_empty(),
-        "brokkr.toml contains no workload registrations"
+        !bench.is_empty(),
+        "brokkr.d/bench.toml contains no workload registrations"
     );
-    workloads
+    assert_eq!(
+        bench.keys().collect::<Vec<_>>(),
+        hotpath.keys().collect::<Vec<_>>(),
+        "data.workloads.bench and data.workloads.hotpath must register the same workload names"
+    );
+    bench
         .iter()
         .map(|(name, registration)| {
-            assert!(
-                registration.is_table(),
-                "workload {name} registration in brokkr.toml must be a table"
-            );
+            let profiled = &hotpath[name];
             WorkloadPair {
                 name: name.clone(),
-                file: workload_string(registration, "file", name),
-                xxh128: workload_string(registration, "xxh128", name),
-                hotpath_file: workload_string(registration, "hotpath_file", name),
-                hotpath_xxh128: workload_string(registration, "hotpath_xxh128", name),
+                file: workload_string(registration, "file", "bench", name),
+                xxh128: workload_string(registration, "xxhash", "bench", name),
+                hotpath_file: workload_string(profiled, "file", "hotpath", name),
+                hotpath_xxh128: workload_string(profiled, "xxhash", "hotpath", name),
             }
         })
         .collect()
 }
 
-fn workload_string(registration: &toml::Value, key: &str, workload: &str) -> String {
+fn workload_string(registration: &toml::Value, key: &str, scale: &str, workload: &str) -> String {
     let value = registration
         .get(key)
         .and_then(toml::Value::as_str)
-        .unwrap_or_else(|| panic!("workload {workload} {key} must be a string in brokkr.toml"));
+        .unwrap_or_else(|| {
+            panic!(
+                "[data.workloads.{scale}.{workload}].{key} must be a string in brokkr.d/bench.toml"
+            )
+        });
     assert!(
         !value.is_empty(),
-        "workload {workload} {key} must not be empty in brokkr.toml"
+        "[data.workloads.{scale}.{workload}].{key} must not be empty in brokkr.d/bench.toml"
     );
     value.to_owned()
 }
@@ -433,10 +450,10 @@ fn registered_workload_file_digests_match_brokkr_pins() {
 
     for pair in pairs {
         let workload_name = pair.name.as_str();
-        for (digest_key, file, expected) in [
-            ("xxh128", pair.file.as_str(), pair.xxh128.as_str()),
+        for (scale, file, expected) in [
+            ("bench", pair.file.as_str(), pair.xxh128.as_str()),
             (
-                "hotpath_xxh128",
+                "hotpath",
                 pair.hotpath_file.as_str(),
                 pair.hotpath_xxh128.as_str(),
             ),
@@ -444,13 +461,13 @@ fn registered_workload_file_digests_match_brokkr_pins() {
             let path = root.join(file);
             let bytes = fs::read(&path).unwrap_or_else(|error| {
                 panic!(
-                    "cannot read workload registration [dellingr.workloads.{workload_name}] pinned file {file}: {error}"
+                    "cannot read workload registration [data.workloads.{scale}.{workload_name}] pinned file {file}: {error}"
                 )
             });
             let actual = format!("{:032x}", xxh3_128(&bytes));
             assert_eq!(
                 actual, expected,
-                "workload registration [dellingr.workloads.{workload_name}].{digest_key} drifted for file {file}: expected {expected}, actual {actual}. Editing a pinned file means re-registering its pin, which cuts its stored benchmark history."
+                "workload registration [data.workloads.{scale}.{workload_name}].xxhash in brokkr.d/bench.toml drifted for file {file}: expected {expected}, actual {actual}. Editing a pinned file means re-registering its pin, which cuts its stored benchmark history."
             );
         }
     }
@@ -481,7 +498,7 @@ fn registered_workload_files_cover_bench_scripts() {
         let pair = pairs
             .iter()
             .find(|pair| pair.name == workload)
-            .unwrap_or_else(|| panic!("workload {workload} is missing from brokkr.toml"));
+            .unwrap_or_else(|| panic!("workload {workload} is missing from brokkr.d/bench.toml"));
         assert_eq!(
             pair.file, file,
             "workload {workload} must use its listed non-bench file"
@@ -506,13 +523,13 @@ fn bench_scripts_parse_and_follow_the_standalone_footer_contract() {
     assert!(!scripts.is_empty(), "bench/ contains no Lua scripts");
 
     // The 30-call footer is the measured workload, not untimed overhead, and
-    // the test suite deliberately pays for it. The hotpath harness runs the
+    // the test suite deliberately pays for it. The bench harness runs the
     // chunk's top level in its SETUP phase, so a bench/ file's footer is most
-    // of the seconds-scale wall that `brokkr dellingr` stores (the stored
-    // elapsed time is the whole harness process, SETUP included). Under
-    // `--hotpath` and `--alloc` the examples/ footer (calibrated per file,
-    // 20 to 2500 calls, not 30) supplies most of the profiled events, against
-    // only a few warm iterations. The standalone run is also what
+    // of the seconds-scale wall that `brokkr bench wall` stores (the stored
+    // wall is the whole harness process, SETUP included). Under the `hotpath`
+    // and `alloc` benches the examples/ footer (calibrated per file, 20 to
+    // 2500 calls, not 30) supplies most of the profiled events, against only
+    // a few warm iterations. The standalone run is also what
     // scripts/bench.sh times under hyperfine.
     // Shrinking the footer for the tests would change those measurements.
     let bench_function = hotpath_bench_function();

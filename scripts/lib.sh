@@ -82,14 +82,15 @@ dellingr_bin_built() {
     brokkr_artifact "$1" dellingr bin
 }
 
-# This is a curated benchmark subset from brokkr.toml, not an examples corpus walk.
+# This is the curated benchmark subset registered in brokkr.d/bench.toml, not an
+# examples corpus walk.
 workload_hotpath_files() {
     if [ "$#" -gt 1 ]; then
         echo "usage: workload_hotpath_files [workload-name]" >&2
         return 2
     fi
     if ! command -v python3 >/dev/null 2>&1; then
-        echo "missing tool: python3 (needed to read brokkr.toml)" >&2
+        echo "missing tool: python3 (needed to read brokkr.d/bench.toml)" >&2
         return 1
     fi
 
@@ -97,34 +98,35 @@ workload_hotpath_files() {
 import sys
 
 if sys.version_info < (3, 11):
-    print("Python 3.11 or newer is required to read brokkr.toml", file=sys.stderr)
+    print("Python 3.11 or newer is required to read brokkr.d/bench.toml", file=sys.stderr)
     raise SystemExit(1)
 
 import tomllib
 from pathlib import Path
 
+CONFIG = "brokkr.d/bench.toml"
 try:
-    with Path("brokkr.toml").open("rb") as registry_file:
+    with Path(CONFIG).open("rb") as registry_file:
         registry = tomllib.load(registry_file)
 except OSError as error:
-    print(f"cannot read brokkr.toml: {error}", file=sys.stderr)
+    print(f"cannot read {CONFIG}: {error}", file=sys.stderr)
     raise SystemExit(1)
 except tomllib.TOMLDecodeError as error:
-    print(f"cannot parse brokkr.toml: {error}", file=sys.stderr)
+    print(f"cannot parse {CONFIG}: {error}", file=sys.stderr)
     raise SystemExit(1)
 
-workloads = registry.get("dellingr", {}).get("workloads")
+workloads = registry.get("data", {}).get("workloads", {}).get("hotpath")
 if not isinstance(workloads, dict) or not workloads:
-    print("no workloads found in brokkr.toml", file=sys.stderr)
+    print(f"no [data.workloads.hotpath] workloads found in {CONFIG}", file=sys.stderr)
     raise SystemExit(1)
 
 def hotpath_file(name, workload):
     if not isinstance(workload, dict):
-        print(f"invalid workload entry in brokkr.toml: {name}", file=sys.stderr)
+        print(f"invalid workload entry in {CONFIG}: {name}", file=sys.stderr)
         raise SystemExit(1)
-    path = workload.get("hotpath_file")
+    path = workload.get("file")
     if not isinstance(path, str):
-        print(f"workload has no hotpath_file: {name}", file=sys.stderr)
+        print(f"workload has no file: {name}", file=sys.stderr)
         raise SystemExit(1)
     parts = path.split("/")
     if (
@@ -133,7 +135,7 @@ def hotpath_file(name, workload):
         or any(part in ("", ".", "..") for part in parts)
     ):
         print(
-            f"workload hotpath_file must be a Lua file under examples/: {name}",
+            f"hotpath workload file must be a Lua file under examples/: {name}",
             file=sys.stderr,
         )
         raise SystemExit(1)

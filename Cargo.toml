@@ -21,13 +21,14 @@ include = [
     "/src/",
     "/docs/",
     "/reference/",
-    "/examples/hotpath.rs",
 ]
 
 [features]
 hotpath = ["dep:hotpath", "hotpath/hotpath"]
 hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
 snapshot = []
+# Builds the `dellingr-bench` harness bin; enables no library code.
+bench-harness = ["dep:libc"]
 # The next four are debug-only test infrastructure (src/lib.rs refuses them
 # without debug assertions), each enabled by its own curated brokkr.toml check
 # shape. Single-refusal error-boundary sweeps (`instrumentation-faults`).
@@ -111,6 +112,8 @@ slotmap = "1.1"
 # Profiling is opt-in: cfg_attr keeps measurement macros out of default
 # builds, and the optional dependency keeps the profiler out of their graph.
 hotpath = { version = "0.31.0", optional = true }
+# The bench harness's non-blocking marker FIFO open; `bench-harness` only.
+libc = { version = "0.2.191", optional = true }
 
 [dev-dependencies]
 libc = "0.2.191"
@@ -125,10 +128,13 @@ object = { version = "0.40.0", default-features = false, features = ["read_core"
 toml = "1.1.8"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
-[[example]]
-name = "hotpath"
-path = "examples/hotpath.rs"
-test = true
+# The bench harness `brokkr bench` runs (brokkr.d/bench.toml). A bin because a
+# script bench builds a bin target; gated so `cargo install dellingr` installs
+# only the CLI.
+[[bin]]
+name = "dellingr-bench"
+path = "src/bin/dellingr-bench.rs"
+required-features = ["bench-harness"]
 
 [[example]]
 name = "regenerate_save_golden"

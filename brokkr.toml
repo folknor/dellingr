@@ -1,4 +1,5 @@
 project = "dellingr"
+include = ["brokkr.d/bench.toml"]
 
 # These crates are absent, so Clippy paths into them cannot resolve. Refuse
 # their introduction at the dependency boundary instead of keeping no-op bans.
@@ -12,7 +13,16 @@ forbid = ["rand", "rand_core", "getrandom"]
 name = "consumer-dependencies"
 from = "dellingr"
 kinds = ["normal", "build"]
-allow = ["indexmap", "foldhash", "hashbrown", "slotmap", "hotpath"]
+allow = ["indexmap", "foldhash", "hashbrown", "slotmap", "hotpath", "libc"]
+
+# libc reaches a consumer's graph only through `bench-harness`, the harness
+# bin's feature; the library itself never links it.
+[[dependency_rule]]
+name = "libc-must-be-optional"
+from = "dellingr"
+forbid = ["libc"]
+kinds = ["normal"]
+optional = false
 
 # The profiler reaches a consumer's graph only through the `hotpath` feature.
 # A non-optional hotpath dependency would link it into every default build.
@@ -125,13 +135,17 @@ stage = "pre-clippy"
 # pinning `selected` on the siblings instead rebuilt the integration binary
 # under different content on every check.)
 
+# `bench-harness` only adds the `dellingr-bench` bin (its unit tests and
+# lints); the library compiles as the consumer's default build.
 [[check]]
 name = "default"
+features = ["bench-harness"]
 skip = ["corpus::run_examples::standalone::"]
 feature_unification = "workspace"
 
 [[check]]
 name = "default-corpus"
+features = ["bench-harness"]
 only = ["corpus::run_examples::standalone::"]
 parallel = {}
 feature_unification = "workspace"
@@ -176,7 +190,7 @@ feature_unification = "workspace"
 # the `only` filter keeps them from running.
 [[check]]
 name = "instrumentation-faults"
-features = ["hotpath", "hotpath-alloc", "fault-injection", "snapshot", "crmath-sweeps"]
+features = ["bench-harness", "hotpath", "hotpath-alloc", "fault-injection", "snapshot", "crmath-sweeps"]
 tests = ["integration"]
 lib_tests = true
 only = [
@@ -295,228 +309,6 @@ default_package = "dellingr"
 # focused tests; explicit profile flags take precedence.
 debug = true
 
-# Benchmarking harness: `brokkr dellingr --lua <name> --bench|--hotpath|--alloc`.
-# brokkr builds the cargo example target below (plain for --bench, with the
-# standing hotpath / hotpath-alloc feature convention for the instrumented
-# modes) and invokes it with the workload's registered file path.
-#
-# Workloads are content-addressed: the file is part of the measurement's
-# identity, so editing a bench script REQUIRES updating its xxh128 here -
-# that re-registration is the deliberate signal that older stored rows no
-# longer compare against new ones. Not hostname-keyed: these files are in
-# git, identical on every host.
-#
-# Each workload registers an input for both mode families:
-#
-# - `file`/`xxh128`: the bench/ seconds-scale port, resolved by --bench
-#   (and plain runs). Seconds-scale so wall deltas resolve above launch
-#   noise.
-# - `hotpath_file`/`hotpath_xxh128`: the examples/ ms-scale kernel,
-#   resolved by --hotpath / --alloc. The hotpath crate queues one event
-#   per instrumented call in an unbounded per-thread queue that its 50ms
-#   sweep drains at ~1.3M events/s, far below the VM's production rate; a
-#   seconds-scale file backlogs 30+ GB of RAM before the run ends
-#   (observed 2026-07-26 on plantasjen). brokkr REFUSES --hotpath/--alloc
-#   on a workload without the pair.
-#
-# Paired files carry the same kernel, so hotpath percentages read across to
-# the bench walls. `large_source` is a parse/codegen probe, not an execution
-# workload; interpret its timing as a parse/codegen diagnostic, so both modes
-# use the same generated source.
-#
-# tests/integration/corpus/bench_scripts.rs checks matching bytecode and literal
-# pools for each pair's kernel and shared helpers as well as cost fingerprints.
-# Top-level setup and the verdict wrapper's repeat count (`K`, or a literal
-# bound in a wrapper without one) are not compared: the count is calibrated
-# per kernel for wall time, and setup is re-checked by eye when either file
-# changes.
-
-[dellingr]
-example = "hotpath"
-
-[dellingr.workloads.benchmark]
-file = "bench/benchmark.lua"
-xxh128 = "14bf617d8736c9c3fa6f93242cd231f5"
-hotpath_file = "examples/composite/benchmark.lua"
-hotpath_xxh128 = "fd1b898cc308645a3135b078c4fd180a"
-
-[dellingr.workloads.arithmetic]
-file = "bench/arithmetic.lua"
-xxh128 = "5b241180b776f94825c7bc316347f1f4"
-hotpath_file = "examples/numerics/arithmetic.lua"
-hotpath_xxh128 = "6377d75406074f15184e1f03a00f15b8"
-
-[dellingr.workloads.constants]
-file = "bench/constants.lua"
-xxh128 = "468576a94bddba291b96b604288b988c"
-hotpath_file = "examples/numerics/constants.lua"
-hotpath_xxh128 = "04a3cab7b19967cd1f71ad224c5a5ea6"
-
-[dellingr.workloads.math]
-file = "bench/math.lua"
-xxh128 = "3f1ae9f39d8bc1d7a5136967d7d46900"
-hotpath_file = "examples/numerics/math.lua"
-hotpath_xxh128 = "ae2f33864c810825e2b6ec753ece6b21"
-
-[dellingr.workloads.pairs]
-file = "bench/pairs.lua"
-xxh128 = "40f694a23ec14829b96e0403b9a0b6dd"
-hotpath_file = "examples/iter/pairs.lua"
-hotpath_xxh128 = "92432fb93c475cc93053539e2fd235ae"
-
-[dellingr.workloads.fill]
-file = "bench/fill.lua"
-xxh128 = "2d409aa1bb5f82a2a841f80aa69f54a5"
-hotpath_file = "examples/tables/fill.lua"
-hotpath_xxh128 = "79bb664bac707da02ad807c7e4f71f39"
-
-[dellingr.workloads.queue]
-# Never `--bench --commit` a ref older than 2bcc71e: before that commit the
-# VM walks the queue's whole push history on every pairs start, and this
-# file runs for hours. Use `--hotpath`/`--alloc` (hotpath_file) across it.
-file = "bench/queue.lua"
-xxh128 = "b02dfb55c808e62f08a1311046988351"
-hotpath_file = "examples/tables/queue.lua"
-hotpath_xxh128 = "0a3e2b4117a7ba5dfbb360c72feba99f"
-
-[dellingr.workloads.sort]
-file = "bench/sort.lua"
-xxh128 = "3186097866519fa8829611bd9b74512b"
-hotpath_file = "examples/tables/sort.lua"
-hotpath_xxh128 = "bf77465635b1c608fdd83f7614de9bff"
-
-[dellingr.workloads.mixed]
-file = "bench/mixed.lua"
-xxh128 = "4193f315750f157ff7fb2b1ec6f30165"
-hotpath_file = "examples/strings/mixed.lua"
-hotpath_xxh128 = "245208e07e6a7073a04075ee83f09964"
-
-[dellingr.workloads.patterns]
-file = "bench/patterns.lua"
-xxh128 = "42d9c2249ebdda7440c60d344725d9fb"
-hotpath_file = "examples/strings/patterns.lua"
-hotpath_xxh128 = "b30f9fbcb791eadddf21de1e129e1e79"
-
-[dellingr.workloads.literal_find]
-file = "bench/literal_find.lua"
-xxh128 = "c23da899a8d2925a4f1ec6ea872160d7"
-hotpath_file = "examples/strings/literal_find.lua"
-hotpath_xxh128 = "7b6bbdcb62ed6124c1393ab54363b92b"
-
-[dellingr.workloads.large_subject]
-file = "bench/large_subject.lua"
-xxh128 = "21878ee46042ea3cba3c546a14622a78"
-hotpath_file = "examples/strings/large_subject.lua"
-hotpath_xxh128 = "9f4c6b26f375b932a1b4df86c09ab426"
-
-[dellingr.workloads.failed_scan]
-file = "bench/failed_scan.lua"
-xxh128 = "343ca033b4b5ac40c9a2cff1904dac7f"
-hotpath_file = "examples/strings/failed_scan.lua"
-hotpath_xxh128 = "20d62957347ab59ead0ec4c6eb89a5f1"
-
-[dellingr.workloads.format_literals]
-file = "bench/format_literals.lua"
-xxh128 = "7eae0d9472643385ecdd9d8d9d1bf6b3"
-hotpath_file = "examples/strings/format_literals.lua"
-hotpath_xxh128 = "ab951754e92c34654003b4893b4161aa"
-
-[dellingr.workloads.same_obj_read]
-file = "bench/same_obj_read.lua"
-xxh128 = "cdb6bfdf21a72c08d4b1d683d7d85d07"
-hotpath_file = "examples/fields/same_obj_read.lua"
-hotpath_xxh128 = "0e00bfb5521a2b4f2e9c48b48581a2e5"
-
-[dellingr.workloads.method]
-file = "bench/method.lua"
-xxh128 = "04d0824886560a272b218449d5fbdd96"
-hotpath_file = "examples/calls/method.lua"
-hotpath_xxh128 = "c0c9ba6ea8af339cedc61dab0d12cc26"
-
-[dellingr.workloads.method_chain]
-file = "bench/method_chain.lua"
-xxh128 = "592fe9284df75909e4e2ea2386da19b1"
-hotpath_file = "examples/calls/method_chain.lua"
-hotpath_xxh128 = "141a5a7aa1d8453a36135afe9b714c44"
-
-[dellingr.workloads.method_polymorphic]
-file = "bench/method_polymorphic.lua"
-xxh128 = "9a54ab4456ea475ecbb9335505a1a329"
-hotpath_file = "examples/calls/method_polymorphic.lua"
-hotpath_xxh128 = "6b6609c4b16cb1e7910c06fd99cd3d5f"
-
-[dellingr.workloads.write]
-file = "bench/write.lua"
-xxh128 = "5b7919b3243dd95d587bdc10b38f3a46"
-hotpath_file = "examples/globals/write.lua"
-hotpath_xxh128 = "d1ae7f006614656eec29a9c4d8adcb28"
-
-[dellingr.workloads.global]
-file = "bench/global.lua"
-xxh128 = "1b5839ba84a8fdec0d702af4d3a16d64"
-hotpath_file = "examples/calls/global.lua"
-hotpath_xxh128 = "c2dbedfee234dd0fef1acb770d658e5b"
-
-[dellingr.workloads.tail_call]
-file = "bench/tail_call.lua"
-xxh128 = "6705dacaef8104a740405265665aa1a5"
-hotpath_file = "examples/calls/tail_call.lua"
-hotpath_xxh128 = "d6093b8c5e88d2806c8d5faa4fdfafc3"
-
-[dellingr.workloads.many_literals]
-file = "bench/many_literals.lua"
-xxh128 = "595df87ab2324092ce74b20a95818ec2"
-hotpath_file = "examples/calls/many_literals.lua"
-hotpath_xxh128 = "c2e5719005d74bfbad110836376f3d11"
-
-[dellingr.workloads.loop_beside_closure]
-file = "bench/loop_beside_closure.lua"
-xxh128 = "d3641fef08461158df9f383cee08cd7b"
-hotpath_file = "examples/calls/loop_beside_closure.lua"
-hotpath_xxh128 = "7dcad64f975e95ca6305fb01738c91db"
-
-[dellingr.workloads.closure]
-file = "bench/closure.lua"
-xxh128 = "5befb079865e20e3343cd9beaa8e84be"
-hotpath_file = "examples/alloc/closure.lua"
-hotpath_xxh128 = "6c3b54c67fadaa55c51db6f64916d331"
-
-[dellingr.workloads.record_tables]
-file = "bench/record_tables.lua"
-xxh128 = "9ebd1f3da641203c82de3ee42b0c251c"
-hotpath_file = "examples/alloc/record_tables.lua"
-hotpath_xxh128 = "759fd927309e69e0623bf3eff2fcff13"
-
-[dellingr.workloads.list_literals]
-file = "bench/list_literals.lua"
-xxh128 = "69948cfa2e1cb8ea44e935f481d3fa16"
-hotpath_file = "examples/alloc/list_literals.lua"
-hotpath_xxh128 = "f1242d5988d552fa7c7f3d23855f9696"
-
-[dellingr.workloads.gc_churn]
-file = "bench/gc_churn.lua"
-xxh128 = "1ed1ab2e97827b61e317a94d3f197a5a"
-hotpath_file = "examples/alloc/gc_churn.lua"
-hotpath_xxh128 = "9c89ca315d197f5c3bd4c31cfd79d065"
-
-[dellingr.workloads.result_adjust]
-file = "bench/result_adjust.lua"
-xxh128 = "fc03bdf3c2faafa7c72e56ee78bab09b"
-hotpath_file = "examples/calls/result_adjust.lua"
-hotpath_xxh128 = "0a6667c4ac5e50ab10967e31497c9abe"
-
-[dellingr.workloads.sequence_len]
-file = "bench/sequence_len.lua"
-xxh128 = "93b8e0633008bb396b87f09fed52470f"
-hotpath_file = "examples/tables/sequence_len.lua"
-hotpath_xxh128 = "52dfdaed38435144b82ffd50ee11342e"
-
-[dellingr.workloads.large_source]
-file = "examples/parse/large_source.lua"
-xxh128 = "3d87b6e87edaa28e17783d5c9a89b3d3"
-hotpath_file = "examples/parse/large_source.lua"
-hotpath_xxh128 = "3d87b6e87edaa28e17783d5c9a89b3d3"
-
 # `_G` is the global table itself, not a proxy in front of it; this keeps the
 # old wording from returning to code, comments and test names.
 [[textlint]]
@@ -557,7 +349,7 @@ message = "build and test through brokkr instead of invoking cargo directly"
 name = "hotpath-alloc-only-at-allocator-install"
 pattern = 'feature\s*=\s*"hotpath-alloc"'
 paths = ["src/**/*.rs", "tests/**/*.rs", "examples/**/*.rs"]
-exclude = ["src/main.rs", "examples/hotpath.rs"]
+exclude = ["src/main.rs", "src/bin/dellingr-bench.rs"]
 message = "hotpath-alloc implies hotpath; use hotpath for instrumentation guards"
 
 # Tests do not write files: CLI tests feed Lua source on stdin, and anything
@@ -695,7 +487,7 @@ message = "name examples by their list entries in tests/common/examples.rs; no R
 name = "native-call-method-value"
 pattern = '\b(?:State|Self|Frame)\s*::\s*(?:append_function_replacement|append_gsub_replacement|base_ipairs_iter|base_unpack_values|begin_call|begin_callable_call|call|call_anchor|call_anchor_unguarded|call_from_lua|call_unguarded|error_value|eval_batched|format|format_argument|get_table|get_table_unguarded|gsub_empty_pattern|gsub_lua_pattern|gsub_plain_pattern|index_call|insert_through_metamethods|instr_tfor_call|instr_tfor_call_rust_fn|invoke_rust_fn|len_call|main|move_element|newindex_call|push_gmatch_wrapper|reg_get_field|reg_get_table|reg_len|reg_set_field|reg_set_table|remove_through_metamethods|run|run_cli|run_frame|run_invocation|sequence_len|set_index|set_table|set_table_unguarded|sort_through_metamethods|table_sort|table_sort_heap|table_sort_less|table_sort_scratch|table_sort_sift_down|table_sort_values|table_unpack_values|tail_call_from_lua|to_string_with_meta|tostring_bytes|tostring_bytes_unguarded|tostring_rendering|unpack_values)\s*(?:::\s*<[^>]*>\s*)?(?:[,;)\]}]|as\b)'
 paths = ["src/**/*.rs"]
-exclude = ["src/compiler/**"]
+exclude = ["src/compiler/**", "src/bin/**"]
 region = "code"
 test_code = "skip"
 message = "keep re-entering methods as direct calls so the native-call inventory sees their edges"
@@ -707,12 +499,13 @@ message = "keep re-entering methods as direct calls so the native-call inventory
 # function names; scripts/native_calls.py checks it against the inventory and
 # prints the expected value when they drift. The compiler is excluded: it
 # holds no State, and its `Instr::call`/`get_table`/`set_table` constructors
-# share names with inventoried functions.
+# share names with inventoried functions. `src/bin/` is excluded too: the bench
+# harness is a host, calling the public `State` API from outside the VM.
 [[textlint]]
 name = "native-call-marker"
 pattern = '\b(?:append_function_replacement|append_gsub_replacement|base_ipairs_iter|base_unpack_values|begin_call|begin_callable_call|call|call_anchor|call_anchor_unguarded|call_from_lua|call_unguarded|error_value|eval_batched|format|format_argument|get_table|get_table_unguarded|gsub_empty_pattern|gsub_lua_pattern|gsub_plain_pattern|index_call|insert_through_metamethods|instr_tfor_call|instr_tfor_call_rust_fn|invoke_rust_fn|len_call|main|move_element|newindex_call|push_gmatch_wrapper|reg_get_field|reg_get_table|reg_len|reg_set_field|reg_set_table|remove_through_metamethods|run|run_cli|run_frame|run_invocation|sequence_len|set_index|set_table|set_table_unguarded|sort_through_metamethods|table_sort|table_sort_heap|table_sort_less|table_sort_scratch|table_sort_sift_down|table_sort_values|table_unpack_values|tail_call_from_lua|to_string_with_meta|tostring_bytes|tostring_bytes_unguarded|tostring_rendering|unpack_values)\s*(?:::\s*<[^>]*>\s*)?\('
 paths = ["src/**/*.rs"]
-exclude = ["src/compiler/**"]
+exclude = ["src/compiler/**", "src/bin/**"]
 region = "code"
 test_code = "skip"
 allow_marker = "native_call!"
@@ -807,8 +600,12 @@ match = "last-line"
 stream = "stdout"
 stage = "pre-clippy"
 
-[dellingr.workloads.rust_boundary]
-file = "bench/rust_boundary.lua"
-xxh128 = "488c7cc9b818ba7a69cdede59b518cfd"
-hotpath_file = "examples/calls/rust_boundary.lua"
-hotpath_xxh128 = "0443637fb717226cb1239958b85ee341"
+# Inert: brokkr still refuses a dellingr project's config without a
+# `[dellingr]` section naming a harness and one workload, a leftover of the
+# retired `brokkr dellingr` driver (benchmarks are brokkr.d/bench.toml now,
+# and no `hotpath` example exists). Delete this once brokkr drops that check.
+[dellingr]
+example = "hotpath"
+[dellingr.workloads.stub]
+file = "bench/sort.lua"
+xxh128 = "3186097866519fa8829611bd9b74512b"

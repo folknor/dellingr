@@ -11,6 +11,11 @@ version's meaning is wider (see below).
 
 ### Added
 
+- The `bench-harness` feature builds `dellingr-bench`, the benchmark harness
+  bin that was the `hotpath` example (it moved to `src/bin/dellingr-bench.rs`).
+  Without the feature, `cargo install dellingr` still installs only the CLI.
+  The feature pulls in `libc` as an optional dependency; the library never
+  links it.
 - `State::set_table(i)`: the host store that honours `__newindex`, the
   counterpart of `get_table`. It stores exactly as a script's `t[k] = v`
   does (handler tables, functions and the metamethod depth rule, table

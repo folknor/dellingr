@@ -74,27 +74,27 @@ Invariants that are easy to break:
 
 ## Benchmarks
 
-Workloads are `[dellingr.workloads.*]` in `brokkr.toml`, each pairing a seconds-scale `bench/` file (wall-clock verdicts) with its ms-scale `examples/` counterpart (`--hotpath`/`--alloc` profiling); `examples/hotpath.rs` is the harness and documents its phases and output. `brokkr --help`, `brokkr results --help` and `brokkr sidecar --help` cover the rest.
+Benchmarks are script benches in `brokkr.d/bench.toml` (included from `brokkr.toml`; `brokkr man bench-config`). Each workload name is registered at both scales: `[data.workloads.bench.<W>]` is the seconds-scale `bench/` file (wall-clock verdicts), `[data.workloads.hotpath.<W>]` its ms-scale `examples/` counterpart (profiling). The `wall`, `hotpath` and `alloc` benches run `brokkr.d/bench.lua`, which drives the harness bin `dellingr-bench` (`src/bin/dellingr-bench.rs`, behind the `bench-harness` feature; it documents its phases and output) and stores its KV report as the run's record. `brokkr man bench`, `brokkr results --help` and `brokkr sidecar --help` cover the rest.
 
 ```sh
-brokkr dellingr --lua <W>                          # run once, store nothing
-brokkr dellingr --lua <W> --bench                  # best of 3, stored
-brokkr dellingr --lua <W> --hotpath                # function-level timing
-brokkr dellingr --lua <W> --alloc                  # allocation tracking
-brokkr dellingr --lua <W> --bench --commit <ref>   # old VM, current workload file
+brokkr bench wall --workload <W>                     # best of 3, stored
+brokkr bench hotpath --workload <W>                  # function-level timing
+brokkr bench alloc --workload <W>                    # allocation tracking
+brokkr bench --commit <ref> wall --workload <W>      # old VM, current workload file
+brokkr bench --iterations 5 wall --workload a,b      # one stored run per workload
 ```
 
-- **Every measurement of dellingr's own performance goes through `brokkr dellingr`**: never hyperfine, `time` or a hand-rolled loop. Register a workload first. The one exception is `scripts/bench.sh`, which only regenerates the README comparison table.
+- **Every measurement of dellingr's own performance goes through `brokkr bench`**: never hyperfine, `time` or a hand-rolled loop. Register a workload first. The one exception is `scripts/bench.sh`, which only regenerates the README comparison table.
 - **Never run benchmark or profiling commands in parallel.**
-- **Interleave matched A/B cells** and compare medians with sign consistency across pairs; `--bench N` is best-of-N within one cell and cannot cancel drift. A same-day matched pair beats any historical number.
+- **Interleave matched A/B cells** and compare medians with sign consistency across pairs; `--iterations N` is best-of-N within one cell and cannot cancel drift. A same-day matched pair beats any historical number.
 - **Suspect code layout before mechanism**: binaries whose executed path is identical have measured about 11% apart. Run a five-launch same-binary control before trusting a small delta.
-- Never point instrumentation (`--hotpath`, `--alloc`, any `--features hotpath` build) at a seconds-scale `bench/` file: its event queue is unbounded and backlogs tens of GB.
+- Never point instrumentation (the `hotpath` and `alloc` benches, any `--features hotpath` build) at a seconds-scale `bench/` file: its event queue is unbounded and backlogs tens of GB. Those benches bind only `data.workloads.hotpath`, so they cannot.
 - Read instrumented runs as distributions (call counts, % of total), never as absolute times. When a result's iteration walls disagree, don't read it as one number. Before calling a delta a regression, read `brokkr sidecar`: SETUP is the standalone footer, WARM is the verdict phase.
-- Stored runs need a tree clean of source changes (`--force` runs anyway and stores nothing).
+- A run of a tree with source changes is stored marked dirty and never compared.
 - Performance numbers in markdown include commit hash and hostname.
-- The paired files keep the same kernel in the same proportions (`corpus::bench_scripts` checks the bytecode). Editing a registered file means updating its pin in `brokkr.toml` (`xxhsum -H2 <file>`), which deliberately cuts its stored history; brokkr refuses on hash drift.
-- A registered `hotpath_file` opens with `-- Workload:`, `-- Probe:` or `-- Historical probe:`. Probes isolate one path on purpose; their ratios are not representative.
-- New target: write `examples/{category}/{name}.lua` with `_bench()` and a footer printing `"{category}/{name}: " .. tostring(_bench()) ..`, then run `python3 scripts/example_list.py --write`. Register it in `brokkr.toml` to make it a brokkr workload.
+- The paired files keep the same kernel in the same proportions (`corpus::bench_scripts` checks the bytecode). Editing a registered file means updating its `xxhash` pin in `brokkr.d/bench.toml` (`xxhsum -H2 <file>`), which deliberately cuts its stored history; brokkr refuses on hash drift.
+- A registered hotpath-scale file opens with `-- Workload:`, `-- Probe:` or `-- Historical probe:`. Probes isolate one path on purpose; their ratios are not representative.
+- New target: write `examples/{category}/{name}.lua` with `_bench()` and a footer printing `"{category}/{name}: " .. tostring(_bench()) ..`, then run `python3 scripts/example_list.py --write`. Register it at both scales in `brokkr.d/bench.toml` to make it a workload.
 - Measurement sites use `#[cfg_attr(feature = "hotpath", hotpath::measure)]`. **Never put one on a function that stays live across a native re-entry** (`call_unguarded`, `run_invocation`, `Frame::run` and the helpers between them): it grows every native level. `scripts/native_calls.py` rejects it there. For anything touching `Frame::run`, measure `brokkr test native_bytes_per_level` (dev and `--release`) before and after.
 
 ## Conventions
