@@ -134,7 +134,8 @@ showing an array window far larger than its live count.
 
 ### Grow the brokkr workload registry to the full candidate surface
 
-What: `bench/` ports only the curated benches registered in brokkr.toml.
+What: `bench/` ports only the curated workloads registered in
+`brokkr.d/bench.toml`.
 The optimization backlogs name
 more trackers that exist in `examples/` but have no seconds-scale
 verdict port yet: the `calls/` family (`local`, `global`, `method`,
@@ -149,9 +150,13 @@ examples/ original under `data.workloads.hotpath`).
 
 Also open: a seconds-scale parse
 workload (`large_source` at a second, larger size), and a Rust-driven
-snapshot bench
-(optimizations.md "Snapshot path" - needs harness support, not a .lua
-file).
+snapshot bench (optimizations.md "Snapshot path").
+
+The Rust-driven items here are no longer blocked on brokkr: a script bench
+runs whatever binary its `[bench.*]` table builds, with any argv and params,
+so each needs only dellingr-side code (a mode of `dellingr-bench` or a bin
+of its own behind `bench-harness`) plus a bench table beside `wall`, `kernel`
+and `alloc`. Mark its call as a hotpath stage to profile it.
 
 Also open: a workload where one State holds a lot of loaded code and a small
 live heap, so that per-collection work proportional to retained runtimes
@@ -159,16 +164,15 @@ live heap, so that per-collection work proportional to retained runtimes
 `CACHE_PRUNE_INTERVAL` collections, and the per-runtime
 `GcRoot::ChunkLiterals` visit) is what dominates. No registered workload loads
 more than one chunk, so the change that put the cache prune on a cadence was
-measured only on `gc_churn`. Scripts cannot load code, so this also needs a
-Rust-driven harness that loads many Programs into one State.
+measured only on `gc_churn`. Scripts cannot load code, so this is a
+Rust-driven bench that loads many Programs into one State.
 
 Also open: State construction (`State::new`, `open_libs`) has no workload. The
 harness reports `state_new_us`, one cold State per launch, so the change that
 made the function table borrow the catalog's static ids (instead of copying
 them per State) was read from interleaved single launches, not a stored
 verdict. A Rust-driven bench building many States would measure what a host
-building one State per script or per tick pays. Like the snapshot bench, this
-needs brokkr to run a host-driven workload, not a `.lua` file.
+building one State per script or per tick pays.
 
 Why deferred: the registry is live with the curated workloads;
 porting the rest before those have proven the recipe would be

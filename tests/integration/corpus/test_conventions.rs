@@ -613,8 +613,12 @@ fn curated_check_filters_select_existing_feature_gated_tests() {
             .get("name")
             .and_then(toml::Value::as_str)
             .expect("curated check shapes should have names");
+        // Unset (the `[test] debug` default) or pinned to dev; the debug-only
+        // shapes pin it with `profile_required` so `--release` skips them.
         assert!(
-            check.get("profile").is_none()
+            check
+                .get("profile")
+                .is_none_or(|profile| profile.as_str() == Some("dev"))
                 && document
                     .get("test")
                     .and_then(|settings| settings.get("debug"))

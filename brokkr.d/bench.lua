@@ -2,7 +2,8 @@
 -- (brokkr.d/bench.toml). Each bench builds the harness
 -- (src/bin/dellingr-bench.rs) and binds `workload` to one pinned file; this
 -- runs the harness on it once per iteration and records the KV report it
--- writes to stderr. The iteration's wall is the whole harness process, the
+-- writes to stderr, returning the workload's success line as the verdict.
+-- The iteration's wall is the whole harness process, the
 -- workload's top-level footer included: that footer is the measured
 -- workload, not warm-up overhead.
 --
@@ -22,4 +23,12 @@ function bench(params, keys)
     if record.warm_avg_cost == nil then
         fail("the harness wrote no warm_avg_cost KV to stderr")
     end
+    -- The workload's success line (`bench/sort: true`, `tables/sort: 39:
+    -- true`) is the verdict: iterations that disagree fail the run, and
+    -- `brokkr results --compare` names a verdict that moved between commits.
+    local verdict = string.match(r.stdout, "([^\n]*: [^\n]*)\n?$")
+    if verdict == nil then
+        fail("the workload printed no success line")
+    end
+    return verdict
 end

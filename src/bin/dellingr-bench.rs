@@ -64,10 +64,22 @@ const MAX_WARM_BLOCKS: u32 = 32;
 /// Maximum time to wait for room in the marker FIFO for one line.
 const FIFO_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The marker clock's origin, taken first thing in `main`. brokkr's sidecar
+/// contract stamps every FIFO line in microseconds since the start of the
+/// process it spawned and compares them directly with its `/proc` samples, so
+/// the origin must not wait for the first marker: work before it (State
+/// setup, reading the script) would shift every marker early by that delay.
+static PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+fn process_start() -> Instant {
+    *PROCESS_START.get_or_init(Instant::now)
+}
+
 /// Emit a named phase marker to the brokkr sidecar (if active).
 ///
 /// Protocol: `<timestamp_us> <name>\n` on the FIFO named by
-/// `BROKKR_MARKER_FIFO`, timestamped in microseconds since the first emit.
+/// `BROKKR_MARKER_FIFO`, timestamped in microseconds since process start
+/// (`PROCESS_START`).
 /// Counters use `<timestamp_us> @name=value\n`. The parser lives in brokkr (a
 /// separate repository); the line format is tiny and stable, and a shared
 /// protocol crate for two one-line formats would cost more than it protects.
@@ -88,7 +100,7 @@ fn emit_counter(name: &str, value: i64) {
 fn write_fifo(line: impl FnOnce(u128) -> String) {
     use std::sync::OnceLock;
 
-    static STATE: OnceLock<Option<(std::fs::File, Instant)>> = OnceLock::new();
+    static STATE: OnceLock<Option<std::fs::File>> = OnceLock::new();
 
     let state = STATE.get_or_init(|| {
         let path = env::var_os("BROKKR_MARKER_FIFO")?;
@@ -100,7 +112,7 @@ fn write_fifo(line: impl FnOnce(u128) -> String) {
                 .custom_flags(libc::O_NONBLOCK)
                 .open(&path)
             {
-                Ok(file) => Some((file, Instant::now())),
+                Ok(file) => Some(file),
                 Err(error) => {
                     eprintln!(
                         "Failed to open BROKKR_MARKER_FIFO {}: {error}",
@@ -120,8 +132,8 @@ fn write_fifo(line: impl FnOnce(u128) -> String) {
         }
     });
 
-    if let Some((file, start)) = state.as_ref() {
-        let us = start.elapsed().as_micros();
+    if let Some(file) = state.as_ref() {
+        let us = process_start().elapsed().as_micros();
         let line = line(us);
         if let Err(error) = write_fifo_all(file, line.as_bytes()) {
             eprintln!("Failed to write BROKKR_MARKER_FIFO: {error}");
@@ -382,6 +394,9 @@ fn run_warm_block(
 }
 
 fn main() {
+    // Before anything else: the marker clock's origin is process start.
+    process_start();
+
     #[cfg(feature = "hotpath")]
     let _guard = hotpath::HotpathGuardBuilder::new("dellingr::hotpath")
         .percentiles(&[50.0, 95.0, 99.0])

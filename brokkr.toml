@@ -190,6 +190,8 @@ feature_unification = "workspace"
 # the `only` filter keeps them from running.
 [[check]]
 name = "instrumentation-faults"
+profile = "dev"
+profile_required = true
 features = ["bench-harness", "hotpath", "hotpath-alloc", "fault-injection", "snapshot", "crmath-sweeps"]
 tests = ["integration"]
 lib_tests = true
@@ -212,6 +214,8 @@ curated = true
 # debug-only (compile_error) and appears in no other shape.
 [[check]]
 name = "inline-cache-differential"
+profile = "dev"
+profile_required = true
 features = ["disable-inline-caches"]
 lib_tests = true
 curated = true
@@ -226,6 +230,8 @@ curated = true
 # differential from the integration crate.
 [[check]]
 name = "cost-check-interval-differential"
+profile = "dev"
+profile_required = true
 features = ["cost-check-interval"]
 tests = ["integration"]
 lib_tests = false
@@ -236,6 +242,8 @@ curated = true
 # not define the shipped native-stack envelope.
 [[check]]
 name = "native-call-coverage"
+profile = "dev"
+profile_required = true
 features = ["native-call-trace"]
 tests = ["native_stack"]
 lib_tests = false
@@ -306,7 +314,10 @@ debug = false
 [test]
 default_package = "dellingr"
 # Without a per-sweep profile, this selects the dev profile by default for
-# focused tests; explicit profile flags take precedence.
+# focused tests; explicit profile flags take precedence. The four debug-only
+# sweeps (their features are compile_error without debug assertions) pin
+# `profile = "dev"` with `profile_required`, so `brokkr test --release` skips
+# them instead of failing to build them.
 debug = true
 
 # `_G` is the global table itself, not a proxy in front of it; this keeps the
