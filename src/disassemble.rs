@@ -230,6 +230,16 @@ fn write_annotation(
                 f.write_str("method")?;
             }
         }
+        Instr::OP_TAILCALL => {
+            if inst.call_args() == ArgCount::Dynamic {
+                notes.next(f)?;
+                f.write_str("open arguments")?;
+            }
+            if inst.call_is_method() {
+                notes.next(f)?;
+                f.write_str("method")?;
+            }
+        }
         _ => {}
     }
 

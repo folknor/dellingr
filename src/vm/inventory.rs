@@ -510,7 +510,7 @@ mod tests {
                     bytecode: closure.bytecode,
                     ip: 0,
                     vararg_start: 0,
-                    chain_charges: 0,
+                    chain: crate::vm::ChainUnits::NONE,
                 }],
                 vararg_stack: vec![Val::Nil],
                 open_upvalues: vec![(0, UpvalueRef::new(0))],

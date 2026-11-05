@@ -167,9 +167,10 @@ local function generic_for_tail(...)
 end
 print("Test 18 - Generic-for vararg tail: " .. tostring(generic_for_tail(count_to, 3, 0) == 6))
 
--- Test 19: More expressions than targets keeps the first values; a tail call
--- is still evaluated (for side effects) but its results are discarded, not
--- assigned. Covers non-local assignment, local declaration, and the 2-target
+-- Test 19: More expressions than targets keeps the first values; a trailing
+-- call is still evaluated (for side effects) but its results are discarded,
+-- not assigned. (A trailing call of an assignment list is not a tail call:
+-- only `return f(...)` is.) Covers non-local assignment, local declaration, and the 2-target
 -- case where the fixed prefix exactly fills the targets.
 local function ret10() return 10 end
 local function ret20() return 20 end
@@ -177,7 +178,7 @@ local function ret30() return 30 end
 g19a = ret10(), ret20(), ret30()
 local d19 = ret10(), ret20(), ret30()
 local g19b, g19c = ret10(), ret20(), ret30()
-print("Test 19 - Shrink with tail call: " .. tostring(
+print("Test 19 - Shrink with trailing call: " .. tostring(
     g19a == 10 and d19 == 10 and g19b == 10 and g19c == 20
 ))
 

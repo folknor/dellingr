@@ -75,7 +75,13 @@ Violations are reported as errors at load time, never silently truncated.
 - `MAX_STRING_BYTES`: size of any Lua string.
 - `MAX_CALL_DEPTH`: simultaneously active Lua function calls. Only Lua
   frames count, and Lua-to-Lua calls hold their frames on the heap, so
-  reaching it needs no native stack per level.
+  reaching it needs no native stack per level. A tail call
+  (`return f(...)`, a single call that is not parenthesised) to a Lua
+  function, directly or through `__call`, replaces the calling activation
+  instead of adding one, so tail recursion runs at constant depth and is
+  never refused by this limit, not even at it. A Rust function in tail
+  position runs as an ordinary call while its caller's record stays for
+  tracebacks; a call back into Lua from it counts that record as usual.
 - `MAX_NATIVE_CALL_DEPTH`: simultaneously active calls made from Rust, which
   are the calls that run on the native stack. See "Native stack" below.
   Exceeding it raises `NativeCallDepthExceeded`.
@@ -93,7 +99,11 @@ Violations are reported as errors at load time, never silently truncated.
   one that continues, and a function handler, each take one until the store
   ends, for `t.k = v`, `t["k"] = v` and table-library writes alike. A
   handler that can be neither indexed nor called, on either side, reports
-  its type error without taking a unit, so it does so at the limit too.
+  its type error without taking a unit, so it does so at the limit too. A
+  non-function `__call` step takes one until the call it resolved ends; a
+  tail call made by the activation it reached ends that activation, so it
+  releases those units before the tail callee is resolved, and tail
+  recursion through a callable chain is not bounded by this limit.
 - `MAX_ARGUMENTS`, `MAX_RESULTS`: values carried by one call or return.
   See below.
 
@@ -307,7 +317,8 @@ profile and thread size; none depends on how much native stack is left.
 
 - A Lua function calling a Lua function, directly or through a `__call`
   handler, does not recurse natively: the dispatch loop suspends the caller
-  in the State's activation records and continues in the callee.
+  in the State's activation records and continues in the callee, or, for a
+  tail call, replaces the caller's activation with the callee's.
 - Every call made from Rust runs on the native stack: host `call` and
   `call_anchor`, metamethod handlers, generic-for iterator functions, and
   library callbacks such as `table.sort` comparators and `string.gsub`

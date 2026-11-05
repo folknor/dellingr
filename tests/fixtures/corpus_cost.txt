@@ -19,6 +19,7 @@ examples/calls/method_cached.lua|f5a9c71d0c190f56d748d789bdff789c|1402006
 examples/calls/method_chain.lua|141a5a7aa1d8453a36135afe9b714c44|802010
 examples/calls/method_polymorphic.lua|6b6609c4b16cb1e7910c06fd99cd3d5f|677304
 examples/calls/rust_boundary.lua|0443637fb717226cb1239958b85ee341|93009
+examples/calls/tail_call.lua|d6093b8c5e88d2806c8d5faa4fdfafc3|1234100
 examples/calls/vararg.lua|9698e9b1d879799d1eebea02be3ce6b4|3005000
 examples/closures.lua|284eb64203ec6cbefa055d8f7de9ddbe|24
 examples/comments.lua|1baf36fe8e1e55251dbbbc6adc144218|0
@@ -83,8 +84,9 @@ examples/tables/mixed.lua|8ccde6a97133456c22a74b063b20503b|2752394
 examples/tables/numeric_index.lua|91aec619d8cfcd8dbc1c564b6ffc2b57|2520001
 examples/tables/queue.lua|0a3e2b4117a7ba5dfbb360c72feba99f|443874
 examples/tables/sort.lua|bf77465635b1c608fdd83f7614de9bff|186065
+examples/tail_calls.lua|85d1445bbad36a50eba7414aff7eec8a|1052043
 examples/test_local_function.lua|58efc49b9065ebb487bb1b590f94ef8b|265
 examples/unpack_global.lua|8d7a943784d57e18fc51251229a3e20d|11
 examples/upvalue_close_scopes.lua|9831e16b4eef0f990b983a935c38cfd5|58
 examples/upvalue_stress.lua|c3b3ab32faa00212792aded6e2281cc7|104
-examples/varargs.lua|8ebeeeae07a353b3a6d585e3ee15558d|31
+examples/varargs.lua|b514f44d27fd7b5cc3345ec6753c5593|31

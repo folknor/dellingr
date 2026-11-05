@@ -837,6 +837,15 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
                 check_registers(pc, a, 1 + args.unwrap_or(0), frame)?;
                 check_registers(pc, a, results.unwrap_or(0), frame)?;
             }
+            Instr::OP_TAILCALL => {
+                // A call's callee and arguments; it has no result operand
+                // (the layout reserves C) and leaves nothing open.
+                if d > 1 {
+                    return Err(err(Some(pc), ValidationReason::BooleanOperandInvalid));
+                }
+                let args = count_operand(pc, b, MAX_FIXED_ARGS)?;
+                check_registers(pc, a, 1 + args.unwrap_or(0), frame)?;
+            }
             Instr::OP_RETURN => match count_operand(pc, b, usize::from(u8::MAX))? {
                 Some(count) => check_registers(pc, a, count, frame)?,
                 None => reg(pc, a)?,
@@ -887,7 +896,7 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
 /// above their callee or table, a return's values at its own first register.
 fn open_window_fits(consumer: Instr, producer: Instr) -> bool {
     let first = match consumer.opcode() {
-        Instr::OP_CALL | Instr::OP_SET_LIST => u32::from(consumer.a()) + 1,
+        Instr::OP_CALL | Instr::OP_TAILCALL | Instr::OP_SET_LIST => u32::from(consumer.a()) + 1,
         _ => u32::from(consumer.a()),
     };
     first <= u32::from(producer.a())

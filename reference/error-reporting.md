@@ -14,7 +14,9 @@ identities for the outer wrapper and its iterator, so a user chunk named
 iterator the shared identity: a chunk qualifies only when a closure of it
 captures the private gmatch iterator function and its contents equal this
 build's shim. An iterator saved by a build whose shim differs keeps its own
-bytecode and location.
+bytecode and location. When a script tail calls the iterator
+(`return iter()`), the omitted shim frame takes its tail-call marker (see
+"Stack trace names") with it.
 
 ## Kinds and exact bytes
 
@@ -130,6 +132,18 @@ function's definition line, so labels survive save and load. Rust callbacks are
 not traceback frames, so a callback called by Lua appears only through its Lua
 caller frames. This traceback naming is separate from the optional function
 name in an `ArgError`.
+
+A tail call (`return f(...)` to a Lua function) replaces the calling
+activation, so the replaced frames are gone from the trace, as in reference
+Lua. The frame the replacement entered has `StackFrame::tail_called` set, and
+`Error`'s display prints `(...tail calls...)` after it. The marker is not a
+frame: `error(msg, level)` counts only surviving frames, so level 2 in a
+helper reached by tail call blames the activation still running below it.
+A refused tail call (an uncallable value, a stack or metamethod limit, an
+interrupt) is reported at the caller's tail call instruction with the caller
+still in the trace. A Rust function in tail position runs while its caller's
+record remains, so `print` locations and host source context name the
+caller's call site as for any call.
 
 A location renders only what is known. A frame or error prefix of an unnamed
 chunk shows just the line (`3: in main chunk`, `3: msg`); a line of 0 is

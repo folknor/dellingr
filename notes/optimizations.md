@@ -266,8 +266,11 @@ since 27ee714. What B-O1 listed and is still open:
   `admitted_frame`), dropped again on return, although the closure in the
   function slot already roots all of them. Its suggested shape is one stack:
   merge the activation record into the frame, with records owned by
-  invocations and tracebacks walking frames. It notes that the merge would also
-  simplify an in-place tail call (filed in `notes/bugs-compat.md`).
+  invocations and tracebacks walking frames. Tail calls now exist
+  (`State::tail_call_from_lua`, `State::replace_tail_caller`): with the merge,
+  replacing the caller would be one record instead of a record and a frame,
+  and the caller record a Rust tail callee keeps for diagnostics would be its
+  frame.
 
 Measurement lesson worth keeping: on plantasjen (Zen 3) the first flattened
 version moved frames and records by value and lost 14-22% to store-forwarding

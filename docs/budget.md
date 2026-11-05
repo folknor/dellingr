@@ -133,7 +133,8 @@ let mut state = State::builder().interrupt(stop.clone()).build();
 ```
 
 - **Safepoints.** Every backward jump, every Lua function call admission
-  (from Lua or from Rust), entry to every Rust callback (including library
+  (from Lua or from Rust, tail calls included, so tail recursion, which runs
+  at constant depth, still stops), entry to every Rust callback (including library
   functions and Rust metamethod handlers), and the library work that could
   otherwise run without bound: pattern-matcher steps, plain substring search
   candidates, heap-sort steps, `string.format` directives, and the iterations

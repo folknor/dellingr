@@ -49,6 +49,10 @@ name = "call_from_lua"
 owner = "State"
 
 [[function]]
+name = "tail_call_from_lua"
+owner = "State"
+
+[[function]]
 name = "run_invocation"
 owner = "State"
 
@@ -324,6 +328,9 @@ id = "call_unguarded->run_invocation"
 id = "call_from_lua->begin_call"
 
 [[edge]]
+id = "tail_call_from_lua->begin_call"
+
+[[edge]]
 id = "begin_call->invoke_rust_fn"
 
 [[edge]]
@@ -365,6 +372,9 @@ id = "run_frame->instr_tfor_call"
 
 [[edge]]
 id = "run_frame->call_from_lua"
+
+[[edge]]
+id = "run_frame->tail_call_from_lua"
 
 # src/vm/registers.rs
 [[edge]]
@@ -873,6 +883,27 @@ path = [
     "table_sort_heap->table_sort_sift_down:heapify",
     "table_sort_sift_down->table_sort_less:left",
     "@sort_comparator",
+]
+
+[[scenario]]
+name = "tail_rust"
+path = [
+    "@lua",
+    "run_frame->tail_call_from_lua",
+    "tail_call_from_lua->begin_call",
+    "begin_call->invoke_rust_fn",
+    "call->call_unguarded",
+]
+
+[[scenario]]
+name = "tail_callable_rust"
+path = [
+    "@lua",
+    "run_frame->tail_call_from_lua",
+    "tail_call_from_lua->begin_call",
+    "begin_call->begin_callable_call",
+    "begin_callable_call->invoke_rust_fn",
+    "call->call_unguarded",
 ]
 
 [[scenario]]

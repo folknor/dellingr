@@ -112,6 +112,23 @@ fn recursion_without_loops_stops_at_the_next_call() {
 }
 
 #[test]
+fn tail_recursion_stops_at_the_next_tail_call() {
+    // Tail recursion runs at constant depth, so nothing but the interrupt
+    // ends it: each tail call's admission is a safepoint, directly and
+    // through a callable object.
+    for source in [
+        "local function f(k) n = k if k == 3 then stop() end return f(k + 1) end
+         f(1)",
+        "local f = setmetatable({}, {__call = function(self, k)
+             n = k if k == 3 then stop() end return self(k + 1) end})
+         f(1)",
+    ] {
+        let mut state = interrupted(source);
+        assert_eq!(support::global_number(&mut state, "n"), 3.0, "{source}");
+    }
+}
+
+#[test]
 fn a_lua_call_is_refused_before_its_body_runs() {
     let source = "local function f() ran = true end
                   stop()

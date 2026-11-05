@@ -69,6 +69,7 @@ OP_CALL=65 Abcd Free
 OP_RETURN=66 Ab Free
 OP_VARARG=67 Ab Free
 OP_CLOSURE=68 Ab Free
+OP_TAILCALL=69 Abd Free
 builtin:print=0
 builtin:type=1
 builtin:tonumber=2

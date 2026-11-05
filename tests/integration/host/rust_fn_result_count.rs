@@ -112,6 +112,13 @@ const LUA_OVER_REPORT_ROUTES: &[LuaOverReportRoute] = &[
         available: 2,
     },
     LuaOverReportRoute {
+        // A Rust callee in tail position, called from the retiring caller's
+        // function slot.
+        edge: "tail_call_from_lua->begin_call",
+        script: "return bad(1, 2)",
+        available: 3,
+    },
+    LuaOverReportRoute {
         edge: "len_call->call_unguarded",
         script: "return #setmetatable({}, {__len = bad})",
         available: 3,

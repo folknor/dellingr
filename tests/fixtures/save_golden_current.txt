@@ -117,7 +117,7 @@ bytecode[1]: bytes=133 fnv1a=c23d4d383d43adf2
 bytecode[2]: bytes=131 fnv1a=4ac1729c03ecde2b
 bytecode[3]: bytes=81 fnv1a=cb54678bd93409b3
 bytecode[4]: bytes=101 fnv1a=2afadfacb59f9012
-bytecode[5]: bytes=124 fnv1a=cc4ecd3ea73bbd55
+bytecode[5]: bytes=112 fnv1a=fa98fdcc7a26e12c
 upvalue[0]=number:4000000000000000
 upvalue[1]=number:4008000000000000
 upvalue[2]=number:4014000000000000

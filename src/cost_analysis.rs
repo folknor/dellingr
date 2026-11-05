@@ -3,8 +3,8 @@
 //!
 //! The analysis walks each chunk's bytecode once, recording per scope how
 //! many units of each [`Charge`] its opcodes make (from the opcode table's
-//! charging declaration, the same one dispatch reads) and how many `OP_CALL`
-//! instructions it holds. Those counts describe the program, not the model:
+//! charging declaration, the same one dispatch reads) and how many call
+//! instructions (`OP_CALL`, `OP_TAILCALL`) it holds. Those counts describe the program, not the model:
 //! cost is derived from them afterwards by one rule, the saturating sum of
 //! `units * weight` over the charges. The model that priced the analysis is
 //! recorded in it and named in its report.
@@ -61,7 +61,8 @@ impl ScopeCost {
         self.units[charge as usize]
     }
 
-    /// Number of `OP_CALL` instructions in this scope's chunk. Generic-`for`
+    /// Number of call instructions (`OP_CALL`, and `OP_TAILCALL` for
+    /// `return f(...)`) in this scope's chunk. Generic-`for`
     /// iterator calls and metamethod-driven calls are not call instructions
     /// and are not counted. A statistic: calls have no static charge.
     pub fn function_calls(&self) -> u64 {
@@ -113,7 +114,7 @@ impl ScopeCost {
             if let Some((charge, units)) = inst.static_units() {
                 scope.units[charge as usize] += units;
             }
-            if inst.opcode() == Instr::OP_CALL {
+            if matches!(inst.opcode(), Instr::OP_CALL | Instr::OP_TAILCALL) {
                 scope.call_instructions += 1;
             }
         }

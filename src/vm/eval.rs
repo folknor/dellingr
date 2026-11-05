@@ -9,7 +9,9 @@ use super::RustFnId;
 use super::frame::Frame;
 use super::lua_val::Val;
 use super::object::{Upvalue, UpvalueRef};
-use super::{Bytecode, CallInfo, Error, ErrorKind, MAX_CALL_DEPTH, Result, State, TypeError};
+use super::{
+    Bytecode, CallInfo, ChainUnits, Error, ErrorKind, MAX_CALL_DEPTH, Result, State, TypeError,
+};
 use crate::instr::{ArgCount, RetCount};
 use crate::limits::{MAX_ARGUMENTS, MAX_METAMETHOD_DEPTH, MAX_NATIVE_CALL_DEPTH};
 
@@ -85,6 +87,39 @@ impl<'a> CallArguments for (ArgCount, StoreEntry<'a>) {
     type Entry = StoreEntry<'a>;
     fn into_parts(self) -> (ArgCount, Self::Entry) {
         self
+    }
+}
+
+/// What kind of call a callee is being resolved for: a method call
+/// (`obj:m()`, which numbers a library function's argument errors without
+/// the receiver) and a tail call (whose admission replaces the calling
+/// activation). Two flag bits in one byte, so the tail flag adds no argument
+/// to the resolution path: a struct of two `bool`s is passed as two
+/// arguments, and as the seventh it went on the stack in `call_unguarded`'s
+/// frame, which is live across every native re-entry.
+#[derive(Clone, Copy)]
+pub(super) struct CallShape(u8);
+
+impl CallShape {
+    const METHOD: u8 = 1;
+    const TAIL: u8 = 2;
+
+    /// A call made from Rust: neither a method call nor a tail call.
+    const HOST: Self = Self(0);
+
+    /// A call made by a Lua call instruction. Arithmetic on the flags, not
+    /// a branch on them: branching made `call_from_lua` duplicate its whole
+    /// body per method flag.
+    fn from_lua(method: bool, tail: bool) -> Self {
+        Self((u8::from(method) * Self::METHOD) | (u8::from(tail) * Self::TAIL))
+    }
+
+    const fn method(self) -> bool {
+        self.0 & Self::METHOD != 0
+    }
+
+    const fn tail(self) -> bool {
+        self.0 & Self::TAIL != 0
     }
 }
 
@@ -197,7 +232,7 @@ impl State {
             let result = 'call: {
                 let admitted = match crate::native_call!(
                     "call_unguarded->begin_call",
-                    self.begin_call(idx, num_args, old_stack_bottom, false, entered)
+                    self.begin_call(idx, num_args, old_stack_bottom, CallShape::HOST, entered)
                 ) {
                     Ok(admitted) => admitted,
                     Err(error) => break 'call Err(error),
@@ -255,7 +290,13 @@ impl State {
         let old_stack_bottom = self.in_flight.stack_bottom;
         match crate::native_call!(
             "call_from_lua->begin_call",
-            self.begin_call(idx, num_args, old_stack_bottom, method, ())
+            self.begin_call(
+                idx,
+                num_args,
+                old_stack_bottom,
+                CallShape::from_lua(method, false),
+                ()
+            )
         )? {
             Some(n) => {
                 self.finish_call(num_ret_expected, n)?;
@@ -263,6 +304,107 @@ impl State {
             }
             None => Ok(true),
         }
+    }
+
+    /// The call of the dispatch loop's `OP_TAILCALL`, `return f(...)`: a
+    /// proper tail call, which ends the calling activation before the callee
+    /// runs, so tail recursion runs at constant call depth and stack. The
+    /// caller's upvalues close (its registers are dead, and closing now
+    /// captures exactly what an unwind would), the callee and its arguments
+    /// slide down into the caller's function slot, and the caller's
+    /// `__call` chain units are released. Resolution and admission then run
+    /// at that destination as for any call, `__call` receivers and the frame
+    /// reservation included, and admission does not count the activation
+    /// being replaced against `MAX_CALL_DEPTH`.
+    ///
+    /// The caller's frame and record stay in place until the callee is
+    /// known, for diagnostics only: a refusal is located at the caller's
+    /// tail call, its traceback shows the caller, and a Rust callee (which
+    /// runs to completion here, as Lua 5.4 runs a C function in tail
+    /// position) sees the caller's call site for `print` and host source
+    /// context. Nothing reads that frame's registers, closure or upvalues
+    /// again: its function slot now holds the callee, so its closure may be
+    /// collected while a Rust callee runs, and `stack_bottom` is the
+    /// destination slot so the top stays well defined. A Rust callee's
+    /// results land at the destination, the caller's function slot, where a
+    /// return slides them anyway, and `Some(count)` is returned for the
+    /// caller to return them; a Lua callee is admitted, `None` is returned,
+    /// and `State::replace_tail_caller` retires the caller.
+    ///
+    /// The arm's whole body, from recording the call site (`inst` at
+    /// register `ra`, the cursor `ip` past it) and settling the frame's
+    /// pending cost on: out of line, so the dispatch loop's frame, live
+    /// across every native re-entry, holds none of its temporaries. The
+    /// result stays register-sized for the same reason: handing back a
+    /// whole `Leave` made the loop reserve a separate return slot for it.
+    #[inline(never)]
+    pub(super) fn tail_call_from_lua(
+        &mut self,
+        inst: crate::instr::Instr,
+        ra: usize,
+        ip: usize,
+        local_cost: &mut u64,
+    ) -> Result<Option<u8>> {
+        self.record_call_site(ip);
+        Frame::flush_local_cost(self, local_cost)?;
+        let num_args = self.call_window(ra, inst.call_args())?;
+        let callee = self.call_base(num_args)?;
+        let caller_bottom = self.in_flight.stack_bottom;
+        let destination = caller_bottom - 1;
+        self.close_upvalues(caller_bottom);
+        self.stack.drain(destination..callee);
+        let caller = self
+            .in_flight
+            .call_stack
+            .last_mut()
+            .expect("a tail call is made by a Lua activation");
+        let units = caller.chain.units();
+        caller.chain = caller.chain.with_units(0);
+        self.release_chain_charges(units);
+        self.in_flight.stack_bottom = destination;
+        let method = inst.call_is_method();
+        crate::native_call!(
+            "tail_call_from_lua->begin_call",
+            self.begin_call(
+                destination,
+                num_args,
+                destination,
+                CallShape::from_lua(method, true),
+                ()
+            )
+        )
+    }
+
+    /// Finish a tail call whose Lua callee `tail_call_from_lua` admitted:
+    /// drop the calling activation, whose record sits just below the
+    /// callee's, and put the callee's frame in its place. The callee's
+    /// record takes the caller's slot and vararg start (the caller's extra
+    /// arguments are dropped; the callee's slide down), is marked as tail
+    /// called, and the call depth is back to what it was. The caller's
+    /// chain units were already released. Infallible, and nothing between
+    /// the admission and this can run code or collect.
+    ///
+    /// The frame is replaced by truncating and extending in place, never
+    /// by moving a whole frame (see `run_invocation`).
+    #[inline(never)]
+    pub(super) fn replace_tail_caller(&mut self, frames: &mut Vec<Frame>) {
+        let calls = &mut self.in_flight.call_stack;
+        let len = calls.len();
+        let caller_start = calls[len - 2].vararg_start;
+        let callee_start = calls[len - 1].vararg_start;
+        debug_assert_eq!(calls[len - 2].chain.units(), 0);
+        self.in_flight
+            .vararg_stack
+            .drain(caller_start as usize..callee_start as usize);
+        let callee = calls.pop().expect("the tail callee was admitted");
+        calls[len - 2] = CallInfo {
+            vararg_start: caller_start,
+            chain: callee.chain.marked_tail_called(),
+            ..callee
+        };
+        self.in_flight.call_depth -= 1;
+        frames.truncate(frames.len() - 1);
+        frames.extend(std::iter::once_with(|| self.admitted_frame()));
     }
 
     /// Adjust a completed call's results. Chain owners have already released
@@ -294,7 +436,7 @@ impl State {
         idx: usize,
         num_args: u8,
         old_stack_bottom: usize,
-        method: bool,
+        shape: CallShape,
         entered: impl CallEntry,
     ) -> Result<Option<u8>> {
         // The two function cases inline into the call sites; only a
@@ -314,12 +456,12 @@ impl State {
             self.stack.remove(idx);
             return crate::native_call!(
                 "begin_call->invoke_rust_fn",
-                self.invoke_rust_fn(f, idx, method)
+                self.invoke_rust_fn(f, idx, shape.method())
             )
             .map(Some);
         }
         if let Some(bytecode) = self.lua_function_bytecode(func_val) {
-            self.admit_lua_call(bytecode, num_args, old_stack_bottom)?;
+            self.admit_lua_call(bytecode, num_args, old_stack_bottom, shape.tail())?;
             entered.mark_entered();
             return Ok(None);
         }
@@ -329,7 +471,7 @@ impl State {
         debug_assert!(!entered.tracks_entry());
         crate::native_call!(
             "begin_call->begin_callable_call",
-            self.begin_callable_call(idx, num_args, old_stack_bottom, method)
+            self.begin_callable_call(idx, num_args, old_stack_bottom, shape)
         )
     }
 
@@ -341,10 +483,10 @@ impl State {
         idx: usize,
         num_args: u8,
         old_stack_bottom: usize,
-        method: bool,
+        shape: CallShape,
     ) -> Result<Option<u8>> {
         let mut num_args = num_args;
-        let mut charges = 0;
+        let mut charges: u32 = 0;
         let result = 'resolve: loop {
             let func_val = self.stack[idx];
             if let Val::RustFn(f) = func_val {
@@ -354,7 +496,7 @@ impl State {
                 self.stack.remove(idx);
                 break crate::native_call!(
                     "begin_callable_call->invoke_rust_fn",
-                    self.invoke_rust_fn(f, idx, method)
+                    self.invoke_rust_fn(f, idx, shape.method())
                 )
                 .map(Some);
             }
@@ -363,13 +505,13 @@ impl State {
                 // rooted there below the callee's frame, its frame is built
                 // from it (`State::admitted_frame`), and the results land in
                 // it on return.
-                match self.admit_lua_call(bytecode, num_args, old_stack_bottom) {
+                match self.admit_lua_call(bytecode, num_args, old_stack_bottom, shape.tail()) {
                     Ok(()) => {
                         self.in_flight
                             .call_stack
                             .last_mut()
                             .expect("admission created an activation")
-                            .chain_charges = charges;
+                            .chain = ChainUnits::NONE.with_units(charges);
                         charges = 0;
                         break Ok(None);
                     }
@@ -662,23 +804,26 @@ impl State {
     ///
     /// On error nothing stays admitted: the call stack, call depth and
     /// stack_bottom are restored and the frame's slots cleared.
+    ///
+    /// A `tail` admission replaces the innermost activation, which
+    /// `State::retire_tail_caller` removes right after, before anything
+    /// runs: the record pushed here is one past the depth limit for that
+    /// instant only, so the replaced activation does not count against it.
     pub(super) fn admit_lua_call(
         &mut self,
         bytecode: Arc<Bytecode>,
         num_args: u8,
         old_stack_bottom: usize,
+        tail: bool,
     ) -> Result<()> {
+        let depth = self.in_flight.call_depth - u32::from(tail);
         #[cfg(not(feature = "fault-injection"))]
         let injected = false;
         #[cfg(feature = "fault-injection")]
-        let injected = self.inject_fault(
-            crate::FaultSite::CallDepth,
-            self.in_flight.call_depth as usize,
-            true,
-        );
-        if injected || self.in_flight.call_depth >= MAX_CALL_DEPTH {
+        let injected = self.inject_fault(crate::FaultSite::CallDepth, depth as usize, true);
+        if injected || depth >= MAX_CALL_DEPTH {
             return Err(self.error(ErrorKind::CallDepthExceeded {
-                depth: self.in_flight.call_depth,
+                depth,
                 limit: MAX_CALL_DEPTH,
             }));
         }
@@ -697,10 +842,11 @@ impl State {
 
         // Extra arguments of a vararg function leave the value stack for the
         // activation record, which roots them.
-        // Every admitted activation contributes at most MAX_ARGUMENTS values.
+        // Every admitted activation contributes at most MAX_ARGUMENTS values,
+        // and a tail admission holds one record past the depth limit.
         // Prove narrowing safe without adding a fallible admission boundary.
         const {
-            assert!(MAX_CALL_DEPTH as u64 * MAX_ARGUMENTS as u64 <= u32::MAX as u64);
+            assert!((MAX_CALL_DEPTH as u64 + 1) * MAX_ARGUMENTS as u64 <= u32::MAX as u64);
         }
         let vararg_start = self.in_flight.vararg_stack.len() as u32;
         if is_vararg && num_args > num_params {
@@ -715,7 +861,7 @@ impl State {
             .extend(std::iter::once_with(|| CallInfo {
                 bytecode,
                 ip: 0,
-                chain_charges: 0,
+                chain: ChainUnits::NONE,
                 vararg_start,
             }));
 
@@ -808,7 +954,8 @@ impl State {
                 .call_stack
                 .last()
                 .expect("a rejected admission pushed its record")
-                .chain_charges,
+                .chain
+                .units(),
             0
         );
         self.pop_activation();
@@ -938,7 +1085,7 @@ impl State {
     fn pop_activation(&mut self) {
         let len = self.in_flight.call_stack.len();
         let info = &self.in_flight.call_stack[len - 1];
-        self.in_flight.metamethod_depth -= info.chain_charges;
+        self.in_flight.metamethod_depth -= info.chain.units();
         self.in_flight
             .vararg_stack
             .truncate(info.vararg_start as usize);
@@ -1151,7 +1298,7 @@ impl State {
         let func = self.pop_val();
         self.stack.insert(func_slot, func);
         let old_stack_bottom = self.in_flight.stack_bottom;
-        self.admit_lua_call(bytecode, num_args, old_stack_bottom)?;
+        self.admit_lua_call(bytecode, num_args, old_stack_bottom, false)?;
         self.run_invocation(old_stack_bottom)
     }
 }

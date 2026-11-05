@@ -18,8 +18,9 @@
 //!   call, a metamethod handler, an iterator, a library callback), after the
 //!   call-depth check and before anything is pushed, so an interruption there
 //!   is a refusal reported at the caller's call instruction. Recursion needs
-//!   no backward jump; a return needs no poll, since every return pairs with
-//!   a call that polled;
+//!   no backward jump, and tail recursion, which runs at constant depth, is
+//!   still a call admission each time; a return needs no poll, since every
+//!   return pairs with a call that polled;
 //! - entry to every Rust callback, before its bookkeeping is changed or its
 //!   body runs, including library functions and Rust metamethod handlers.
 //!   The generic `for` fast paths for `next` and the `ipairs` iterator run

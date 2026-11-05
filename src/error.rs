@@ -44,6 +44,13 @@ pub struct StackFrame {
     /// chunk. `Display` uses it to label an unnamed function that is not the
     /// main chunk, as `function <source:line>`.
     pub defined_line: u32,
+    /// Whether this activation was entered by a tail call (`return f()`),
+    /// which replaced the activation that made it: the next frame in the
+    /// trace is not this one's direct caller. `Error`'s display then shows
+    /// `(...tail calls...)` after this frame, as reference Lua does. The
+    /// marker is not a frame of its own, so `error(msg, level)` never
+    /// counts it.
+    pub tail_called: bool,
 }
 
 /// Instruction context for an internal error escaping Lua dispatch.
@@ -1718,6 +1725,9 @@ impl fmt::Display for Error {
             write!(f, "\nstack traceback:")?;
             for frame in &self.0.stack_trace {
                 write!(f, "\n\t{frame}")?;
+                if frame.tail_called {
+                    write!(f, "\n\t(...tail calls...)")?;
+                }
             }
         }
         Ok(())

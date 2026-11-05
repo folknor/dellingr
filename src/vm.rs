@@ -122,11 +122,52 @@ pub(super) struct CallInfo {
     /// The innermost activation owns the suffix, including an empty suffix.
     /// Call depth times MAX_ARGUMENTS bounds the arena below u32::MAX.
     pub(super) vararg_start: u32,
-    /// Non-function `__call` chain steps resolved to reach this activation.
-    /// Each holds one unit of metamethod_depth. Resolution transfers these
-    /// for calls from Rust and Lua alike; popping the activation releases
-    /// them before result adjustment.
-    pub(super) chain_charges: u32,
+    /// Non-function `__call` chain steps resolved to reach this activation,
+    /// and whether a tail call entered it. Each step holds one unit of
+    /// metamethod_depth. Resolution transfers these for calls from Rust and
+    /// Lua alike; popping the activation releases them before result
+    /// adjustment, and so does a tail call the activation makes, which ends
+    /// it (`State::tail_call_from_lua`).
+    pub(super) chain: ChainUnits,
+}
+
+/// A `CallInfo`'s `__call` chain units with its tail-call mark in the top
+/// bit: one word, so admission writes the record's last field with one
+/// store. Separate `u16` and `bool` fields took two stores per call, and
+/// fib-style recursion measured about 2.7% slower with them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct ChainUnits(u32);
+
+// The units never reach the tail-call bit.
+const _: () = assert!(crate::limits::MAX_METAMETHOD_DEPTH < ChainUnits::TAIL_CALLED);
+
+impl ChainUnits {
+    const TAIL_CALLED: u32 = 1 << 31;
+
+    /// No units, not tail called: what admission records.
+    pub(super) const NONE: Self = Self(0);
+
+    /// Units held, the mark aside.
+    pub(super) const fn units(self) -> u32 {
+        self.0 & !Self::TAIL_CALLED
+    }
+
+    /// Whether a tail call entered the activation, replacing the one that
+    /// made it. Tracebacks mark the frames that replacement removed.
+    pub(super) const fn tail_called(self) -> bool {
+        self.0 & Self::TAIL_CALLED != 0
+    }
+
+    /// The same units, marked as entered by a tail call.
+    pub(super) const fn marked_tail_called(self) -> Self {
+        Self(self.0 | Self::TAIL_CALLED)
+    }
+
+    /// Set the units to `units` (at most `MAX_METAMETHOD_DEPTH`), keeping
+    /// the mark.
+    pub(super) const fn with_units(self, units: u32) -> Self {
+        Self(self.0 & Self::TAIL_CALLED | units)
+    }
 }
 
 impl State {
@@ -1722,12 +1763,13 @@ impl State {
             .unwrap_or(0)
     }
 
-    fn trace_frame(bytecode: &Bytecode, cursor: usize) -> StackFrame {
+    fn trace_frame(bytecode: &Bytecode, cursor: usize, tail_called: bool) -> StackFrame {
         StackFrame {
             function_name: bytecode.name.clone(),
             source: bytecode.source.clone(),
             line: Self::line_before(bytecode, cursor),
             defined_line: bytecode.defined_line,
+            tail_called,
         }
     }
 
@@ -1755,7 +1797,12 @@ impl State {
                 .skip(1)
                 .any(|info| !Self::is_gmatch_wrapper(&info.bytecode));
         if !shim_with_script_caller {
-            trace.push(Self::trace_frame(bytecode, cursor));
+            let tail_called = self
+                .in_flight
+                .call_stack
+                .last()
+                .is_some_and(|info| info.chain.tail_called());
+            trace.push(Self::trace_frame(bytecode, cursor, tail_called));
         }
 
         // Add entries from call_stack (most recent first).
@@ -1765,7 +1812,11 @@ impl State {
             if Self::is_gmatch_wrapper(&call_info.bytecode) {
                 continue;
             }
-            trace.push(Self::trace_frame(&call_info.bytecode, call_info.ip));
+            trace.push(Self::trace_frame(
+                &call_info.bytecode,
+                call_info.ip,
+                call_info.chain.tail_called(),
+            ));
         }
 
         trace

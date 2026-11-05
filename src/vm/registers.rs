@@ -562,7 +562,7 @@ mod tests {
             bytecode: Arc::new(Bytecode::default()),
             ip: 0,
             vararg_start: 0,
-            chain_charges: 0,
+            chain: crate::vm::ChainUnits::NONE,
         });
         state.arm_fault_injection(Some(1));
 

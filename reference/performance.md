@@ -78,6 +78,52 @@ Hosts: plantasjen from 4a722cf on; the 2026-10-23 rows name x86-64 Linux only.
 | 33734f8, Cargo's default release profile | 13680 | 3104 | 3168 |
 | 912c2d5 with the dependency bumps that followed it | 15856 | 3280 | 3296 |
 | host interrupt safepoints on top of that | 16064 | 3296 | 3312 |
+| proper tail calls on top of 2a566c8 | 16304 | 3296 | 3312 |
+
+### 2026-11-05: proper tail calls
+
+`OP_TAILCALL` (`State::tail_call_from_lua`, `State::replace_tail_caller`)
+added an arm to the dispatch loop and a tail flag to call resolution and the
+activation record. Release cycles are unchanged in every row (plantasjen,
+`rustc 1.101.0-nightly (e9bbadf68 2026-10-12)`); dev cycles grew 192 bytes
+(the `index_*` paths) to 272 (`callable_rust`), 240 for the largest cycle. Three shapes on the way there grew release, each found with
+`scripts/frame_sizes.py`:
+
+- The tail-call arm returning a whole `Leave` from its out-of-line helper:
+  `Frame::run` reserved a separate return slot, 232 to 264 bytes. The helper
+  returns `Result<Option<u8>>` and the arm builds the `Leave`.
+- The tail flag as a sixth argument to `begin_callable_call` and a struct of
+  two `bool`s for method and tail: LLVM passes such a struct as two
+  arguments, so the seventh went on the stack in `call_unguarded`'s frame,
+  184 to 200 bytes. `CallShape` packs both flags in one byte.
+- A branch building that byte from the method flag made `call_from_lua`
+  duplicate its body per flag value; it is built by arithmetic.
+
+The record's chain units and tail mark share one word (`ChainUnits`): as a
+`u16` and a `bool` they took two stores per admission.
+
+Wall, interleaved cells of HEAD (`--commit`) against the tree, five pairs,
+medians: `tail_call` -2.5%, `method` -1.7%, `closure` -0.8%,
+`rust_boundary` -0.7%, `benchmark` -0.4%, `sort` -0.4%, `global` -0.3%,
+`arithmetic` +1.5% (B slower in every pair). An A/A control (HEAD in the
+main tree against the HEAD worktree) put `arithmetic` at -0.2%, so the
+method is unbiased. `arithmetic` runs no tail call. What it does execute
+differently is the ordinary call path: a few instructions per call (the tail
+flag's subtraction in `admit_lua_call`, the mark mask in `pop_activation`,
+building `CallShape`), none of it proportional to depth. Call density argues
+strongly against that being the delta: `arithmetic` makes about
+8,400 Lua calls per millisecond (26 `fib(20)` per `_bench`, 21,891 calls
+each, in about 68 ms), so +1.5% would be about 1.8 ns, roughly 8 cycles, per
+call, and `global`, which runs the same call and return path at about 16,000
+calls per millisecond, would then lose about 3% unless placement happened to
+hide it; it gained 0.3%. The
+call-free `constants`, `math` and `fill` workloads were neutral too. A build
+with the tail-call arm and its `Leave` variant removed, whose `Frame::run`
+diffed identical to HEAD's apart from data addresses, still measured +1.6%,
+with `Frame::run` starting at a different offset within its 64-byte line (0
+against 32). Placement (of the dispatch loop or of the recursion-heavy
+kernel's code) is the best-supported explanation; the evidence is a strong
+attribution, not complete isolation. Accepted for the change.
 
 Every scenario's release cycle shrank under the default profile at 0779c08.
 The dev figure drifted from 13,552 (41ad774) to 13,680 (0779c08), and every

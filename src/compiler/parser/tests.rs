@@ -262,6 +262,35 @@ fn method_calls_look_up_with_self_and_mark_the_call() {
 }
 
 #[test]
+fn only_a_lone_unparenthesised_returned_call_is_a_tail_call() {
+    for (source, tail_calls, calls) in [
+        ("local function f() end return f(1)", 1, 0),
+        ("local o = {} return o:m(1)", 1, 0),
+        ("local function f(...) return f(...) end", 1, 0),
+        ("local function f() end return (f(1))", 0, 1),
+        ("local function f() end return 1, f(1)", 0, 1),
+        ("local function f() end return f(1), 1", 0, 1),
+        ("local function f() end local x = f(1) return x", 0, 1),
+    ] {
+        let chunk = parse_unfinalized(source).expect("compiles");
+        let all = |op| {
+            opcodes(&chunk, op).len()
+                + chunk
+                    .nested
+                    .iter()
+                    .map(|nested| opcodes(nested, op).len())
+                    .sum::<usize>()
+        };
+        assert_eq!(all(Instr::OP_TAILCALL), tail_calls, "{source}");
+        assert_eq!(all(Instr::OP_CALL), calls, "{source}");
+    }
+    let chunk = parse_unfinalized("local o = {} return o:m(1, 2)").expect("compiles");
+    let tail = opcodes(&chunk, Instr::OP_TAILCALL);
+    assert!(tail[0].call_is_method());
+    assert_eq!(tail[0].call_args(), ArgCount::Fixed(3));
+}
+
+#[test]
 fn conditions_ending_in_a_comparison_branch_in_one_instruction() {
     for (source, op) in [
         ("local n = 0 while n < 3 do n = n + 1 end", CompareOp::Lt),

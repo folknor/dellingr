@@ -131,7 +131,9 @@ assignments beyond their cache-slot capacity use the uncached path.
 ## Runtime limits
 
 Call depth is capped at `limits::MAX_CALL_DEPTH` frames, held on the heap: a
-Lua function calling a Lua function costs no native stack. Calls made from
+Lua function calling a Lua function costs no native stack. Tail calls
+(`return f(...)`) are proper, as in Lua: the callee replaces the caller's
+frame, so tail recursion runs at constant depth. Calls made from
 Rust - host calls, metamethod handlers, iterator functions, `table.sort`
 comparators, `string.gsub` replacement functions - do run on the native stack,
 and `limits::MAX_NATIVE_CALL_DEPTH` caps how many are active at once, as

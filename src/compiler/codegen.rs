@@ -806,6 +806,20 @@ impl Generator<'_> {
                 self.emit_at(Instr::ret(reg, RetCount::Fixed(1)), line);
                 self.free_reg(reg);
             }
+            // `return f(...)` and `return o:m(...)`, a lone unparenthesised
+            // call: a proper tail call, as Lua 5.2 and 5.4 guarantee. The
+            // call instruction becomes the function's exit, so tail
+            // recursion runs at constant call depth.
+            [value] if value.is_multi() && !matches!(value.kind, ExprKind::Vararg { .. }) => {
+                let base = self.freereg;
+                let Val::Call(pc) = self.expr(value)? else {
+                    return Err(Self::internal(
+                        ParserFault::MultiValueTailMissingInstruction,
+                    ));
+                };
+                self.code[pc] = self.code[pc].into_tail_call();
+                self.freereg = base;
+            }
             _ => {
                 let base = self.freereg;
                 let (last, fixed) = values

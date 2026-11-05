@@ -331,6 +331,28 @@ const SCENARIOS: &[Scenario] = &[
         raises: false,
     },
     Scenario {
+        // A Rust function in tail position runs as an ordinary call, with
+        // the retiring caller's frame still on the frame stack.
+        name: "tail_rust",
+        setup: "",
+        step: "HANDLER = function() DESCEND end
+            return call_handler()",
+        native: 1,
+        meta: 0,
+        raises: false,
+    },
+    Scenario {
+        // The same through a callable object's Rust `__call` handler, which
+        // keeps `begin_callable_call` live across the re-entry.
+        name: "tail_callable_rust",
+        setup: "",
+        step: "HANDLER = function() DESCEND end
+            return setmetatable({}, {__call = call_handler})()",
+        native: 1,
+        meta: 0,
+        raises: false,
+    },
+    Scenario {
         name: "sort_metamethods_comparator",
         setup: "",
         step: "local calls, t = 0, setmetatable({2, 1}, {__index = function() end})
@@ -1398,6 +1420,8 @@ scenario_tests!(
     sort_comparator_right,
     sort_comparator_sortdown,
     callable_rust,
+    tail_rust,
+    tail_callable_rust,
     sort_metamethods_comparator,
     sort_metamethods_length,
     sort_metamethods_read,

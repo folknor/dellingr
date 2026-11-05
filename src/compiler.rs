@@ -249,6 +249,7 @@ mod tests {
     struct OpenShapes {
         open_call_args: bool,
         open_call_results: bool,
+        open_tail_call_args: bool,
         open_set_list: bool,
         return_all: bool,
         vararg_all: bool,
@@ -266,6 +267,9 @@ mod tests {
                     if instruction.call_results() == crate::RetCount::All {
                         seen.open_call_results = true;
                     }
+                }
+                Instr::OP_TAILCALL if instruction.call_args() == crate::ArgCount::Dynamic => {
+                    seen.open_tail_call_args = true;
                 }
                 Instr::OP_SET_LIST if instruction.set_list_count().is_none() => {
                     seen.open_set_list = true;
@@ -512,6 +516,10 @@ mod tests {
         assert!(
             seen.open_call_results,
             "corpus lost a call with all results"
+        );
+        assert!(
+            seen.open_tail_call_args,
+            "corpus lost a tail call with open arguments"
         );
         assert!(seen.open_set_list, "corpus lost an open OP_SET_LIST");
         assert!(seen.return_all, "corpus lost OP_RETURN with RetCount::All");

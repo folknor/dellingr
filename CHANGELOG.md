@@ -206,6 +206,28 @@ version's meaning is wider (see below).
 
 ### Changed
 
+- Proper tail calls, as Lua 5.2 and 5.4 guarantee. `return f(...)` and
+  `return o:m(...)` (a single call, not parenthesised) compile to the new
+  `OP_TAILCALL`: a Lua callee, directly or through `__call`, replaces the
+  calling activation, so tail recursion, state machines and
+  continuation-passing loops run at constant call depth instead of failing
+  with `CallDepthExceeded` after `MAX_CALL_DEPTH` levels. Replay-visible:
+  scripts that died there now run on (an unending tail recursion now runs
+  until the host interrupts it, like any loop; every tail call admission is a
+  safepoint), and a tail call made by the activation at the depth limit is
+  admitted. The replaced activation's non-function `__call` chain units are
+  released at the tail call, so tail recursion through a callable chain is no
+  longer bounded by `MAX_METAMETHOD_DEPTH` either. Tracebacks no longer show
+  the replaced frames: the frame a tail call entered has the new public
+  `StackFrame::tail_called` set and the display prints `(...tail calls...)`
+  after it, and `error(msg, 2)` in a helper reached by tail call blames the
+  surviving caller, as in reference Lua (rendered messages change for such
+  scripts). A Rust function in tail position still runs as an ordinary call.
+  Calls and returns stay free, so costs are unchanged for every script that
+  ran before; `ScopeCost::function_calls` counts tail calls. Compiled
+  bytecode changes (one instruction fewer per tail call), so saves of
+  affected functions have different bytes; snapshot format 14, which has not
+  shipped, gains the opcode.
 - `goto` is a reserved word (breaking for scripts that used it as a name or
   field): any use raises the new `SyntaxError::UnsupportedGoto`, "the 'goto'
   keyword is not supported", and `TokenKind::Goto` names it. Goto statements

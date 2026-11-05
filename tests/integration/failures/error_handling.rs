@@ -373,7 +373,8 @@ fn error_msg_budget_exceeded_shows_amounts() {
 #[test]
 fn error_msg_call_depth_shows_overflow() {
     stack::on_limit_test_stack("error_msg_call_depth_shows_overflow", || {
-        let err = run_error("local function r(n) return r(n+1) end\nr(0)");
+        // Not a tail call: the addition keeps every level active.
+        let err = run_error("local function r(n) return 1 + r(n+1) end\nr(0)");
         let limit = dellingr::limits::MAX_CALL_DEPTH;
         assert_eq!(
             err.kind().to_string(),
@@ -433,11 +434,13 @@ fn host_string_limit_is_inclusive_and_leaves_stack_unchanged() {
 fn call_depth_exceeded_error() {
     stack::on_limit_test_stack("call_depth_exceeded_error", || {
         // Rejected with exactly MAX_CALL_DEPTH activations live: every call
-        // up to the limit was admitted, and only the next one refused.
+        // up to the limit was admitted, and only the next one refused. The
+        // result is kept in a local so the call is not a tail call.
         let err = run_error(
             r#"
             local function recurse(n)
-                return recurse(n + 1)
+                local result = recurse(n + 1)
+                return result
             end
             recurse(0)
         "#,
@@ -450,4 +453,77 @@ fn call_depth_exceeded_error() {
             other => panic!("Expected CallDepthExceeded, got: {other}"),
         }
     });
+}
+
+#[test]
+fn tail_calls_run_at_constant_call_depth() {
+    stack::on_limit_test_stack("tail_calls_run_at_constant_call_depth", || {
+        let depth = dellingr::limits::MAX_CALL_DEPTH * 20;
+        let result = support::eval_bytes(format!(
+            r##"
+            local function loop(n) if n == 0 then return "done" end return loop(n - 1) end
+            local even, odd
+            function even(n) if n == 0 then return true end return odd(n - 1) end
+            function odd(n) if n == 0 then return false end return even(n - 1) end
+            local o = {{count = 0}}
+            function o:step(n) if n == 0 then return self.count end
+                self.count = self.count + 1 return self:step(n - 1) end
+            local callable = setmetatable({{}}, {{__call = function(self, n)
+                if n == 0 then return "callable" end return self(n - 1) end}})
+            local function varargs(n, ...)
+                if n == 0 then return select("#", ...) end return varargs(n - 1, n, ...) end
+            return loop({depth}) .. " " .. tostring(even({depth}))
+                .. " " .. o:step({depth}) .. " " .. callable({depth})
+                .. " " .. varargs(200)
+            "##
+        ));
+        assert_eq!(
+            result,
+            format!("done true {depth} callable 200").into_bytes()
+        );
+    });
+}
+
+#[test]
+fn a_tail_call_at_the_depth_limit_replaces_the_deepest_activation() {
+    stack::on_limit_test_stack(
+        "a_tail_call_at_the_depth_limit_replaces_the_deepest_activation",
+        || {
+            // The innermost of MAX_CALL_DEPTH activations tail calls: the
+            // callee replaces it, so the depth limit does not refuse it. A
+            // parenthesised call is not a tail call and is refused there.
+            // The main chunk is the first activation, so `nested(n)` is
+            // activation n + 1 and the innermost one is n = limit - 1.
+            let innermost = dellingr::limits::MAX_CALL_DEPTH - 1;
+            let result = support::eval_bytes(format!(
+                r#"
+                local function finish() return "finished" end
+                local function nested(n)
+                    if n == {innermost} then return finish() end
+                    local result = nested(n + 1)
+                    return result
+                end
+                local result = nested(1)
+                return result
+                "#
+            ));
+            assert_eq!(result, b"finished");
+
+            let err = run_error(format!(
+                r#"
+                local function finish() return "finished" end
+                local function nested(n)
+                    if n == {innermost} then return (finish()) end
+                    local result = nested(n + 1)
+                    return result
+                end
+                nested(1)
+                "#
+            ));
+            assert!(
+                matches!(err.kind(), ErrorKind::CallDepthExceeded { .. }),
+                "{err}"
+            );
+        },
+    );
 }

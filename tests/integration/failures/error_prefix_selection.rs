@@ -10,6 +10,7 @@ fn frame(line: u32) -> StackFrame {
         source: None,
         line,
         defined_line: 0,
+        tail_called: false,
     }
 }
 

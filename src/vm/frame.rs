@@ -150,7 +150,8 @@ impl Frame {
     /// The `RetCount` operand of the `OP_CALL` this suspended frame is
     /// waiting on. A suspended frame's `ip` points just past that call, and
     /// its bytecode is immutable, so the instruction can be read back rather
-    /// than stored per activation.
+    /// than stored per activation. A frame never waits on an `OP_TAILCALL`:
+    /// a Lua callee replaces it, and a Rust callee completes in the arm.
     pub(super) fn pending_call_results(&self) -> RetCount {
         self.bytecode.code[self.ip.get() - 1].call_results()
     }
@@ -223,6 +224,7 @@ impl Frame {
             frame.ip.set(ip);
             match leave? {
                 Leave::Call => frames.extend(std::iter::once_with(|| state.admitted_frame())),
+                Leave::TailCall => state.replace_tail_caller(frames),
                 Leave::Return { first, count } => {
                     if frames.len() == 1 {
                         // The entry frame: its Rust caller finishes the call.
@@ -742,6 +744,26 @@ impl Frame {
                     fixed_cost!(Instr::OP_VARARG);
                     state.reg_vararg(ra, inst.vararg_count())?;
                 }
+                Instr::OP_TAILCALL => {
+                    fixed_cost!(Instr::OP_TAILCALL);
+                    // The whole call is out of line (see the function). A
+                    // plain match rather than `?` keeps the unoptimized
+                    // build's frame from growing a residual temporary.
+                    return match crate::native_call!(
+                        "run_frame->tail_call_from_lua",
+                        state.tail_call_from_lua(inst, ra, *ip, local_cost)
+                    ) {
+                        // A Rust callee ran; its results sit in this frame's
+                        // function slot upwards, which is where a return
+                        // slides them, so nothing moves.
+                        Ok(Some(count)) => Ok(Leave::Return {
+                            first: base - 1,
+                            count: usize::from(count),
+                        }),
+                        Ok(None) => Ok(Leave::TailCall),
+                        Err(error) => Err(error),
+                    };
+                }
 
                 // Admission rejects unknown opcodes, including dead code.
                 _ => unreachable!("verified bytecode contains an unknown opcode"),
@@ -754,6 +776,8 @@ impl Frame {
 enum Leave {
     /// A Lua callee was admitted; its frame goes on top.
     Call,
+    /// A Lua callee was admitted by a tail call; it replaces this frame.
+    TailCall,
     /// The activation returned `count` results from register index `first`.
     Return { first: usize, count: usize },
 }
@@ -765,8 +789,8 @@ impl State {
     /// innermost one while a Rust function runs.
     ///
     /// Every path from a dispatch arm that can reach a call (into Lua or into
-    /// a Rust function) must record first: `OP_CALL` and `OP_TFOR_CALL` in
-    /// their arms, the table and length instructions first thing in their
+    /// a Rust function) must record first: `OP_CALL`, `OP_TAILCALL` and
+    /// `OP_TFOR_CALL` in their arms, the table and length instructions first thing in their
     /// outlined handler-call functions (`index_call`, `newindex_call`,
     /// `len_call`), so the cache hits and the resolvers that call nothing do
     /// not pay for it. The innermost

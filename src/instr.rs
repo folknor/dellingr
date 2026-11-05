@@ -242,8 +242,9 @@ pub(crate) mod snapshot_format;
 /// separately by its helpers and is not described here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OpcodeCharge {
-    /// No charge under any model. `OP_CALL` is free too: static analysis
-    /// counts call instructions by opcode as a statistic, not as a charge.
+    /// No charge under any model. `OP_CALL` and `OP_TAILCALL` are free too:
+    /// static analysis counts call instructions by opcode as a statistic,
+    /// not as a charge.
     Free,
     /// One unit of the charge per execution.
     Once(Charge),
@@ -421,6 +422,7 @@ macro_rules! opcode_rows {
             OP_RETURN = 66, Ab, Free;
             OP_VARARG = 67, Ab, Free;
             OP_CLOSURE = 68, Ab, Free {Nested, B};
+            OP_TAILCALL = 69, Abd, Free;
         }
     };
 }
@@ -1045,7 +1047,15 @@ impl Instr {
             u8::from(method),
         )
     }
-    /// The argument count of an `OP_CALL`.
+    /// This `OP_CALL` as the tail call of `return f(...)`: the same callee,
+    /// arguments and method mark, with no result count, because a tail call
+    /// returns whatever its callee returns. `OP_TAILCALL` ends its function:
+    /// a Lua callee replaces the calling activation, a Rust callee's results
+    /// are returned as an open `OP_RETURN` would return them.
+    pub(crate) const fn into_tail_call(self) -> Self {
+        Self::pack(Self::OP_TAILCALL, self.a(), self.b(), 0, self.d())
+    }
+    /// The argument count of an `OP_CALL` or `OP_TAILCALL`.
     #[inline(always)]
     pub(crate) const fn call_args(self) -> ArgCount {
         ArgCount::from_operand(self.b())
@@ -1055,7 +1065,8 @@ impl Instr {
     pub(crate) const fn call_results(self) -> RetCount {
         RetCount::from_operand(self.c())
     }
-    /// Whether an `OP_CALL` is the call of a method call (`obj:m()`).
+    /// Whether an `OP_CALL` or `OP_TAILCALL` is the call of a method call
+    /// (`obj:m()`).
     #[inline(always)]
     pub(crate) const fn call_is_method(self) -> bool {
         self.d() != 0
@@ -1093,10 +1104,13 @@ impl Instr {
     }
 
     /// Whether this instruction reads an open top left by the instruction
-    /// before it: a call with open arguments, an open return or set-list.
+    /// before it: a call or tail call with open arguments, an open return or
+    /// set-list. A tail call produces nothing for a next instruction.
     pub(crate) const fn consumes_open(self) -> bool {
         match self.opcode() {
-            Self::OP_CALL | Self::OP_RETURN | Self::OP_SET_LIST => self.b() == OPEN_COUNT,
+            Self::OP_CALL | Self::OP_TAILCALL | Self::OP_RETURN | Self::OP_SET_LIST => {
+                self.b() == OPEN_COUNT
+            }
             _ => false,
         }
     }

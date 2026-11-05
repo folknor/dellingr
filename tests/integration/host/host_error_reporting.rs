@@ -197,6 +197,7 @@ fn fail_with_trace(_state: &mut State) -> dellingr::Result<u8> {
                 source: Some(b"host-source".as_slice().into()),
                 line: 7,
                 defined_line: 0,
+                tail_called: false,
             }],
         ),
     )
@@ -355,11 +356,12 @@ fn nonfunction_chain_resolution_and_admission_report_once() {
                 state.set_global("host_admit").unwrap();
                 // Fill Lua activation depth without holding chain units at
                 // intervening levels; the final admission exercises either
-                // call_from_lua or a nested call_unguarded from Rust.
+                // call_from_lua or a nested call_unguarded from Rust. No call
+                // here is a tail call, so every level stays active.
                 let source = format!(
                     "function recurse(n)
-                    if n < {} then return recurse(n + 1) end
-                    return {}()
+                    if n < {} then recurse(n + 1) return end
+                    {}()
                     end",
                     dellingr::limits::MAX_CALL_DEPTH - 1 - u32::from(from_lua),
                     if from_lua { "target" } else { "host_admit" }
@@ -369,11 +371,7 @@ fn nonfunction_chain_resolution_and_admission_report_once() {
                 state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
             }
             let error = if from_lua {
-                let source = if admission {
-                    "return recurse(0)"
-                } else {
-                    "return target()"
-                };
+                let source = if admission { "recurse(0)" } else { "target()" };
                 let program = dellingr::Program::compile(source, Some(b"chain-caller")).unwrap();
                 state.load(&program).unwrap();
                 state
