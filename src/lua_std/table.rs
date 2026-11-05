@@ -60,6 +60,8 @@ fn clear_raw_move_interrupt_test_hook() {
 }
 
 // Keep registration order: it determines table iteration and snapshot baselines.
+// Each entry is named by its full catalog id; the `table` table key is the part
+// after `table.` (`lua_std::CatalogSegment`).
 pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // table.insert(t, [pos,] value) - costs 1
     // Inserts value at position pos in t, shifting elements up.
@@ -76,7 +78,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // table whose metatable defines none of the three takes the in-place
     // storage shift instead; the two paths are observably identical there and
     // charge the same.
-    ("insert", |state| {
+    ("table.insert", |state| {
         state.charge(Charge::TableInsert, 1)?;
         check_type_named(state, 1, LuaType::Table, "insert")?;
         let num_args = state.get_top();
@@ -115,7 +117,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // If pos is omitted, removes the last element.
     //
     // Flat charge: see table.insert.
-    ("remove", |state| {
+    ("table.remove", |state| {
         state.charge(Charge::TableRemove, 1)?;
         check_type_named(state, 1, LuaType::Table, "remove")?;
         if has_sequence_metamethods(state, 1)? {
@@ -154,7 +156,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // `__newindex` is sorted through them (length, reads, then writes); any
     // other table takes the raw in-place sort. Both paths charge the length
     // of the original range (at least 1) before any comparator runs.
-    ("sort", |state| {
+    ("table.sort", |state| {
         check_type_named(state, 1, LuaType::Table, "sort")?;
         // A non-function comparator is a script bug, so report it for short
         // tables too instead of letting it surface only after the table grows.
@@ -183,7 +185,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // table.unpack(list [, i [, j]])
     // Returns list[i], list[i+1], ..., list[j].
     // Default: i=1, j=#list
-    ("unpack", table_unpack_values),
+    ("table.unpack", table_unpack_values),
     // table.pack(...) - costs 1
     // Returns a new table with all arguments stored into keys 1, 2, etc.
     // and with a field "n" with the total number of arguments.
@@ -191,7 +193,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // The flat charge is a deliberate game-design choice of the cost model
     // (the budget is not a CPU meter), not an oversight: do not charge per
     // argument.
-    ("pack", |state| {
+    ("table.pack", |state| {
         state.charge(Charge::TablePack, 1)?;
         let num_args = state.top_isize();
 
@@ -227,7 +229,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // Follows Lua 5.4: `#list` honours `__len` (evaluated even when j is
     // given, as 5.4 does) and elements are read through `__index`. Lua 5.2
     // reads raw.
-    ("concat", |state| {
+    ("table.concat", |state| {
         check_type_named(state, 1, LuaType::Table, "concat")?;
         let len = crate::native_call!(
             "lib:table.concat->sequence_len",
@@ -314,7 +316,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // `__index` and writes through `__newindex`. When neither table's
     // metatable defines `__len`, `__index` or `__newindex`, both sides are
     // accessed raw, which is observably the same.
-    ("move", |state| {
+    ("table.move", |state| {
         check_type_named(state, 1, LuaType::Table, "move")?;
         let f = arg_integer(state, 2, "move")?;
         let e = arg_integer(state, 3, "move")?;

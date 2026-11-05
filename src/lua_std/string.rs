@@ -595,10 +595,12 @@ fn append_gsub_replacement(
 }
 
 // Keep this order stable: it is the installation order, which determines table
-// iteration order and snapshot baselines, and the catalog positions.
+// iteration order and snapshot baselines, and the catalog positions. Each entry
+// is named by its full catalog id; the `string` table key is the part after
+// `string.` (`lua_std::CatalogSegment`).
 pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // string.sub(s, i [, j])
-    ("sub", |state| {
+    ("string.sub", |state| {
         // Argument #1 is validated first, as in the reference.
         check_string_or_number(state, 1, "sub")?;
         let i = arg_integer(state, 2, "sub")?;
@@ -617,7 +619,7 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         Ok(1)
     }),
     // string.find(s, pattern [, init [, plain]])
-    ("find", |state| {
+    ("string.find", |state| {
         let subject = string_or_number_bytes(state, 1, "find")?;
         let pattern = string_or_number_bytes(state, 2, "find")?;
         state.charge(
@@ -709,9 +711,9 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         }
     }),
     // string.format(formatstring, ...)
-    ("format", super::string_format::format),
+    ("string.format", super::string_format::format),
     // string.len(s)
-    ("len", |state| {
+    ("string.len", |state| {
         let len = match state.typ(1) {
             LuaType::String => state.to_bytes(1)?.len(),
             _ => string_or_number_bytes(state, 1, "len")?.len(),
@@ -721,7 +723,7 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         Ok(1)
     }),
     // string.upper(s)
-    ("upper", |state| {
+    ("string.upper", |state| {
         let mut s = string_or_number_bytes(state, 1, "upper")?;
         charge_bytes(state, Charge::StringUpper, s.len())?;
         s.make_ascii_uppercase();
@@ -730,7 +732,7 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         Ok(1)
     }),
     // string.lower(s)
-    ("lower", |state| {
+    ("string.lower", |state| {
         let mut s = string_or_number_bytes(state, 1, "lower")?;
         charge_bytes(state, Charge::StringLower, s.len())?;
         s.make_ascii_lowercase();
@@ -739,7 +741,7 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         Ok(1)
     }),
     // string.reverse(s)
-    ("reverse", |state| {
+    ("string.reverse", |state| {
         let mut s = string_or_number_bytes(state, 1, "reverse")?;
         charge_bytes(state, Charge::StringReverse, s.len())?;
         s.reverse();
@@ -748,7 +750,7 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         Ok(1)
     }),
     // string.match(s, pattern [, init])
-    ("match", |state| {
+    ("string.match", |state| {
         let s = string_or_number_bytes(state, 1, "match")?;
         let pattern = string_or_number_bytes(state, 2, "match")?;
         state.charge(Charge::StringMatch, (s.len() + pattern.len()).max(1) as u64)?;
@@ -781,7 +783,7 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         }
     }),
     // string.gmatch(s, pattern [, init])
-    ("gmatch", |state| {
+    ("string.gmatch", |state| {
         let s = string_or_number_bytes(state, 1, "gmatch")?;
         let pattern = string_or_number_bytes(state, 2, "gmatch")?;
         state.charge(
@@ -836,7 +838,7 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         )
     }),
     // string.gsub(s, pattern, repl [, n])
-    ("gsub", |state| {
+    ("string.gsub", |state| {
         let s = string_or_number_bytes(state, 1, "gsub")?;
         let pattern = string_or_number_bytes(state, 2, "gsub")?;
         let repl_type = state.typ(3);

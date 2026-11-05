@@ -149,6 +149,14 @@ more than one chunk, so the change that put the cache prune on a cadence was
 measured only on `gc_churn`. Scripts cannot load code, so this also needs a
 Rust-driven harness that loads many Programs into one State.
 
+Also open: State construction (`State::new`, `open_libs`) has no workload. The
+harness reports `state_new_us`, one cold State per launch, so the change that
+made the function table borrow the catalog's static ids (instead of copying
+them per State) was read from interleaved single launches, not a stored
+verdict. A Rust-driven bench building many States would measure what a host
+building one State per script or per tick pays. Like the snapshot bench, this
+needs brokkr to run a host-driven workload, not a `.lua` file.
+
 Why deferred: the registry is live with the curated workloads;
 porting the rest before those have proven the recipe would be
 premature batch work.

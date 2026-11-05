@@ -16,7 +16,13 @@
 //! functions occupy fixed positions at the front of every State's table
 //! (`lua_std::catalog_functions`), so the VM can recognise `next` and the
 //! `ipairs` iterator by handle.
+//!
+//! A catalog entry's name and id are compile-time strings (the catalog's
+//! `&'static str` ids), which the table borrows; only host entries own their
+//! name and id. Building a State therefore copies no catalog strings, which
+//! matters to a host that builds a State per script or per tick.
 
+use std::borrow::Cow;
 use std::num::NonZeroU64;
 
 #[cfg(feature = "snapshot")]
@@ -83,26 +89,29 @@ pub(crate) struct RustFnTable {
     /// Each entry's diagnostic name, the one argument errors raised while it
     /// runs carry: its catalog id for a standard-library entry, the name the
     /// host gave for a host entry. Fixed at creation, not unique, not saved,
-    /// and never part of identity or saveability.
-    names: Vec<Box<str>>,
+    /// and never part of identity or saveability. Borrowed for a catalog
+    /// entry, owned for a host entry.
+    names: Vec<Cow<'static, str>>,
     /// Each entry's stable save id, if it has one. A catalog entry gets its
     /// id when `open_libs` binds the catalog, a host entry when it is
-    /// registered.
+    /// registered: the catalog's ids being static does not make them bound,
+    /// so a raw State's host may register one first (and `open_libs` then
+    /// refuses). Borrowed for a catalog entry, owned for a host entry.
     #[cfg(feature = "snapshot")]
-    ids: Vec<Option<Box<str>>>,
-    /// Stable id to entry. An id names exactly one entry and an entry has at
-    /// most one id. Iterated in id order only (conflict reporting), never in
-    /// entry order.
+    ids: Vec<Option<Cow<'static, str>>>,
+    /// Stable id to entry, the one source of truth for resolving an id. An
+    /// id names exactly one entry and an entry has at most one id. Iterated
+    /// in id order only (conflict reporting), never in entry order.
     #[cfg(feature = "snapshot")]
-    by_id: BTreeMap<Box<str>, RustFnId>,
+    by_id: BTreeMap<Cow<'static, str>, RustFnId>,
 }
 
 impl RustFnTable {
     /// A table holding the standard-library catalog, unbound.
     pub(crate) fn new(state_id: NonZeroU64) -> Self {
         let functions: Vec<RustFunc> = crate::lua_std::catalog_functions().collect();
-        let names: Vec<Box<str>> = crate::lua_std::catalog_ids()
-            .map(|(_, id)| id.into_boxed_str())
+        let names: Vec<Cow<'static, str>> = crate::lua_std::catalog_ids()
+            .map(|(_, id)| Cow::Borrowed(id))
             .collect();
         debug_assert_eq!(names.len(), functions.len());
         Self {
@@ -141,7 +150,7 @@ impl RustFnTable {
     pub(crate) fn add(&mut self, name: &str, function: RustFunc) -> Option<RustFnHandle> {
         let id = self.next_id()?;
         self.functions.push(function);
-        self.names.push(name.into());
+        self.names.push(Cow::Owned(name.to_owned()));
         #[cfg(feature = "snapshot")]
         self.ids.push(None);
         Some(self.handle(id))
@@ -203,20 +212,20 @@ impl RustFnTable {
         debug_assert!(!self.is_bound(id), "registration ids are checked unbound");
         let entry = self.next_id()?;
         self.functions.push(function);
-        self.names.push(name.into());
-        self.ids.push(Some(id.into()));
-        self.by_id.insert(id.into(), entry);
+        self.names.push(Cow::Owned(name.to_owned()));
+        self.ids.push(Some(Cow::Owned(id.to_owned())));
+        self.by_id.insert(Cow::Owned(id.to_owned()), entry);
         Some(self.handle(entry))
     }
 
     /// The smallest catalog id bound to an entry other than its own catalog
     /// entry, which `open_libs` must refuse before binding anything.
-    pub(crate) fn catalog_conflict(&self) -> Option<String> {
-        let mut conflict: Option<String> = None;
+    pub(crate) fn catalog_conflict(&self) -> Option<&'static str> {
+        let mut conflict: Option<&'static str> = None;
         for (entry, id) in crate::lua_std::catalog_ids() {
-            if let Some(bound) = self.by_id.get(id.as_str())
+            if let Some(bound) = self.by_id.get(id)
                 && *bound != entry
-                && conflict.as_ref().is_none_or(|smallest| id < *smallest)
+                && conflict.is_none_or(|smallest| id < smallest)
             {
                 conflict = Some(id);
             }
@@ -228,18 +237,14 @@ impl RustFnTable {
     /// ruled out conflicts with `catalog_conflict`.
     pub(crate) fn bind_catalog(&mut self) {
         for (entry, id) in crate::lua_std::catalog_ids() {
-            debug_assert!(
-                self.by_id
-                    .get(id.as_str())
-                    .is_none_or(|bound| *bound == entry)
-            );
-            self.ids[entry.index()] = Some(id.as_str().into());
-            self.by_id.insert(id.into_boxed_str(), entry);
+            debug_assert!(self.by_id.get(id).is_none_or(|bound| *bound == entry));
+            self.ids[entry.index()] = Some(Cow::Borrowed(id));
+            self.by_id.insert(Cow::Borrowed(id), entry);
         }
     }
 
     /// Stable id to entry, for resolving a save's function ids on load.
-    pub(crate) fn ids(&self) -> &BTreeMap<Box<str>, RustFnId> {
+    pub(crate) fn ids(&self) -> &BTreeMap<Cow<'static, str>, RustFnId> {
         &self.by_id
     }
 }

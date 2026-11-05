@@ -64,6 +64,7 @@
 //!   host that content-hashes saves across upgrades must hash the payload
 //!   after the header, or accept that a version bump changes the bytes.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -2085,7 +2086,7 @@ struct DecodeCtx<'a> {
     strings: &'a [super::object::StringPtr],
     objects: &'a [ObjectPtr],
     env_forward: &'a BTreeMap<String, ObjectPtr>,
-    fn_forward: &'a BTreeMap<Box<str>, RustFnId>,
+    fn_forward: &'a BTreeMap<Cow<'static, str>, RustFnId>,
 }
 
 #[derive(Eq, Ord, PartialEq, PartialOrd)]

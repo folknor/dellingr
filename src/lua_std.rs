@@ -140,7 +140,7 @@ pub(crate) fn open_libs(state: &mut State) -> Result<()> {
     {
         if let Some(id) = state.rust_fns.catalog_conflict() {
             return Err(Error::without_location(
-                ErrorKind::DuplicateFunctionRegistration { id },
+                ErrorKind::DuplicateFunctionRegistration { id: id.to_owned() },
             ));
         }
         state.rust_fns.bind_catalog();
@@ -159,10 +159,20 @@ pub(crate) fn open_libs(state: &mut State) -> Result<()> {
 /// every State and every build, and the VM recognises `next` and the `ipairs`
 /// iterator by handle. Installation order is each `open_*` function's own,
 /// unchanged by the catalog order.
+///
+/// Each entry's string is its catalog id, written out in full (`"math.sin"`):
+/// the entry's diagnostic name in every build and its stable save id under
+/// `snapshot`. Being a compile-time string, it is borrowed by every State's
+/// function table rather than copied into it, so building a State allocates
+/// no catalog names or ids (`RustFnTable::new`, `RustFnTable::bind_catalog`).
+/// The key a library table installs the entry under is the id with the
+/// segment's prefix and dot removed (`install_key`). `check_catalog_ids`
+/// makes every prefixed id carry its prefix and every id unique at compile
+/// time.
 struct CatalogSegment {
-    /// The library table whose name prefixes each id (the diagnostic name,
-    /// and the stable save id under `snapshot`), or `None` for ids that are
-    /// complete names.
+    /// The library table the segment installs into, whose name and a dot
+    /// begin each of its ids, or `None` for ids that are complete names
+    /// (the base segment's are also its global names).
     prefix: Option<&'static str>,
     functions: &'static [(&'static str, crate::RustFunc)],
 }
@@ -222,26 +232,89 @@ const fn segment_offset(segment: usize) -> usize {
     offset
 }
 
+/// Whether `bytes` begins with `prefix`, at compile time.
+const fn starts_with(bytes: &[u8], prefix: &[u8]) -> bool {
+    if bytes.len() < prefix.len() {
+        return false;
+    }
+    let mut byte = 0;
+    // bounded: both are fixed catalog strings.
+    while byte < prefix.len() {
+        if bytes[byte] != prefix[byte] {
+            return false;
+        }
+        byte += 1;
+    }
+    true
+}
+
+/// Whether two strings are equal, at compile time.
+const fn same_str(a: &str, b: &str) -> bool {
+    a.len() == b.len() && starts_with(a.as_bytes(), b.as_bytes())
+}
+
 /// The position of `name` in a segment, found at compile time.
 const fn position_in(functions: &[(&str, crate::RustFunc)], name: &str) -> usize {
     let mut index = 0;
     // bounded: the library function list is fixed at compile time.
     while index < functions.len() {
-        let candidate = functions[index].0.as_bytes();
-        let wanted = name.as_bytes();
-        if candidate.len() == wanted.len() {
-            let mut byte = 0;
-            // bounded: both names are fixed catalog strings.
-            while byte < wanted.len() && candidate[byte] == wanted[byte] {
-                byte += 1;
-            }
-            if byte == wanted.len() {
-                return index;
-            }
+        if same_str(functions[index].0, name) {
+            return index;
         }
         index += 1;
     }
     panic!("the catalog lists every recognised library function")
+}
+
+/// Compile-time check of the catalog ids: an id in a prefixed segment is
+/// the prefix, a dot and a nonempty name, so `install_key` can slice it, and
+/// no two entries share an id, so an id names exactly one entry (a repeated
+/// id would otherwise collapse into one `by_id` binding).
+const fn check_catalog_ids() {
+    let mut segment = 0;
+    // bounded: segment is an index into the fixed library catalog.
+    while segment < CATALOG.len() {
+        let functions = CATALOG[segment].functions;
+        let mut index = 0;
+        // bounded: each library segment is a fixed catalog list.
+        while index < functions.len() {
+            let id = functions[index].0;
+            if let Some(prefix) = CATALOG[segment].prefix {
+                assert!(
+                    id.len() > prefix.len() + 1
+                        && starts_with(id.as_bytes(), prefix.as_bytes())
+                        && id.as_bytes()[prefix.len()] == b'.',
+                    "a prefixed catalog id is its prefix, a dot and a name"
+                );
+            }
+            let mut other_segment = segment;
+            let mut other = index + 1;
+            // bounded: the rest of the fixed library catalog.
+            while other_segment < CATALOG.len() {
+                let others = CATALOG[other_segment].functions;
+                // bounded: each library segment is a fixed catalog list.
+                while other < others.len() {
+                    assert!(!same_str(id, others[other].0), "catalog ids are unique");
+                    other += 1;
+                }
+                other_segment += 1;
+                other = 0;
+            }
+            index += 1;
+        }
+        segment += 1;
+    }
+}
+
+const _: () = check_catalog_ids();
+
+/// The key a segment's entry is installed under in its library table: its
+/// id without the segment's prefix and dot (`sin` for `math.sin`).
+fn install_key(segment: &CatalogSegment, id: &'static str) -> &'static str {
+    match segment.prefix {
+        Some(prefix) => &id[prefix.len() + 1..],
+        None => id,
+    }
 }
 
 /// The `ipairs` iterator `ipairs` returns.
@@ -270,18 +343,10 @@ pub(crate) fn catalog_functions() -> impl Iterator<Item = crate::RustFunc> {
 /// Every catalog entry with its id (`math.sin`, `print`, `ipairs.iter`, ...):
 /// its diagnostic name in every build, and its stable save id under the
 /// `snapshot` feature.
-pub(crate) fn catalog_ids() -> impl Iterator<Item = (RustFnId, String)> {
+pub(crate) fn catalog_ids() -> impl Iterator<Item = (RustFnId, &'static str)> {
     CATALOG
         .iter()
-        .flat_map(|segment| {
-            segment
-                .functions
-                .iter()
-                .map(move |&(name, _)| match segment.prefix {
-                    Some(prefix) => format!("{prefix}.{name}"),
-                    None => name.to_owned(),
-                })
-        })
+        .flat_map(|segment| segment.functions.iter().map(|&(id, _)| id))
         .enumerate()
         .map(|(index, id)| (RustFnId::catalog(index), id))
 }
@@ -289,9 +354,11 @@ pub(crate) fn catalog_ids() -> impl Iterator<Item = (RustFnId, String)> {
 /// Installs each function of a library segment into the table on top of the
 /// stack, in the segment's order.
 fn install_library_functions(state: &mut State, segment: usize) -> Result<()> {
+    let segment_entries = &CATALOG[segment];
     // bounded: each library segment is a fixed catalog list.
-    for (index, &(name, _)) in CATALOG[segment].functions.iter().enumerate() {
-        state.set_table_str_key_rust_fn(-1, name, library_fn(segment, index))?;
+    for (index, &(id, _)) in segment_entries.functions.iter().enumerate() {
+        let key = install_key(segment_entries, id);
+        state.set_table_str_key_rust_fn(-1, key, library_fn(segment, index))?;
     }
     Ok(())
 }

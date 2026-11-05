@@ -14,8 +14,9 @@ one line per problem otherwise.
 
 The model is lexical, not a compiler call graph. It finds `fn` items and
 their bodies (closure bodies count as part of the enclosing function, and a
-library callback written as a closure in a registration list, `("name",
-|state| { ... })`, counts as a function of its own named `lib:name`), skips
+library callback written as a closure in a registration list, `("id",
+|state| { ... })`, counts as a function of its own named `lib:id` after its
+catalog id, `lib:table.insert`), skips
 test code, and resolves a call by its name and receiver: `self.f(` inside
 `impl T` and `Self::f(` resolve to `T::f`, `state.f(` to `State::f`,
 `T::f(` to `T::f`, a bare or module-path `f(` to a free function, and any
@@ -294,15 +295,14 @@ class Source:
         return fns
 
     def closure_callbacks(self):
-        lib = pathlib.PurePosixPath(self.rel).stem
-        prefix = "" if lib == "basic" else f"{lib}."
+        # The registration list spells each entry's full catalog id.
         out = []
         for m in CLOSURE_CALLBACK.finditer(self.text):
             open_at = m.end() - 1
             if self.code[open_at] != "{":
                 continue
             close = match_brace(self.code, open_at)
-            out.append(Fn(self, f"lib:{prefix}{m.group(1)}", None, m.start(), open_at, close, ""))
+            out.append(Fn(self, f"lib:{m.group(1)}", None, m.start(), open_at, close, ""))
         return out
 
     def enclosing(self, offset):
