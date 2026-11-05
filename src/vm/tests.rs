@@ -192,6 +192,7 @@ fn unsealed_globals_keep_every_tombstone() {
 
 #[test]
 fn compaction_keeps_live_order_and_cached_writes() {
+    let _hits = super::caches::HitMode::required();
     let mut state = State::new();
     state.seal_globals();
     let baseline = state.global_env.len(&state.heap);

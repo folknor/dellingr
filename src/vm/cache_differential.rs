@@ -2,6 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use super::caches::HitMode;
 use crate::example_list::EXAMPLES;
 use crate::{ArgCount, HostCallbacks, Program, RetCount, State};
 
@@ -17,20 +18,6 @@ impl HostCallbacks for Output {
     }
 
     fn on_error(&mut self, _error: &crate::error::Error) {}
-}
-
-struct HitMode(bool);
-
-impl HitMode {
-    fn new(enabled: bool) -> Self {
-        Self(super::caches::ENABLE_HITS.replace(enabled))
-    }
-}
-
-impl Drop for HitMode {
-    fn drop(&mut self) {
-        super::caches::ENABLE_HITS.set(self.0);
-    }
 }
 
 // A larger per-example ceiling gives ordinary programs room to reach repeated

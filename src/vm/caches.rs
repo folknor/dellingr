@@ -8,10 +8,67 @@ use super::lua_val::Val;
 use super::object::{GcHeap, ObjectPtr};
 use super::table::{HashProbe, KeyedIndex, SlotRef};
 
-// Under `disable-inline-caches` every cache read misses. Only this crate's unit tests can re-enable hits for the paired execution.
+// Under `disable-inline-caches` every cache read misses (the builtin mirror
+// included). Only this crate's unit tests can turn hits back on, per thread,
+// through `HitMode`.
 #[cfg(all(feature = "disable-inline-caches", test))]
 std::thread_local! {
-    pub(super) static ENABLE_HITS: Cell<bool> = const { Cell::new(false) };
+    static ENABLE_HITS: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Inline-cache hit mode for the current thread while the guard is held.
+///
+/// The `inline-cache-differential` check shape runs the whole library test
+/// suite under `disable-inline-caches`, so a test runs on the forced-miss
+/// path unless it holds `HitMode::required()`. A test whose subject is an
+/// inline-cache hit or the builtin mirror (it reads a cache slot, asserts a
+/// warmed entry, or exists to prove a hit does not go stale) holds it from
+/// its first line; without it a positive hit assertion fails that shape and a
+/// negative one passes there without testing anything. Every other test
+/// passing on the forced-miss path is coverage of the miss path, and the
+/// corpus differential compares the two modes directly. Without the feature
+/// hits cannot be turned off, so `required()` does nothing.
+///
+/// The mode is thread-local and the guard is neither `Send` nor `Sync`: a
+/// test that checks hits on a worker thread takes the guard in that worker.
+#[cfg(test)]
+#[must_use = "the hit mode holds only while the guard is alive"]
+pub(super) struct HitMode {
+    #[cfg(feature = "disable-inline-caches")]
+    previous: bool,
+    _thread: std::marker::PhantomData<*const ()>,
+}
+
+#[cfg(test)]
+impl HitMode {
+    /// Hits on for this thread while the guard lives.
+    pub(super) fn required() -> Self {
+        #[cfg(feature = "disable-inline-caches")]
+        {
+            Self::new(true)
+        }
+        #[cfg(not(feature = "disable-inline-caches"))]
+        {
+            Self {
+                _thread: std::marker::PhantomData,
+            }
+        }
+    }
+
+    #[cfg(feature = "disable-inline-caches")]
+    pub(super) fn new(enabled: bool) -> Self {
+        Self {
+            previous: ENABLE_HITS.replace(enabled),
+            _thread: std::marker::PhantomData,
+        }
+    }
+}
+
+#[cfg(all(feature = "disable-inline-caches", test))]
+impl Drop for HitMode {
+    fn drop(&mut self) {
+        ENABLE_HITS.set(self.previous);
+    }
 }
 
 #[cfg(feature = "disable-inline-caches")]

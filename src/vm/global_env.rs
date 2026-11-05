@@ -723,7 +723,7 @@ mod tests {
     use crate::State;
     use crate::instr::{ArgCount, Builtin, RetCount};
     use crate::vm::Val;
-    use crate::vm::caches::{GlobalLookupCacheEntry, GlobalLookupCacheSlot};
+    use crate::vm::caches::{GlobalLookupCacheEntry, GlobalLookupCacheSlot, HitMode};
     use std::sync::Arc;
 
     fn key(state: &mut State, name: &str) -> Val {
@@ -740,6 +740,7 @@ mod tests {
 
     #[test]
     fn global_write_cache_is_filled_and_shared_by_writer_closures() {
+        let _hits = HitMode::required();
         let mut state = State::new();
         crate::Program::compile(
             "function make() return function(v) cache_target = v end end \
@@ -801,6 +802,7 @@ mod tests {
 
     #[test]
     fn a_missing_cached_global_slot_requests_the_keyed_fallback() {
+        let _hits = HitMode::required();
         let mut state = State::raw();
         let cache = GlobalLookupCacheSlot::default();
         cache.set(GlobalLookupCacheEntry {
@@ -824,6 +826,7 @@ mod tests {
 
     #[test]
     fn generic_global_table_mutation_invalidates_the_builtin_mirror() {
+        let _hits = HitMode::required();
         let mut state = State::raw();
         let slot = Builtin::Print as u8;
         let env = &state.global_env;
@@ -842,6 +845,7 @@ mod tests {
 
     #[test]
     fn builtin_rebind_keeps_global_slot_cache_valid() {
+        let _hits = HitMode::required();
         let mut state = State::raw();
         let target = key(&mut state, "target");
         let env = &state.global_env;
@@ -857,6 +861,7 @@ mod tests {
 
     #[test]
     fn absent_global_cache_survives_value_writes_but_not_definition() {
+        let _hits = HitMode::required();
         let mut state = State::raw();
         let existing = key(&mut state, "existing");
         let optional = key(&mut state, "optional");
@@ -877,6 +882,7 @@ mod tests {
 
     #[test]
     fn a_cleared_global_keeps_its_slot_and_its_cache() {
+        let _hits = HitMode::required();
         for seal in [false, true] {
             let mut state = State::raw();
             if seal {
@@ -902,6 +908,7 @@ mod tests {
 
     #[test]
     fn global_caches_invalidate_on_both_environment_swaps() {
+        let _hits = HitMode::required();
         let mut state = State::raw();
         let optional = key(&mut state, "optional");
         state

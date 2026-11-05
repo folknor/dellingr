@@ -189,15 +189,17 @@ curated = true
 
 # Inline-cache differential. Under `disable-inline-caches` every cache read
 # misses; the library's unit-test build alone can turn hits back on per
-# thread, so one dev build runs each corpus program with hits on and off and
-# compares prints, cost and errors. The feature is debug-only (compile_error)
-# and appears in no other shape: other cache tests would fail with hits off,
-# so this shape runs only the differential, from the library harness.
+# thread (`HitMode` in `src/vm/caches.rs`). This dev build runs the whole
+# library suite with hits forced off unless a test holds
+# `HitMode::required()` (the cache-hit tests do), so every other library test
+# also passes on the miss path, plus the corpus differential, which runs each
+# example with hits on and off and compares prints, cost and errors. A cache
+# test that asserts a hit without the guard fails here. The feature is
+# debug-only (compile_error) and appears in no other shape.
 [[check]]
 name = "inline-cache-differential"
 features = ["disable-inline-caches"]
 lib_tests = true
-only = ["vm::cache_differential::corpus_inline_cache_differential"]
 curated = true
 
 # Opcode-batching differential. Under `cost-check-interval` the dispatch loop

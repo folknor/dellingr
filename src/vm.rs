@@ -1806,6 +1806,7 @@ mod runtime_tests {
 
     #[test]
     fn warming_one_factory_closure_populates_the_shared_slots() {
+        let _hits = caches::HitMode::required();
         let mut state = State::new();
         crate::Program::compile(
             "function make() return function(t) return t.v end end \
@@ -2011,6 +2012,7 @@ mod runtime_tests {
                 .and_then(|()| state.call(ArgCount::Fixed(0), RetCount::Fixed(0)))
                 .expect("chunk runs");
         }
+        let _hits = caches::HitMode::required();
         let mut state = State::new();
         state.gc_disable_auto();
         // A pruning collection first, so the next one is known not to prune.
@@ -2052,6 +2054,7 @@ mod runtime_tests {
     /// leave none.
     #[test]
     fn collection_clears_cache_entries_naming_freed_objects() {
+        let _hits = caches::HitMode::required();
         let mut state = State::new();
         state.gc_disable_auto();
         crate::Program::compile(
@@ -2246,6 +2249,7 @@ mod runtime_tests {
     /// position a collection emptied before evicting a survivor.
     #[test]
     fn method_entries_replace_least_recently_used_and_never_duplicate() {
+        let _hits = caches::HitMode::required();
         let mut state = State::new();
         state.gc_disable_auto();
         let run = |state: &mut State, source: &str| {

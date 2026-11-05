@@ -549,9 +549,9 @@ fn process_global_constructs_are_marked() {
     }
 }
 
-/// Curated check shapes filter tests by substring. Each filter must select an
-/// existing test, and feature gates on matched tests identify the families
-/// that the shape must keep selected.
+/// Curated check shapes filter tests by substring, or run whole selected
+/// targets. Each filter must select an existing test, and feature gates on
+/// matched tests identify the families that the shape must keep selected.
 #[test]
 fn curated_check_filters_select_existing_feature_gated_tests() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -622,10 +622,22 @@ fn curated_check_filters_select_existing_feature_gated_tests() {
                     == Some(true),
             "curated check shape `{name}` must use the default dev profile"
         );
-        let filters = check
-            .get("only")
-            .and_then(toml::Value::as_array)
-            .unwrap_or_else(|| panic!("curated check shape `{name}` should list its only filters"))
+        let selects_targets = check.get("lib_tests").and_then(toml::Value::as_bool) == Some(true)
+            || check.get("tests").is_some();
+        // A curated shape narrows by name, or runs whole selected targets
+        // (`inline-cache-differential` runs every library test under its
+        // feature); with no name filter every test of those targets runs, so
+        // no feature-gated family can fall out of it.
+        let Some(only) = check.get("only") else {
+            assert!(
+                selects_targets,
+                "curated check shape `{name}` should list only filters or select its targets"
+            );
+            continue;
+        };
+        let filters = only
+            .as_array()
+            .unwrap_or_else(|| panic!("curated check shape `{name}` only filters should be a list"))
             .iter()
             .map(|filter| {
                 let filter = filter.as_str().unwrap_or_else(|| {

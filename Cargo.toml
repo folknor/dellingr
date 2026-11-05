@@ -32,7 +32,8 @@ snapshot = []
 # without debug assertions), each enabled by its own curated brokkr.toml check
 # shape. Single-refusal error-boundary sweeps (`instrumentation-faults`).
 fault-injection = []
-# Every inline-cache read misses, for the inline-cache differential
+# Every inline-cache read misses unless a unit test turns hits on, for the
+# inline-cache differential and forced-miss library run
 # (`inline-cache-differential`).
 disable-inline-caches = []
 # Overridable cost-flush interval and charge-site log, for the opcode-batching
