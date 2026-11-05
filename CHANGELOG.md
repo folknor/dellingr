@@ -4,292 +4,115 @@ All notable changes to dellingr are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 [Semantic Versioning](https://semver.org/) once 1.0 lands.
 
-## [Unreleased]
+## [0.7.0] - 2026-11-05
 
-`COST_MODEL_VERSION` is 8 (unchanged). Default costs are unchanged; the
-version's meaning is wider (see below).
+Saves from 0.6.0 do not load: snapshot `FORMAT_VERSION` is 14.
+`COST_MODEL_VERSION` is 8 (unchanged) and default costs are unchanged, but the
+version now also covers which charge work is attributed to and how a charge is
+admitted, under every cost model. Several changes are replay-visible;
+re-record replays.
 
 ### Added
 
-- The `bench-harness` feature builds `dellingr-bench`, the benchmark harness
-  bin that was the `hotpath` example (it moved to `src/bin/dellingr-bench.rs`).
-  Without the feature, `cargo install dellingr` still installs only the CLI.
-  The feature pulls in `libc` as an optional dependency; the library never
-  links it.
-- `State::set_table(i)`: the host store that honours `__newindex`, the
-  counterpart of `get_table`. It stores exactly as a script's `t[k] = v`
-  does (handler tables, functions and the metamethod depth rule, table
-  receivers only, nil and NaN keys passed to a handler and refused only by a
-  raw store) and charges nothing. Every failure before a handler runs leaves
-  the stack unchanged; a failing handler consumes the key and value. Errors
-  are reported to `on_error` like `get_table`'s. The table library's
-  metamethod stores now follow the same contract.
-- Host interrupts. `Interrupt` is a shareable flag (`trigger`, `reset`,
-  `is_triggered`, `same_as`) that a host sets from any thread or a signal
-  handler to stop running Lua: `StateBuilder::interrupt` installs a host-held
-  handle (one trigger stops every State sharing it), `State::interrupt`
-  returns a State's handle and `State::set_interrupt` replaces it, including
-  in a `load_state` setup. Lua fails with the new `ErrorKind::Interrupted` at
-  its next safepoint: every backward jump, every Lua call admission, entry to
-  every Rust callback, and each step of library work that could otherwise
-  run without bound (pattern matching, plain substring search, heap sort,
-  `string.format` directives, `table.concat`, `table.move`, the metamethod
-  paths of `table.insert`, `table.remove` and `table.sort`, and the
-  empty-pattern `string.gsub`). Between two safepoints the work is bounded by
-  the VM's fixed limits, plus any garbage collection and the body of a host
-  callback, which the VM cannot stop. The flag is sticky until the host
-  resets it, charges nothing, and is not saved in snapshots. There is still
-  no instruction-count or time limit. See "Stopping a script from the host"
-  in `docs/budget.md`. The polls cost every run, interrupted or not: about
-  0.5 to 2.4 percent wall time on the benchmark workloads, most on call-heavy
-  code (`reference/performance.md`, "2026-11-04: interrupt safepoints"),
-  measured before the Rust-callback-entry and `string.format` polls existed.
-- `State::raw_field::<T>(table_arg, name)`: host functions read a typed field
-  of an options table argument such as `game.spawn{player = 1, x = 2}`. It is a
-  raw read (a field supplied by `__index` reads as absent), runs no Lua, leaves
-  the stack unchanged and charges no cost. `T` is `f64`, any of `i8` to `i64`
-  and `u8` to `u64` (a finite integral number in range), `bool` (a Lua boolean
-  only), `String` (valid UTF-8), `Vec<u8>` or `Option<_>` of those, where a
-  missing and a nil field are `None`. Failures are argument errors on the
-  table argument: `ArgError::field` names the field, rendered as
-  `bad argument #1 to 'spawn' (field 'x': number expected, got string)`. New
-  `ArgDetail::ValueOutOfRange` and `ArgDetail::InvalidUtf8`; `RawField` is the
-  sealed trait bound.
-- Configurable costs. Every costed operation is a `Charge` (each costed
-  operator opcode, each array element a constructor stores, and each costed
-  library function), and a `CostModel` gives each one an integer weight. A
-  charge site measures the same units as before and charges units times the
-  weight, saturating; weight 0 makes it free. `CostModel::default()` weighs
-  everything 1 and reproduces the existing costs; `CostModel::zero()` makes
-  every registered charge free while host charges and budgets still apply.
-  `Charge::ALL`, `Charge::name` and `CostModel::iter` expose the registry.
-- `Costing`, chosen when the State is built: `Costing::Metered(model)` or
-  `Costing::Off`, which admits every charge (including `consume_cost`) without
-  counting it, leaves `cost_used` at 0 and `cost_remaining` at `i64::MAX`, and
-  refuses a budget. `State::costing` reports it.
-- `State::builder()` with `StateBuilder::costing`, `callbacks`, `gc_policy` and
-  `raw`.
-- `ErrorKind::CostingOff`, returned by `set_cost_budget` under `Costing::Off`.
-- `Program::analyze_cost_with(&model)`: static analysis under a model.
-  `analyze_cost` is the default model. `CostAnalysis::model` returns the model
-  an analysis was priced under, and `ScopeCost::units(charge)` its units of
-  each `Charge`, so each operator is counted on its own.
-- Snapshots save and restore the costing.
+- Configurable costs. Every costed operation is a `Charge` with an integer
+  weight in a `CostModel`: `default()` weighs everything 1, `zero()` makes
+  every registered charge free. `Costing::Metered(model)` or `Costing::Off` is
+  chosen when the State is built; `Off` counts nothing and refuses a budget
+  with `ErrorKind::CostingOff`. Snapshots save the costing, which is
+  replay-visible: record it with replays.
+- `State::builder()` with `costing`, `callbacks`, `gc_policy`, `raw` and
+  `interrupt`.
+- `Program::analyze_cost_with(&model)`, `ScopeCost::units(charge)` and
+  `CostAnalysis::model`.
+- Host interrupts. `Interrupt` is a shareable flag a host triggers from any
+  thread or a signal handler, installed with `StateBuilder::interrupt` or
+  `State::set_interrupt`. Running Lua fails with `ErrorKind::Interrupted` at
+  its next safepoint: backward jumps, calls, Rust callback entry and every
+  library loop that could otherwise run without bound. The flag is sticky
+  until reset, charges nothing and is not saved. See `docs/budget.md`. The
+  polls cost 0.5 to 2.4 percent wall time on the benchmark workloads.
+- `State::set_table(i)`: a host store that honours `__newindex`, the
+  counterpart of `get_table`. Charges nothing.
+- `State::raw_field::<T>(table_arg, name)`: typed raw reads of an options
+  table's fields for host functions (`f64`, integers, `bool`, `String`,
+  `Vec<u8>`, `Option<_>`). Failures are argument errors naming the field, with
+  the new `ArgDetail::ValueOutOfRange` and `ArgDetail::InvalidUtf8`.
+- The `bench-harness` feature builds the `dellingr-bench` benchmark harness,
+  formerly the `hotpath` example. `cargo install dellingr` still installs only
+  the CLI.
 
-### Changed (breaking): cost configuration
+### Changed (breaking)
 
-- `State::set_cost_budget` returns `Result<()>`: it is refused under
-  `Costing::Off`, and, like every other fallible entry point, on a poisoned
-  State. Callers that ignore the result now get an unused-result warning.
-- The snapshot format is version 14: the payload carries the costing. Saves
-  written by earlier formats do not load.
-- The State constructors that took callbacks or a GC policy are replaced by
+- Proper tail calls. `return f(...)` replaces the calling frame (the new
+  `OP_TAILCALL`), so tail recursion runs at constant depth instead of failing
+  with `CallDepthExceeded`. Replay-visible for scripts that died there.
+  Tracebacks print `(...tail calls...)` (`StackFrame::tail_called`), and
+  `error(msg, 2)` in a tail-called helper blames the surviving caller. Costs
+  are unchanged.
+- `goto` is a reserved word: any use raises `SyntaxError::UnsupportedGoto`.
+- A numeral glued to dots is a malformed number: `1...2` no longer
+  concatenates to `12`. Every malformed numeral reports `malformed number` at
+  its first column.
+- `State::set_cost_budget` returns `Result<()>`.
+- The constructors that took callbacks or a GC policy are replaced by
   `State::builder()`. `State::new` and `State::raw` remain.
-- `COST_MODEL_VERSION` now covers the units each charge measures, which charge
-  work is attributed to and how a charge is admitted against a budget, for
-  every model, not only the default costs: moving work from one charge to
-  another needs a bump even when default costs are unchanged. A cost
-  fingerprint is the version plus the costing (`CostModel::iter`). The costing
-  is replay-visible, because it changes where a callback fails: record it with
-  replays.
+- `add_rust_fn(name, f)` and `register_rust_fn(id, name, f)` take a diagnostic
+  name, which argument errors render. Before, the name was looked up in the
+  globals at error time, so rendered names change for aliased and id-only
+  functions, and functions reached through tables no longer show as
+  `<anonymous>` (dellingr#5).
+- `ScopeCost`'s per-category counters are replaced by `units(charge)`;
+  `ScopeCost` and `CostAnalysis` are read-only, with accessor methods. The
+  `--analyze` report names its cost model and lists costs per charge
+  (`+: 3 x 1 = 3`).
 - A library function's weight covers everything it charges, including its
-  pattern-matcher and substring-scan work. Per-unit charges keep their
-  admission under any weight: `table.move` copies exactly the elements it paid
-  for, and scans and matcher steps stop at the first unit that starts with no
-  budget left.
-- Static analysis counts per `Charge`. `ScopeCost::arithmetic_ops`,
-  `negations`, `table_creations`, `table_writes` and `array_elements` are
-  replaced by `ScopeCost::units(charge)`; `function_calls` stays. `ScopeCost`
-  and `CostAnalysis` are read-only: their fields are accessor methods
-  (`name`, `own_cost`, `total_cost`, `instructions`, `nested`, `root`), and
-  they no longer implement `Default`. Costs are derived from the counts under
-  the recorded model and are unchanged for every script.
-- The `--analyze` report names its cost model (`Cost model: version 8, every
-  weight 1`, or every weight that differs from 1) and lists costed operations
-  per charge as `units x weight = cost` (`+: 3 x 1 = 3`); per-scope rows are
-  per charge too (`+: 3`, `table write: 2`). The merged
-  `Arithmetic (+,-,*,/,%,^)` and other category rows are gone.
-
-### Changed (breaking): library tables follow the global table's rule
-
-- Snapshots save every library table (`math`, `string`, `table`, the global
-  table's metatable and the string metatable) whole, like the global table,
-  instead of as a delta against the freshly opened library, and a load
-  restores each by the global table's rule: the save is authoritative for
-  every key it holds, its array part and its metatable, and load setup
-  contributes only string keys the save mentions nowhere. Before, a setup
-  value for a library key survived only while the script left the whole
-  table untouched (any change wrote every slot with its value), and a delta
-  could not tell a key never changed from one restored to its stock value
-  after initialization changed it, so a load that replayed initialization
-  could diverge from the saving State. Replay-visible: save bytes change for
-  every standard-library save (every save now carries the stock contents), a
-  setup override of a stock field or a setup metatable on a
-  library table no longer survives a load, setup's numeric and other
-  non-string keys in a library table are discarded, and a build that drops a
-  stock function cannot load a save from one that had it. Format 14 has not
-  shipped, so the version is unchanged.
-- At run time, in every build, those tables take the global table's slot
-  policy: until `State::seal_globals` they keep every tombstone, and a key
-  cleared and set again keeps its slot instead of moving to the end, which
-  changes `pairs` order over a library table for scripts that do that
-  (replay-visible). Sealing records their pins under `snapshot`. A library
-  table a later `open_libs` replaces becomes an ordinary table again.
-- Snapshot error enums lose the delta-only variants: `EnvironmentCorruption`
-  and `TableRestoreStep` are gone (`SnapshotError::InvalidTable` has no
-  `step`), `TableLoadLocation::Environment` has no `entry`, the per-delta
-  locations are replaced by `EnvironmentTables` and `EnvironmentTable(i)`,
-  `SaveCollection` has `EnvironmentTables` and `EnvironmentPins`,
-  `DecodeReason::InvalidEnvironmentMetatableMode` is gone, and
-  `CorruptionReason::InvalidGlobalPin` and `DuplicateEntry::GlobalPin` are
-  `InvalidPin` and `Pin`, covering library pins too. An unregistered function
-  found in a library table is reported as `environment string.key[i]` (or
-  `[i]`, `.metatable`), whether or not a global still names the table.
-
-### Changed (breaking): host function names
-
-- `State::add_rust_fn` and, under `snapshot`, `State::register_rust_fn` take a
-  mandatory diagnostic name: `add_rust_fn(name, f)` and
-  `register_rust_fn(id, name, f)`. `set_global_named_rust_fn` uses the global
-  name. Callers must pass a name; the id of `register_rust_fn` stays the save
-  identity and is independent of the name.
-- Argument errors raised while a Rust function runs (`check_type`,
-  `check_any`, `raw_field`) now render the entry's name, fixed at creation.
-  Before, the name was discovered at error time from the first matching global
-  binding, then (under `snapshot`) from the snapshot id. Rendered names change
-  for any function reached under an alias, bound under a global that differs
-  from the name now given, or registered by id only. Standard-library entries
-  are named by catalog id in every build. Names are not saved and not unique.
+  matcher and substring-scan work.
+- Snapshots save the library tables (`math`, `string`, `table`, and the global
+  and string metatables) whole and restore them by the global table's rule:
+  the save is authoritative, and load setup adds only string keys the save
+  never mentions. Replay-visible: save bytes change, and a setup override of a
+  stock field no longer survives a load.
+- Library tables follow the global table's slot policy until `seal_globals`,
+  so a key cleared and set again keeps its `pairs` position (replay-visible).
+- Snapshot error enums lose the delta-only variants (`EnvironmentCorruption`,
+  `TableRestoreStep` and others); the global-pin variants become `InvalidPin`
+  and `Pin`.
+- Bytecode admission refuses a loop exit that jumps backward
+  (`ValidationReason::BackwardLoopExit`) and no longer requires UTF-8 global
+  names (`GlobalNameNotUtf8` is removed). Only edited snapshots are affected.
+- `State::set_global_named_rust_fn` inside `with_restricted_env` is refused
+  with `ErrorKind::SetGlobalNamedRustFnInRestrictedEnv`.
+- A function's defined line is the line of its `function` keyword, so saves
+  of functions whose `(` starts a later line change bytes.
 
 ### Fixed
 
-- Host functions exposed only through tables (`game.spawn`, `game.after`) no
-  longer render as `<anonymous>` in argument errors: they show the name the
-  host gave (dellingr#5).
-- Syntax errors for `break` outside a loop and `...` outside a vararg
-  function point at the offending token, not just past it. Other parser
-  errors without a token of their own point just past the last consumed
-  token, whatever the parser had peeked.
-- The compiler rejects a backward jump of exactly 2^23 instructions with
-  `JumpTooFar`, matching the documented "fewer than 2^23" span limit.
-- Edited snapshot bytecode that reaches `FOR_LOOP` with nonnumeric hidden
-  controls returns an internal error instead of panicking.
-- `unpack` and `table.unpack` refuse a range of more than `MAX_RESULTS`
-  elements with `TooManyResults` before checking that its keys are exactly
-  representable.
-- Snapshot loads reject global pins whose strings have equal contents under
-  different arena ids, as documented, instead of merging them.
-- An unregistered function under a global-table key that is not a UTF-8 name
-  is reported as `global table entry[i].key` or `.value` instead of
-  `environment _G`.
-- `Error` and `StackFrame` display no longer invent locations. A traceback
-  frame of an unnamed chunk renders as `3: in main chunk`, not
-  `[C]:3: in main chunk`; a runtime error in an unnamed chunk is prefixed
-  `3: msg`, not `3:0: msg`; an error with neither source nor line (host API
-  misuse such as `invalid stack index (-1)`, or an `error(msg, 2)` whose
-  selected caller has no line) has no prefix instead of `0:0:`. A known
-  column is still shown.
-- A function's defined line (`function <source:line>` in tracebacks) is the
-  line of its `function` keyword, not of its parameter list's `(`. The two
-  differ only when the `(` starts a later line. Snapshot-visible: the defined
-  line is saved, so such a function saves different bytes.
-- The CLI labels every compile failure `compiling source:` instead of
-  `parsing source:` (a source-size refusal is not a parse error), and
-  `--analyze` no longer ends its report with an extra blank line.
-- `docs/determinism.md` names the anchor release queue as a second
-  asynchronous host input: a cross-thread `Anchor` drop concurrent with a run
-  can change which collection frees its value.
-- `Error::is_recoverable` reports a short string or numeral cut off by the
-  end of the source (`"abc`, `1e`, `0x1p-`), through the new
-  `SyntaxError::UnfinishedString` and `SyntaxError::UnfinishedNumber`. Their
-  messages are unchanged (`unfinished string`, `malformed number`); a short
-  string broken by a line break stays `UnclosedString` and nonrecoverable.
-- A numeral glued to dots is a malformed number, as in Lua 5.2 and 5.4
-  (breaking for scripts that relied on it): `1...2` and `0x1...2` used to
-  concatenate to `12`, `1.5..x` and `1e5..2` to concatenate, and `1..2` and
-  `1.2.3` failed with a misleading `')' expected` or `unexpected symbol`.
-  Every numeral is validated by the lexer, so a malformed one reports
-  `malformed number` wherever it appears (`local 1e = 2` said `<name>
-  expected`), and its column is the numeral's first byte for every form
-  (malformed hex numerals and numerals glued to a letter pointed inside the
-  numeral). A source ending inside an incomplete numeral is recoverable even
-  where the grammar wanted another token (`local 1e`), as `local "abc` was.
-- An automatic GC threshold whose computed value saturates to `usize::MAX`
-  stays automatic, so a later collection recomputes it, instead of switching
-  allocation-triggered collection off for good.
-- A snapshot table restore that rejects an entry leaves the table's contents,
-  version and metatable as they were, instead of a half-rebuilt table.
-- Saves write rendered pointer identities in ascending id order, so a loaded
-  State and the continuous run it came from save identical bytes. A State
-  whose identity map was in another order saves different bytes than before,
-  with the same format and identities.
-- The `--analyze` per-scope breakdown shows a scope's operation counts when
-  the model weighs them zero, instead of reporting `cost 0 (static)`.
+- Error and traceback display no longer invent locations (`[C]:3:`, `3:0:`,
+  `0:0:`).
+- Syntax errors for `break` outside a loop and `...` outside a vararg function
+  point at the offending token.
+- `Error::is_recoverable` recognises a string or numeral cut off by the end of
+  the source (`SyntaxError::UnfinishedString`, `UnfinishedNumber`).
+- `select("#n", ...)` returns the argument count.
+- A backward jump of exactly 2^23 instructions is rejected with `JumpTooFar`.
+- `unpack` refuses a range over `MAX_RESULTS` before checking its keys.
+- A saturated automatic GC threshold stays automatic.
+- Snapshots: a rejected table restore leaves the table unchanged; pointer
+  identities save in id order, so a reloaded State saves the same bytes as
+  the run it came from; pins with equal strings under different ids are
+  rejected; forged `FOR_LOOP` controls return an error instead of panicking.
 - Marking a swept upvalue slot panics in release builds too, instead of
-  letting the sweep put the same slot on the free list twice.
-- `State::set_global_named_rust_fn` inside `with_restricted_env` is refused
-  with the new `ErrorKind::SetGlobalNamedRustFnInRestrictedEnv`, before the id
-  is registered. Before, the id stayed registered while its global was
-  discarded with the environment, so retrying outside failed as a duplicate.
-- `select` takes any string starting with `#` as the count form, so
-  `select("#n", ...)` returns the argument count instead of raising "number
-  expected, got string".
-- The CLI reads at most `MAX_SOURCE_BYTES + 1` bytes of input, so an
-  oversized file or an endless stdin fails with the source-size error instead
-  of being buffered in full. It compiles and runs the script on a thread with
-  an explicit 8 MiB stack instead of the main thread, whose size depends on
-  the platform (1 MiB on Windows, below the documented native-stack envelope).
+  corrupting the free list.
+- CLI: reads at most `MAX_SOURCE_BYTES + 1` bytes of input, runs scripts on an
+  explicit 8 MiB stack, and labels every compile failure `compiling source:`.
+- The `--analyze` breakdown shows the counts of zero-weight operations.
 
 ### Changed
 
-- Proper tail calls, as Lua 5.2 and 5.4 guarantee. `return f(...)` and
-  `return o:m(...)` (a single call, not parenthesised) compile to the new
-  `OP_TAILCALL`: a Lua callee, directly or through `__call`, replaces the
-  calling activation, so tail recursion, state machines and
-  continuation-passing loops run at constant call depth instead of failing
-  with `CallDepthExceeded` after `MAX_CALL_DEPTH` levels. Replay-visible:
-  scripts that died there now run on (an unending tail recursion now runs
-  until the host interrupts it, like any loop; every tail call admission is a
-  safepoint), and a tail call made by the activation at the depth limit is
-  admitted. The replaced activation's non-function `__call` chain units are
-  released at the tail call, so tail recursion through a callable chain is no
-  longer bounded by `MAX_METAMETHOD_DEPTH` either. Tracebacks no longer show
-  the replaced frames: the frame a tail call entered has the new public
-  `StackFrame::tail_called` set and the display prints `(...tail calls...)`
-  after it, and `error(msg, 2)` in a helper reached by tail call blames the
-  surviving caller, as in reference Lua (rendered messages change for such
-  scripts). A Rust function in tail position still runs as an ordinary call.
-  Calls and returns stay free, so costs are unchanged for every script that
-  ran before; `ScopeCost::function_calls` counts tail calls. Compiled
-  bytecode changes (one instruction fewer per tail call), so saves of
-  affected functions have different bytes; snapshot format 14, which has not
-  shipped, gains the opcode.
-- `goto` is a reserved word (breaking for scripts that used it as a name or
-  field): any use raises the new `SyntaxError::UnsupportedGoto`, "the 'goto'
-  keyword is not supported", and `TokenKind::Goto` names it. Goto statements
-  and labels remain unimplemented.
-- Bumped the dev-only `object` dependency (the libm symbol test's ELF reader)
-  0.37 to 0.40, and the optional `hotpath` profiler 0.29 to 0.31. Neither
-  touches a default build.
-- Bytecode admission, for compiled code and snapshot loads alike, refuses a
-  `FOR_PREP` or `TFOR_LOOP` whose exit jumps backward, with the new
-  `ValidationReason::BackwardLoopExit`. The compiler never emits one, so no
-  save written by this crate is affected; the rule keeps every backward
-  transfer an interrupt safepoint.
-- Bytecode admission no longer requires a `GET_GLOBAL` or `SET_GLOBAL` name
-  to be UTF-8, and `ValidationReason::GlobalNameNotUtf8` is removed
-  (breaking for code that matched it). `_G` is an ordinary table keyed by the
-  interned literal, so a binary name works as `_G["\255"]` does; the compiler
-  never emits one, so this only widens what a snapshot load accepts.
-- The table library (`insert`, `remove`, `sort`, `move`, `concat`,
-  `unpack`) reads a table's `__len`, `__index` and `__newindex` straight
-  from its metatable instead of through temporary stack slots, and shares
-  the VM's `#` routine for a `__len` call. Behaviour at the stack cap
-  changes: a call that was refused with `StackOverflow` only because the
-  metatable lookup needed one or two free slots now runs, and a `__len`
-  call that does not fit is refused before anything is pushed, reporting
-  the size of the whole three-slot call window as `#` already did. Costs
-  are unchanged.
+- The table library reads `__len`, `__index` and `__newindex` straight from
+  the metatable, so a call refused at the stack cap only for its lookup slots
+  now runs.
+- Dependencies: dev-only `object` 0.40, optional `hotpath` 0.31.
 
 ## [0.6.0] - 2026-10-25
 

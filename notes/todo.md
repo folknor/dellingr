@@ -18,6 +18,113 @@ get deleted as they ship or stop being worth tracking.
 - Possible CORE-MATH bug: `is_exact` in pow.c measures the bit length of `m`
   rather than `m^y`. Ported as is; unobservable here (the sweeps pass).
 
+### One rule for string costs (decide before the next release)
+
+Goal: replace today's per-function string charges with one rule a script
+author can state in a sentence, write that rule into `docs/budget.md`, and
+make every string operation obey it. Any change in charges bumps
+`COST_MODEL_VERSION` (and is replay-visible through `cost_used`); do it once,
+before a release, and fold every string change into that one bump.
+
+Why it matters: in the programming game (players' scripts compete per tick
+under one budget) players optimise against the cost model. A rule they can
+predict matters more than the exact numbers, and any free operation that can
+stand in for a priced one will be found and used. In the RTS nobody will
+notice either way.
+
+#### The principle (settled with the user, 2026-11-05)
+
+String work is charged only where it would otherwise be a proxy for work the
+budget prices. This is the same reasoning the README has used since May for
+excluding `string.rep`, `string.byte` and `string.char` ("could be used to
+work around restrictions the game wants to put on the user"), and it sits on
+the older rule that structural code is free so that authors are encouraged to
+write more code, not less. The budget is a game-design instrument, not a CPU
+meter (`docs/budget.md`): host work out of proportion to its charge is a
+performance concern, not a reason to charge.
+
+Applied, the leaning (not yet the decision) is: **pattern work costs per
+primitive scanned; producing strings is free.**
+
+- Pattern matching keeps its per-primitive charges. Matching is real
+  computation (backtracking can be superpolynomial), and making it free would
+  turn `find`/`gsub` into a free search-and-filter engine standing in for
+  charged arithmetic and table work.
+- Emitted bytes go free in `string.format`, `gsub` output and anything else
+  that charges for bytes it produces, because `..` already produces bytes
+  for free. Today a player avoids the `format` charge by concatenating by
+  hand, which is exactly the kind of trick the rule must not leave open.
+
+#### History: what was decided and what was only inferred
+
+- 2026-05-04 READMEs (`0d75771`, `acdd010`): structural semantics free; the
+  `rep`/`byte`/`char` exclusion as a proxy defence. Nothing about `..`.
+- 2026-07-25 `6f9db93` (released as 0.4.0): before it, no string or pattern
+  work was charged at all. Its plan, recoverable with
+  `git show 6f9db93:WORK.md`, is headed "Agreed design" and set the unit as
+  "bytes examined, bytes produced, elements visited", with the constraint
+  "never bill a script for our implementation artifacts" and "legibility is
+  never the more expensive option". That is where `format`, `gsub` and
+  `table.concat` got charged for emitted bytes. The plan never mentions `..`,
+  although its own motivation reads "a script could build a large subject
+  with a handful of concatenations": it closed the work done on a big string,
+  not the building of it.
+- `docs/budget.md` "Free by design" lists "`..`: concatenation output bytes
+  are uncharged". That line describes the status quo; the user never ruled
+  on `..`. The `-S` search places the wording in the docs restructure for the
+  0.4.0 release (`3170f83`, 2026-07-27), but that diff has not been read.
+
+So the July design ("bytes produced cost") and today's leaning ("producing
+strings is free") point opposite ways, and `..` is the loose end either way:
+
+- Keep "bytes produced cost": `..` starts charging per output byte. Large
+  change; ordinary string building gets expensive in both games.
+- Adopt "producing strings is free": drop the output-byte charges from
+  `format`, `gsub` and `table.concat` (check `upper`/`lower`/`reverse`/`sub`
+  too) and keep only examination and pattern charges.
+
+The user has not chosen between these yet. Ask before implementing.
+
+#### Current charges to reconcile (from the earlier laterals list)
+
+Read the code to confirm each before acting; these were recorded from
+earlier reviews.
+
+- `string.format` charges a `%s` argument's bytes when it is consumed and
+  again when the result is appended; `%q` charges the argument, then the
+  longer quoted output. A code comment says the double charge is intended.
+- `string.find`, `match` and `gsub` charge the pattern bytes twice: inside
+  `max(1, subject + pattern)` and again as `max(1, pattern)` (the July plan's
+  "compilation reservation"). `gmatch` charges the sum at creation and the
+  pattern again on the first iterator call; an empty `gmatch` pattern charges
+  nothing after creation. Decide whether compiling a pattern is a priced step
+  of its own; if it is, document it as one.
+- A `gsub` string replacement template charges its length up front on each
+  applied match (the scan for `%1` captures) and then every byte it emits, so
+  a literal template `xyz` costs 6 per match while a function returning
+  `xyz` costs 3 (`CALL` is free). Under "producing strings is free" both
+  drop their output charge and the template keeps only its scan.
+
+#### The proxy check to run on every free string operation
+
+For each string operation the rule leaves free, ask whether a script can use
+it in place of something charged. The known case: strings as a table
+substitute. `t[i] = x` costs a `TableWrite`, while `s = s .. x` is free and
+reading back may be cheap (`string.sub` charges its returned bytes, per the
+July schedule; confirm). Each "write" copies the whole string, which is
+host work the budget does not price, and the 16 MiB string cap bounds it, so
+it may be self-limiting enough to accept. Record the verdict either way in
+`docs/budget.md`.
+
+#### Deliverables
+
+1. The user's choice between the two directions above.
+2. `docs/budget.md`: one stated rule for string costs, the per-function
+   charges as consequences of it, and the proxy verdicts.
+3. The code changes, one `COST_MODEL_VERSION` bump, regenerated
+   `tests/fixtures/corpus_cost.txt` after review, CHANGELOG entry calling out
+   the cost change as replay-visible.
+
 ### Housekeeping left from the `string.format` literal-run change (2026-11-05)
 
 - AGENTS.md (Benchmarks, measurement sites) says to measure
@@ -46,33 +153,30 @@ get deleted as they ship or stop being worth tracking.
 
 Residuals that need a decision:
 
-- Budget exhaustion kills the callback. The user wants to revisit whether
-  running out of budget should do something else; not decided. (The separate
-  question of runaway free loops is settled: see `docs/budget.md`, "Runaway
-  loops are not the VM's problem".)
+- Budget exhaustion kills the callback. Revisited 2026-11-05 against both
+  target games and kept: in the user-scripted AI game (one budget per bug
+  per tick) the kill is a fair game rule, and pausing across ticks would hand
+  a script extra budget; in the RTS the budget is a safety net and waits are
+  host callbacks dispatched from a Lua timers table (dellingr#3, closed), so
+  each due callback is its own budgeted call. Before a release:
+  - Document the kill as the intended outcome in `docs/budget.md`: the error
+    kind a host matches on, which side effects of the killed call persist,
+    and that the State is ready for the next call. Also say that a host
+    exposes the remaining budget to scripts with its own host function over
+    `State::cost_remaining()` (exact mid-run, since the batched opcode cost
+    is flushed before any call leaves the dispatch loop); the VM adds no
+    script-side API for it.
+  (The separate question of runaway free loops is settled: see
+  `docs/budget.md`, "Runaway loops are not the VM's problem".)
 - Every metered snapshot stores all `Charge` weights, `4 * Charge::COUNT`
   bytes, even under the default model. A tag meaning "default model" would
   shrink every default save, at the cost of another format bump.
-- `COST_MODEL_VERSION` stayed 8 while its documented meaning widened to
-  cover attribution and admission for every model. Judged right because
-  default costs and behaviour are unchanged; revisit if anyone keyed stored
-  fingerprints on the old meaning.
 
 Known laterals, pre-existing and deliberate (record, don't "fix" without a
 cost-model decision):
 
-- `string.format` charges a `%s` argument's bytes when it is consumed and
-  again when the result is appended; `%q` charges the argument, then the
-  longer quoted output. A code comment says the double charge is intended.
-- `string.find`, `match` and `gsub` charge the pattern bytes twice: inside
-  `max(1, subject + pattern)` and again as `max(1, pattern)`. `gmatch`
-  charges the sum at creation and the pattern again on the first iterator
-  call. An empty `gmatch` pattern charges nothing after creation.
-- A `gsub` string replacement template charges its length up front on each
-  applied match and then charges every byte it emits, so a literal template
-  `xyz` costs 6 per match while a function returning `xyz` costs 3 output
-  bytes. `docs/budget.md` now states the units; whether the asymmetry is
-  intended is open, and removing it would bump `COST_MODEL_VERSION`.
+- The string-library charges (`format`, `find`/`match`/`gsub`/`gmatch`,
+  `gsub` templates) moved to "One rule for string costs" above.
 - `table.insert` and `table.remove` charge their flat 1 before validating
   their arguments, so an argument error still costs 1.
 - `load_state` discards whatever setup charged or budgeted when it restores
@@ -91,6 +195,33 @@ Cosmetic:
   `Send + 'static`.
 
 ## Deferred forward-looking ideas
+
+### Execution trace hook for a stepping debugger
+
+What: a host-installed hook the VM calls on each new source line (or
+instruction) with the line and `cost_remaining()`, so a programming-game
+client can let the player step through a tick and watch the budget drain.
+Nothing like it exists today: the host's only way in mid-run is the
+`Interrupt`, which kills rather than pauses.
+
+Preferred shape: record, then replay. The hook only appends `(line,
+cost_remaining)` to a buffer during a normal run: it never blocks, never
+re-enters Lua (so no native-call inventory entry or re-entry hazards) and
+charges nothing (so tracing never changes the traced run). The client scrubs
+the trace forwards and backwards; to inspect values at step N it reloads the
+start-of-tick snapshot and reruns to N, which determinism makes exact. The
+alternative, a blocking hook whose call hosts the debugger UI, avoids
+suspension too but fires inside comparators and metamethods and gives no
+backwards stepping.
+
+Open: the hot-path cost of the check (feature flag or a separate traced
+dispatch loop), line versus instruction granularity, and how a trace marks
+nested native invocations.
+
+Why deferred: purely additive and not replay-visible if it charges nothing,
+so it does not gate a release.
+
+Signal: work starting on the AI game's debug client.
 
 ### Observable GC and cache diagnostics
 
