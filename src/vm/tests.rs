@@ -1281,6 +1281,83 @@ fn length_metamethod_preflights_three_slots_at_the_stack_cap() {
     assert_eq!(*state.user_data::<usize>().unwrap(), 1);
 }
 
+/// The library's length lookup takes no stack room: with the stack full, a
+/// table without a metatable or without `__len` answers with its border, and
+/// the sequence-metamethod probe answers too. Only a handler call needs room,
+/// and its window is preflighted whole, as the VM's `#` does: refused with
+/// one or two free slots (stack unchanged, handler not called), pushed and
+/// callable with three. A non-nil, non-function `__len` still counts as a
+/// handler; call resolution judges it.
+#[test]
+fn library_length_lookup_needs_no_stack_room_and_preflights_the_window() {
+    fn len_handler(state: &mut State) -> crate::Result<u8> {
+        *state
+            .user_data_mut::<usize>()
+            .expect("call counter is installed") += 1;
+        state.push_number(7.0)?;
+        Ok(1)
+    }
+
+    let mut state = State::new();
+    state.set_user_data(0usize);
+    set_global_fn(&mut state, "len_handler", len_handler);
+    crate::Program::compile(
+        "plain = {1, 2, 3} \
+         indexed = setmetatable({1, 2}, { __index = {} }) \
+         unrelated = setmetatable({1}, { __call = len_handler }) \
+         measured = setmetatable({}, { __len = len_handler }) \
+         odd = setmetatable({}, { __len = false })",
+        None,
+    )
+    .and_then(|program| state.load(&program))
+    .unwrap();
+    state
+        .call(crate::ArgCount::Fixed(0), RetCount::Fixed(0))
+        .unwrap();
+    for name in ["plain", "indexed", "unrelated", "measured", "odd"] {
+        state.get_global(name).unwrap();
+    }
+
+    state.set_top(MAX_STACK_SIZE as isize).unwrap();
+    assert_eq!(state.length_or_push_len_call(1).unwrap(), Some(3));
+    assert_eq!(state.length_or_push_len_call(2).unwrap(), Some(2));
+    assert_eq!(state.length_or_push_len_call(3).unwrap(), Some(1));
+    assert!(!state.has_sequence_metamethods(1).unwrap());
+    assert!(state.has_sequence_metamethods(2).unwrap());
+    assert!(!state.has_sequence_metamethods(3).unwrap());
+    assert!(state.has_sequence_metamethods(4).unwrap());
+    assert!(state.has_sequence_metamethods(5).unwrap());
+    assert_eq!(state.get_top(), MAX_STACK_SIZE);
+
+    for entry_size in [MAX_STACK_SIZE - 2, MAX_STACK_SIZE - 1, MAX_STACK_SIZE] {
+        state.set_top(entry_size as isize).unwrap();
+        let error = state
+            .length_or_push_len_call(4)
+            .expect_err("three slots do not fit");
+        assert!(matches!(
+            error.kind(),
+            crate::error::ErrorKind::StackOverflow { size, limit }
+                if *size == entry_size + 3 && *limit == MAX_STACK_SIZE
+        ));
+        assert_eq!(state.get_top(), entry_size);
+        assert_eq!(*state.user_data::<usize>().unwrap(), 0);
+    }
+
+    state.set_top((MAX_STACK_SIZE - 3) as isize).unwrap();
+    assert_eq!(state.length_or_push_len_call(4).unwrap(), None);
+    assert_eq!(state.get_top(), MAX_STACK_SIZE);
+    state
+        .call(crate::ArgCount::Fixed(2), RetCount::Fixed(1))
+        .unwrap();
+    assert_eq!(state.to_number(-1).unwrap(), 7.0);
+    assert_eq!(*state.user_data::<usize>().unwrap(), 1);
+
+    state.set_top(5).unwrap();
+    assert_eq!(state.length_or_push_len_call(5).unwrap(), None);
+    assert_eq!(state.get_top(), 8);
+    assert!(matches!(state.at_index(6).unwrap(), Val::Bool(false)));
+}
+
 /// Default rendering that runs out of pointer identities is an execution
 /// failure of `tostring_bytes`, so it notifies like a failed `__tostring`.
 #[test]

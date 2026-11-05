@@ -64,20 +64,13 @@ impl State {
         else {
             return Err(self.type_error(TypeError::Length(val.typ(&self.heap))));
         };
-        let len = tbl.array_len();
-        let len_key = self.meta_names.get(super::MetaName::Len);
-        let handler = tbl
-            .get_metatable()
-            .and_then(|mt_ptr| self.heap.as_table_ref(mt_ptr))
-            .map_or(Val::Nil, |mt| mt.get(&len_key));
+        // The border is computed only when no handler replaces it.
+        let handler = self.metatable_field(tbl.get_metatable(), super::MetaName::Len);
         if matches!(handler, Val::Nil) {
-            return Ok(Some(Val::Num(len as f64)));
+            return Ok(Some(Val::Num(tbl.array_len() as f64)));
         }
         Frame::flush_local_cost(self, local_cost)?;
-        self.check_stack_space(3)?;
-        self.push_unchecked(handler);
-        self.push_unchecked(val);
-        self.push_unchecked(val);
+        self.push_len_window(handler, val)?;
         Ok(None)
     }
 

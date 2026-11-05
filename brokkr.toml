@@ -479,6 +479,18 @@ xxh128 = "1ed1ab2e97827b61e317a94d3f197a5a"
 hotpath_file = "examples/alloc/gc_churn.lua"
 hotpath_xxh128 = "9c89ca315d197f5c3bd4c31cfd79d065"
 
+[dellingr.workloads.result_adjust]
+file = "bench/result_adjust.lua"
+xxh128 = "fc03bdf3c2faafa7c72e56ee78bab09b"
+hotpath_file = "examples/calls/result_adjust.lua"
+hotpath_xxh128 = "0a6667c4ac5e50ab10967e31497c9abe"
+
+[dellingr.workloads.sequence_len]
+file = "bench/sequence_len.lua"
+xxh128 = "93b8e0633008bb396b87f09fed52470f"
+hotpath_file = "examples/tables/sequence_len.lua"
+hotpath_xxh128 = "52dfdaed38435144b82ffd50ee11342e"
+
 [dellingr.workloads.large_source]
 file = "examples/parse/large_source.lua"
 xxh128 = "3d87b6e87edaa28e17783d5c9a89b3d3"

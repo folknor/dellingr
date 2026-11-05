@@ -276,6 +276,15 @@ version's meaning is wider (see below).
   (breaking for code that matched it). `_G` is an ordinary table keyed by the
   interned literal, so a binary name works as `_G["\255"]` does; the compiler
   never emits one, so this only widens what a snapshot load accepts.
+- The table library (`insert`, `remove`, `sort`, `move`, `concat`,
+  `unpack`) reads a table's `__len`, `__index` and `__newindex` straight
+  from its metatable instead of through temporary stack slots, and shares
+  the VM's `#` routine for a `__len` call. Behaviour at the stack cap
+  changes: a call that was refused with `StackOverflow` only because the
+  metatable lookup needed one or two free slots now runs, and a `__len`
+  call that does not fit is refused before anything is pushed, reporting
+  the size of the whole three-slot call window as `#` already did. Costs
+  are unchanged.
 
 ## [0.6.0] - 2026-10-25
 

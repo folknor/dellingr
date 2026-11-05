@@ -47,16 +47,7 @@ impl State {
                 .map_err(|_| self.error(ErrorKind::InvalidStackIndex { index: i }))?,
         };
 
-        match new_top.cmp(&old_top) {
-            Ordering::Less => self.pop_n((old_top - new_top) as isize)?,
-            Ordering::Equal => (),
-            Ordering::Greater => {
-                self.check_stack_space(new_top - old_top)?;
-                self.stack
-                    .resize(self.stack.len() + (new_top - old_top), Val::Nil);
-            }
-        }
-        Ok(())
+        self.resize_stack(self.in_flight.stack_bottom + new_top)
     }
 
     /// Pops `n` elements from the stack.
@@ -75,9 +66,27 @@ impl State {
         if count > self.get_top() {
             return Err(self.error(ErrorKind::InvalidStackIndex { index: n }));
         }
-        for _ in 0..count {
-            self.pop_val();
+        self.stack.truncate(self.stack.len() - count);
+        Ok(())
+    }
+
+    /// Move the top of the physical stack to `len`, dropping the values above
+    /// it or filling the slots it newly covers with nil. Growth is preflighted
+    /// against the stack cap, and only growth: shrinking or keeping the length
+    /// runs no check, so it cannot fail and is no fault-injection site. The
+    /// caller owns the frame boundary: nothing here stops `len` from cutting
+    /// below `stack_bottom`.
+    ///
+    /// The one rule for "the top is now here" wherever growth needs fresh
+    /// capacity (`set_top`, adjusting a call's results). Admission and the
+    /// return to a Lua caller resize within capacity their frame already
+    /// reserved, so they resize directly.
+    #[inline(always)]
+    pub(super) fn resize_stack(&mut self, len: usize) -> Result<()> {
+        if len > self.stack.len() {
+            self.check_stack_space(len - self.stack.len())?;
         }
+        self.stack.resize(len, Val::Nil);
         Ok(())
     }
 
@@ -435,26 +444,6 @@ impl State {
         } else {
             Err(self.error(ErrorKind::InvalidStackIndex { index: fake_idx }))
         }
-    }
-
-    /// Balances a stack after an operation that returns an indefinite number of
-    /// results.
-    pub(super) fn balance_stack(&mut self, expected: usize, received: usize) -> Result<()> {
-        match expected.cmp(&received) {
-            Ordering::Greater => {
-                self.check_stack_space(expected - received)?;
-                for _ in received..expected {
-                    self.push_unchecked(Val::Nil);
-                }
-            }
-            Ordering::Less => {
-                for _ in expected..received {
-                    self.pop_val();
-                }
-            }
-            Ordering::Equal => (),
-        }
-        Ok(())
     }
 
     /// Append after a successful capacity check, or when replacing popped values.

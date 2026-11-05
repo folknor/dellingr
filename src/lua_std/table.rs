@@ -8,7 +8,6 @@ use crate::cost_model::Charge;
 use crate::error::{ArgDetail, LibraryError, LibraryFunction};
 use crate::instr::{ArgCount, RetCount};
 use crate::numeral::{MAX_EXACT_INTEGER, exact_i64, parse_lua_numeral};
-use crate::vm::MetaName;
 
 // `table.unpack` and global `unpack` are separate catalog entries, so they are
 // distinct values with their own save ids whatever this wrapper compiles to
@@ -83,7 +82,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         check_type_named(state, 1, LuaType::Table, "insert")?;
         let num_args = state.get_top();
 
-        if has_sequence_metamethods(state, 1)? {
+        if state.has_sequence_metamethods(1)? {
             return crate::native_call!(
                 "lib:table.insert->insert_through_metamethods",
                 insert_through_metamethods(state, num_args)
@@ -120,7 +119,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     ("table.remove", |state| {
         state.charge(Charge::TableRemove, 1)?;
         check_type_named(state, 1, LuaType::Table, "remove")?;
-        if has_sequence_metamethods(state, 1)? {
+        if state.has_sequence_metamethods(1)? {
             return crate::native_call!(
                 "lib:table.remove->remove_through_metamethods",
                 remove_through_metamethods(state)
@@ -164,7 +163,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         // elements. This choice is deliberate; see docs/compatibility.md.
         let has_comp = check_optional_type_named(state, 2, LuaType::Function, "sort")?;
 
-        if has_sequence_metamethods(state, 1)? {
+        if state.has_sequence_metamethods(1)? {
             return crate::native_call!(
                 "lib:table.sort->sort_through_metamethods",
                 sort_through_metamethods(state, has_comp)
@@ -364,8 +363,8 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         }
 
         let honour_meta = count > 0
-            && (has_sequence_metamethods(state, 1)?
-                || (has_a2 && has_sequence_metamethods(state, dest_idx)?));
+            && (state.has_sequence_metamethods(1)?
+                || (has_a2 && state.has_sequence_metamethods(dest_idx)?));
 
         // Copy elements (if any). Same-table moves that shift the range right
         // must copy backwards so earlier writes do not clobber later reads.
@@ -504,60 +503,23 @@ fn move_element(
     }
 }
 
-/// Whether the table at stack index `idx` has a metatable defining `__len`,
-/// `__index` or `__newindex` - the events that make Lua 5.4's sequence
-/// functions (lua_geti/lua_seti/luaL_len) differ from raw access. Tables
-/// without one take the raw fast paths. `idx` must be a positive index.
-fn has_sequence_metamethods(state: &mut State, idx: isize) -> Result<bool> {
-    state.get_metatable_of(idx)?;
-    if state.typ(-1) == LuaType::Nil {
-        state.pop(1)?;
-        return Ok(false);
-    }
-    let mut found = false;
-    // bounded: three fixed events.
-    for event in [MetaName::Len, MetaName::Index, MetaName::NewIndex] {
-        state.push_meta_name(event)?;
-        state.get_table_raw(-2)?;
-        found = state.typ(-1) != LuaType::Nil;
-        state.pop(1)?;
-        if found {
-            break;
-        }
-    }
-    state.pop(1)?;
-    Ok(found)
-}
-
-/// Lua 5.4's `luaL_len` for the table at the positive stack index `idx`: calls
-/// `__len` when the metatable defines it, else returns the raw border. The
+/// Lua 5.4's `luaL_len` for the table at stack index `idx`: calls `__len`
+/// when the metatable defines it, else returns the raw border. The
 /// metamethod's result must be a number or numeral string with an exact
 /// integer value; `function` names the caller in the error raised otherwise.
 ///
-/// This lives here rather than in `State::table_len` (which is raw and used by
-/// raw fast paths); a shared metamethod-aware length belongs beside it in
-/// `vm/table_ops.rs` once more callers need one.
+/// The handler lookup and its call window are `State::length_or_push_len_call`,
+/// which shares the window routine with the VM's `#`; only the call and the
+/// result conversion live here. The border is computed only when no handler
+/// replaces it.
 pub(super) fn sequence_len(
     state: &mut State,
     idx: isize,
     function: LibraryFunction,
 ) -> Result<i64> {
-    // The array part is bounded by the stack and heap caps, far below i64::MAX.
-    let raw = i64::try_from(state.table_len(idx)?).map_or(i64::MAX, i64::from);
-    state.get_metatable_of(idx)?;
-    if state.typ(-1) == LuaType::Nil {
-        state.pop(1)?;
-        return Ok(raw);
+    if let Some(border) = state.length_or_push_len_call(idx)? {
+        return Ok(crate::saturate::saturating_cast(border));
     }
-    state.push_meta_name(MetaName::Len)?;
-    state.get_table_raw(-2)?;
-    state.remove(-2)?; // drop the metatable, keep the handler
-    if state.typ(-1) == LuaType::Nil {
-        state.pop(1)?;
-        return Ok(raw);
-    }
-    state.push_value(idx)?;
-    state.push_value(idx)?;
     crate::native_call!(
         "sequence_len->call_unguarded",
         state.call_unguarded(ArgCount::Fixed(2), RetCount::Fixed(1))

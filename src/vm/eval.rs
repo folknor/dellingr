@@ -407,16 +407,20 @@ impl State {
         frames.extend(std::iter::once_with(|| self.admitted_frame()));
     }
 
-    /// Adjust a completed call's results. Chain owners have already released
-    /// their units; any padding error propagates to the boundary or unwind.
+    /// Adjust a completed call's results to a fixed count: surplus results
+    /// are dropped, missing ones are nil, and only the padding is checked
+    /// against the stack cap. Chain owners have already released their
+    /// units; any padding error propagates to the boundary or unwind.
+    ///
+    /// A matching count, the common case, skips the resize entirely. Without
+    /// that test the composite `benchmark` workload measured about 2% slower
+    /// in same-day interleaved pairs, with `Frame::run` instruction-identical
+    /// in both builds; with it the difference went away.
     fn finish_call(&mut self, expected: RetCount, actual: u8) -> Result<()> {
-        if let RetCount::Fixed(expected) = expected {
-            if expected < actual {
-                self.stack
-                    .truncate(self.stack.len() - usize::from(actual - expected));
-            } else if expected > actual {
-                self.balance_stack(usize::from(expected), usize::from(actual))?;
-            }
+        if let RetCount::Fixed(expected) = expected
+            && expected != actual
+        {
+            self.resize_stack(self.stack.len() - usize::from(actual) + usize::from(expected))?;
         }
         Ok(())
     }
@@ -865,15 +869,13 @@ impl State {
                 vararg_start,
             }));
 
-        // A public fixed call prevalidates these argument slots, so this pop
-        // cannot fail through the host API. Undo admission for a future
-        // internal caller that violates that invariant. A vararg function's
-        // extra arguments were already collected above.
-        if num_args > num_params
-            && !is_vararg
-            && let Err(e) = self.pop_n((num_args - num_params) as isize)
-        {
-            return Err(self.reject_admission(e, frame_bottom, old_stack_bottom));
+        // A non-vararg function drops its surplus arguments. They are the
+        // top `num_args - num_params` of the `num_args` slots `frame_bottom`
+        // was measured from, so the cut cannot reach below the frame and
+        // needs no check. A vararg function's extra arguments were already
+        // collected above.
+        if num_args > num_params && !is_vararg {
+            self.stack.truncate(frame_bottom + usize::from(num_params));
         }
 
         // The frame reserves every register it can use, parameters, locals

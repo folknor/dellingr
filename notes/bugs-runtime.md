@@ -17,25 +17,9 @@ and may be wrong; verify before acting.
    and they are never deduplicated through git history. Carry the context
    inline instead.
 
-The performance entries below (RT-016 through RT-020, RT-022) describe work the
-hunters saw in the code. None has been measured; any change goes through a
-registered `brokkr dellingr` workload first.
-
-## RT-016 - State::pop_n and balance_stack move one value per loop turn
-
-Scope: `vm-dispatch`. Performance.
-
-`State::pop_n` pops one value per loop turn, and `balance_stack` pushes one nil
-per turn. `truncate` and `resize` express the same operations as single calls.
-
-## RT-017 - sequence_len computes the raw border before checking for __len
-
-Scope: `stdlib-core`. Performance and clarity.
-
-`sequence_len` (`table.rs`) computes the raw border before checking for `__len`
-and discards it when a handler exists, so every metamethod-path call does that
-work for nothing. The expression `i64::try_from(..).map_or(i64::MAX,
-i64::from)` there and in `table_sort` is an identity map written indirectly.
+The entries below marked Performance describe work the hunters saw in the
+code. None has been measured; any change goes through a registered
+`brokkr dellingr` workload first.
 
 ## RT-018 - gmatch construction re-interns strings already on the stack
 

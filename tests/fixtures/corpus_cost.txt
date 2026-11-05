@@ -18,6 +18,7 @@ examples/calls/method.lua|c0c9ba6ea8af339cedc61dab0d12cc26|1002006
 examples/calls/method_cached.lua|f5a9c71d0c190f56d748d789bdff789c|1402006
 examples/calls/method_chain.lua|141a5a7aa1d8453a36135afe9b714c44|802010
 examples/calls/method_polymorphic.lua|6b6609c4b16cb1e7910c06fd99cd3d5f|677304
+examples/calls/result_adjust.lua|0a6667c4ac5e50ab10967e31497c9abe|1083600
 examples/calls/rust_boundary.lua|0443637fb717226cb1239958b85ee341|93009
 examples/calls/tail_call.lua|d6093b8c5e88d2806c8d5faa4fdfafc3|1234100
 examples/calls/vararg.lua|9698e9b1d879799d1eebea02be3ce6b4|3005000
@@ -83,6 +84,7 @@ examples/tables/metamethod_sequence.lua|61159dd099badf6846209df171c4c4b4|227
 examples/tables/mixed.lua|8ccde6a97133456c22a74b063b20503b|2752394
 examples/tables/numeric_index.lua|91aec619d8cfcd8dbc1c564b6ffc2b57|2520001
 examples/tables/queue.lua|0a3e2b4117a7ba5dfbb360c72feba99f|443874
+examples/tables/sequence_len.lua|52dfdaed38435144b82ffd50ee11342e|1806016
 examples/tables/sort.lua|bf77465635b1c608fdd83f7614de9bff|186065
 examples/tail_calls.lua|85d1445bbad36a50eba7414aff7eec8a|1052043
 examples/test_local_function.lua|58efc49b9065ebb487bb1b590f94ef8b|265

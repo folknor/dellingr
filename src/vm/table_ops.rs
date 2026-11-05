@@ -578,6 +578,70 @@ impl State {
             .map_or(0, super::table::Table::array_len))
     }
 
+    /// The table at stack index `idx` and its metatable, for the library's
+    /// metamethod-aware sequence operations. A non-table is a length type
+    /// error; the library checks the argument type first, so a string never
+    /// reaches here and its shared metatable is never consulted.
+    fn sequence_operand(&self, idx: isize) -> Result<(Val, Option<super::object::ObjectPtr>)> {
+        let val = self.at_index(idx)?;
+        let table = val
+            .as_object_ptr()
+            .and_then(|ptr| self.heap.as_table_ref(ptr))
+            .ok_or_else(|| self.type_error(TypeError::Length(val.typ(&self.heap))))?;
+        Ok((val, table.get_metatable()))
+    }
+
+    /// Lua 5.4's `luaL_len` up to the handler call, for the table at `idx`:
+    /// the raw border when its metatable has no `__len` (or it has none),
+    /// with the stack unchanged; otherwise `None`, with the window
+    /// `[handler, t, t]` pushed for a call with two arguments and one result.
+    /// The window is pushed by the routine the VM's `#` uses, so a refusal
+    /// at the stack cap leaves the stack unchanged and reads the same on
+    /// both paths. Looking the handler up takes no stack slots: only a
+    /// handler call needs room. Any non-nil handler counts; whether it is
+    /// callable is call resolution's question.
+    pub(crate) fn length_or_push_len_call(&mut self, idx: isize) -> Result<Option<usize>> {
+        let (val, mt) = self.sequence_operand(idx)?;
+        let handler = self.metatable_field(mt, super::MetaName::Len);
+        if matches!(handler, Val::Nil) {
+            return Ok(Some(self.table_len_of(val)));
+        }
+        self.push_len_window(handler, val)?;
+        Ok(None)
+    }
+
+    /// Whether the table at `idx` has a metatable defining `__len`,
+    /// `__index` or `__newindex`: the events that make Lua 5.4's sequence
+    /// functions (lua_geti/lua_seti/luaL_len) differ from raw access. A raw
+    /// heap read, so it needs no stack room.
+    pub(crate) fn has_sequence_metamethods(&self, idx: isize) -> Result<bool> {
+        use super::MetaName::{Index, Len, NewIndex};
+        let (_, mt) = self.sequence_operand(idx)?;
+        if mt.is_none() {
+            return Ok(false);
+        }
+        Ok([Len, Index, NewIndex]
+            .into_iter()
+            .any(|name| !matches!(self.metatable_field(mt, name), Val::Nil)))
+    }
+
+    /// Push the `__len` call window `[handler, val, val]` after one
+    /// preflight of all three slots, so a refusal pushes nothing.
+    pub(super) fn push_len_window(&mut self, handler: Val, val: Val) -> Result<()> {
+        self.check_stack_space(3)?;
+        self.push_unchecked(handler);
+        self.push_unchecked(val);
+        self.push_unchecked(val);
+        Ok(())
+    }
+
+    fn table_len_of(&self, val: Val) -> usize {
+        val.as_object_ptr()
+            .and_then(|ptr| self.heap.as_table_ref(ptr))
+            .expect("sequence_operand validated the table")
+            .array_len()
+    }
+
     fn table_array_len_at(&self, idx: usize) -> usize {
         self.stack[idx]
             .as_object_ptr()
@@ -1012,8 +1076,16 @@ impl State {
         })
     }
 
-    fn metatable_tostring_field(&self, mt: Option<super::object::ObjectPtr>) -> Val {
-        let key = self.meta_names.get(super::MetaName::ToString);
+    /// The raw `name` field of the metatable `mt`, nil when there is none.
+    /// Choosing whose metatable (a table's own, the strings' shared one) is
+    /// the caller's. Reads the State's interned key, so it neither pushes,
+    /// allocates nor collects.
+    pub(super) fn metatable_field(
+        &self,
+        mt: Option<super::object::ObjectPtr>,
+        name: super::MetaName,
+    ) -> Val {
+        let key = self.meta_names.get(name);
         mt.and_then(|ptr| self.heap.as_table_ref(ptr))
             .map_or(Val::Nil, |mt| mt.get(&key))
     }
@@ -1029,7 +1101,7 @@ impl State {
                 .and_then(super::table::Table::get_metatable),
             _ => None,
         };
-        self.metatable_tostring_field(metatable_ptr)
+        self.metatable_field(metatable_ptr, super::MetaName::ToString)
     }
 
     pub(crate) fn bytes_with_default_string_coercion(&mut self, idx: isize) -> Result<Vec<u8>> {

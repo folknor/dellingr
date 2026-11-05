@@ -51,6 +51,10 @@ pub(crate) const CASES: &[(&str, &str)] = &[
         "local t = setmetatable({}, {__newindex = function() observed = 8 end}) table.insert(t, 1) return 8",
     ),
     (
+        "len",
+        "local t = setmetatable({8}, {__len = function() return 1 end}) return unpack(t)",
+    ),
+    (
         "tostring",
         "return tostring(setmetatable({}, {__tostring = function() return 'ok' end}))",
     ),
