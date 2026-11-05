@@ -499,6 +499,19 @@ pattern = '\b(?:STD|VM)-\d{3}\b|\bC\d{2}\b:|\(L\d+\)'
 paths = ["src/**/*.rs", "tests/**/*.rs"]
 message = "comments must carry their own context instead of citing transient tracker IDs"
 
+# A lint suppression is `#[expect(lint, reason = "...")]` on the narrowest item
+# or statement, so a suppression that no longer suppresses anything fails the
+# warnings-denied clippy run (it cannot tell whether the remaining hit is the
+# one the reason describes). Clippy's own `allow_attributes` skips inner
+# attributes and cannot see code a cfg removes, so this lexical rule is the
+# enforcement; Cargo.toml requires the reason.
+[[textlint]]
+name = "no-allow-attributes"
+pattern = '\ballow\s*\('
+paths = ["src/**/*.rs", "tests/**/*.rs", "examples/**/*.rs"]
+region = "code"
+message = "suppress a lint with #[expect(lint, reason = \"...\")], never allow"
+
 # bench.sh's header documents how to build the external omniLua comparator,
 # which is not a dellingr build.
 [[textlint]]

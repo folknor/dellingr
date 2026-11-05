@@ -26,7 +26,7 @@
 #![warn(missing_docs)]
 // Library output goes through `HostCallbacks`, never straight to a process
 // stream. These catch the printing macros; `std::io::stdout`/`stderr` are
-// banned in clippy.toml, with a scoped allow on `DefaultCallbacks::on_print`.
+// banned in clippy.toml, with an `expect` on `DefaultCallbacks::on_print`.
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
 // The debug-only features are test instrumentation. Keep them out of release
@@ -105,6 +105,7 @@ pub mod limits;
 mod lua_std;
 mod numeral;
 mod patterns;
+mod saturate;
 mod vm;
 mod vm_aux;
 

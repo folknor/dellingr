@@ -218,7 +218,7 @@ pub(super) struct Closure {
 /// pay for this enum's largest variant. Boxing tables would add an allocation
 /// and indirection to every table, including small records; keep them inline
 /// unless measurements justify that tradeoff.
-#[allow(
+#[expect(
     clippy::large_enum_variant,
     reason = "Table is stored inline so table access takes no extra indirection; the exact live-slot count pushed it past the lint threshold"
 )]

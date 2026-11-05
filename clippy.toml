@@ -4,11 +4,11 @@
 # Pointer method bans cover address extraction through addr/expose_provenance;
 # pointer-to-integer casts still require review because these are method bans.
 disallowed-methods = [
-    { path = "std::panic::set_hook", reason = "Process-wide hook replacement can hide concurrent test failures. Use a scoped allow only for a permanent filtering installer." },
-    { path = "std::panic::take_hook", reason = "Process-wide hook replacement can hide concurrent test failures. Use a scoped allow only for a permanent filtering installer." },
+    { path = "std::panic::set_hook", reason = "Process-wide hook replacement can hide concurrent test failures. Only a permanent filtering installer carries an expect with a reason." },
+    { path = "std::panic::take_hook", reason = "Process-wide hook replacement can hide concurrent test failures. Only a permanent filtering installer carries an expect with a reason." },
     { path = "core::result::Result::ok", reason = "Silently discards errors. Use `?` to propagate, or handle the error explicitly." },
-    { path = "core::result::Result::unwrap_or", reason = "Silently discards errors. Handle the error explicitly, or use a scoped allow for an intentional fallback." },
-    { path = "core::result::Result::unwrap_or_default", reason = "Silently discards errors. Handle the error explicitly, or use a scoped allow for an intentional fallback." },
+    { path = "core::result::Result::unwrap_or", reason = "Silently discards errors. Handle the error explicitly; a saturating integer conversion is crate::saturate::saturating_cast." },
+    { path = "core::result::Result::unwrap_or_default", reason = "Silently discards errors. Handle the error explicitly; a saturating integer conversion is crate::saturate::saturating_cast." },
     { path = "std::env::args", reason = "Reading process arguments makes behavior depend on host process state." },
     { path = "std::env::args_os", reason = "Reading process arguments makes behavior depend on host process state." },
     { path = "std::env::var", reason = "Reading host environment makes behavior depend on process state." },
@@ -81,8 +81,8 @@ disallowed-methods = [
     { path = "f32::powf", reason = "Platform libm results differ across hosts." },
     { path = "f32::powi", reason = "Not specified to round once and lowered to a host routine." },
     { path = "f32::mul_add", reason = "Can lower to a library fma that is not correctly rounded on some targets." },
-    { path = "std::io::stdout", reason = "Library output goes through HostCallbacks. Hosts and harnesses whose job is printing use a scoped allow." },
-    { path = "std::io::stderr", reason = "Library output goes through HostCallbacks. Hosts and harnesses whose job is printing use a scoped allow." },
+    { path = "std::io::stdout", reason = "Library output goes through HostCallbacks. Hosts and harnesses whose job is printing carry an expect with a reason." },
+    { path = "std::io::stderr", reason = "Library output goes through HostCallbacks. Hosts and harnesses whose job is printing carry an expect with a reason." },
 ]
 
 # Determinism: ban non-deterministic collections. Re-export aliases share a

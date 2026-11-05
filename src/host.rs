@@ -116,17 +116,19 @@ pub trait HostCallbacks: Send {
 pub struct DefaultCallbacks;
 
 impl HostCallbacks for DefaultCallbacks {
-    // Printing to stdout is this callback's job; the library-wide stream ban
-    // exists so that nothing else does.
-    #[allow(clippy::disallowed_methods)]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "Printing to stdout is this callback's job; the library-wide stream ban exists so that nothing else does."
+    )]
     fn on_print(&mut self, _source: Option<&[u8]>, _line: u32, message: &[u8]) {
         use std::io::Write;
 
         let mut stdout = std::io::stdout().lock();
         // Deliberately discarded: on_print has no error channel (see above).
-        #[allow(clippy::let_underscore_must_use)]
-        let _ = stdout
-            .write_all(message)
-            .and_then(|()| stdout.write_all(b"\n"));
+        drop(
+            stdout
+                .write_all(message)
+                .and_then(|()| stdout.write_all(b"\n")),
+        );
     }
 }

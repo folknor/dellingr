@@ -22,7 +22,7 @@ The crate ships a library (`Program`, `State`, `HostCallbacks`, `RustFunc`, `Pro
 - The user can exempt you from any rule at any time.
 - Never read or write from `/tmp`. All data lives in the project.
 - Never run raw `cargo`, `curl`, `pkill`. Use `brokkr`.
-- Never disable a lint; fix the code. The `clippy.toml` bans name their replacements. An `expect` string explains the invariant, not the call.
+- Fix the code before suppressing a lint; the `clippy.toml` bans name their replacements. A suppression is for a site where the diagnostic does not warrant the change (a host process printing, an exact float comparison that is the algorithm, a deliberate layout tradeoff): `#[expect(lint, reason = "...")]` on the narrowest item or statement, the reason saying why. `allow` and reasonless suppressions fail the gate. An `.expect("...")` string explains the invariant, not the call.
 
 ## Commands
 

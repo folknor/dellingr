@@ -89,3 +89,17 @@ fix wave.
 
 Approaches raised so far (not exhaustive): the shared-ownership handle the doc
 comment names, which would let `find`, `match` and `gsub` borrow.
+
+## RT-023 - A global-cache unit test fails under the inline-cache differential sweep
+
+Scope: `vm-heap`. Unverified; observed in passing on 2026-11-05 during the
+library-table snapshot change (660cb05), which did not touch the code.
+
+`vm::global_env::tests::global_caches_invalidate_on_both_environment_swaps`
+fails when run as `brokkr test <name> --sweep inline-cache-differential`.
+`brokkr check` does not run that test under that sweep, so the gate is green.
+Not established: whether the failure predates 660cb05, and whether the test is
+meant to run with cache hits disabled at all (a test asserting cache behaviour
+may be wrong by construction under `disable-inline-caches`, in which case the
+sweep's scope or the test's feature gate is the thing to state, not a defect in
+the caches).

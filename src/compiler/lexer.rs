@@ -89,32 +89,26 @@ impl<'a> TokenStream<'a> {
 
     /// Returns the next `Token`, without popping it from the stream.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    #[allow(clippy::expect_used)] // The branch above populates this exact option.
     pub(super) fn peek(&mut self) -> Result<&Token> {
-        if self.lookahead.is_none() {
-            self.lookahead = Some(self.lexer.next_token()?);
-        }
-        Ok(&self
-            .lookahead
-            .as_ref()
-            .expect("lexer lookahead is populated before returning")
-            .0)
+        let lexed = match &mut self.lookahead {
+            Some(lexed) => lexed,
+            slot @ None => slot.insert(self.lexer.next_token()?),
+        };
+        Ok(&lexed.0)
     }
 
     /// Returns the token after the next token, without popping it from the stream.
-    #[allow(clippy::expect_used)] // Both lookahead slots are populated before access.
     pub(super) fn peek2(&mut self) -> Result<&Token> {
+        // The first slot fills before the second lexes, and stays filled when
+        // lexing the second fails.
         if self.lookahead.is_none() {
             self.lookahead = Some(self.lexer.next_token()?);
         }
-        if self.lookahead2.is_none() {
-            self.lookahead2 = Some(self.lexer.next_token()?);
-        }
-        Ok(&self
-            .lookahead2
-            .as_ref()
-            .expect("second lexer lookahead is populated before returning")
-            .0)
+        let lexed = match &mut self.lookahead2 {
+            Some(lexed) => lexed,
+            slot @ None => slot.insert(self.lexer.next_token()?),
+        };
+        Ok(&lexed.0)
     }
 
     /// Returns the type of the next token.
@@ -215,7 +209,16 @@ impl<'a> Lexer<'a> {
                 }
                 b'.' => self.lex_dots(),
 
-                b'=' | b'<' | b'>' | b'~' => self.peek_equals(first_char)?,
+                b'=' => self.with_equals(Equal, Assign),
+                b'<' => self.with_equals(LessEqual, Less),
+                b'>' => self.with_equals(GreaterEqual, Greater),
+                // `~` is only ever the first half of `~=`.
+                b'~' => {
+                    if !self.try_next(b'=') {
+                        return Err(self.error(SyntaxError::InvalidCharacter('~')));
+                    }
+                    NotEqual
+                }
 
                 b'-' => {
                     if self.try_next(b'-') {
@@ -429,31 +432,10 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// The lexer just read something which might be part of a two-character
-    /// operator, with `=` as the second character.
-    ///
-    /// Returns `Err` if the first character is `~` and it is not paired with a
-    /// `=`.
-    #[allow(clippy::panic)] // Only the four operator characters call this helper.
-    fn peek_equals(&mut self, first_char: u8) -> Result<TokenKind> {
-        if self.try_next(b'=') {
-            let typ = match first_char {
-                b'=' => Equal,
-                b'~' => NotEqual,
-                b'<' => LessEqual,
-                b'>' => GreaterEqual,
-                _ => panic!("peek_equals was called with first_char = {first_char}"),
-            };
-            Ok(typ)
-        } else {
-            match first_char {
-                b'=' => Ok(Assign),
-                b'<' => Ok(Less),
-                b'>' => Ok(Greater),
-                b'~' => Err(self.error(SyntaxError::InvalidCharacter('~'))),
-                _ => panic!("peek_equals was called with first_char = {first_char}"),
-            }
-        }
+    /// The lexer just read the first character of an operator that may take
+    /// `=` as its second character: `paired` if it does, `alone` if not.
+    fn with_equals(&mut self, paired: TokenKind, alone: TokenKind) -> TokenKind {
+        if self.try_next(b'=') { paired } else { alone }
     }
 
     /// Tokenizes and decodes a short literal string in one pass.

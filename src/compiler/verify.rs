@@ -9,9 +9,13 @@ use crate::limits::{
 /// compiler's internal error nor a snapshot rejection carries a free-form
 /// string; public as the reason inside a snapshot's
 /// `InvalidBytecodeReason::Validation`.
-// Public through `dellingr::snapshot`, which exists only with the snapshot
-// feature; the compiler uses the type in every build.
-#[cfg_attr(not(feature = "snapshot"), allow(unreachable_pub))]
+#[cfg_attr(
+    not(feature = "snapshot"),
+    expect(
+        unreachable_pub,
+        reason = "Public through dellingr::snapshot, which exists only with the snapshot feature; the compiler uses the type in every build."
+    )
+)]
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ValidationReason {
@@ -101,9 +105,13 @@ pub enum ValidationReason {
 
 /// The pool an instruction operand indexes, named by
 /// [`ValidationReason::IndexOutOfRange`].
-// Public through `dellingr::snapshot`, which exists only with the snapshot
-// feature; the compiler uses the type in every build.
-#[cfg_attr(not(feature = "snapshot"), allow(unreachable_pub))]
+#[cfg_attr(
+    not(feature = "snapshot"),
+    expect(
+        unreachable_pub,
+        reason = "Public through dellingr::snapshot, which exists only with the snapshot feature; the compiler uses the type in every build."
+    )
+)]
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BytecodeOperand {
@@ -133,9 +141,13 @@ impl std::fmt::Display for BytecodeOperand {
 
 /// A per-function list with a length limit, named by
 /// [`ValidationReason::TooMany`].
-// Public through `dellingr::snapshot`, which exists only with the snapshot
-// feature; the compiler uses the type in every build.
-#[cfg_attr(not(feature = "snapshot"), allow(unreachable_pub))]
+#[cfg_attr(
+    not(feature = "snapshot"),
+    expect(
+        unreachable_pub,
+        reason = "Public through dellingr::snapshot, which exists only with the snapshot feature; the compiler uses the type in every build."
+    )
+)]
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BytecodePool {
@@ -163,9 +175,13 @@ impl std::fmt::Display for BytecodePool {
 /// An inline-cache family whose slots are allocated in instruction order,
 /// named by [`ValidationReason::CacheSlotOrder`]. Global caches have their
 /// own rule ([`ValidationReason::GlobalCacheSlotOrder`]).
-// Public through `dellingr::snapshot`, which exists only with the snapshot
-// feature; the compiler uses the type in every build.
-#[cfg_attr(not(feature = "snapshot"), allow(unreachable_pub))]
+#[cfg_attr(
+    not(feature = "snapshot"),
+    expect(
+        unreachable_pub,
+        reason = "Public through dellingr::snapshot, which exists only with the snapshot feature; the compiler uses the type in every build."
+    )
+)]
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CacheFamily {

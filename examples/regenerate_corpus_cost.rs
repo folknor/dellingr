@@ -5,7 +5,10 @@
 //! source under an unchanged `COST_MODEL_VERSION`.
 
 #[cfg(not(test))]
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "The tool shares the integration suite's golden module and uses only its regeneration half."
+)]
 #[path = "../tests/common/corpus_cost_golden.rs"]
 mod corpus_cost;
 #[cfg(not(test))]

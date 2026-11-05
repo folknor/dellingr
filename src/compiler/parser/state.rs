@@ -51,34 +51,92 @@ impl FuncState<'_> {
     }
 }
 
-/// One uniform stack for both enclosing and current functions. Dereferencing
-/// selects the last frame in one place and borrows only the function state,
-/// leaving the parser's lexer and line stamp independently accessible.
-#[derive(Debug, Default)]
+/// The function being parsed and every function enclosing it. The current
+/// frame is a field, not the top of a vector, so it exists by construction:
+/// the parser starts with the real root frame, and dereferencing borrows
+/// only the function state, leaving the parser's lexer and line stamp
+/// independently accessible.
+#[derive(Debug)]
 pub(super) struct FunctionStack<'a> {
-    pub(super) frames: Vec<FuncState<'a>>,
+    current: FuncState<'a>,
+    /// Enclosing functions, outermost (the root) first.
+    enclosing: Vec<FuncState<'a>>,
 }
 
-// Deref cannot return a parser error. These two guards enforce the private
-// lifecycle boundary: parse_chunk installs a frame before any field access,
-// and removes it only after the final access. Recoverable checks inside that
-// lifecycle return InternalError instead of relying on this guard.
+impl<'a> FunctionStack<'a> {
+    pub(super) fn new(root: FuncState<'a>) -> Self {
+        Self {
+            current: root,
+            enclosing: Vec::new(),
+        }
+    }
+
+    /// Active functions, the current one included.
+    pub(super) fn depth(&self) -> usize {
+        self.enclosing.len() + 1
+    }
+
+    /// Level of the current function; the root is level 0.
+    pub(super) fn current_level(&self) -> usize {
+        self.enclosing.len()
+    }
+
+    /// The function at `level`, the root being level 0. Like slice
+    /// indexing, a level past the current function panics; callers derive
+    /// levels from [`Self::current_level`] downward.
+    pub(super) fn frame(&self, level: usize) -> &FuncState<'a> {
+        if level == self.enclosing.len() {
+            &self.current
+        } else {
+            &self.enclosing[level]
+        }
+    }
+
+    pub(super) fn frame_mut(&mut self, level: usize) -> &mut FuncState<'a> {
+        if level == self.enclosing.len() {
+            &mut self.current
+        } else {
+            &mut self.enclosing[level]
+        }
+    }
+
+    /// Make `child` the current function, its parent enclosing it.
+    pub(super) fn enter(&mut self, child: FuncState<'a>) {
+        let parent = std::mem::replace(&mut self.current, child);
+        self.enclosing.push(parent);
+    }
+
+    /// Finish the current nested function, restoring its parent. `None` at
+    /// the root, which only [`Self::take_root`] finishes.
+    pub(super) fn leave(&mut self) -> Option<FuncState<'a>> {
+        let parent = self.enclosing.pop()?;
+        Some(std::mem::replace(&mut self.current, parent))
+    }
+
+    /// Finish the root function. `None` while a nested function is open. The
+    /// frame left behind is inert: the parser is consumed right after, so it
+    /// never takes part in name lookup, the nesting limit or any read.
+    pub(super) fn take_root(&mut self) -> Option<FuncState<'a>> {
+        if !self.enclosing.is_empty() {
+            return None;
+        }
+        Some(std::mem::replace(
+            &mut self.current,
+            FuncState::new(None, 0, false),
+        ))
+    }
+}
+
 impl<'a> Deref for FunctionStack<'a> {
     type Target = FuncState<'a>;
 
-    #[allow(clippy::expect_used)] // A function frame is active throughout parsing.
     fn deref(&self) -> &Self::Target {
-        self.frames
-            .last()
-            .expect("function state is accessed only while parsing a chunk")
+        &self.current
     }
 }
 
 impl DerefMut for FunctionStack<'_> {
-    #[allow(clippy::expect_used)] // A function frame is active throughout parsing.
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.frames
-            .last_mut()
-            .expect("function state is accessed only while parsing a chunk")
+        &mut self.current
     }
 }

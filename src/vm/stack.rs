@@ -232,11 +232,10 @@ impl State {
     /// Removes the `count` lowest visible values in one move, shifting the rest
     /// down. Equivalent to `count` calls of `remove(1)` at the cost of one.
     // The error index is diagnostic only; a count past isize::MAX saturates.
-    #[allow(clippy::disallowed_methods)]
     pub(crate) fn remove_bottom(&mut self, count: usize) -> Result<()> {
         if count > self.get_top() {
             return Err(self.error(ErrorKind::InvalidStackIndex {
-                index: isize::try_from(count).unwrap_or(isize::MAX),
+                index: crate::saturate::saturating_cast(count),
             }));
         }
         let bottom = self.in_flight.stack_bottom;

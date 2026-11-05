@@ -11,6 +11,7 @@ use crate::error::{
 };
 use crate::instr::{ArgCount, RetCount};
 use crate::patterns::{LuaCapture, LuaPattern, MatchError, PatternError};
+use crate::saturate::saturating_cast;
 use crate::{LuaType, Result, State};
 
 use crate::gmatch_schema;
@@ -164,19 +165,12 @@ fn pattern_runtime_error(
         .with_pattern_function(function)
 }
 
-/// Convert a nonnegative Lua integer to `usize`, saturating where `usize` is
-/// narrower than `i64`, and mapping negatives to 0. For every caller (a
-/// string index, a replacement count) a value past `usize::MAX` behaves
-/// exactly like `usize::MAX`.
-#[allow(clippy::disallowed_methods)]
-fn saturating_usize(n: i64) -> usize {
-    usize::try_from(n.max(0)).unwrap_or(usize::MAX)
-}
-
 fn lua_start_index(len: usize, idx: i64) -> usize {
     let len = i64::try_from(len).expect("string length fits in i64");
     if idx >= 0 {
-        saturating_usize(idx - 1)
+        // Index 0 maps to -1, which clamps to 0; past `usize::MAX` behaves
+        // exactly like `usize::MAX`.
+        saturating_cast(idx - 1)
     } else {
         usize::try_from((len + idx).max(0)).expect("nonnegative string index fits in usize")
     }
@@ -858,7 +852,9 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
                 crate::error::ArgDetail::StringFunctionOrTableExpected,
             ));
         }
-        let max_replacements = opt_integer(state, 4, "gsub")?.map(saturating_usize);
+        // A negative count replaces nothing; one past `usize::MAX` behaves
+        // exactly like `usize::MAX`.
+        let max_replacements = opt_integer(state, 4, "gsub")?.map(saturating_cast::<usize, i64>);
         state.charge(Charge::StringGsub, (s.len() + pattern.len()).max(1) as u64)?;
         charge_bytes(state, Charge::StringGsub, pattern.len())?;
         if max_replacements == Some(0) {

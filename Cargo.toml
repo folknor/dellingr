@@ -92,6 +92,9 @@ await_holding_lock = "deny"
 await_holding_refcell_ref = "deny"
 dbg_macro = "deny"
 todo = "deny"
+# A suppression is `#[expect(lint, reason = "...")]`; the `no-allow-attributes`
+# textlint in brokkr.toml rejects `allow` in every cfg, inner attributes too.
+allow_attributes_without_reason = "deny"
 
 [dependencies]
 # Disabling `std` removes indexmap's `RandomState` default in standalone

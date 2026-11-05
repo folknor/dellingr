@@ -265,8 +265,10 @@ fn report_usage_error(error: &str) -> ! {
     exit(1);
 }
 
-// The CLI is the host process; printing is its job.
-#[allow(clippy::disallowed_methods)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "The CLI is the host process; printing is its job."
+)]
 fn write_stdout(output: &str) -> io::Result<()> {
     let mut stdout = io::stdout().lock();
     stdout.write_all(output.as_bytes())?;
@@ -279,7 +281,10 @@ fn write_stdout_or_exit(output: &str) {
     }
 }
 
-#[allow(clippy::disallowed_methods)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "The CLI is the host process; printing the script's output is its job."
+)]
 fn write_stdout_line_or_exit(line: &[u8]) {
     let mut stdout = io::stdout().lock();
     if let Err(error) = stdout
@@ -302,13 +307,17 @@ fn exit_for_stdout_error(error: &io::Error) -> ! {
 
 /// Writes diagnostics to stderr. A failure here is deliberately discarded:
 /// stderr is the last channel the CLI has, so there is nowhere to report it.
-#[allow(clippy::disallowed_methods)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "The CLI is the host process; writing its diagnostics is its job."
+)]
 fn write_stderr(output: &str) {
     let mut stderr = io::stderr().lock();
-    #[allow(clippy::let_underscore_must_use)]
-    let _ = stderr
-        .write_all(output.as_bytes())
-        .and_then(|()| stderr.flush());
+    drop(
+        stderr
+            .write_all(output.as_bytes())
+            .and_then(|()| stderr.flush()),
+    );
 }
 
 struct CliCallbacks;
@@ -320,9 +329,10 @@ impl HostCallbacks for CliCallbacks {
     }
 }
 
-// The CLI is the host process, so reading its own command line is the point;
-// the ban on process arguments guards the library.
-#[allow(clippy::disallowed_methods)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "The CLI is the host process, so reading its own command line is the point; the ban on process arguments guards the library."
+)]
 fn main() {
     // Internal harness handshake, deliberately absent from user help. Keep the
     // response limited to the feature that changes the ordinary CLI semantics.

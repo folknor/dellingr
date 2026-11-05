@@ -109,7 +109,10 @@ const GOLDEN_COUNTS: [(Func, usize); 11] = [
     (Func::Pow, 1_543),
 ];
 
-#[allow(clippy::print_stderr)] // Test coverage depends on this host's CPU.
+#[expect(
+    clippy::print_stderr,
+    reason = "Test coverage depends on this host's CPU, so the run reports which FMA backends it covered."
+)]
 #[cfg(test)]
 fn report_fma_modes(modes: &[super::ForcedFma]) {
     eprintln!(
@@ -364,7 +367,7 @@ fn parse_worst_cases(f: Func, path: &str, text: &str) -> Vec<(f64, f64)> {
 fn check_inputs(f: Func, inputs: &[(f64, f64)]) -> Vec<String> {
     // Keep the process hook intact: caught oracle panics still need diagnostics,
     // and silencing them globally would also hide unrelated test failures.
-    #[allow(
+    #[expect(
         clippy::disallowed_methods,
         reason = "Oracle certification sizes host workers without changing the inputs or comparisons."
     )]

@@ -1786,10 +1786,7 @@ fn materialize_payload(
                     )
                 })?;
                 // The verifier bounds `array_len` by MAX_ARRAY_LEN, so it fits.
-                let array_len = match usize::try_from(*array_len) {
-                    Ok(len) => len,
-                    Err(_) => usize::MAX,
-                };
+                let array_len: usize = crate::saturate::saturating_cast(*array_len);
                 table
                     .rebuild_from_snapshot(array_len, *array_slots as usize, entries)
                     .map_err(|error| SnapshotError::InvalidTable {
@@ -2008,10 +2005,7 @@ fn decode_env_table(
         }
     }
     // The verifier bounds `array_len` by MAX_ARRAY_LEN, so it fits.
-    let array_len = match usize::try_from(*array_len) {
-        Ok(len) => len,
-        Err(_) => usize::MAX,
-    };
+    let array_len: usize = crate::saturate::saturating_cast(*array_len);
     Ok(SavedEnvTable {
         entries: (array_len, hash_start, decoded),
         metatable,

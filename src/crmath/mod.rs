@@ -39,10 +39,10 @@
 //! its tests would run once instead of per check shape; nothing measured makes
 //! that worth a second crate.
 
-// Exact floating-point comparisons are the algorithms here: rounding tests
-// compare two bounds for bit equality and special-case dispatch matches exact
-// constants.
-#![allow(clippy::float_cmp)]
+#![expect(
+    clippy::float_cmp,
+    reason = "Exact floating-point comparisons are the algorithms here: rounding tests compare two bounds for bit equality and special-case dispatch matches exact constants."
+)]
 
 /// A hexadecimal float literal, evaluated at compile time by [`hf`].
 macro_rules! h {
@@ -260,10 +260,11 @@ fn fma_dispatch(a: f64, b: f64, c: f64) -> f64 {
 
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 #[inline(always)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "Every aarch64 target with floating point has fmadd, so this lowers to the instruction and never to a library call."
+)]
 fn fma_dispatch(a: f64, b: f64, c: f64) -> f64 {
-    // Every aarch64 target with floating point has `fmadd`, so this lowers to
-    // the instruction and never to a library call.
-    #[allow(clippy::disallowed_methods)]
     a.mul_add(b, c)
 }
 

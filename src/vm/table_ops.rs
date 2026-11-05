@@ -729,7 +729,7 @@ impl State {
             .expect("validated object pointer is a table")
             .array_len();
         // The array part is bounded far below i64::MAX; saturate rather than panic.
-        let len = i64::try_from(array_len).map_or(i64::MAX, i64::from);
+        let len: i64 = crate::saturate::saturating_cast(array_len);
         let n = self.checked_table_sort_len(len)?;
         let mut arr = self
             .heap

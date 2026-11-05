@@ -33,7 +33,7 @@ struct Parser<'a> {
     // The token stream owns consumed-token line and position state, so the
     // parser does not keep duplicate fields or update them for each token.
     input: TokenStream<'a>,
-    /// Every active function, outermost first; field access selects the last.
+    /// Every active function; field access selects the current one.
     funcs: FunctionStack<'a>,
     source_name: Option<Arc<[u8]>>,
     /// Current nesting depth across recursive parser entry points.
@@ -86,7 +86,10 @@ pub(super) fn parse(source: &[u8], source_name: Option<Arc<[u8]>>) -> Result<Byt
 
     let parser = Parser {
         input: TokenStream::new(source),
-        funcs: FunctionStack::default(),
+        // The root is a real frame too; no placeholder chunk participates in
+        // name lookup or the function-depth limit. The top-level chunk is a
+        // vararg function (it can receive command-line arguments).
+        funcs: FunctionStack::new(state::FuncState::new(source_name.clone(), 0, true)),
         source_name: source_name.clone(),
         syntax_depth: 0,
     };
@@ -442,15 +445,16 @@ impl<'a> Parser<'a> {
     /// The main entry point for the parser. This parses the entire input.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn parse_all(mut self) -> Result<Bytecode> {
-        // The top-level chunk is a vararg function (can receive command-line args)
-        // As with nested functions, generate the body before checking its
-        // terminator. A body limit error can win over trailing invalid syntax;
-        // either failure rejects the whole program, so keep this precedence.
-        let c = self.parse_chunk(&[], true)?;
-        let token = self.input.next()?;
-        if !self.funcs.frames.is_empty() {
+        // The root frame was installed with the parser. As with nested
+        // functions, generate the body before checking its terminator. A body
+        // limit error can win over trailing invalid syntax; either failure
+        // rejects the whole program, so keep this precedence.
+        let body = self.parse_statements()?;
+        let Some(root) = self.funcs.take_root() else {
             return Err(self.internal_error(ParserFault::CompletedSourceRetainsFunctionFrames));
-        }
+        };
+        let c = self.finish_chunk(root, 0, body)?;
+        let token = self.input.next()?;
         if let TokenKind::EndOfFile = token.typ {
             Ok(c)
         } else {
@@ -458,31 +462,54 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parses a function body and generates its code.
+    /// Parses a nested function body and generates its code.
     fn parse_chunk(&mut self, params: &[&'a str], is_vararg: bool) -> Result<Bytecode> {
         let num_params = self.bounded_u8(params.len(), MAX_LOCALS, SyntaxError::TooManyLocals)?;
-        // The root is a real frame too; no placeholder chunk participates in
-        // name lookup or the function-depth limit.
-        self.funcs.frames.push(state::FuncState::new(
-            self.source_name.clone(),
-            num_params,
-            is_vararg,
-        ));
+        self.enter_function(num_params, is_vararg);
 
         for &param in params {
             self.declare(param)?;
         }
 
         let body = self.parse_statements()?;
-        self.finish_chunk(num_params, body)
+        self.finish_nested_chunk(num_params, body)
     }
 
-    /// Closes the innermost function frame and generates its code. Kept out
+    /// Makes a new function frame current. Kept out of `parse_chunk`, which
+    /// stays live on the native stack through every nested function, so no
+    /// `FuncState` temporary occupies its frame.
+    #[inline(never)]
+    fn enter_function(&mut self, num_params: u8, is_vararg: bool) {
+        self.funcs.enter(state::FuncState::new(
+            self.source_name.clone(),
+            num_params,
+            is_vararg,
+        ));
+    }
+
+    /// Closes the innermost nested function frame, restoring its parent, and
+    /// generates its code. Out of `parse_chunk` for the same reason as
+    /// `enter_function`: the extracted frame is passed by value.
+    #[inline(never)]
+    fn finish_nested_chunk(&mut self, num_params: u8, body: Vec<Stmt>) -> Result<Bytecode> {
+        let Some(finished) = self.funcs.leave() else {
+            return Err(self.internal_error(ParserFault::ChunkCompletionWithoutFunctionFrame));
+        };
+        self.finish_chunk(finished, num_params, body)
+    }
+
+    /// Generates the code of a finished function frame, which is no longer
+    /// current: everything about the function comes from `finished`. Kept out
     /// of `parse_chunk`, which stays live on the native stack through every
     /// nested function, so the finished chunk and the code generator occupy
     /// stack only while one function is being finished.
     #[inline(never)]
-    fn finish_chunk(&mut self, num_params: u8, body: Vec<Stmt>) -> Result<Bytecode> {
+    fn finish_chunk(
+        &mut self,
+        mut finished: state::FuncState<'a>,
+        num_params: u8,
+        body: Vec<Stmt>,
+    ) -> Result<Bytecode> {
         // The implicit return belongs to the block terminator. Keep its token
         // position because codegen errors are reported before it is consumed.
         // Jump overflow has no originating span in CodegenError, so the end of
@@ -493,11 +520,8 @@ impl<'a> Parser<'a> {
         let end_pos = end.start;
 
         // Copy upvalues to chunk
-        self.funcs.chunk.upvalues = self.funcs.upvalues.iter().map(|(_, desc)| *desc).collect();
+        finished.chunk.upvalues = finished.upvalues.iter().map(|(_, desc)| *desc).collect();
 
-        let Some(finished) = self.funcs.frames.pop() else {
-            return Err(self.internal_error(ParserFault::ChunkCompletionWithoutFunctionFrame));
-        };
         if !finished.loops.is_empty() || !finished.block_starts.is_empty() {
             return Err(self.internal_error(ParserFault::CompletedFunctionRetainsScopes));
         }
@@ -589,7 +613,7 @@ impl<'a> Parser<'a> {
 
     /// Resolves a variable's name to a local, upvalue, builtin or global.
     fn parse_prefix_identifier(&mut self, name: &'a str) -> Result<Variable> {
-        let level = self.funcs.frames.len() - 1;
+        let level = self.funcs.current_level();
         if let Some(binding) = self.resolve_in(level, name)? {
             return Ok(match binding {
                 UpvalueDesc::Local(reg) => {

@@ -30,10 +30,11 @@
 //! which resolves a `brokkr.toml` workload registration to the script path
 //! this harness requires.
 
-// A benchmark harness is a host process: it legitimately reads its own
-// command line, the marker FIFO from the environment, and wall-clock time.
-// The clippy.toml bans on those guard the deterministic library, not this.
-#![allow(clippy::disallowed_methods, clippy::disallowed_types)]
+#![expect(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "A benchmark harness is a host process: it legitimately reads its own command line, the marker FIFO from the environment, and wall-clock time, and writes its KV report to stderr. The clippy.toml bans on those guard the deterministic library, not this."
+)]
 
 use std::env;
 use std::fs;
@@ -308,8 +309,6 @@ fn write_kvs(writer: &mut impl Write, metrics: &[Metric]) -> io::Result<()> {
     Ok(())
 }
 
-// Writing the KV report to stderr is this harness's job.
-#[allow(clippy::disallowed_methods)]
 fn emit_metrics(metrics: &[Metric]) {
     let stderr = io::stderr();
     let mut output = stderr.lock();

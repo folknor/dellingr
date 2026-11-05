@@ -83,7 +83,10 @@ impl From<TableError> for Error {
 
 /// A non-negative integral number bounded by a collection's maximum index.
 #[inline]
-#[allow(clippy::float_cmp)]
+#[expect(
+    clippy::float_cmp,
+    reason = "An exact integrality test: a key is an index only when it equals its floor."
+)]
 pub(crate) fn integer_index(value: f64, maximum: usize) -> Option<usize> {
     (value >= 0.0 && value <= maximum as f64 && value == value.floor()).then_some(value as usize)
 }
@@ -100,7 +103,10 @@ pub(super) fn array_index(value: f64, len: usize) -> Option<usize> {
 
 /// Whether a numeric key extends an array of the given length.
 #[inline]
-#[allow(clippy::float_cmp)]
+#[expect(
+    clippy::float_cmp,
+    reason = "Only the exact next index extends the array."
+)]
 pub(super) fn is_append_key(value: f64, len: usize) -> bool {
     value == (len + 1) as f64
 }

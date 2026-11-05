@@ -115,7 +115,7 @@ pub(crate) fn parallel_map<T: Sync, R: Send>(
     max_workers: usize,
     map: impl Fn(&T) -> R + Sync,
 ) -> Vec<R> {
-    #[allow(
+    #[expect(
         clippy::disallowed_methods,
         reason = "The harness sizes workers to the host; results remain in item order."
     )]

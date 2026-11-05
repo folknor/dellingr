@@ -4,11 +4,17 @@
 // than widening the library API for a maintenance tool. Some helpers are only
 // used by the VM or the test harness.
 #[cfg(not(test))]
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "The tool shares the library kernels; some helpers are used only by the VM or the test harness."
+)]
 #[path = "../src/crmath/mod.rs"]
 mod crmath;
 #[cfg(not(test))]
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "The tool shares the test oracle; part of it serves only the in-crate tests."
+)]
 #[path = "../src/crmath/tests/oracle.rs"]
 mod oracle;
 #[cfg(not(test))]

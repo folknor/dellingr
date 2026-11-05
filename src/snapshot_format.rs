@@ -1,4 +1,5 @@
-//! Persistence compatibility constants, available even without the codec.
+//! Persistence compatibility constants, available to the opcode fixture test
+//! even without the codec.
 
 /// Snapshot compatibility is exact-match only. Change this only when encoded
 /// fields change, keeping opcode fixtures available in non-snapshot builds.
@@ -10,5 +11,7 @@
 // named bindings and the environment delta for `_G`. Version 14: the payload
 // carries the State's costing (mode, and a metered model's weights) before
 // the meter counters.
-#[cfg_attr(not(feature = "snapshot"), allow(dead_code))]
+// Read by the codec and by the opcode fixture test, which runs in every
+// feature shape; no other build has a reader.
+#[cfg(any(feature = "snapshot", test))]
 pub(crate) const FORMAT_VERSION: u16 = 14;

@@ -15,7 +15,7 @@ impl<'a> Parser<'a> {
         level: usize,
         name: &'a str,
     ) -> Result<Option<UpvalueDesc>> {
-        let frame = &self.funcs.frames[level];
+        let frame = self.funcs.frame(level);
         if let Some(index) = find_last_local(&frame.locals, name) {
             let slot = self.bounded_u8(index, MAX_LOCALS - 1, SyntaxError::TooManyLocals)?;
             return Ok(Some(UpvalueDesc::Local(slot)));
@@ -34,7 +34,7 @@ impl<'a> Parser<'a> {
             // Recorded in the frame that owns the local, so its scopes keep
             // the close that gives this capture its own lifetime, and its
             // code generation knows a callback can write the local.
-            let owner = &mut self.funcs.frames[level - 1];
+            let owner = self.funcs.frame_mut(level - 1);
             owner.captures.push(slot);
             if let Some(&id) = owner.local_ids.get(usize::from(slot))
                 && let Some(decl) = owner.decls.get_mut(id as usize)
@@ -42,12 +42,12 @@ impl<'a> Parser<'a> {
                 decl.captured = true;
             }
         }
-        let len = self.funcs.frames[level].upvalues.len();
+        let len = self.funcs.frame(level).upvalues.len();
         if len >= MAX_UPVALUES {
             return Err(self.error_here(SyntaxError::TooManyUpvalues));
         }
         let slot = self.bounded_u8(len, MAX_UPVALUES - 1, SyntaxError::TooManyUpvalues)?;
-        self.funcs.frames[level].upvalues.push((name, desc));
+        self.funcs.frame_mut(level).upvalues.push((name, desc));
         Ok(Some(UpvalueDesc::Upvalue(slot)))
     }
 }

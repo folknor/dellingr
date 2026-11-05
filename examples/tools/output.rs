@@ -4,8 +4,10 @@
 use std::path::{Path, PathBuf};
 
 pub(crate) fn destination(tool: &str) -> PathBuf {
-    // Host tool arguments select an output file, outside the deterministic VM.
-    #[allow(clippy::disallowed_methods)]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "Host tool arguments select an output file, outside the deterministic VM."
+    )]
     let mut args = std::env::args_os().skip(1);
     let output = args
         .next()

@@ -1632,7 +1632,7 @@ fn native_bytes_per_level() {
     require_native_stack_target("native_bytes_per_level");
     fn record(state: &mut State) -> dellingr::Result<u8> {
         let local = 0_u8;
-        #[allow(
+        #[expect(
             clippy::disallowed_methods,
             reason = "This on-demand host probe measures native stack addresses, outside deterministic VM execution."
         )]

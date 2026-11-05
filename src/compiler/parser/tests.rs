@@ -640,7 +640,7 @@ fn expression_source_line_is_stored_for_codegen_diagnostics() {
     let source = b"\n  nil";
     let mut parser = Parser {
         input: TokenStream::new(source),
-        funcs: Default::default(),
+        funcs: super::FunctionStack::new(super::state::FuncState::new(None, 0, false)),
         source_name: None,
         syntax_depth: 0,
     };
@@ -655,14 +655,10 @@ fn local_statement_keeps_the_keyword_line_for_codegen_diagnostics() {
     let source = b"\nlocal a";
     let mut parser = Parser {
         input: TokenStream::new(source),
-        funcs: Default::default(),
+        funcs: super::FunctionStack::new(super::state::FuncState::new(None, 0, false)),
         source_name: None,
         syntax_depth: 0,
     };
-    parser
-        .funcs
-        .frames
-        .push(super::state::FuncState::new(None, 0, false));
 
     let stmt = parser.parse_locals().expect("local statement parses");
 
@@ -821,9 +817,7 @@ fn named_table_fields(count: usize) -> String {
 fn parser_for_limit_test() -> Parser<'static> {
     Parser {
         input: TokenStream::new(b""),
-        funcs: super::FunctionStack {
-            frames: vec![super::state::FuncState::new(None, 0, false)],
-        },
+        funcs: super::FunctionStack::new(super::state::FuncState::new(None, 0, false)),
         source_name: None,
         syntax_depth: 0,
     }

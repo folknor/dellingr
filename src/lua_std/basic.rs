@@ -24,9 +24,8 @@ fn digit_value(byte: u8) -> Option<u32> {
 /// Convert a positive `error` level to the stored trace-frame index.
 ///
 /// Levels beyond the trace index range intentionally saturate.
-#[allow(clippy::disallowed_methods)]
 fn error_trace_frame(level: i64) -> u32 {
-    u32::try_from(level).unwrap_or(u32::MAX).saturating_sub(1)
+    crate::saturate::saturating_cast::<u32, i64>(level).saturating_sub(1)
 }
 
 fn parse_integer_with_base(bytes: &[u8], base: u32) -> Option<f64> {

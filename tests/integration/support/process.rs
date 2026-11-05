@@ -239,14 +239,22 @@ fn address_space_limit() -> libc::rlim_t {
 ///
 /// The harness reads the host clock only to bound its own child processes,
 /// which affects no Lua-visible value.
-#[allow(
+#[expect(
     clippy::disallowed_types,
     reason = "Bounding test processes needs the host clock; no Lua-visible value depends on it."
 )]
-#[derive(Clone, Copy)]
+#[derive(Copy)]
 pub(crate) struct Deadline(std::time::Instant);
 
-#[allow(
+// Written out because a derived `Clone` names the field type in generated code
+// that the expectation on the struct does not cover.
+impl Clone for Deadline {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+#[expect(
     clippy::disallowed_methods,
     clippy::disallowed_types,
     reason = "Bounding test processes needs the host clock; no Lua-visible value depends on it."

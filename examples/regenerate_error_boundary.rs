@@ -1,7 +1,10 @@
 //! Write the error-boundary transcript to an explicit destination.
 
 #[cfg(not(test))]
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "The tool shares the integration suite's case module and uses only the transcript writer."
+)]
 #[path = "../tests/common/error_boundary_cases.rs"]
 mod error_boundary;
 #[cfg(not(test))]

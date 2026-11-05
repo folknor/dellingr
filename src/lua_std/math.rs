@@ -282,7 +282,10 @@ pub(super) const MATH_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
             // Any other base is the quotient of two correctly rounded natural
             // logarithms, rounded once more: deterministic, but not a
             // correctly rounded log_base.
-            #[allow(clippy::float_cmp)]
+            #[expect(
+                clippy::float_cmp,
+                reason = "Only the exact base 10 takes the log10 special case."
+            )]
             let is_base_ten = base == 10.0;
             if is_base_ten {
                 crmath::log10(x)
