@@ -4,10 +4,12 @@ All notable changes to dellingr are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 [Semantic Versioning](https://semver.org/) once 1.0 lands.
 
-## [Unreleased]
+## [0.7.1] - 2026-11-06
 
-`COST_MODEL_VERSION` is 8 (unchanged). Compiled bytecode, costs and
-snapshots are unchanged.
+Saves from 0.7.0 load: snapshot `FORMAT_VERSION` is 14 (unchanged).
+`COST_MODEL_VERSION` is 8 (unchanged). Compiled bytecode and costs are
+unchanged, and so is everything a save holds after its engine label. Nothing
+is replay-visible.
 
 ### Added
 
