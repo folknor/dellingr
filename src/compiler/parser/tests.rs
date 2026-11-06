@@ -643,6 +643,7 @@ fn expression_source_line_is_stored_for_codegen_diagnostics() {
         funcs: super::FunctionStack::new(super::state::FuncState::new(None, 0, false)),
         source_name: None,
         syntax_depth: 0,
+        globals: Vec::new(),
     };
 
     let expr = parser.parse_expr().expect("nil expression parses");
@@ -658,6 +659,7 @@ fn local_statement_keeps_the_keyword_line_for_codegen_diagnostics() {
         funcs: super::FunctionStack::new(super::state::FuncState::new(None, 0, false)),
         source_name: None,
         syntax_depth: 0,
+        globals: Vec::new(),
     };
 
     let stmt = parser.parse_locals().expect("local statement parses");
@@ -742,7 +744,7 @@ fn parser_error_positions_stay_pinned_after_comments_and_newlines() {
 
 #[test]
 fn nested_chunks_preserve_shape_and_source_name() {
-    let chunk = super::parse(
+    let (chunk, _) = super::parse(
         b"function f() function g() end end",
         Some(std::sync::Arc::from(&b"nested-lines.lua"[..])),
     )
@@ -820,6 +822,7 @@ fn parser_for_limit_test() -> Parser<'static> {
         funcs: super::FunctionStack::new(super::state::FuncState::new(None, 0, false)),
         source_name: None,
         syntax_depth: 0,
+        globals: Vec::new(),
     }
 }
 

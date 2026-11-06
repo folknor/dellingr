@@ -152,8 +152,17 @@ fn internal_error(fault: error::CompilerFault) -> error::Error {
 /// The one compile path: Lua source bytes plus an optional, byte-exact chunk
 /// name, to finalized bytecode. The name is bounded before anything else is
 /// examined, so an oversized name wins over a malformed or oversized source.
-#[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub(crate) fn compile(source: impl AsRef<[u8]>, name: Option<&[u8]>) -> Result<Bytecode> {
+    compile_with_globals(source, name).map(|(bc, _)| bc)
+}
+
+/// [`compile`], also returning the source's global occurrences in lexical
+/// order (`crate::Program::globals`).
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
+pub(crate) fn compile_with_globals(
+    source: impl AsRef<[u8]>,
+    name: Option<&[u8]>,
+) -> Result<(Bytecode, Vec<crate::globals::GlobalAccess>)> {
     if let Some(name) = name
         && name.len() > crate::limits::MAX_SOURCE_NAME_BYTES
     {
@@ -164,9 +173,9 @@ pub(crate) fn compile(source: impl AsRef<[u8]>, name: Option<&[u8]>) -> Result<B
             },
         ));
     }
-    let mut bc = parser::parse(source.as_ref(), name.map(Arc::<[u8]>::from))?;
+    let (mut bc, globals) = parser::parse(source.as_ref(), name.map(Arc::<[u8]>::from))?;
     finalize(&mut bc)?;
-    Ok(bc)
+    Ok((bc, globals))
 }
 
 /// Finalize a freshly-parsed `Bytecode` tree before it ships to the runtime.

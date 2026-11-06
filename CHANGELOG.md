@@ -4,6 +4,22 @@ All notable changes to dellingr are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 [Semantic Versioning](https://semver.org/) once 1.0 lands.
 
+## [Unreleased]
+
+`COST_MODEL_VERSION` is 8 (unchanged). Compiled bytecode, costs and
+snapshots are unchanged.
+
+### Added
+
+- `Program::globals()`: every free identifier in the source that names a
+  global, as `GlobalAccess { name, line, column, kind }` with
+  `AccessKind::Read` or `Write`, one record per occurrence in lexical source
+  order. The parser records them as it resolves names, so a write carries its
+  identifier's own line and column, and code that can never run is listed.
+  Builtin-slot names (`print`, `_G`, ...) are listed like any other. Only a
+  bare whole assignment target is a write; the table of `x.f = v` is a read.
+  The records are source metadata kept beside the bytecode, not in it.
+
 ## [0.7.0] - 2026-11-05
 
 Saves from 0.6.0 do not load: snapshot `FORMAT_VERSION` is 14.

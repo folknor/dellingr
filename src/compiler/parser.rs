@@ -15,6 +15,7 @@ use super::token::TokenKind;
 use super::token::{EscapeError, Literal, Token};
 use crate::det_hash::{IndexMap, IndexSet};
 use crate::error::{InternalFault, ParserFault};
+use crate::globals::{AccessKind, GlobalAccess};
 use crate::instr::Builtin;
 use crate::limits::{MAX_FIXED_ARGS, MAX_LITERALS, MAX_LOCALS, MAX_SOURCE_BYTES, MAX_SYNTAX_DEPTH};
 
@@ -38,7 +39,16 @@ struct Parser<'a> {
     source_name: Option<Arc<[u8]>>,
     /// Current nesting depth across recursive parser entry points.
     syntax_depth: u32,
+    /// Every global-naming identifier so far, in lexical order. One list for
+    /// the whole source: nested functions parse in place, so appending keeps
+    /// that order. A record is appended as a read where its name resolves and
+    /// flipped to a write, by its index, once it proves a bare target.
+    globals: Vec<GlobalAccess>,
 }
+
+/// The index of one record in `Parser::globals`.
+#[derive(Clone, Copy, Debug)]
+struct GlobalRef(usize);
 
 /// Ordered literal storage for one chunk while parsing.
 ///
@@ -72,10 +82,13 @@ enum Variable {
     Builtin(Builtin),
 }
 
-/// Parses Lua source bytes into an unfinalized `Bytecode` tree; the compiler's
-/// `compile` finalizes it.
+/// Parses Lua source bytes into an unfinalized `Bytecode` tree, which the
+/// compiler's `compile` finalizes, and the source's global occurrences.
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
-pub(super) fn parse(source: &[u8], source_name: Option<Arc<[u8]>>) -> Result<Bytecode> {
+pub(super) fn parse(
+    source: &[u8],
+    source_name: Option<Arc<[u8]>>,
+) -> Result<(Bytecode, Vec<GlobalAccess>)> {
     if source.len() > MAX_SOURCE_BYTES {
         return Err(Error::without_location(ErrorKind::SourceSizeExceeded {
             size: source.len(),
@@ -92,6 +105,7 @@ pub(super) fn parse(source: &[u8], source_name: Option<Arc<[u8]>>) -> Result<Byt
         funcs: FunctionStack::new(state::FuncState::new(source_name.clone(), 0, true)),
         source_name: source_name.clone(),
         syntax_depth: 0,
+        globals: Vec::new(),
     };
     parser
         .parse_all()
@@ -102,7 +116,7 @@ pub(super) fn parse(source: &[u8], source_name: Option<Arc<[u8]>>) -> Result<Byt
 /// rewrites.
 #[cfg(test)]
 pub(super) fn parse_unfinalized(source: &str) -> Result<Bytecode> {
-    parse(source.as_bytes(), None)
+    parse(source.as_bytes(), None).map(|(bc, _)| bc)
 }
 
 impl<'a> Parser<'a> {
@@ -444,7 +458,7 @@ impl<'a> Parser<'a> {
 
     /// The main entry point for the parser. This parses the entire input.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    fn parse_all(mut self) -> Result<Bytecode> {
+    fn parse_all(mut self) -> Result<(Bytecode, Vec<GlobalAccess>)> {
         // The root frame was installed with the parser. As with nested
         // functions, generate the body before checking its terminator. A body
         // limit error can win over trailing invalid syntax; either failure
@@ -456,7 +470,7 @@ impl<'a> Parser<'a> {
         let c = self.finish_chunk(root, 0, body)?;
         let token = self.input.next()?;
         if let TokenKind::EndOfFile = token.typ {
-            Ok(c)
+            Ok((c, self.globals))
         } else {
             Err(self.err_unexpected(token, TokenKind::EndOfFile))
         }
@@ -609,6 +623,45 @@ impl<'a> Parser<'a> {
     ) -> Result<()> {
         stmts.push(parse(self)?);
         Ok(())
+    }
+
+    /// Resolves the identifier `name`, whose token starts at byte `start`, to
+    /// a variable. A builtin or global is also recorded as a read; the
+    /// returned reference flips it to a write if it proves a bare target.
+    fn resolve_identifier(
+        &mut self,
+        name: &'a str,
+        start: usize,
+    ) -> Result<(Variable, Option<GlobalRef>)> {
+        let variable = self.parse_prefix_identifier(name)?;
+        let global = match variable {
+            Variable::Global(_) | Variable::Builtin(_) => {
+                let (line, column) = self.input.line_and_column(start);
+                self.globals.push(GlobalAccess {
+                    name: name.as_bytes().into(),
+                    line,
+                    column,
+                    kind: AccessKind::Read,
+                });
+                Some(GlobalRef(self.globals.len() - 1))
+            }
+            Variable::Local { .. } | Variable::Upval(_) => None,
+        };
+        Ok((variable, global))
+    }
+
+    /// Marks a recorded occurrence as an assignment's bare target.
+    fn mark_global_write(&mut self, global: Option<GlobalRef>) -> Result<()> {
+        let Some(GlobalRef(index)) = global else {
+            return Ok(());
+        };
+        match self.globals.get_mut(index) {
+            Some(access) => {
+                access.kind = AccessKind::Write;
+                Ok(())
+            }
+            None => Err(self.internal_error(ParserFault::GlobalOccurrenceMissing)),
+        }
     }
 
     /// Resolves a variable's name to a local, upvalue, builtin or global.

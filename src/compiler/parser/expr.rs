@@ -2,6 +2,7 @@ use super::super::ast::{
     ArithChain, ArithLink, CallSuffix, CompareChain, CompareLink, Expr, ExprKind, MethodSuffix,
     Place, Suffix, Suffixed,
 };
+use super::GlobalRef;
 use super::Literal;
 use super::Parser;
 use super::Result;
@@ -19,8 +20,9 @@ pub(super) struct Prefix {
 }
 
 enum PrefixBase {
-    /// A name, resolved and stamped where it was read.
-    Var(Variable, u32),
+    /// A name, resolved and stamped where it was read, with its occurrence
+    /// record when it names a global.
+    Var(Variable, u32, Option<GlobalRef>),
     /// A parenthesized expression.
     Paren(Expr),
 }
@@ -37,7 +39,7 @@ impl Prefix {
     /// The prefix's value.
     pub(super) fn into_expr(self) -> Expr {
         let base = match self.base {
-            PrefixBase::Var(variable, line) => variable_read(variable, line),
+            PrefixBase::Var(variable, line, _) => variable_read(variable, line),
             PrefixBase::Paren(expr) => expr,
         };
         if self.suffixes.is_empty() {
@@ -51,26 +53,37 @@ impl Prefix {
     }
 
     /// The prefix as an assignment target, or `None` when it names no
-    /// variable or field (a call or a parenthesized expression).
-    pub(super) fn into_place(mut self) -> Option<Place> {
+    /// variable or field (a call or a parenthesized expression). The second
+    /// value is the occurrence record of a bare global target, which the
+    /// caller marks as a write; a field or index target's root stays a read.
+    pub(super) fn into_place(mut self) -> Option<(Place, Option<GlobalRef>)> {
         match self.suffixes.pop() {
             None => match self.base {
-                PrefixBase::Var(variable, _) => Some(match variable {
-                    Variable::Local { reg, .. } => Place::Local(reg),
-                    Variable::Upval(index) => Place::Upval(index),
-                    Variable::Global(name) => Place::Global(name),
-                    Variable::Builtin(builtin) => Place::Builtin(builtin),
-                }),
+                PrefixBase::Var(variable, _, global) => Some((
+                    match variable {
+                        Variable::Local { reg, .. } => Place::Local(reg),
+                        Variable::Upval(index) => Place::Upval(index),
+                        Variable::Global(name) => Place::Global(name),
+                        Variable::Builtin(builtin) => Place::Builtin(builtin),
+                    },
+                    global,
+                )),
                 PrefixBase::Paren(_) => None,
             },
-            Some(Suffix::Field { name, .. }) => Some(Place::Field {
-                object: self.into_expr(),
-                name,
-            }),
-            Some(Suffix::Index { key, .. }) => Some(Place::Index {
-                object: self.into_expr(),
-                key,
-            }),
+            Some(Suffix::Field { name, .. }) => Some((
+                Place::Field {
+                    object: self.into_expr(),
+                    name,
+                },
+                None,
+            )),
+            Some(Suffix::Index { key, .. }) => Some((
+                Place::Index {
+                    object: self.into_expr(),
+                    key,
+                },
+                None,
+            )),
             Some(Suffix::Call(_) | Suffix::Method(_)) => None,
         }
     }
@@ -306,8 +319,8 @@ impl Parser<'_> {
             TokenKind::Identifier => {
                 let text = self.get_text(tok)?;
                 self.reject_environment_name(text, tok.start)?;
-                let variable = self.parse_prefix_identifier(text)?;
-                PrefixBase::Var(variable, self.input.last_line())
+                let (variable, global) = self.resolve_identifier(text, tok.start)?;
+                PrefixBase::Var(variable, self.input.last_line(), global)
             }
             TokenKind::LParen => {
                 let inner = self.parse_expr()?;

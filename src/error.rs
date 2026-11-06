@@ -145,6 +145,8 @@ pub(crate) enum ParserFault {
     FoldedLiteralOutOfRange,
     /// A resolved local has no declaration in its function.
     LocalWithoutDeclaration,
+    /// An assignment target's occurrence reference names no recorded global.
+    GlobalOccurrenceMissing,
     /// Identifier tokens are ASCII by construction in the byte lexer, and the
     /// parser reads them as `&str`.
     TokenTextNotUtf8,
@@ -257,6 +259,7 @@ impl ParserFault {
             Self::EmptyComparisonChain => "comparison chain requires an operator",
             Self::FoldedLiteralOutOfRange => "folded operand names a literal outside the pool",
             Self::LocalWithoutDeclaration => "resolved local has no declaration",
+            Self::GlobalOccurrenceMissing => "assignment target names no recorded global",
             Self::TokenTextNotUtf8 => "lexer produced a non-UTF-8 identifier token",
         }
     }

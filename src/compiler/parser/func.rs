@@ -14,18 +14,22 @@ impl<'a> Parser<'a> {
     /// the keyword `function`.
     pub(super) fn parse_fndecl(&mut self) -> Result<Stmt> {
         let line = self.input.next()?.line; // 'function' keyword
+        let start = self.input.peek()?.start;
         let name = self.expect_variable_identifier()?;
         match self.input.peek_type()? {
-            TokenKind::Dot => self.parse_fndecl_table(name, line),
-            TokenKind::Colon => self.parse_fndecl_method(name, line),
-            _ => self.parse_fndecl_basic(name, line),
+            TokenKind::Dot => self.parse_fndecl_table(name, start, line),
+            TokenKind::Colon => self.parse_fndecl_method(name, start, line),
+            _ => self.parse_fndecl_basic(name, start, line),
         }
     }
 
     /// Parses a basic function declaration, which just assigns the function to
-    /// a local, upvalue, or global variable.
-    fn parse_fndecl_basic(&mut self, name: &'a str, line: u32) -> Result<Stmt> {
-        let target = match self.parse_prefix_identifier(name)? {
+    /// a local, upvalue, or global variable. A global name is marked written
+    /// before the body parses, so it precedes the body's occurrences.
+    fn parse_fndecl_basic(&mut self, name: &'a str, start: usize, line: u32) -> Result<Stmt> {
+        let (variable, global) = self.resolve_identifier(name, start)?;
+        self.mark_global_write(global)?;
+        let target = match variable {
             Variable::Local { reg, .. } => Place::Local(reg),
             Variable::Upval(index) => Place::Upval(index),
             Variable::Global(name) => Place::Global(name),
@@ -41,13 +45,13 @@ impl<'a> Parser<'a> {
 
     /// The table a dotted or method declaration stores into, read where its
     /// name was resolved.
-    fn declaration_table(&mut self, table_name: &'a str) -> Result<Expr> {
-        let table = self.parse_prefix_identifier(table_name)?;
+    fn declaration_table(&mut self, table_name: &'a str, start: usize) -> Result<Expr> {
+        let (table, _) = self.resolve_identifier(table_name, start)?;
         Ok(variable_read(table, self.input.last_line()))
     }
 
-    fn parse_fndecl_table(&mut self, table_name: &'a str, line: u32) -> Result<Stmt> {
-        let base = self.declaration_table(table_name)?;
+    fn parse_fndecl_table(&mut self, table_name: &'a str, start: usize, line: u32) -> Result<Stmt> {
+        let base = self.declaration_table(table_name, start)?;
         let mut suffixes = Vec::new();
 
         // Parse all the fields, building the full name (e.g., "foo.bar.baz").
@@ -100,8 +104,13 @@ impl<'a> Parser<'a> {
 
     /// Parses a method declaration: `function table:method()`
     /// This is sugar for `table.method = function(self, ...)`
-    fn parse_fndecl_method(&mut self, table_name: &'a str, line: u32) -> Result<Stmt> {
-        let object = self.declaration_table(table_name)?;
+    fn parse_fndecl_method(
+        &mut self,
+        table_name: &'a str,
+        start: usize,
+        line: u32,
+    ) -> Result<Stmt> {
+        let object = self.declaration_table(table_name, start)?;
 
         // Consume the colon and get the method name.
         self.expect(TokenKind::Colon)?;

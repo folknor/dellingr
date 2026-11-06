@@ -54,7 +54,10 @@ impl<'a> Parser<'a> {
             return Err(self.malformed_statement());
         }
         match prefix.into_place() {
-            Some(place) => self.parse_assign(place),
+            Some((place, global)) => {
+                self.mark_global_write(global)?;
+                self.parse_assign(place)
+            }
             None => Err(self.malformed_statement()),
         }
     }
@@ -94,7 +97,10 @@ impl<'a> Parser<'a> {
     fn parse_place_exp(&mut self) -> Result<Place> {
         let prefix: Prefix = self.parse_prefix_exp()?;
         match prefix.into_place() {
-            Some(place) => Ok(place),
+            Some((place, global)) => {
+                self.mark_global_write(global)?;
+                Ok(place)
+            }
             None => Err(self.malformed_statement()),
         }
     }

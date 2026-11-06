@@ -98,6 +98,7 @@ mod crmath;
 mod det_hash;
 mod disassemble;
 mod fp_env;
+mod globals;
 mod gmatch_schema;
 mod host;
 mod instr;
@@ -145,6 +146,7 @@ pub use cost_meter::COST_MODEL_VERSION;
 pub use cost_meter::interval_test::with_cost_check_interval;
 pub use cost_model::{Charge, CostModel, Costing};
 pub use disassemble::Disassembly;
+pub use globals::{AccessKind, GlobalAccess};
 pub use host::{DefaultCallbacks, HostCallbacks};
 pub use instr::{ArgCount, RetCount};
 #[cfg(feature = "native-call-trace")]
@@ -227,7 +229,11 @@ pub mod cli {
 /// state.call(ArgCount::Fixed(0), RetCount::Fixed(1)).unwrap();
 /// ```
 #[derive(Clone, Debug)]
-pub struct Program(Arc<Bytecode>);
+pub struct Program {
+    bytecode: Arc<Bytecode>,
+    /// Source metadata, never part of the bytecode a `State` runs or saves.
+    globals: Arc<[GlobalAccess]>,
+}
 
 impl Program {
     /// Compile Lua source into an executable `Program`. This is the only way
@@ -251,7 +257,11 @@ impl Program {
         if fp_env::unsupported() {
             return Err(State::float_environment_error());
         }
-        Ok(Program(Arc::new(compiler::compile(source, name)?)))
+        let (bytecode, globals) = compiler::compile_with_globals(source, name)?;
+        Ok(Program {
+            bytecode: Arc::new(bytecode),
+            globals: globals.into(),
+        })
     }
 
     /// Statically analyze the cost of this program, without executing it.
@@ -275,12 +285,12 @@ impl Program {
         // under another model: the walk is one linear pass over the bytecode,
         // the host keeps the Program, and a second pricing path would only
         // duplicate this one.
-        CostAnalysis::analyze(&self.0, model)
+        CostAnalysis::analyze(&self.bytecode, model)
     }
 
     /// The chunk name given at compile time, byte-exact.
     pub fn source_name(&self) -> Option<&[u8]> {
-        self.0.source.as_deref()
+        self.bytecode.source.as_deref()
     }
 
     /// A human-readable listing of the compiled bytecode: every function
@@ -292,7 +302,39 @@ impl Program {
     /// for a given compiled program but is diagnostic only: its format may
     /// change between versions and it is not replay data.
     pub fn disassemble(&self) -> Disassembly<'_> {
-        Disassembly::new(&self.0)
+        Disassembly::new(&self.bytecode)
+    }
+
+    /// Every free identifier in the source that names a global, one record
+    /// per occurrence in lexical source order, with its name, the
+    /// identifier's line and byte column, and whether it is read or written.
+    /// Builtin-slot names (`print`, `_G`, ...) are listed like any other.
+    ///
+    /// The parser records these as it resolves names, so they describe the
+    /// source, not what runs: code that can never run, such as
+    /// `if false then x() end`, is listed, and the order is not execution
+    /// order (`x = f()` lists the write of `x` first). A record is a write
+    /// only when the bare name is a whole assignment target (`x = v`, one of
+    /// `x, y = ...`, `function x() end`); the root of `x.f = v`, `x[k] = v`
+    /// or `function x.f() end` is a read. Names reached through a table
+    /// (`_G.y`, `rawget(_G, "y")`) are not listed, though `_G` and `rawget`
+    /// are, as is any global in a key or value expression. Locals and
+    /// upvalues are never listed.
+    ///
+    /// Unlike [`Program::disassemble`], whose text format may change in any
+    /// release, this is typed data meant for programs to consume; like the
+    /// rest of the crate before 1.0, it may still change between minor
+    /// versions. It is not part of the bytecode, so it does not affect
+    /// execution, cost or snapshots.
+    ///
+    /// ```
+    /// use dellingr::{AccessKind, Program};
+    /// let program = Program::compile("x = y", None).unwrap();
+    /// let names: Vec<_> = program.globals().iter().map(|a| (&*a.name, a.kind)).collect();
+    /// assert_eq!(names, [(&b"x"[..], AccessKind::Write), (&b"y"[..], AccessKind::Read)]);
+    /// ```
+    pub fn globals(&self) -> &[GlobalAccess] {
+        &self.globals
     }
 }
 
@@ -305,7 +347,7 @@ impl State {
     /// and heap; only the immutable bytecode is shared).
     pub fn load(&mut self, program: &Program) -> Result<()> {
         self.check_usable()?;
-        self.push_chunk(Arc::clone(&program.0))?;
+        self.push_chunk(Arc::clone(&program.bytecode))?;
         Ok(())
     }
 }
