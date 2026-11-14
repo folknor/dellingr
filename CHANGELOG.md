@@ -11,6 +11,10 @@ Saves from 0.7.x do not load: snapshot `FORMAT_VERSION` is 15.
 
 ### Fixed
 
+- Upvalue pool references are as wide as the pool itself. They were 32-bit,
+  so once a State had allocated 2^32 upvalue slots the next capture wrapped
+  to slot zero and aliased an existing variable, and sweep could free-list a
+  live low slot. Capturing stays infallible; save files are unchanged.
 - **Replay-visible:** a compile error a Rust callback returns through Lua
   keeps the rejected source's location as its prefix. Before:
   `outer.lua:3: <name> expected near '='`; now `child.lua:1:7: <name>

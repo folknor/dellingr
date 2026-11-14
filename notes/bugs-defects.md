@@ -50,30 +50,6 @@ request more input.
 Hunter's suggested direction: preserve permanent escape failures at EOF while
 keeping incomplete valid prefixes such as `\x4` recoverable.
 
-## BUG-003 - Upvalue allocation silently wraps and aliases an existing capture
-
-Hunter label: P2. Scope: `heap`. Sites: `UpvaluePool::alloc` (`src/vm/object.rs`,
-reported at line 104) and sweep (`src/vm/object.rs`, reported at line 134).
-
-`UpvaluePool::alloc` claims to allocate an upvalue and return its reference, but
-narrows `self.slots.len()` from `usize` to `u32` without checking. On a 64-bit
-host, allocating slot `2^32` stores the new upvalue there and returns
-`UpvalueRef(0)`.
-
-This is reachable by retaining closures with distinct captures. For example,
-33,554,432 closures capturing 128 fresh locals each fill the representable range
-without exceeding the per-function capture limit.
-
-The next capture aliases slot zero. Closing that capture overwrites an older
-closure's variable, and subsequent reads return the wrong value. GC compounds the
-corruption: sweep also narrows indices, so sweeping the unreferenced high slot
-adds an occupied low slot to the free list.
-
-Hunter's suggested direction: use indices wide enough for the backing vectors, or
-reject exhaustion before mutation and propagate an ordinary error. The hunter
-states this is established by source tracing and that it did not exercise the
-enormous allocation required.
-
 ## BUG-004 - `RawField` promises integer implementations it does not provide
 
 Hunter label: P3, from both `heap` and `host`, reported independently. Site:

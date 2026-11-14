@@ -40,16 +40,25 @@ pub(crate) enum Upvalue {
 }
 
 /// Index into the upvalue pool.
+///
+/// `usize`, the width of the backing `Vec`, so every slot the pool can hold
+/// has a distinct reference. A narrower index would wrap once the pool passed
+/// its range and alias a new capture onto an old slot; the pool has no quota
+/// (docs/limits.md, "State-local growth"), so that range is reachable by a
+/// script retaining enough captures or growing the pool with automatic
+/// collection disabled. Widening costs four bytes per capture-list entry and
+/// keeps capture infallible; no pool index is serialized (snapshots assign
+/// their own dense ids).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct UpvalueRef(u32);
+pub(crate) struct UpvalueRef(usize);
 
 impl UpvalueRef {
-    pub(crate) fn new(idx: u32) -> Self {
+    pub(crate) fn new(idx: usize) -> Self {
         Self(idx)
     }
 
     pub(crate) fn index(self) -> usize {
-        self.0 as usize
+        self.0
     }
 }
 
@@ -75,7 +84,7 @@ pub(crate) struct UpvaluePool {
     /// phase holds the pool immutably.
     colors: Vec<Cell<UpvalueSlotColor>>,
     /// Indices of `Free` slots, consumed LIFO by `alloc`.
-    free: Vec<u32>,
+    free: Vec<usize>,
 }
 
 impl Default for UpvaluePool {
@@ -97,11 +106,11 @@ impl UpvaluePool {
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(super) fn alloc(&mut self, upvalue: Upvalue) -> UpvalueRef {
         if let Some(idx) = self.free.pop() {
-            self.slots[idx as usize] = upvalue;
-            self.colors[idx as usize].set(UpvalueSlotColor::Unmarked);
+            self.slots[idx] = upvalue;
+            self.colors[idx].set(UpvalueSlotColor::Unmarked);
             return UpvalueRef::new(idx);
         }
-        let idx = self.slots.len() as u32;
+        let idx = self.slots.len();
         self.slots.push(upvalue);
         self.colors.push(Cell::new(UpvalueSlotColor::Unmarked));
         UpvalueRef::new(idx)
@@ -131,7 +140,7 @@ impl UpvaluePool {
                     // pin heap objects; the slot is dead until reallocated.
                     self.slots[idx] = Upvalue::Closed(Val::Nil);
                     color.set(UpvalueSlotColor::Free);
-                    self.free.push(idx as u32);
+                    self.free.push(idx);
                 }
                 UpvalueSlotColor::Free => {}
             }
