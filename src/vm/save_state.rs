@@ -268,6 +268,12 @@ struct SavePayload {
     cost: CostState,
     strings: Vec<Vec<u8>>,
     bytecode: Vec<SavedBytecode>,
+    /// Ascending ids of the chunks that had a runtime bundle (interned
+    /// literals, inline caches) in the saving State: every closure's chunk,
+    /// plus each nested chunk that had been instantiated. A live closure
+    /// keeps its whole nested tree's bundles, and with them their literals
+    /// and the literals' `%p` identities, so load rebuilds exactly these.
+    chunk_runtimes: Vec<u32>,
     upvalues: Vec<SavedVal>,
     objects: Vec<SavedObject>,
     /// The global table, whole: always the `Table` variant (the verifier
@@ -295,6 +301,7 @@ impl SavePayload {
             cost: CostState::default(),
             strings: Vec::new(),
             bytecode: Vec::new(),
+            chunk_runtimes: Vec::new(),
             upvalues: Vec::new(),
             objects: Vec::new(),
             globals: SavedObject::empty_table(),
@@ -795,9 +802,13 @@ pub(super) fn save_coverage(root: &GcRoot<'_>) -> SaveCoverage {
         // table, so it is encoded with them.
         GcRoot::Globals(_) | GcRoot::StringMetatable(_) => SaveCoverage::Serialized,
         // MetaNames: interned again when the loaded State is built.
-        // ChunkLiterals: literals of saved bytecode are re-interned by load,
-        // carrying their `%p` identities; literals of cache-only chunks need
-        // not survive.
+        // ChunkLiterals: the save lists every encoded chunk that has a
+        // bundle (nested chunks included), and load rebuilds exactly those,
+        // re-interning their literals with their `%p` identities. Bundles of
+        // chunks outside the saved closure trees are not carried: in the
+        // continuous State the next collection drops them while still
+        // rooting their literals one last time, a grace a load does not
+        // reproduce.
         GcRoot::MetaNames(_) | GcRoot::ChunkLiterals(_) => SaveCoverage::Rebuilt,
         GcRoot::Stack(_)
         | GcRoot::RootedValues(_)
@@ -917,6 +928,15 @@ impl<'a> SaveBuilder<'a> {
             .into_iter()
             .map(|value| value.ok_or(SaveError::from(SaveFault::UnfilledUpvalueSlot)))
             .collect::<Result<Vec<_>, _>>()?;
+        // Arena ids are assigned in walk order; the list is canonical
+        // ascending so it carries membership only.
+        let mut chunk_runtimes: Vec<u32> = self
+            .bytecode_ids
+            .iter()
+            .filter(|(key, _)| self.state.bytecode_caches.contains_key(*key))
+            .map(|(_, id)| *id)
+            .collect();
+        chunk_runtimes.sort_unstable();
 
         Ok(SavePayload {
             has_standard_environment: !self.state.global_env.env_tables().is_empty(),
@@ -924,6 +944,7 @@ impl<'a> SaveBuilder<'a> {
             cost: self.state.cost.clone(),
             strings: self.strings,
             bytecode: self.bytecode,
+            chunk_runtimes,
             upvalues,
             objects,
             globals,
@@ -1676,6 +1697,22 @@ fn materialize_payload(
     let mut strings = Vec::with_capacity(payload.strings.len());
     for bytes in &payload.strings {
         strings.push(state.heap.no_gc_allocator().alloc_string(bytes));
+    }
+
+    // Rebuild every runtime bundle the saving State held, nested chunks
+    // included: a nested chunk's bundle (and so its literals and their `%p`
+    // identities) lives as long as an enclosing closure, with or without a
+    // closure of its own. The verifier has checked the ids are in range and
+    // cover every closure's chunk, which then finds its bundle here.
+    for id in &payload.chunk_runtimes {
+        let bc = bytecode.get(*id as usize).ok_or_else(|| {
+            corrupt_arena(
+                CorruptionReason::IdOutOfRange(SavedReference::RuntimeChunk),
+                *id as usize,
+                SaveLocation::Bytecode,
+            )
+        })?;
+        state.resolve_bytecode_runtime_no_gc(bc);
     }
 
     let mut upvalues = Vec::with_capacity(payload.upvalues.len());
@@ -2705,6 +2742,15 @@ impl SavePayload {
         })?;
         write_vec(
             out,
+            SaveCollection::ChunkRuntimes,
+            &self.chunk_runtimes,
+            |out, id| {
+                out.write_u32(*id);
+                Ok(())
+            },
+        )?;
+        write_vec(
+            out,
             SaveCollection::Upvalues,
             &self.upvalues,
             |out, item| item.encode(out),
@@ -2758,6 +2804,7 @@ impl SavePayload {
             },
             strings: read_vec(input, Decoder::read_lua_string_bytes)?,
             bytecode: read_vec(input, SavedBytecode::decode)?,
+            chunk_runtimes: read_vec(input, Decoder::read_u32)?,
             upvalues: read_vec(input, SavedVal::decode)?,
             objects: read_vec(input, SavedObject::decode)?,
             globals: SavedObject::decode(input)?,
@@ -3356,9 +3403,20 @@ mod tests {
                     .map(|(id, (_, value))| (SavedVal::Str(id as u32), value)),
             )
             .collect();
+        // A closure's chunk always has a runtime bundle; list exactly those.
+        let chunk_runtimes = objects
+            .iter()
+            .filter_map(|object| match object {
+                SavedObject::Closure { chunk, .. } => Some(*chunk),
+                SavedObject::Table { .. } => None,
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
         let payload = SavePayload {
             strings,
             bytecode,
+            chunk_runtimes,
             objects,
             globals: SavedObject::Table {
                 array_len: 0,
@@ -3383,6 +3441,45 @@ mod tests {
         match load_bytecode(bytecode, objects) {
             Ok(_) => panic!("fixture must be rejected"),
             Err(error) => error,
+        }
+    }
+
+    #[test]
+    fn chunk_runtime_list_is_ascending_in_range_and_covers_closures() {
+        let load = |chunk_runtimes: Vec<u32>| {
+            let payload = SavePayload {
+                bytecode: vec![valid_saved_bytecode(), valid_saved_bytecode()],
+                chunk_runtimes,
+                objects: vec![SavedObject::Closure {
+                    chunk: 1,
+                    upvalues: Vec::new(),
+                }],
+                ..SavePayload::empty(false)
+            };
+            let Ok(bytes) = encode_save(&payload) else {
+                panic!("fixture payload must encode");
+            };
+            State::load_state(&bytes, Box::new(crate::DefaultCallbacks), no_setup)
+        };
+        assert!(load(vec![1]).is_ok());
+        assert!(load(vec![0, 1]).is_ok());
+        for (runtimes, expected) in [
+            (vec![], CorruptionReason::ClosureChunkWithoutRuntime),
+            (vec![0], CorruptionReason::ClosureChunkWithoutRuntime),
+            (vec![1, 0], CorruptionReason::ChunkRuntimesNotAscending),
+            (vec![1, 1], CorruptionReason::ChunkRuntimesNotAscending),
+            (
+                vec![1, 2],
+                CorruptionReason::IdOutOfRange(SavedReference::RuntimeChunk),
+            ),
+        ] {
+            match load(runtimes) {
+                Err(LoadError::Snapshot(SnapshotError::CorruptArena { reason, .. })) => {
+                    assert_eq!(reason, expected);
+                }
+                Err(other) => panic!("expected {expected:?}, got {other:?}"),
+                Ok(_) => panic!("expected {expected:?}, but the save loaded"),
+            }
         }
     }
 

@@ -4,6 +4,22 @@ All notable changes to dellingr are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/) and the project adheres to
 [Semantic Versioning](https://semver.org/) once 1.0 lands.
 
+## [Unreleased]
+
+Saves from 0.7.x do not load: snapshot `FORMAT_VERSION` is 15.
+`COST_MODEL_VERSION` is 8 (unchanged).
+
+### Fixed
+
+- **Replay-visible:** a string literal of a nested function keeps its `%p`
+  id across save and load when only an enclosing closure is saved (a
+  function returned by a saved one, run before the save, with no closure of
+  it alive). Load used to rebuild the interned literals only of functions
+  with a saved closure, so the literal rendered a fresh id after load and a
+  resave dropped its id record. The save now lists every saved function
+  that has been instantiated, after the bytecode arena, and load rebuilds
+  exactly those.
+
 ## [0.7.1] - 2026-11-06
 
 Saves from 0.7.0 load: snapshot `FORMAT_VERSION` is 14 (unchanged).

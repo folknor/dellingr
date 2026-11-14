@@ -138,39 +138,6 @@ the documentation or fulfill the existing promise. `host` says listing the
 supported widths explicitly suffices and adding types is unnecessary to resolve
 the documentation defect.
 
-## BUG-005 - Load loses rendered identities of literals in nested functions without live closures
-
-Hunter label: P1. Scope: `snapshot`. Sites: materialization
-(`src/vm/save_state.rs`, reported at line 1709), capture (reported at line 856),
-and the final collection (reported at line 1875).
-
-Materialization creates runtime bundles only for saved closure objects. Nested
-bytecode is rebuilt, but its previously populated runtime is omitted.
-
-Reproducer: execute this chunk, return to the host, then save/load with no setup:
-
-```lua
-function make()
-    return function() return "nested-only" end
-end
-before = string.format("%p", make()())
-```
-
-The continuous State retains the nested function's runtime through `make`'s
-bytecode tree. Capture therefore records the literal's rendered identity. During
-load, however, the temporary nested closure has no saved object, so its runtime is
-never reconstructed. The final collection frees the otherwise unrooted literal and
-prunes its identity.
-
-Consequently, `string.format("%p", make()())` produces a new identity after load
-while the continuous State retains `before`. An immediate resave also loses the
-identity record. This breaks the `docs/save-state.md` contract for rendered
-identities and continued byte stability. The hunter says restoring these
-identities must also restore their lifetime through reachable nested bytecode.
-
-The hunter states this is source-traced, and that the existing snapshot
-integration suite passed, including the current released-format archive check.
-
 ## BUG-006 - Gmatch validation rejects legitimate ordinary closures
 
 Hunter label: P2. Scope: `snapshot`. Site: iterator detection

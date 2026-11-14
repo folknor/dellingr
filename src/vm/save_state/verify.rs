@@ -219,6 +219,44 @@ fn validate_closures(payload: &SavePayload) -> Result<(), SnapshotError> {
     Ok(())
 }
 
+/// The chunk runtime list is a set of bytecode ids in strictly ascending
+/// order, and names every closure's chunk: a live closure always runs on
+/// its chunk's State-local bundle, so a save without it is not one this
+/// crate wrote. Nested chunks may or may not be listed, depending on
+/// whether they had been instantiated before the save.
+fn validate_chunk_runtimes(payload: &SavePayload) -> Result<(), SnapshotError> {
+    let mut previous: Option<u32> = None;
+    for (index, id) in payload.chunk_runtimes.iter().enumerate() {
+        if (*id as usize) >= payload.bytecode.len() {
+            return Err(corrupt(
+                CorruptionReason::IdOutOfRange(SavedReference::RuntimeChunk),
+                *id as usize,
+                SaveLocation::Bytecode,
+            ));
+        }
+        if previous.is_some_and(|previous| previous >= *id) {
+            return Err(corrupt(
+                CorruptionReason::ChunkRuntimesNotAscending,
+                index,
+                SaveLocation::Bytecode,
+            ));
+        }
+        previous = Some(*id);
+    }
+    for object in &payload.objects {
+        if let SavedObject::Closure { chunk, .. } = object
+            && payload.chunk_runtimes.binary_search(chunk).is_err()
+        {
+            return Err(corrupt(
+                CorruptionReason::ClosureChunkWithoutRuntime,
+                *chunk as usize,
+                SaveLocation::Bytecode,
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_value(value: &super::SavedVal, payload: &SavePayload) -> Result<(), SnapshotError> {
     match value {
         super::SavedVal::Str(id) if (*id as usize) >= payload.strings.len() => Err(corrupt(
@@ -863,6 +901,7 @@ pub(super) fn verify_payload(payload: SavePayload) -> Result<VerifiedSavePayload
     // This precedes materialization, including build_bytecode's out[idx] access.
     validate_nested_graph(&payload.bytecode)?;
     validate_closures(&payload)?;
+    validate_chunk_runtimes(&payload)?;
     validate_references(&payload)?;
     validate_gmatch_iterators(&payload)?;
     validate_pointer_ids(&payload)?;

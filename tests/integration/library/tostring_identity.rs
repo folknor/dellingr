@@ -107,6 +107,47 @@ fn closure_literal_identity_survives_save_and_load() {
     );
 }
 
+/// A literal of a nested function keeps its `%p` identity when only the
+/// enclosing closure is saved: the nested chunk's runtime bundle (and so the
+/// interned literal) lives as long as the enclosing closure, and load must
+/// rebuild it even though no closure of the nested function survives.
+#[cfg(feature = "snapshot")]
+#[test]
+fn nested_literal_identity_survives_save_and_load_without_a_nested_closure() {
+    use dellingr::DefaultCallbacks;
+    let mut state = State::new();
+    support::run(
+        &mut state,
+        "function make() return function() return 'nested-only' end end
+             before = string.format('%p', make()())",
+    );
+    state.gc_collect();
+    support::eval(
+        &mut state,
+        "return string.format('%p', make()()) == before",
+        1,
+    );
+    assert!(state.to_boolean(-1), "the continuous State keeps the id");
+    state.pop(1).unwrap();
+
+    let save = state.save_state().expect("state saves");
+    let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), support::no_setup)
+        .expect("state loads");
+    assert_eq!(
+        loaded.save_state().expect("loaded state resaves").bytes,
+        save.bytes
+    );
+    support::eval(
+        &mut loaded,
+        "return string.format('%p', make()()) == before",
+        1,
+    );
+    assert!(
+        loaded.to_boolean(-1),
+        "a nested literal rendered a fresh identity after load"
+    );
+}
+
 /// Metamethod event names are permanent State strings, so an identity given
 /// to one survives collection even when no saved value reaches it. The
 /// snapshot must carry that identity, or the loaded State renders anew.

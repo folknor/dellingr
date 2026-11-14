@@ -10,8 +10,10 @@
 // Version 13: the global table is saved whole, with its pins, in place of the
 // named bindings and the environment delta for `_G`. Version 14: the payload
 // carries the State's costing (mode, and a metered model's weights) before
-// the meter counters.
+// the meter counters. Version 15: after the bytecode arena, the ascending ids
+// of the chunks that had a runtime bundle, so load rebuilds the bundles of
+// instantiated nested chunks and keeps their literals' `%p` identities.
 // Read by the codec and by the opcode fixture test, which runs in every
 // feature shape; no other build has a reader.
 #[cfg(any(feature = "snapshot", test))]
-pub(crate) const FORMAT_VERSION: u16 = 14;
+pub(crate) const FORMAT_VERSION: u16 = 15;

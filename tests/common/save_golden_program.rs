@@ -27,6 +27,9 @@ const GOLDEN_PROGRAM: &str = r#"
         return function() return a + b + c end
     end
     captured = make(2, 3)
+    function instantiated_once() return function() return "nested literal" end end
+    instantiated_once()()
+    function never_instantiated() return function() return "never" end end
 
     ordered = { 1, 2, 3, extra = "tail" }
     math.golden_delta = { marker = "environment delta" }
@@ -125,6 +128,8 @@ pub(crate) fn golden_text(bytes: &[u8]) -> String {
             encoded.len()
         ));
     }
+    let runtimes: Vec<_> = (0..reader.count()).map(|_| reader.number(4)).collect();
+    lines.push(format!("chunk_runtimes={runtimes:?}"));
     for id in 0..reader.count() {
         lines.push(format!("upvalue[{id}]={}", reader.value()));
     }

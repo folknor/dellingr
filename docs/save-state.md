@@ -10,6 +10,14 @@ in the module doc of `src/vm/save_state.rs`.
   either metered, with the weight of every charge in `Charge` order, or off.
 - State-local object identities that `tostring` and `%p` have rendered,
   including those of the environment objects `open_libs` rebuilds on load.
+- Which saved functions have been instantiated, so load rebuilds their
+  interned literals. A saved closure keeps the literals of every nested
+  function that has run, even with no closure of that function alive, and so
+  does the loaded State, with the literals' rendered identities. Literals of
+  code no saved closure reaches are not kept: the continuous State keeps them
+  through its next collection, the loaded State does not, so a string held
+  only by them can render a fresh identity after load where the continuous
+  run would have kept its old one.
 - The standard-library tables, whole, by the same rule as the global table.
 
 Not saved: call stack, program counter, open upvalues, coroutines, anchors,

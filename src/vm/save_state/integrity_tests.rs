@@ -338,7 +338,8 @@ fn golden_payload_covers_persisted_graph_shapes() {
         rng_state: _,
         cost: _,
         strings: _,
-        bytecode: _,
+        bytecode,
+        chunk_runtimes,
         upvalues: _,
         objects: _,
         globals: _,
@@ -349,6 +350,18 @@ fn golden_payload_covers_persisted_graph_shapes() {
         format_pointer_ids: _,
     } = &payload;
     assert!(*has_standard_environment && *next_format_pointer_id > 1);
+    // Runtime membership covers both nested cases: a chunk instantiated
+    // without a surviving closure of its own, and one never instantiated.
+    let closure_chunks: BTreeSet<u32> = payload
+        .objects
+        .iter()
+        .filter_map(|object| match object {
+            SavedObject::Closure { chunk, .. } => Some(*chunk),
+            SavedObject::Table { .. } => None,
+        })
+        .collect();
+    assert!(chunk_runtimes.iter().any(|id| !closure_chunks.contains(id)));
+    assert!(chunk_runtimes.len() < bytecode.len());
     let mut values = [false; 7];
     let mut objects = [false; 2];
     let mut shared_upvalues = BTreeSet::new();

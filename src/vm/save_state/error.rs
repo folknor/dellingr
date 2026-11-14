@@ -181,6 +181,8 @@ pub enum SaveCollection {
     EnvironmentTables,
     /// The rendered pointer identity records.
     FormatPointerIds,
+    /// The chunks that had a runtime bundle.
+    ChunkRuntimes,
     /// An environment table's pins.
     EnvironmentPins,
     /// A table's stored array slots.
@@ -217,6 +219,7 @@ impl fmt::Display for SaveCollection {
             Self::Globals => "globals",
             Self::EnvironmentTables => "environment tables",
             Self::FormatPointerIds => "format pointer ids",
+            Self::ChunkRuntimes => "chunk runtimes",
             Self::EnvironmentPins => "environment pins",
             Self::TableArraySlots => "table array slots",
             Self::TableEntries => "table entries",
@@ -592,6 +595,10 @@ pub enum CorruptionReason {
     /// A pin of the global table or an environment table is not a string,
     /// or an unsealed save carries pins.
     InvalidPin,
+    /// The chunk runtime list is not in strictly ascending chunk order.
+    ChunkRuntimesNotAscending,
+    /// A closure's chunk is missing from the chunk runtime list.
+    ClosureChunkWithoutRuntime,
 }
 
 impl fmt::Display for CorruptionReason {
@@ -608,6 +615,10 @@ impl fmt::Display for CorruptionReason {
             Self::Table(reason) => fmt::Display::fmt(reason, f),
             Self::Gmatch(reason) => fmt::Display::fmt(reason, f),
             Self::InvalidPin => f.write_str("invalid pin"),
+            Self::ChunkRuntimesNotAscending => {
+                f.write_str("chunk runtime ids are not strictly ascending")
+            }
+            Self::ClosureChunkWithoutRuntime => f.write_str("closure chunk has no runtime bundle"),
         }
     }
 }
@@ -650,6 +661,8 @@ pub enum SavedReference {
     BytecodeChunk,
     /// A nested function, in the bytecode arena.
     NestedChunk,
+    /// A function listed as having a runtime bundle, in the bytecode arena.
+    RuntimeChunk,
 }
 
 impl fmt::Display for SavedReference {
@@ -663,6 +676,7 @@ impl fmt::Display for SavedReference {
             Self::TableKeyString => "table key string id",
             Self::BytecodeChunk => "bytecode chunk id",
             Self::NestedChunk => "nested chunk id",
+            Self::RuntimeChunk => "runtime chunk id",
         })
     }
 }
