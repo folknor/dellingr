@@ -514,6 +514,45 @@ sweeps! {
     sweep_pow => Func::Pow,
 }
 
+/// Every golden row re-certified by the oracle and compared with its pinned
+/// result, so a change to the oracle or to `libbeef` is checked against the
+/// oracle's own earlier output without a CORE-MATH checkout.
+#[test]
+#[cfg(feature = "crmath-sweeps")]
+fn golden_matches_oracle() {
+    let mut rows = 0;
+    let mut problems = Vec::new();
+    for line in GOLDEN.lines() {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let f = Func::from_name(fields[0]).expect("golden lines start with a function name");
+        let x = parse_bits(fields[1]);
+        let y = if f.binary() {
+            parse_bits(fields[2])
+        } else {
+            0.0
+        };
+        let expected = parse_bits(fields[fields.len() - 1]);
+        rows += 1;
+        match certify(f, x, y) {
+            Ok(got) if same(got, expected) => {}
+            Ok(got) => problems.push(format!("{line}: oracle gives {}", show_bits(got))),
+            Err(message) => problems.push(format!("{line}: {message}")),
+        }
+    }
+    let pinned: usize = GOLDEN_COUNTS.iter().map(|(_, n)| n).sum();
+    assert_eq!(rows, pinned, "golden fixture row count changed");
+    let shown: Vec<_> = problems.iter().take(100).cloned().collect();
+    assert!(
+        problems.is_empty(),
+        "{} golden rows disagree with the oracle:\n{}",
+        problems.len(),
+        shown.join("\n")
+    );
+}
+
 /// Random inputs against the oracle, beyond what the golden file pins.
 #[test]
 #[cfg(feature = "crmath-sweeps")]

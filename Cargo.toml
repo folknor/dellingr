@@ -43,7 +43,8 @@ cost-check-interval = []
 # Records native-call inventory edges (`native-call-coverage`).
 native-call-trace = []
 # Explicit opt-in for checkout-dependent and long-running math verification:
-# `brokkr test crmath::tests::golden --release --features crmath-sweeps`.
+# `brokkr test <name> --sweep crmath-oracle` (the gate runs only the golden
+# re-certification in that shape).
 crmath-sweeps = []
 
 [lints.rust]
@@ -118,13 +119,14 @@ libc = { version = "0.2.191", optional = true }
 [dev-dependencies]
 libc = "0.2.191"
 # Correctly rounded arbitrary-precision reference for the src/crmath kernels'
-# test oracle (directed-rounding enclosures). Its own `pow` is not used: a
-# power-of-two-base shortcut truncates the exponent.
-libbeef = "0.1.1"
+# test oracle (directed-rounding enclosures). 0.1.2 is the floor: earlier
+# releases get pi, power-of-two-base pow, huge-argument sin and subnormal
+# to_f64 wrong, which the oracle now relies on.
+libbeef = "0.1.2"
 # Reads the linked CLI's ELF symbol tables for the libm symbol test
 # (tests/common/libm_symbols.rs). Dev-only: it must never become a normal
 # dependency.
-object = { version = "0.40.0", default-features = false, features = ["read_core", "elf"] }
+object = { version = "0.41.0", default-features = false, features = ["read_core", "elf"] }
 toml = "1.1.8"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 

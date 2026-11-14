@@ -8,13 +8,6 @@ get deleted as they ship or stop being worth tracking.
 
 ### Housekeeping left from the 2026-10-22 loops
 
-- libbeef 0.1.1 bugs the crmath test oracle works around, reported
-  upstream on 2026-10-22: lifthrasiir/libbeef#2 (`pi` returns 0 from 688
-  bits up, taking `atan` with it), #3 (power-of-two base `pow` truncates
-  the exponent), #4 (`sin` panics on huge arguments), #5 (`to_f64`
-  misrounds small inexact subnormals). When a release fixes them, bump the
-  dev-dependency and drop the matching workarounds in
-  `src/crmath/tests/oracle.rs` (and the `pow` note in Cargo.toml).
 - Possible CORE-MATH bug: `is_exact` in pow.c measures the bit length of `m`
   rather than `m^y`. Ported as is; unobservable here (the sweeps pass).
 

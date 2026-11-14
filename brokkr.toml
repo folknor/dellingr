@@ -293,6 +293,17 @@ only = [
     "snapshot::save_golden::",
 ]
 
+# The crmath oracle re-certifies every golden row, so a libbeef bump or an
+# oracle change is checked without a CORE-MATH checkout. The worst-case
+# sweeps and the random check also need this feature; run them on request
+# with `brokkr test <name> --sweep crmath-oracle`.
+[[check]]
+name = "crmath-oracle"
+profile = "release"
+features = ["crmath-sweeps"]
+lib_tests = true
+only = ["crmath::tests::golden::golden_matches_oracle"]
+
 # The example corpus gate, with its corpus cost golden and reference
 # comparison, in the default-feature release build: every example's
 # `Cost used` from the optimized CLI against `tests/fixtures/corpus_cost.txt`.

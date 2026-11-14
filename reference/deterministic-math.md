@@ -129,15 +129,19 @@ NaN's bits), and the VM never lets a script observe them.
   check shape.
 - `crmath::tests::oracle`: an interval Ziv procedure over `libbeef` in
   directed rounding, which certifies the expected values. It reports an error
-  instead of guessing if its explicit Ziv loop exceeds its precision cap: 512
-  bits for pi-dependent functions and 4096 bits for the others. This cap does
-  not constrain precision escalation internal to a `libbeef` primitive.
+  instead of guessing if its explicit Ziv loop exceeds its 4096-bit precision
+  cap. This cap does not constrain precision escalation internal to a
+  `libbeef` primitive. Each function except `log10` is a single `libbeef`
+  primitive (`pow` included), so the oracle depends on `libbeef` 0.1.2 or
+  later, where those primitives are correct at every precision and argument.
   The `regenerate_crmath_golden` example certifies the golden inputs and
   writes changed bytes to an explicit output path:
   `brokkr run --release regenerate_crmath_golden -- tests/fixtures/crmath_golden.txt`.
   Long oracle sweeps and checkout-dependent checks in `crmath::tests::golden`
-  require the explicit `crmath-sweeps` feature. Run them in release with
-  `brokkr test crmath::tests::golden --release --features crmath-sweeps`.
+  require the explicit `crmath-sweeps` feature, which the release
+  `crmath-oracle` check shape enables. The gate runs only
+  `golden_matches_oracle` there: it re-certifies every golden row and needs
+  no checkout. Run the rest with `brokkr test <name> --sweep crmath-oracle`.
   The worst-case sweeps read the checkout under `research/core-math`.
   The checkout must be the upstream commit in `reference/core-math-pin.toml`,
   the one the port was taken at (which the golden file's header also names).

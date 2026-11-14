@@ -26,7 +26,7 @@ fn exact_fma(a: f64, b: f64, c: f64) -> f64 {
         // zero terms combine by the signed-zero rules of addition.
         return if product.is_zero() { a * b + c } else { 0.0 };
     }
-    sum.round(BigFormat::BINARY64).to_f64(Rounding::NearestEven)
+    sum.to_f64(Rounding::NearestEven)
 }
 
 fn check(a: f64, b: f64, c: f64) {
