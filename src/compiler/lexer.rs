@@ -444,7 +444,9 @@ impl<'a> Lexer<'a> {
     /// only when the parser interprets the literal (see `Literal::String`).
     /// This preserves the parser's error ordering when a malformed string
     /// appears after an earlier syntax error. An unfinished or unclosed
-    /// string is still an error here, at lexing time. Bytes other than the
+    /// string is still an error here, at lexing time; a string that reaches
+    /// the end of the source after an escape failure raises that failure
+    /// here instead, since appending text cannot repair it. Bytes other than the
     /// quote, backslash and line breaks are copied verbatim, so a literal
     /// holds exactly the source's bytes, valid UTF-8 or not.
     ///
@@ -464,7 +466,7 @@ impl<'a> Lexer<'a> {
         loop {
             let char_start = self.pos;
             let Some(c) = self.next_char() else {
-                return Err(self.error(SyntaxError::UnfinishedString));
+                return Err(self.unfinished_string(failure));
             };
             if c == quote {
                 return Ok(match failure {
@@ -475,7 +477,7 @@ impl<'a> Lexer<'a> {
 
             if c == b'\\' {
                 let Some(escaped) = self.next_char() else {
-                    return Err(self.error(SyntaxError::UnfinishedString));
+                    return Err(self.unfinished_string(failure));
                 };
                 if escaped == b'z' {
                     self.consume_whitespace();
@@ -506,6 +508,17 @@ impl<'a> Lexer<'a> {
             } else if failure.is_none() && char_start >= decoded_until {
                 decoded.push(c);
             }
+        }
+    }
+
+    /// The error for a short string that reached the end of the source. An
+    /// escape failure already recorded is permanent (appending text cannot
+    /// repair `\q`, `\256` or `\xG`), so it is raised here, at its
+    /// backslash, rather than the recoverable `UnfinishedString`.
+    fn unfinished_string(&self, failure: Option<EscapeError>) -> Error {
+        match failure {
+            Some(failure) => self.error_at(failure.kind.syntax_error(), failure.pos),
+            None => self.error(SyntaxError::UnfinishedString),
         }
     }
 
@@ -549,16 +562,24 @@ impl<'a> Lexer<'a> {
             b'x' => {
                 let high_pos = slash_pos + 2;
                 let low_pos = high_pos + 1;
-                let high = match bytes.get(high_pos) {
-                    Some(&byte) if byte != quote => hex_value(byte),
-                    _ => None,
-                }
-                .ok_or_else(|| error(EscapeErrorKind::HexadecimalDigitExpected))?;
-                let low = match bytes.get(low_pos) {
-                    Some(&byte) if byte != quote => hex_value(byte),
-                    _ => None,
-                }
-                .ok_or_else(|| error(EscapeErrorKind::HexadecimalDigitExpected))?;
+                // Each digit is checked in order. A digit position past the
+                // end of the source is not a failure yet: the string cannot
+                // close, so it ends in `UnfinishedString`, which appended
+                // text may still complete (`"\x4` at EOF). A present byte
+                // that is not a hex digit (the quote included) is permanent.
+                let hex_digit = |pos: usize| match bytes.get(pos) {
+                    None => Ok(None),
+                    Some(&byte) if byte != quote => hex_value(byte)
+                        .map(Some)
+                        .ok_or_else(|| error(EscapeErrorKind::HexadecimalDigitExpected)),
+                    Some(_) => Err(error(EscapeErrorKind::HexadecimalDigitExpected)),
+                };
+                let Some(high) = hex_digit(high_pos)? else {
+                    return Ok(bytes.len());
+                };
+                let Some(low) = hex_digit(low_pos)? else {
+                    return Ok(bytes.len());
+                };
                 decoded.push(high * 16 + low);
                 low_pos + 1
             }

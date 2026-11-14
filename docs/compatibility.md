@@ -146,7 +146,9 @@ does.
   incomplete at EOF. The claim is about that last token alone, whether or not
   the preceding tokens would let the completed source parse: `local "abc` and
   `local 1e` are both recoverable. A short string broken by a line break
-  remains nonrecoverable.
+  remains nonrecoverable, and so does one that reaches EOF after a malformed
+  escape (`"\q`, `"\256`, `"\xG`): it reports that escape error, at its
+  backslash. An escape EOF cut short (`"\x4`, `"\25`) is still recoverable.
 - Lexer errors (`malformed number`, `unfinished string`, invalid escapes)
   name no `near` token; a malformed number's column is its first byte
   instead. A missing closing bracket on a later line does not add reference Lua's `(to close '(' at line N)`. The parser's other

@@ -108,7 +108,15 @@ fn appending_digits_completes_incomplete_numerals() {
 
 #[test]
 fn short_string_ending_at_eof_is_recoverable() {
-    for source in ["print(\"abc", "print(\"abc\\"] {
+    // Valid escape prefixes cut off by EOF are still completable.
+    for source in [
+        "print(\"abc",
+        "print(\"abc\\",
+        "print(\"\\x",
+        "print(\"\\x4",
+        "print(\"\\25",
+        "print(\"\\z  ",
+    ] {
         let err = load_error(source);
         assert!(
             matches!(
@@ -120,6 +128,33 @@ fn short_string_ending_at_eof_is_recoverable() {
         assert!(err.is_recoverable(), "{source:?}");
         assert!(err.kind().is_recoverable(), "{source:?}");
         assert!(format!("{err}").contains("unfinished string"), "{err}");
+    }
+}
+
+#[test]
+fn invalid_escape_in_string_ending_at_eof_is_not_recoverable() {
+    // Appending text cannot repair an escape that is already malformed, so
+    // the escape error is raised at its backslash instead of the
+    // recoverable unfinished-string error.
+    for (source, expected, column) in [
+        ("return \"\\q", SyntaxError::InvalidEscapeSequence, 9),
+        ("return \"\\q\\", SyntaxError::InvalidEscapeSequence, 9),
+        ("return \"ab\\256", SyntaxError::DecimalEscapeTooLarge, 11),
+        ("return \"\\xG", SyntaxError::HexadecimalDigitExpected, 9),
+        ("return \"\\x4G", SyntaxError::HexadecimalDigitExpected, 9),
+        ("return \"\\n\\q\\x", SyntaxError::InvalidEscapeSequence, 11),
+    ] {
+        let err = load_error(source);
+        assert!(
+            matches!(
+                err.kind(),
+                ErrorKind::SyntaxError(kind)
+                    if std::mem::discriminant(kind) == std::mem::discriminant(&expected)
+            ),
+            "{source:?}: {err}"
+        );
+        assert!(!err.is_recoverable(), "{source:?}");
+        assert_eq!((err.line_num(), err.column()), (1, column), "{source:?}");
     }
 }
 

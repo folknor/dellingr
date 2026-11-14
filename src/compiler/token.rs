@@ -25,7 +25,9 @@ pub(super) enum Literal {
     /// The decoded bytes, or the first malformed escape. The escape error is
     /// raised only when the parser interprets the literal: popping a string
     /// token in some other grammar position drops it, and the grammar error
-    /// there wins, as it did when the parser decoded the body itself.
+    /// there wins, as it did when the parser decoded the body itself. Only a
+    /// closed string defers: one that reaches the end of the source raises
+    /// its escape failure at lexing time, like any unfinished string.
     String(std::result::Result<Vec<u8>, EscapeError>),
 }
 

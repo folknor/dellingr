@@ -11,6 +11,13 @@ Saves from 0.7.x do not load: snapshot `FORMAT_VERSION` is 15.
 
 ### Fixed
 
+- A short string that reaches the end of the source after a malformed escape
+  (`"\q`, `"\256`, `"\xG`) reports that escape error at its backslash
+  (`InvalidEscapeSequence`, `DecimalEscapeTooLarge`,
+  `HexadecimalDigitExpected`) instead of `unfinished string`, so
+  `Error::is_recoverable` no longer tells a host REPL that more input could
+  complete it. An escape EOF cut short (`"\x4`) stays recoverable. The error
+  kind and message of those sources change.
 - Upvalue pool references are as wide as the pool itself. They were 32-bit,
   so once a State had allocated 2^32 upvalue slots the next capture wrapped
   to slot zero and aliased an existing variable, and sweep could free-list a

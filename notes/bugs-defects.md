@@ -28,28 +28,6 @@ might bypass the compiler's convention of keeping call and open-vararg windows
 above live locals. The hunter was tracing a minimal case through return cleanup
 when the run stopped.
 
-## BUG-001 - Invalid string escapes become falsely recoverable at EOF
-
-Hunter label: P2. Scope: `frontend`. Site: `src/compiler/lexer.rs`, the string
-scanner's EOF branches (reported at line 466).
-
-Compiling `return "\q` with EOF immediately after `q` returns
-`SyntaxError::UnfinishedString`, making `is_recoverable()` return `true`. The
-same happens with unfinished strings containing `\256` or `\xG`.
-
-The lexer has already recorded a permanent escape error, but both EOF branches
-discard it. Appending text cannot repair those escapes. Adding the closing quote
-merely exposes the original error.
-
-This breaks the `SyntaxError::is_recoverable` contract (`src/error.rs`, reported
-at line 1642): appending text can complete the construct. It also fails
-`docs/compatibility.md`'s narrower promise about completing the last token,
-independently of preceding grammar. Hosts using this API are incorrectly told to
-request more input.
-
-Hunter's suggested direction: preserve permanent escape failures at EOF while
-keeping incomplete valid prefixes such as `\x4` recoverable.
-
 ## BUG-004 - `RawField` promises integer implementations it does not provide
 
 Hunter label: P3, from both `heap` and `host`, reported independently. Site:
