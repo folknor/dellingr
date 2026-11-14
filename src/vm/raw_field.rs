@@ -46,8 +46,15 @@ mod sealed {
 
 /// A Rust type [`State::raw_field`] can read a field into.
 ///
-/// Implemented for `f64`, every fixed-width integer type, `bool`, `String`,
-/// `Vec<u8>`, and `Option<T>` of each. The trait is sealed.
+/// Implemented for `f64`, `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`,
+/// `u64`, `bool`, `String`, and `Vec<u8>`, and for `Option<T>` whenever `T`
+/// implements `RawField`. The trait is sealed.
+//
+// The integer set is a choice for option-table fields, not an oversight.
+// `i128`/`u128` would be correct (every integral f64 below 2^127 or 2^128
+// converts exactly) but no embedder reads one; add them when one does.
+// `isize`/`usize` are left out because their accepted range would vary with
+// the host target, which a deterministic VM should not expose to scripts.
 pub trait RawField: sealed::Convert {}
 
 fn number(value: &FieldValue<'_>) -> std::result::Result<f64, FieldFailure> {
