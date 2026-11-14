@@ -35,6 +35,46 @@ operand literals also stay in the chunk's literal pool as unused entries.
   afterwards.
 - Stack-cap enforcement charges nothing.
 
+## When the budget runs out
+
+A charge the budget refuses ends the callback with an error. This is the
+intended outcome, not a failure mode to recover from: a script that spends its
+budget has made its move for this call. Reaching or crossing the budget does
+not fail by itself (see "Mechanics"), so a call that spends exactly its budget
+and has only free work left returns normally. There is no pause or resume
+across calls (a script that could carry work into the next call would get
+extra budget), and Lua has no `pcall` to catch the error.
+
+- **The error.** The call returns `ErrorKind::BudgetExceeded { used, budget }`,
+  which a host matches on to tell exhaustion from a script bug. `used` counts
+  every admitted charge, including the one that crossed the budget or, for a
+  per-unit charge, the admitted prefix of units; the refused charge is not
+  counted. The error unwinds like any runtime error, and
+  `HostCallbacks::on_error` reports each error once.
+- **What persists.** Nothing is rolled back. Every side effect that completed
+  before the refusal stays: global and table writes (including the partial
+  table mutation of a per-unit library call, such as the elements
+  `table.move` copied), and host callbacks made and whatever they changed.
+  Charged work need not have produced a retained result, and values reachable
+  only from the unwound frames become garbage. The stack loses the callee,
+  its arguments and any partial results, as on any error (see `State::call`).
+- **The State remains usable.** Exhaustion does not poison it. The budget
+  belongs to the State, not to the call, so a spent budget stays spent: the
+  next costed operation of any later call is refused the same way, while free
+  work still runs. Call `set_cost_budget` before the next call to give it a
+  fresh budget. A snapshot saved after the failed call holds the reachable
+  mutations and the spent counters, not the interrupted execution; loading it
+  does not replenish the budget either.
+- **A Rust callback that swallows the error** (one that runs Lua through
+  `State::call` and returns `Ok`) does not cancel its caller: the Lua caller
+  continues, and is refused again at its next costed operation while the
+  budget stays spent, which raises and reports a new error. A host that wants
+  the whole outer call to fail propagates the nested error.
+- **Exposing the remaining budget to scripts.** The VM has no script-side
+  accessor. A host that wants one registers its own function that returns
+  `State::cost_remaining()`. Read from a Rust callback it is exact: the
+  dispatch loop flushes its batched opcode cost before every call out of it.
+
 ## Static opcode charges
 
 Each opcode declares one charging rule in the opcode table (`OpcodeCharge` in

@@ -286,6 +286,64 @@ fn budget_flushes_pending_caller_cost_before_nested_call() {
     assert_eq!(state.cost_remaining(), 0);
 }
 
+#[test]
+fn cost_remaining_read_by_a_callback_counts_the_callers_pending_opcodes() {
+    let mut state = State::new();
+    state
+        .push_new_rust_fn(|state| {
+            let left = state.cost_remaining();
+            state.push_number(left as f64)?;
+            Ok(1)
+        })
+        .unwrap();
+    state.set_global("remaining").unwrap();
+    state.set_cost_budget(100).expect("the State is metered");
+    // Three adds stay in the dispatch loop's batch until the call flushes it.
+    support::load(
+        &mut state,
+        "local a = 0\na = a + 1\na = a + 1\na = a + 1\nleft = remaining()",
+    );
+
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
+    state.get_global("left").unwrap();
+    assert_eq!(state.to_number(-1).expect("left should be numeric"), 97.0);
+}
+
+#[test]
+fn a_budget_killed_state_runs_the_next_call_once_the_host_resets_the_budget() {
+    let mut state = State::new();
+    state.set_cost_budget(2).expect("the State is metered");
+    support::load(&mut state, "x = 0\nx = x + 1\nx = x + 1\nx = x + 1");
+    let err = state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect_err("the third add must exhaust the budget");
+    assert!(matches!(
+        err.kind(),
+        ErrorKind::BudgetExceeded { used: 2, budget: 2 }
+    ));
+    assert_eq!(state.get_top(), 0);
+    assert!(!state.is_poisoned());
+
+    // The budget is the State's, not the call's: a spent one stays spent.
+    let next = "local a = 0\na = a + 1\ny = a";
+    support::load(&mut state, next);
+    let err = state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect_err("a spent budget refuses the next call's first costed operation");
+    assert!(matches!(err.kind(), ErrorKind::BudgetExceeded { .. }));
+    state.get_global("y").unwrap();
+    assert_eq!(state.typ(-1), LuaType::Nil);
+    state.pop(1).unwrap();
+
+    state.set_cost_budget(10).expect("the State is metered");
+    support::load(&mut state, next);
+    state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
+    state.get_global("y").unwrap();
+    assert_eq!(state.to_number(-1).expect("y should be numeric"), 1.0);
+    state.get_global("x").unwrap();
+    assert_eq!(state.to_number(-1).expect("x should be numeric"), 2.0);
+}
+
 // -- Error message quality tests --
 
 /// Helper: tries to load+call Lua code and returns the error, panicking if it succeeds.

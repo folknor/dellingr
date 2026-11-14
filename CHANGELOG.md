@@ -83,6 +83,11 @@ is replay-visible.
   Builtin-slot names (`print`, `_G`, ...) are listed like any other. Only a
   bare whole assignment target is a write; the table of `x.f = v` is a read.
   The records are source metadata kept beside the bytecode, not in it.
+- `docs/budget.md`, "When the budget runs out": the host contract for a
+  killed callback (the `BudgetExceeded` error, which effects persist, a spent
+  budget staying spent until `set_cost_budget`, swallowed nested errors, and
+  exposing `cost_remaining()` to scripts through a host function). Behaviour
+  is unchanged.
 
 ## [0.7.0] - 2026-11-05
 

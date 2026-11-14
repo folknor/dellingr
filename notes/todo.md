@@ -141,21 +141,6 @@ it may be self-limiting enough to accept. Record the verdict either way in
 
 Residuals that need a decision:
 
-- Budget exhaustion kills the callback. Revisited 2026-11-05 against both
-  target games and kept: in the user-scripted AI game (one budget per bug
-  per tick) the kill is a fair game rule, and pausing across ticks would hand
-  a script extra budget; in the RTS the budget is a safety net and waits are
-  host callbacks dispatched from a Lua timers table (dellingr#3, closed), so
-  each due callback is its own budgeted call. Before a release:
-  - Document the kill as the intended outcome in `docs/budget.md`: the error
-    kind a host matches on, which side effects of the killed call persist,
-    and that the State is ready for the next call. Also say that a host
-    exposes the remaining budget to scripts with its own host function over
-    `State::cost_remaining()` (exact mid-run, since the batched opcode cost
-    is flushed before any call leaves the dispatch loop); the VM adds no
-    script-side API for it.
-  (The separate question of runaway free loops is settled: see
-  `docs/budget.md`, "Runaway loops are not the VM's problem".)
 - Every metered snapshot stores all `Charge` weights, `4 * Charge::COUNT`
   bytes, even under the default model. A tag meaning "default model" would
   shrink every default save, at the cost of another format bump.
