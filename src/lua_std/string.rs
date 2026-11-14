@@ -897,7 +897,7 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         let pattern_len = string_arg_len(state, &pattern)?;
         state.charge(Charge::StringGmatch, (s_len + pattern_len).max(1) as u64)?;
         // Lua 5.4's optional `init`; past the end it parks the iterator at
-        // `len + 1`, where the first call returns nil.
+        // `len + 1`, where the first call returns nothing.
         let init = opt_integer(state, 3, "gmatch")?
             .map_or(0, |init| lua_start_index(s_len, init))
             .min(s_len + 1);
@@ -1289,9 +1289,9 @@ pub(super) fn gmatch_empty_iter(state: &mut State) -> Result<u8> {
         ));
     }
     if pos > len {
+        // Exhausted: no results, as reference `gmatch_aux` returns.
         state.set_top(0)?;
-        state.push_nil()?;
-        return Ok(1);
+        return Ok(0);
     }
 
     // Stage the result and update operands before advancing. A refused push
@@ -1355,9 +1355,9 @@ pub(super) fn gmatch_iter(state: &mut State) -> Result<u8> {
         ));
     }
     if pos > subject_len {
+        // Exhausted: no results, as reference `gmatch_aux` returns.
         state.set_top(0)?;
-        state.push_nil()?;
-        return Ok(1);
+        return Ok(0);
     }
 
     state.push_number(gmatch_schema::COMPILE_CHARGED_SLOT)?;
@@ -1479,9 +1479,9 @@ pub(super) fn gmatch_iter(state: &mut State) -> Result<u8> {
         state.remove(1)?;
         Ok(num_returns)
     } else {
+        // No match left: no results, like the exhausted exit above.
         state.set_top(0)?;
-        state.push_nil()?;
-        Ok(1)
+        Ok(0)
     }
 }
 

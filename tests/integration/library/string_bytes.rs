@@ -104,6 +104,29 @@ fn empty_pattern_gmatch_visits_each_boundary() {
 }
 
 #[test]
+fn exhausted_gmatch_iterators_return_no_results() {
+    // Every exhaustion exit: init past the end, no match left, a general
+    // iterator past its last match, and the empty-pattern iterator; each
+    // stays exhausted on a repeat call.
+    let state = run_one(
+        r##"
+        local function counts(iter, calls)
+            local out = {}
+            for i = 1, calls do out[i] = select("#", iter()) end
+            return table.concat(out, ",")
+        end
+        local got = counts(string.gmatch("abc", "a", 5), 2)
+            .. ";" .. counts(string.gmatch("abc", "z"), 2)
+            .. ";" .. counts(string.gmatch("abc", "a"), 3)
+            .. ";" .. counts(string.gmatch("ab", ""), 4)
+        return got
+        "##,
+    );
+
+    assert_eq!(state.to_bytes(-1).unwrap(), b"0,0;0,0;1,0,0;1,1,1,0");
+}
+
+#[test]
 fn gmatch_treats_a_leading_caret_as_literal() {
     let mut state = State::new();
     support::eval(

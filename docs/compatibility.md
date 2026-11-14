@@ -61,7 +61,7 @@ does.
 
 - Integer arguments must be numbers with an exact integer value that fits a
   64-bit signed integer. That covers string and table positions, `gsub`'s
-  count, `select`'s index, `error`'s level, `tonumber`'s base,
+  count, `select`'s index, the `ipairs` iterator's control, `error`'s level, `tonumber`'s base,
   `math.random`'s bounds and `string.format`'s integer conversions. Anything
   else, `1.5` or `2^63` alike, raises `bad argument #n to 'f' (number has no
   integer representation)`, as in Lua 5.4; Lua 5.2 truncates `1.5` to `1`. A
@@ -245,7 +245,10 @@ does.
   instead of reading or writing keys that round onto each other. That
   applies to `table.concat` and `unpack` (global or `table.`) over `i..j`,
   to `table.move`'s source and destination ranges, and to the shifted range
-  of a metamethod-driven `table.insert` or `table.remove`. A range of one key
+  of a metamethod-driven `table.insert` or `table.remove`. The `ipairs`
+  iterator's step from its control to the next key is such a range: a control
+  outside -2^53..2^53 (upper bound excluded) raises
+  `ipairs range exceeds the exactly representable integer keys`. A range of one key
   passes this check wherever it lies, as long as the key itself is an exact
   f64 (an append one past a huge `__len` can fail it); an empty range never reaches it,
   and the functions' other argument checks still apply first. Lua 5.4 has

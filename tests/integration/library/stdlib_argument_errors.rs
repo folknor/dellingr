@@ -92,7 +92,18 @@ fn error_nil_level_uses_the_default_and_preserves_the_script_message() {
 
 #[test]
 fn stdlib_integer_arguments_reject_fractional_numbers_consistently() {
-    let cases: [(&str, &str, isize); 15] = [
+    let cases: [(&str, &str, isize); 20] = [
+        // The ipairs iterator, called directly and from generic for, whose
+        // fast path defers an invalid control to the callback.
+        (r#"local f = ipairs({}) return f({}, 1.5)"#, "ipairs", 2),
+        (r#"local f = ipairs({}) return f({}, 0/0)"#, "ipairs", 2),
+        (r#"local f = ipairs({}) return f({}, 1/0)"#, "ipairs", 2),
+        (r#"local f = ipairs({}) return f({}, 2^63)"#, "ipairs", 2),
+        (
+            r#"local f = ipairs({}) for k in f, {[2.5] = 1}, 1.5 do end"#,
+            "ipairs",
+            2,
+        ),
         (r#"return unpack({}, 1.5)"#, "unpack", 2),
         (r#"return table.insert({}, 1.5, "x")"#, "insert", 2),
         (r#"return table.remove({}, 1.5)"#, "remove", 2),

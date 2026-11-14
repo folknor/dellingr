@@ -63,7 +63,10 @@
 //! paths of `insert` and `remove` also refuse a nonempty key range that f64
 //! keys cannot represent: a single key must be exact, and a range of several
 //! must lie within the inclusive +/-2^53, where consecutive integer keys stop
-//! being distinct.
+//! being distinct. The `ipairs` iterator's control is read the same way: an
+//! exact integer, else an argument error, and within `-2^53..2^53` (upper
+//! bound excluded) so the next key is its exact successor, else the range
+//! error.
 
 #![deny(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 
@@ -73,7 +76,7 @@ mod string;
 mod string_format;
 mod table;
 
-pub(crate) use basic::open_base;
+pub(crate) use basic::{ipairs_next_index, open_base};
 #[cfg(feature = "snapshot")]
 pub(crate) use string::gmatch_iterator_bytecode;
 

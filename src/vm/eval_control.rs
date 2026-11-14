@@ -223,7 +223,10 @@ impl State {
             return false;
         };
 
-        let new_index = old_index + 1.0;
+        // An invalid control falls to the callback, which raises the error.
+        let Some(new_index) = crate::lua_std::ipairs_next_index(old_index) else {
+            return false;
+        };
         let key = Val::Num(new_index);
         let val = tbl.get(&key);
         if matches!(val, Val::Nil) && tbl.get_metatable().is_some() {

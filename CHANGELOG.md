@@ -11,6 +11,16 @@ Saves from 0.7.x do not load: snapshot `FORMAT_VERSION` is 15.
 
 ### Fixed
 
+- **Replay-visible:** the `ipairs` iterator, called directly or as a generic
+  `for` iterator, requires an exact-integer control: `1.5`, NaN, infinities
+  and values beyond 64-bit raise `bad argument #2 to 'ipairs' (number has no
+  integer representation)` instead of visiting fractional keys. A control
+  outside -2^53..2^53 (upper bound excluded), whose `+ 1` step would round,
+  raises `LibraryError::IntegerKeyRangeExceeded` with the new
+  `LibraryFunction::Ipairs`.
+- **Replay-visible:** an exhausted `string.gmatch` iterator returns no values
+  instead of one nil, so `select("#", iter())` and `table.pack` see 0, as in
+  Lua 5.2 and 5.4. Generic `for` is unaffected.
 - A short string that reaches the end of the source after a malformed escape
   (`"\q`, `"\256`, `"\xG`) reports that escape error at its backslash
   (`InvalidEscapeSequence`, `DecimalEscapeTooLarge`,

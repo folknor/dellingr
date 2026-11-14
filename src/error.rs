@@ -803,6 +803,8 @@ pub enum LibraryFunction {
     Concat,
     /// `table.sort`.
     Sort,
+    /// The iterator `ipairs` returns.
+    Ipairs,
 }
 
 impl LibraryFunction {
@@ -815,6 +817,7 @@ impl LibraryFunction {
             Self::Unpack => "unpack",
             Self::Concat => "concat",
             Self::Sort => "sort",
+            Self::Ipairs => "ipairs",
         }
     }
 }

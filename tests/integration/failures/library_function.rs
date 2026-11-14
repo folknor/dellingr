@@ -67,6 +67,56 @@ fn unrepresentable_key_ranges_name_their_function() {
 }
 
 #[test]
+fn ipairs_refuses_a_control_whose_successor_is_not_exact() {
+    // 2^53 + 1 rounds back to 2^53, so the iterator would revisit one key
+    // forever; below -2^53 the step skips keys. Both call paths refuse, the
+    // generic-for fast path by deferring to the iterator callback.
+    for control in ["2^53", "2^60", "-2^53 - 2"] {
+        for code in [
+            format!("local f = ipairs({{}}) return f({{[2^53] = 1}}, {control})"),
+            format!("local f = ipairs({{}}) for k in f, {{[2^53] = 1}}, {control} do end"),
+        ] {
+            let error = support::run_error(&code);
+            assert!(
+                matches!(
+                    error.kind(),
+                    ErrorKind::LibraryError(LibraryError::IntegerKeyRangeExceeded { .. })
+                ),
+                "{code}: {:?}",
+                error.kind()
+            );
+            assert_eq!(
+                error.library_function(),
+                Some(LibraryFunction::Ipairs),
+                "{code}"
+            );
+        }
+    }
+}
+
+#[test]
+fn ipairs_admits_the_controls_at_the_edges_of_the_exact_range() {
+    let mut state = State::new();
+    support::eval(
+        &mut state,
+        r#"
+        local f = ipairs({})
+        local k, v = f({[-2^53 + 1] = "low"}, -2^53)
+        if k ~= -2^53 + 1 or v ~= "low" then error("low edge") end
+        k, v = f({[2^53] = "high"}, 2^53 - 1)
+        if k ~= 2^53 or v ~= "high" then error("high edge") end
+        k = f({}, -0.0)
+        if k ~= nil then error("negative zero") end
+        k, v = f({"one"}, -0.0)
+        if k ~= 1 or v ~= "one" then error("negative zero step") end
+        return true
+        "#,
+        1,
+    );
+    assert!(state.to_boolean(-1));
+}
+
+#[test]
 fn non_integer_lengths_name_the_function_that_asked() {
     for (call, function) in [
         ("table.concat(t)", LibraryFunction::Concat),

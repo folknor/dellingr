@@ -1,13 +1,15 @@
 //! Lua's base library
 
-use super::{check_any_named, check_type_named};
+use super::{arg_integer, check_any_named, check_type_named};
 use crate::LuaType;
 use crate::Result;
 use crate::State;
 use crate::cost_model::Charge;
-use crate::error::{ArgDetail, ErrorKind, ErrorValue, LibraryError, PrefixLocation};
+use crate::error::{
+    ArgDetail, ErrorKind, ErrorValue, LibraryError, LibraryFunction, PrefixLocation,
+};
 use crate::limits::{TONUMBER_BASE_MAX, TONUMBER_BASE_MIN};
-use crate::numeral::parse_lua_numeral;
+use crate::numeral::{MAX_EXACT_INTEGER, exact_i64, parse_lua_numeral};
 use crate::vm::MetaName;
 use crate::vm::TostringRendering;
 use crate::vm::Val;
@@ -91,12 +93,34 @@ pub(crate) fn base_ipairs(state: &mut State) -> Result<u8> {
     Ok(3)
 }
 
+/// The key the `ipairs` iterator visits after `control`, or `None` when the
+/// control is not a valid position. The one rule for the iterator callback and
+/// the generic-for fast path (`State::instr_tfor_call_ipairs`), which bails to
+/// the callback on `None` so the callback raises the error.
+///
+/// A control must be an exact integer (a fractional control would visit
+/// fractional keys) in `-2^53..2^53`, so that the `+ 1.0` step is exact:
+/// `2^53 + 1.0` rounds back to `2^53` and would revisit one key forever, and
+/// a control below `-2^53` would skip its successor. The check is on the
+/// control, not the sum, because the rounded sum can land back in range.
+pub(crate) fn ipairs_next_index(control: f64) -> Option<f64> {
+    let limit = MAX_EXACT_INTEGER;
+    exact_i64(control)
+        .filter(|control| (-limit..limit).contains(control))
+        .map(|_| control + 1.0)
+}
+
 pub(crate) fn base_ipairs_iter(state: &mut State) -> Result<u8> {
     check_type_named(state, 1, LuaType::Table, "ipairs")?;
-    check_type_named(state, 2, LuaType::Number, "ipairs")?;
+    let old_index = arg_integer(state, 2, "ipairs")?;
     state.set_top(2)?;
-    let old_index = state.to_number(2)?;
-    let new_index = old_index + 1.0;
+    let Some(new_index) = ipairs_next_index(state.to_number(2)?) else {
+        // `arg_integer` admitted an exact integer, so only the range failed.
+        debug_assert!(old_index.unsigned_abs() >= MAX_EXACT_INTEGER.unsigned_abs());
+        return Err(state.library_error(LibraryError::IntegerKeyRangeExceeded {
+            function: LibraryFunction::Ipairs,
+        }));
+    };
     state.pop(1)?; // pop the old number
     state.push_number(new_index)?;
     crate::native_call!(
