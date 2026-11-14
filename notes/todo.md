@@ -139,12 +139,6 @@ it may be self-limiting enough to accept. Record the verdict either way in
 
 ### Left from the configurable-costs, raw_field and naming work (2026-11-01)
 
-Residuals that need a decision:
-
-- Every metered snapshot stores all `Charge` weights, `4 * Charge::COUNT`
-  bytes, even under the default model. A tag meaning "default model" would
-  shrink every default save, at the cost of another format bump.
-
 Known laterals, pre-existing and deliberate (record, don't "fix" without a
 cost-model decision):
 

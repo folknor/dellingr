@@ -2699,6 +2699,16 @@ impl<'a> Decoder<'a> {
 /// Costing mode tags. For `Metered`, one u32 weight per charge follows, in
 /// `Charge` discriminant order; the count is fixed by `COST_MODEL_VERSION`,
 /// which the header checks for an exact match.
+///
+/// A metered save stores the full list even for the default model, on
+/// purpose. A "default model" tag or a sparse diff against a baseline would
+/// save up to `4 * Charge::COUNT` bytes per save, but it would make the wire
+/// format depend on an implicit baseline. That baseline would have to be pinned
+/// per wire version, never read from `CostModel::DEFAULT`, or a change to the
+/// default would silently reprice old saves. The full list records the actual
+/// price list explicitly and is read without one. Revisit only if a host shows
+/// snapshot volume, such as per-tick saves, where those bytes matter. A digest
+/// of the weights is not an option: it cannot restore a custom model.
 const COSTING_METERED: u8 = 0;
 const COSTING_OFF: u8 = 1;
 
