@@ -90,28 +90,6 @@ the documentation or fulfill the existing promise. `host` says listing the
 supported widths explicitly suffices and adding types is unnecessary to resolve
 the documentation defect.
 
-## BUG-007 - A compilation error propagated through a Rust callback displays the caller's location instead of the rejected source's
-
-Hunter label: P2. Scope: `host`. Sites: `locate_error` (`src/vm/eval.rs`, reported
-at line 1161) and `Error::fmt` (`src/error.rs`, reported at line 1667).
-
-This breaks the documented syntax-error location contract in
-`docs/compatibility.md` and produces a misleading diagnostic.
-
-Reproducer: register a Rust callback that returns the error from
-`Program::compile("local =", Some(b"child.lua"))`, then invoke it on line 3 of
-`outer.lua`. The error retains `child.lua`, line 1 and its column through the
-structured accessors, but its displayed prefix becomes `outer.lua:3:`. The rejected
-source's location disappears from the diagnostic.
-
-`locate_error` preserves the original location and adds a Lua traceback.
-`Error::fmt` then unconditionally prefers that traceback's first frame for ordinary
-errors.
-
-Hunter's suggested direction: explicit primary diagnostic locations should survive
-traceback attachment; `ScriptError`'s deliberate frame-selection policy can remain
-separate. The hunter states this is source-traced, not runtime-tested.
-
 ## BUG-008 - The `ipairs` iterator accepts fractional indices and visits fractional keys
 
 Scope: `stdlib`. Sites: `src/lua_std/basic.rs` (reported at line 93) and the

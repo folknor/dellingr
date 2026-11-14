@@ -1165,8 +1165,10 @@ impl State {
     /// Fill in what an error lacks from the innermost activation, whose code
     /// is `bytecode` at `cursor`: the innermost fault, then, for an error
     /// with no traceback yet, the traceback and the source line. An error
-    /// that already carries a location keeps it - that is how parser errors
-    /// survive with their own line and column - and one that carries a
+    /// that already carries a line keeps it, and one whose location the
+    /// compiler sealed keeps its line, column and source name as they are,
+    /// absent ones included, so `Display` names the rejected source rather
+    /// than the caller (`Error::seal_location`); one that carries a
     /// traceback (a nested frame's, or a host-supplied one) keeps both.
     /// Allocates metadata only here, outside the dispatch loop.
     fn locate_error(&self, mut error: Error, bytecode: &Arc<Bytecode>, cursor: usize) -> Error {
@@ -1175,7 +1177,11 @@ impl State {
         error = Self::locate_fault(error, bytecode, cursor);
         if error.stack_trace().is_empty() {
             let trace = self.build_stack_trace(bytecode, cursor);
-            if Self::is_gmatch_wrapper(bytecode) {
+            if error.has_sealed_location() {
+                // A compile error returned through a callback keeps the
+                // rejected source's location, absence included; only the
+                // traceback is the caller's.
+            } else if Self::is_gmatch_wrapper(bytecode) {
                 if let Some(caller) = trace.first() {
                     if error.line_num() == 0 {
                         let column = error.column();

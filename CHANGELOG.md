@@ -11,6 +11,12 @@ Saves from 0.7.x do not load: snapshot `FORMAT_VERSION` is 15.
 
 ### Fixed
 
+- **Replay-visible:** a compile error a Rust callback returns through Lua
+  keeps the rejected source's location as its prefix. Before:
+  `outer.lua:3: <name> expected near '='`; now `child.lua:1:7: <name>
+  expected near '='`, with `outer.lua:3:` still in the traceback. An unnamed
+  rejected source no longer borrows the caller's chunk name, and a
+  locationless compile refusal no longer borrows the caller's line.
 - **Replay-visible:** a string literal of a nested function keeps its `%p`
   id across save and load when only an enclosing closure is saved (a
   function returned by a saved one, run before the save, with no closure of

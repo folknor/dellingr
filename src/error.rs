@@ -347,6 +347,13 @@ struct ErrorContext {
     /// for an `ErrorKind::LibraryError`, which names its function itself.
     library_function: Option<LibraryFunction>,
     vm_fault: Option<VmFault>,
+    /// The location (source name, line, column) was settled where the error
+    /// arose, in a source other than the Lua code it propagates through: a
+    /// compilation's rejected source. Absence is part of that location, so
+    /// an unnamed or unlocated compile error stays unnamed or unlocated.
+    /// Runtime location filling leaves it alone, and `Display` prefixes it
+    /// instead of the traceback's first frame.
+    sealed_location: bool,
 }
 
 // Keep typed metadata behind accessors so Error's existing Debug output stays stable.
@@ -1362,8 +1369,11 @@ impl Error {
 
     /// Attach the reporting frame's source name unless the error already
     /// carries one, so `on_error` sees where the error was first reported.
+    /// A sealed location keeps its absence: an unnamed rejected source is not
+    /// renamed after the chunk that compiled it.
     pub(crate) fn attach_source_name_if_absent(&mut self, source_name: Option<&Arc<[u8]>>) {
         if self.source_name().is_none()
+            && !self.has_sealed_location()
             && let Some(name) = source_name
         {
             self.context_mut().name = Some(Arc::clone(name));
@@ -1378,8 +1388,25 @@ impl Error {
                 pattern_function: None,
                 library_function: None,
                 vm_fault: None,
+                sealed_location: false,
             })
         })
+    }
+
+    /// Seal this error's location as the one its origin settled, so the VM
+    /// never fills it from the Lua frame the error later propagates through.
+    /// Applied once, to every error leaving compilation.
+    pub(crate) fn seal_location(mut self) -> Self {
+        self.context_mut().sealed_location = true;
+        self
+    }
+
+    /// Whether this error's location was sealed by its origin.
+    pub(crate) fn has_sealed_location(&self) -> bool {
+        self.0
+            .context
+            .as_deref()
+            .is_some_and(|context| context.sealed_location)
     }
 
     /// Whether `on_error` has already been notified for this error.
@@ -1683,7 +1710,11 @@ impl fmt::Display for Error {
             ErrorKind::ScriptError { prefix, .. } => *prefix,
             _ => PrefixLocation::Current,
         };
+        // A sealed location (a compile error's rejected source) is the
+        // diagnostic even when the error propagated through Lua and gained the
+        // caller's traceback: the first frame names the caller, not the source.
         let prefix_frame = match prefix_location {
+            PrefixLocation::Current if self.has_sealed_location() => None,
             PrefixLocation::Current => self.0.stack_trace.first(),
             PrefixLocation::Suppressed => None,
             PrefixLocation::TraceFrame(index) => self.0.stack_trace.get(index as usize),

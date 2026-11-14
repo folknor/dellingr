@@ -769,3 +769,51 @@ fn handled_native_call_depth_refusal_notifies_once() {
         }
     });
 }
+
+fn compile_named_child(_state: &mut State) -> dellingr::Result<u8> {
+    dellingr::Program::compile("local =", Some(b"child.lua")).map(|_| 0)
+}
+
+fn compile_unnamed_child(_state: &mut State) -> dellingr::Result<u8> {
+    dellingr::Program::compile("local =", None).map(|_| 0)
+}
+
+fn compile_oversized_name(_state: &mut State) -> dellingr::Result<u8> {
+    let name = vec![b'n'; dellingr::limits::MAX_SOURCE_NAME_BYTES + 1];
+    dellingr::Program::compile("return", Some(&name)).map(|_| 0)
+}
+
+/// A compile error returned through a callback keeps the rejected source's
+/// location as its diagnostic, absent parts included, and gains only the
+/// caller's traceback.
+#[test]
+fn compile_error_through_callback_keeps_rejected_source_location() {
+    let cases: [(dellingr::RustFunc, &str); 3] = [
+        (compile_named_child, "child.lua:1:7:"),
+        (compile_unnamed_child, "1:7:"),
+        (compile_oversized_name, "source name size "),
+    ];
+    for (callback, prefix) in cases {
+        let (mut state, recorder) = Recorder::state();
+        state.push_new_rust_fn(callback).expect("callback fits");
+        state.set_global("child").unwrap();
+        let program =
+            dellingr::Program::compile("local a = 1\nlocal b = 2\nchild()", Some(b"outer.lua"))
+                .expect("outer compiles");
+        state.load(&program).expect("outer loads");
+        let error = state
+            .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+            .expect_err("the child compile fails");
+        let text = error.to_string();
+        assert!(text.starts_with(prefix), "{text}");
+        assert_eq!(
+            error.stack_trace()[0].source.as_deref(),
+            Some(b"outer.lua".as_slice())
+        );
+        assert_eq!(error.stack_trace()[0].line, 3);
+        if prefix != "child.lua:1:7:" {
+            assert_eq!(error.source_name(), None);
+        }
+        assert_eq!(recorder.errors(), vec![text]);
+    }
+}

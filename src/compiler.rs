@@ -163,6 +163,16 @@ pub(crate) fn compile_with_globals(
     source: impl AsRef<[u8]>,
     name: Option<&[u8]>,
 ) -> Result<(Bytecode, Vec<crate::globals::GlobalAccess>)> {
+    // Every compile error's location belongs to the rejected source, so it is
+    // sealed against the VM filling it from a Lua caller when a callback
+    // returns it.
+    compile_unsealed(source.as_ref(), name).map_err(error::Error::seal_location)
+}
+
+fn compile_unsealed(
+    source: &[u8],
+    name: Option<&[u8]>,
+) -> Result<(Bytecode, Vec<crate::globals::GlobalAccess>)> {
     if let Some(name) = name
         && name.len() > crate::limits::MAX_SOURCE_NAME_BYTES
     {
@@ -173,7 +183,7 @@ pub(crate) fn compile_with_globals(
             },
         ));
     }
-    let (mut bc, globals) = parser::parse(source.as_ref(), name.map(Arc::<[u8]>::from))?;
+    let (mut bc, globals) = parser::parse(source, name.map(Arc::<[u8]>::from))?;
     finalize(&mut bc)?;
     Ok((bc, globals))
 }

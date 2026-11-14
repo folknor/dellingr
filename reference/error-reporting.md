@@ -66,6 +66,17 @@ selected frame is absent. A direct host call of the built-in `error` has
 neither a traceback nor a location, so the omitted level and explicit level 1
 render alike in that case.
 
+An error leaving compilation has its location sealed: the rejected source's
+name, line and column, absent parts included, are its prefix even after a
+Rust callback returns it through Lua. The VM still attaches the caller's
+traceback and VM fault, but never fills the line or source name from the
+calling frame, and `Display` prefixes the sealed location rather than the
+first traceback frame. So `Program::compile("local =", Some(b"child.lua"))`
+returned from a callback on line 3 of `outer.lua` renders
+`child.lua:1:7: ...` with `outer.lua:3:` in the traceback; an unnamed
+rejected source renders `1:7: ...` and `source_name()` stays `None`; a
+locationless refusal such as an oversized source name has no prefix.
+
 ## Argument error names
 
 `ArgError` stores an optional function name. Its display includes that name as
