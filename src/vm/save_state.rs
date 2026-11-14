@@ -93,10 +93,9 @@ mod verify;
 
 use error::SaveFault;
 pub use error::{
-    CorruptionReason, DecodeReason, DuplicateEntry, GmatchCorruption, InvalidBytecodeReason,
-    KeyForm, LoadError, MaterializedPart, SaveCollection, SaveError, SaveInternalError,
-    SavedReference, SnapshotError, SnapshotField, TableCorruption, TableLoadLocation,
-    TableRestoreFailure,
+    CorruptionReason, DecodeReason, DuplicateEntry, InvalidBytecodeReason, KeyForm, LoadError,
+    MaterializedPart, SaveCollection, SaveError, SaveInternalError, SavedReference, SnapshotError,
+    SnapshotField, TableCorruption, TableLoadLocation, TableRestoreFailure,
 };
 
 /// The global table's token. Unlike the environment tables it is permanent
@@ -2253,11 +2252,16 @@ fn materialize_bytecode(
     let mut out: Vec<Option<Arc<Bytecode>>> = vec![None; saved.len()];
     // A gmatch iterator chunk becomes this process's shared iterator Arc, the
     // identity error reporting uses to locate a lazy pattern failure at the
-    // script caller. Only the chunks of closures capturing a gmatch iterator
-    // function qualify, which no script-defined closure can, so an identical
-    // or same-named user chunk keeps its own Arc. A chunk that differs from
-    // this build's wrapper (a save from another build) loads as saved and
-    // its errors stay located in the synthetic chunk.
+    // script caller. A chunk qualifies when some closure of it captures a
+    // gmatch iterator function id and its contents equal this build's
+    // wrapper. That is a heuristic, which only affects error attribution:
+    // a script that compiles the wrapper's exact source under its name and
+    // hands the result a function registered under that id gets the shared
+    // Arc too, as does every closure of that chunk, including ones capturing
+    // something else. A same-named chunk with other contents keeps its own
+    // Arc. A chunk that differs from this build's wrapper (a save from
+    // another build) loads as saved and its errors stay located in the
+    // synthetic chunk.
     let iterator_chunks = payload.gmatch_iterator_chunks();
     if !iterator_chunks.is_empty() {
         let shared = crate::lua_std::gmatch_iterator_bytecode();

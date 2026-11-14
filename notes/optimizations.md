@@ -670,8 +670,8 @@ full type and range revalidation (`gmatch_state_index`, `GmatchStateFault`) and
 a `Vec<LuaCapture>` allocation. Beyond the cost, the table-backed state brings
 `is_gmatch_wrapper` identity matching and frame omission in error reporting
 (`reference/error-reporting.md`), `gmatch_iterator_bytecode` substitution on
-snapshot load, and the verifier's gmatch section (`validate_gmatch_*`), which
-re-derives invariants the runtime then checks again. A typed heap object
+snapshot load (load no longer schema-checks the state table: a captured
+iterator id cannot prove a closure is an iterator). A typed heap object
 (subject `StringPtr`, pattern `StringPtr`, `pos`, `lastmatch: Option`,
 `compile_charged`), or native closures with typed upvalues, would delete the
 shim, the identity hack, the field interning and most of the fault enum, and

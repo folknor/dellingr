@@ -96,7 +96,6 @@ pub(crate) enum InternalFault {
         error: crate::compiler::verify::BytecodeValidationError,
     },
     GsubReplacementTemplateMissing,
-    GmatchState(GmatchStateFault),
     #[cfg(feature = "snapshot")]
     SnapshotTable(SnapshotTableFault),
     /// Injected by unit tests that need an internal error escaping dispatch.
@@ -152,15 +151,30 @@ pub(crate) enum ParserFault {
     TokenTextNotUtf8,
 }
 
-#[derive(Debug)]
-pub(crate) enum GmatchStateFault {
+/// What a `string.gmatch` iterator found wrong with its state table, carried
+/// by [`LibraryError::InvalidGmatchState`]. The iterator callbacks are
+/// reachable outside the wrapper `string.gmatch` builds (a host can push the
+/// registered handle and call it with any table) and a save is user-editable
+/// input, so these are not dellingr bugs: the iterator checks the fields it
+/// reads each time it reads them.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GmatchStateFault {
+    /// The named field is missing or is not a string.
     StringFieldInvalid(&'static str),
+    /// The named field is missing or is not a number.
     NumberFieldInvalid(&'static str),
+    /// The named field is not an integer in its valid range.
     NumberFieldOutOfRange(&'static str),
+    /// The position is more than one past the subject's end.
     PositionExceedsSubjectLength,
+    /// The previous match's end lies past the subject's end.
     LastMatchExceedsSubjectLength,
+    /// The named last-match field is neither a number nor nil.
     LastMatchFieldInvalid(&'static str),
+    /// Integer slot 0 does not hold the compile-flag key.
     CompileFlagKeyMissing,
+    /// The compile flag is neither `true` nor nil.
     CompileFlagInvalid,
 }
 
@@ -197,7 +211,6 @@ impl fmt::Display for InternalFault {
             Self::GsubReplacementTemplateMissing => {
                 f.write_str("gsub replacement template was not initialized")
             }
-            Self::GmatchState(fault) => write!(f, "invalid gmatch iterator state: {fault}"),
             #[cfg(feature = "snapshot")]
             Self::SnapshotTable(fault) => fmt::Display::fmt(fault, f),
             #[cfg(test)]
@@ -871,6 +884,11 @@ pub enum LibraryError {
         /// The type returned by the replacement.
         value_type: LuaType,
     },
+    /// A `string.gmatch` iterator callback read a malformed state table.
+    InvalidGmatchState {
+        /// What was wrong with it.
+        fault: GmatchStateFault,
+    },
 }
 
 impl LibraryError {
@@ -898,7 +916,8 @@ impl LibraryError {
             | Self::InvalidFormatSpecification { .. }
             | Self::InvalidGsubCaptureIndex { .. }
             | Self::InvalidGsubEscape
-            | Self::InvalidGsubReplacementValue { .. } => None,
+            | Self::InvalidGsubReplacementValue { .. }
+            | Self::InvalidGmatchState { .. } => None,
         }
     }
 }
@@ -1969,6 +1988,9 @@ impl fmt::Display for LibraryError {
             Self::InvalidGsubEscape => f.write_str("invalid use of '%' in replacement string"),
             Self::InvalidGsubReplacementValue { value_type } => {
                 write!(f, "invalid replacement value (a {value_type})")
+            }
+            Self::InvalidGmatchState { fault } => {
+                write!(f, "invalid gmatch iterator state: {fault}")
             }
         }
     }

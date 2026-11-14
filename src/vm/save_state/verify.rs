@@ -2,11 +2,11 @@ use std::collections::{BTreeSet, VecDeque};
 
 use crate::compiler::verify::{self, BytecodeView};
 
-use super::super::table::{MAX_ARRAY_LEN, array_index, integer_index, is_append_key};
+use super::super::table::{MAX_ARRAY_LEN, array_index, is_append_key};
 use super::{
-    CorruptionReason, DuplicateEntry, GmatchCorruption, InvalidBytecodeReason, KeyForm,
-    SaveLocation, SavePayload, SavedBytecode, SavedObject, SavedReference, SnapshotError,
-    TableCorruption, corrupt_arena as corrupt,
+    CorruptionReason, DuplicateEntry, InvalidBytecodeReason, KeyForm, SaveLocation, SavePayload,
+    SavedBytecode, SavedObject, SavedReference, SnapshotError, TableCorruption,
+    corrupt_arena as corrupt,
 };
 
 use crate::gmatch_schema;
@@ -26,10 +26,13 @@ impl VerifiedSavePayload {
     pub(super) fn bytecode(&self) -> &[SavedBytecode] {
         &self.0.bytecode
     }
-    /// Chunk ids of closures that capture a gmatch iterator function. Those
-    /// functions are reachable only as the gmatch wrapper's upvalue, so such
-    /// a closure is a gmatch iterator; `validate_gmatch_iterators` has
-    /// checked its state.
+    /// Chunk ids of closures that capture a gmatch iterator function id: the
+    /// candidates for the shared iterator identity at load. This is a
+    /// diagnostic heuristic, not recognition. Ordinary closures can capture
+    /// those ids too (the handle is public, and a raw State may register the
+    /// ids for host functions), so the caller also requires the chunk to
+    /// equal this build's wrapper, and nothing here says the closure's state
+    /// is valid.
     pub(super) fn gmatch_iterator_chunks(&self) -> BTreeSet<usize> {
         self.0
             .objects
@@ -560,283 +563,6 @@ fn validate_env_table(
     Ok(())
 }
 
-fn table_field<'a>(
-    payload: &'a SavePayload,
-    table_id: u32,
-    field: &[u8],
-) -> Option<&'a super::SavedVal> {
-    let Some(super::SavedObject::Table { entries, .. }) = payload.objects.get(table_id as usize)
-    else {
-        return None;
-    };
-    entries.iter().find_map(|(key, value)| {
-        let super::SavedVal::Str(id) = key else {
-            return None;
-        };
-        payload
-            .strings
-            .get(*id as usize)
-            .filter(|bytes| bytes.as_slice() == field)
-            .map(|_| value)
-    })
-}
-
-fn table_numeric_field(
-    payload: &SavePayload,
-    table_id: u32,
-    field: f64,
-) -> Option<&super::SavedVal> {
-    let Some(super::SavedObject::Table { entries, .. }) = payload.objects.get(table_id as usize)
-    else {
-        return None;
-    };
-    let field_bits = field.to_bits();
-    entries.iter().find_map(|(key, value)| {
-        let super::SavedVal::Num(bits) = key else {
-            return None;
-        };
-        (*bits == field_bits).then_some(value)
-    })
-}
-
-fn gmatch_integer_field(
-    payload: &SavePayload,
-    table_id: u32,
-    field: &[u8],
-    maximum: usize,
-    reason: CorruptionReason,
-) -> Result<usize, SnapshotError> {
-    let Some(super::SavedVal::Num(bits)) = table_field(payload, table_id, field) else {
-        return Err(corrupt(reason, table_id as usize, SaveLocation::Objects));
-    };
-    let value = f64::from_bits(*bits);
-    integer_index(value, maximum)
-        .ok_or_else(|| corrupt(reason, table_id as usize, SaveLocation::Objects))
-}
-
-fn validate_gmatch_last_match(
-    payload: &SavePayload,
-    table_id: u32,
-    subject_len: usize,
-) -> Result<(), SnapshotError> {
-    if table_field(
-        payload,
-        table_id,
-        gmatch_schema::LAST_MATCH_FIELD.as_bytes(),
-    )
-    .is_some()
-    {
-        gmatch_integer_field(
-            payload,
-            table_id,
-            gmatch_schema::LAST_MATCH_FIELD.as_bytes(),
-            subject_len,
-            CorruptionReason::Gmatch(GmatchCorruption::LastMatchInvalid),
-        )?;
-    }
-    Ok(())
-}
-
-fn validate_gmatch_compile_state(
-    payload: &SavePayload,
-    table_id: u32,
-) -> Result<(), SnapshotError> {
-    let Some(super::SavedVal::Str(cache_key_id)) =
-        table_numeric_field(payload, table_id, gmatch_schema::COMPILE_CHARGED_SLOT)
-    else {
-        return Err(corrupt(
-            CorruptionReason::Gmatch(GmatchCorruption::CompileFlagKeyMissing),
-            table_id as usize,
-            SaveLocation::Objects,
-        ));
-    };
-    let Some(cache_key) = payload.strings.get(*cache_key_id as usize) else {
-        return Err(corrupt(
-            CorruptionReason::Gmatch(GmatchCorruption::CompileFlagKeyOutOfRange),
-            table_id as usize,
-            SaveLocation::Objects,
-        ));
-    };
-    if cache_key.as_slice() != gmatch_schema::COMPILE_CHARGED_FIELD.as_bytes() {
-        return Err(corrupt(
-            CorruptionReason::Gmatch(GmatchCorruption::CompileFlagKeyInvalid),
-            table_id as usize,
-            SaveLocation::Objects,
-        ));
-    }
-    if !matches!(
-        table_field(
-            payload,
-            table_id,
-            gmatch_schema::COMPILE_CHARGED_FIELD.as_bytes(),
-        ),
-        None | Some(super::SavedVal::Bool(true))
-    ) {
-        return Err(corrupt(
-            CorruptionReason::Gmatch(GmatchCorruption::CompileFlagInvalid),
-            table_id as usize,
-            SaveLocation::Objects,
-        ));
-    }
-    Ok(())
-}
-
-fn validate_gmatch_state(
-    payload: &SavePayload,
-    table_id: u32,
-    empty_pattern: bool,
-) -> Result<(), SnapshotError> {
-    let maximum_position = crate::limits::MAX_STRING_BYTES + 1;
-    if empty_pattern {
-        let len = gmatch_integer_field(
-            payload,
-            table_id,
-            gmatch_schema::LENGTH_FIELD.as_bytes(),
-            crate::limits::MAX_STRING_BYTES,
-            CorruptionReason::Gmatch(GmatchCorruption::EmptyLengthInvalid),
-        )?;
-        let pos = gmatch_integer_field(
-            payload,
-            table_id,
-            gmatch_schema::POSITION_FIELD.as_bytes(),
-            maximum_position,
-            CorruptionReason::Gmatch(GmatchCorruption::EmptyPositionInvalid),
-        )?;
-        if pos > len.saturating_add(1) {
-            return Err(corrupt(
-                CorruptionReason::Gmatch(GmatchCorruption::EmptyPositionExceedsLength),
-                table_id as usize,
-                SaveLocation::Objects,
-            ));
-        }
-        return Ok(());
-    }
-
-    let Some(super::SavedVal::Str(subject_id)) =
-        table_field(payload, table_id, gmatch_schema::SUBJECT_FIELD.as_bytes())
-    else {
-        return Err(corrupt(
-            CorruptionReason::Gmatch(GmatchCorruption::SubjectInvalid),
-            table_id as usize,
-            SaveLocation::Objects,
-        ));
-    };
-    let Some(subject) = payload.strings.get(*subject_id as usize) else {
-        return Err(corrupt(
-            CorruptionReason::Gmatch(GmatchCorruption::SubjectStringOutOfRange),
-            *subject_id as usize,
-            SaveLocation::Strings,
-        ));
-    };
-    if !matches!(
-        table_field(payload, table_id, gmatch_schema::PATTERN_FIELD.as_bytes(),),
-        Some(super::SavedVal::Str(_))
-    ) {
-        return Err(corrupt(
-            CorruptionReason::Gmatch(GmatchCorruption::PatternInvalid),
-            table_id as usize,
-            SaveLocation::Objects,
-        ));
-    }
-    let pos = gmatch_integer_field(
-        payload,
-        table_id,
-        gmatch_schema::POSITION_FIELD.as_bytes(),
-        maximum_position,
-        CorruptionReason::Gmatch(GmatchCorruption::PositionInvalid),
-    )?;
-    if pos > subject.len().saturating_add(1) {
-        return Err(corrupt(
-            CorruptionReason::Gmatch(GmatchCorruption::PositionExceedsSubject),
-            table_id as usize,
-            SaveLocation::Objects,
-        ));
-    }
-    validate_gmatch_last_match(payload, table_id, subject.len())?;
-    validate_gmatch_compile_state(payload, table_id)?;
-    Ok(())
-}
-
-fn validate_gmatch_iterators(payload: &SavePayload) -> Result<(), SnapshotError> {
-    let mut validated_states = BTreeSet::new();
-    for (closure_index, object) in payload.objects.iter().enumerate() {
-        let super::SavedObject::Closure { upvalues, .. } = object else {
-            continue;
-        };
-        // Ordinary closures may capture any number of objects, so object
-        // multiplicity only matters once a gmatch iterator upvalue is found.
-        let mut iterator_kind = None;
-        let mut state_table = None;
-        let mut multiple_objects = false;
-        for upvalue_id in upvalues {
-            let value = payload.upvalues.get(*upvalue_id as usize).ok_or_else(|| {
-                corrupt(
-                    CorruptionReason::Gmatch(GmatchCorruption::ClosureUpvalueOutOfRange),
-                    closure_index,
-                    SaveLocation::Objects,
-                )
-            })?;
-            match value {
-                super::SavedVal::Fn(id) if id == gmatch_schema::ITERATOR_ID => {
-                    if iterator_kind.replace(false).is_some() {
-                        return Err(corrupt(
-                            CorruptionReason::Gmatch(GmatchCorruption::MultipleIterators),
-                            closure_index,
-                            SaveLocation::Objects,
-                        ));
-                    }
-                }
-                super::SavedVal::Fn(id) if id == gmatch_schema::EMPTY_ITERATOR_ID => {
-                    if iterator_kind.replace(true).is_some() {
-                        return Err(corrupt(
-                            CorruptionReason::Gmatch(GmatchCorruption::MultipleIterators),
-                            closure_index,
-                            SaveLocation::Objects,
-                        ));
-                    }
-                }
-                super::SavedVal::Obj(id) => {
-                    if state_table.replace(*id).is_some() {
-                        multiple_objects = true;
-                    }
-                }
-                _ => {}
-            }
-        }
-        let Some(empty_pattern) = iterator_kind else {
-            continue;
-        };
-        if multiple_objects {
-            return Err(corrupt(
-                CorruptionReason::Gmatch(GmatchCorruption::MultipleStateObjects),
-                closure_index,
-                SaveLocation::Objects,
-            ));
-        }
-        let Some(table_id) = state_table else {
-            return Err(corrupt(
-                CorruptionReason::Gmatch(GmatchCorruption::StateTableMissing),
-                closure_index,
-                SaveLocation::Objects,
-            ));
-        };
-        if !matches!(
-            payload.objects.get(table_id as usize),
-            Some(super::SavedObject::Table { .. })
-        ) {
-            return Err(corrupt(
-                CorruptionReason::Gmatch(GmatchCorruption::StateNotTable),
-                table_id as usize,
-                SaveLocation::Objects,
-            ));
-        }
-        if validated_states.insert((table_id, empty_pattern)) {
-            validate_gmatch_state(payload, table_id, empty_pattern)?;
-        }
-    }
-    Ok(())
-}
-
 fn validate_pointer_ids(payload: &SavePayload) -> Result<(), SnapshotError> {
     let mut ids = BTreeSet::new();
     // Duplicate detection is split by variant and kept in ordered sets rather
@@ -903,7 +629,13 @@ pub(super) fn verify_payload(payload: SavePayload) -> Result<VerifiedSavePayload
     validate_closures(&payload)?;
     validate_chunk_runtimes(&payload)?;
     validate_references(&payload)?;
-    validate_gmatch_iterators(&payload)?;
+    // No gmatch iterator state check here. Recognising an iterator from a
+    // save needs provenance the payload cannot give: a captured iterator id
+    // is also held by ordinary closures (the handle is public through
+    // `registered_rust_fn`, and a raw State may register those ids for host
+    // functions), and a chunk equal to the wrapper's can be compiled from the
+    // same source. Saves are user-editable, so any such check is advisory;
+    // the iterator callbacks validate the state they read when they read it.
     validate_pointer_ids(&payload)?;
     Ok(VerifiedSavePayload(payload))
 }
@@ -1026,113 +758,13 @@ mod tests {
         ));
     }
 
-    fn gmatch_payload(empty_pattern: bool, position: super::super::SavedVal) -> SavePayload {
-        let (iterator_id, strings, entries) = if empty_pattern {
-            (
-                gmatch_schema::EMPTY_ITERATOR_ID,
-                vec![
-                    gmatch_schema::POSITION_FIELD.as_bytes().to_vec(),
-                    gmatch_schema::LENGTH_FIELD.as_bytes().to_vec(),
-                    b"bad".to_vec(),
-                ],
-                vec![
-                    (super::super::SavedVal::Str(0), position),
-                    (
-                        super::super::SavedVal::Str(1),
-                        super::super::SavedVal::Num(2.0f64.to_bits()),
-                    ),
-                ],
-            )
-        } else {
-            (
-                gmatch_schema::ITERATOR_ID,
-                vec![
-                    gmatch_schema::SUBJECT_FIELD.as_bytes().to_vec(),
-                    gmatch_schema::PATTERN_FIELD.as_bytes().to_vec(),
-                    gmatch_schema::POSITION_FIELD.as_bytes().to_vec(),
-                    b"abc".to_vec(),
-                    b"a+".to_vec(),
-                    b"bad".to_vec(),
-                    gmatch_schema::COMPILE_CHARGED_FIELD.as_bytes().to_vec(),
-                ],
-                vec![
-                    (
-                        super::super::SavedVal::Str(0),
-                        super::super::SavedVal::Str(3),
-                    ),
-                    (
-                        super::super::SavedVal::Str(1),
-                        super::super::SavedVal::Str(4),
-                    ),
-                    (super::super::SavedVal::Str(2), position),
-                    (
-                        super::super::SavedVal::Num(gmatch_schema::COMPILE_CHARGED_SLOT.to_bits()),
-                        super::super::SavedVal::Str(6),
-                    ),
-                ],
-            )
-        };
+    /// A standard-environment payload with one saved string, for tests that
+    /// install their own objects.
+    fn string_payload() -> SavePayload {
         SavePayload {
-            strings,
-            upvalues: vec![
-                super::super::SavedVal::Fn(iterator_id.to_string()),
-                super::super::SavedVal::Obj(0),
-            ],
-            objects: vec![
-                super::super::SavedObject::Table {
-                    array_len: 0,
-                    array_slots: 0,
-                    entries,
-                    metatable: None,
-                },
-                super::super::SavedObject::Closure {
-                    chunk: 0,
-                    upvalues: vec![0, 1],
-                },
-            ],
+            strings: vec![b"x".to_vec()],
             ..SavePayload::empty(true)
         }
-    }
-
-    #[test]
-    fn gmatch_snapshot_state_requires_valid_numeric_positions() {
-        let valid_number = super::super::SavedVal::Num(1.0f64.to_bits());
-        assert!(validate_gmatch_iterators(&gmatch_payload(false, valid_number.clone())).is_ok());
-        assert!(validate_gmatch_iterators(&gmatch_payload(true, valid_number.clone())).is_ok());
-
-        let malformed = super::super::SavedVal::Str(2);
-        assert!(matches!(
-            validate_gmatch_iterators(&gmatch_payload(false, malformed.clone())),
-            Err(SnapshotError::CorruptArena {
-                reason: CorruptionReason::Gmatch(GmatchCorruption::PositionInvalid),
-                index: 0,
-                location: SaveLocation::Objects,
-            })
-        ));
-        assert!(matches!(
-            validate_gmatch_iterators(&gmatch_payload(true, malformed)),
-            Err(SnapshotError::CorruptArena {
-                reason: CorruptionReason::Gmatch(GmatchCorruption::EmptyPositionInvalid),
-                index: 0,
-                location: SaveLocation::Objects,
-            })
-        ));
-
-        let mut invalid_length = gmatch_payload(true, valid_number);
-        let Some(super::super::SavedObject::Table { entries, .. }) =
-            invalid_length.objects.first_mut()
-        else {
-            panic!("fixture has a state table");
-        };
-        entries[1].1 = super::super::SavedVal::Str(2);
-        assert!(matches!(
-            validate_gmatch_iterators(&invalid_length),
-            Err(SnapshotError::CorruptArena {
-                reason: CorruptionReason::Gmatch(GmatchCorruption::EmptyLengthInvalid),
-                index: 0,
-                location: SaveLocation::Objects,
-            })
-        ));
     }
 
     #[test]
@@ -1142,14 +774,13 @@ mod tests {
             |array_len: u64,
              array_slots: u32,
              entries: Vec<(super::super::SavedVal, super::super::SavedVal)>| {
-                let mut payload = gmatch_payload(false, num(1.0));
+                let mut payload = string_payload();
                 payload.objects = vec![super::super::SavedObject::Table {
                     array_len,
                     array_slots,
                     entries,
                     metatable: None,
                 }];
-                payload.upvalues = Vec::new();
                 payload
             };
         let nil = super::super::SavedVal::Nil;
@@ -1233,7 +864,7 @@ mod tests {
         // Object 0 is a table whose metatable is object `mt`; object 1 is a
         // table, object 2 a closure.
         let with_metatable = |mt: super::super::SavedVal| {
-            let mut payload = gmatch_payload(false, super::super::SavedVal::Num(1.0f64.to_bits()));
+            let mut payload = string_payload();
             payload.objects = vec![
                 super::super::SavedObject::Table {
                     array_len: 0,
@@ -1252,7 +883,6 @@ mod tests {
                     upvalues: Vec::new(),
                 },
             ];
-            payload.upvalues = Vec::new();
             payload
         };
         assert!(validate_references(&with_metatable(super::super::SavedVal::Obj(1))).is_ok());

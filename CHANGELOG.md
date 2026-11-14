@@ -24,6 +24,20 @@ Saves from 0.7.x do not load: snapshot `FORMAT_VERSION` is 15.
   it runs, so the host can reset the interrupt and retry. The handler used
   to be recorded as entered before the interrupt poll, and the operands were
   consumed as if it had run.
+- A save holding an ordinary closure that captures a `string.gmatch`
+  iterator function (its handle is public through `registered_rust_fn`, and
+  a raw State may register those ids for host functions) loads. Load used to
+  take any closure capturing either id for a gmatch iterator and rejected it
+  for lacking a state table. Load no longer checks gmatch iterator state at
+  all: a captured id cannot prove a closure is an iterator, and saves are
+  user-editable input, so the iterator callbacks are the authority on the
+  state they read. `snapshot::GmatchCorruption` and
+  `CorruptionReason::Gmatch` are removed.
+- Malformed `string.gmatch` iterator state is reported as
+  `LibraryError::InvalidGmatchState` carrying a public
+  `error::GmatchStateFault`, not as an `InternalError`: a host calling the
+  iterator handle with another table, or an edited save, reaches it without
+  any dellingr bug.
 
 ## [0.7.1] - 2026-11-06
 

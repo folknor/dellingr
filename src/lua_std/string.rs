@@ -1219,24 +1219,29 @@ fn push_gmatch_wrapper(state: &mut State, iterator: crate::vm::RustFnId) -> Resu
     Ok(1)
 }
 
-fn invalid_gmatch_state(fault: GmatchStateFault) -> Error {
-    Error::internal_fault(InternalFault::GmatchState(fault))
+fn invalid_gmatch_state(state: &State, fault: GmatchStateFault) -> Error {
+    state.library_error(LibraryError::InvalidGmatchState { fault })
 }
 
 fn push_gmatch_string_field(state: &mut State, field: &'static str) -> Result<()> {
     state.push_string(field)?;
     state.get_table_raw(1)?;
     if state.typ(-1) != LuaType::String {
-        return Err(invalid_gmatch_state(GmatchStateFault::StringFieldInvalid(
-            field,
-        )));
+        return Err(invalid_gmatch_state(
+            state,
+            GmatchStateFault::StringFieldInvalid(field),
+        ));
     }
     Ok(())
 }
 
-// Gmatch tables are private closure state. Save verification checks their
-// serialized form, and runtime reads repeat the invariant so an absent,
-// mistyped, or out-of-range field cannot silently restart an iterator.
+// Gmatch tables are the wrapper closure's state, but nothing makes them
+// trusted: a host can call the registered iterator handle with any table, and
+// a save is user-editable input that snapshot load does not schema-check. The
+// iterator is the authority, rejecting an absent, mistyped or out-of-range
+// field when it reads it, so a bad field cannot silently restart an iterator.
+// An exhausted iterator returns before reading the compile flag, so a bad flag
+// there goes unreported, which is harmless.
 fn gmatch_state_index(
     state: &State,
     stack_index: isize,
@@ -1244,13 +1249,14 @@ fn gmatch_state_index(
     maximum: usize,
 ) -> Result<usize> {
     if state.typ(stack_index) != LuaType::Number {
-        return Err(invalid_gmatch_state(GmatchStateFault::NumberFieldInvalid(
-            field,
-        )));
+        return Err(invalid_gmatch_state(
+            state,
+            GmatchStateFault::NumberFieldInvalid(field),
+        ));
     }
     let number = state.to_number(stack_index)?;
     crate::vm::integer_index(number, maximum)
-        .ok_or_else(|| invalid_gmatch_state(GmatchStateFault::NumberFieldOutOfRange(field)))
+        .ok_or_else(|| invalid_gmatch_state(state, GmatchStateFault::NumberFieldOutOfRange(field)))
 }
 
 pub(super) fn gmatch_empty_iter(state: &mut State) -> Result<u8> {
@@ -1278,6 +1284,7 @@ pub(super) fn gmatch_empty_iter(state: &mut State) -> Result<u8> {
 
     if pos > len.saturating_add(1) {
         return Err(invalid_gmatch_state(
+            state,
             GmatchStateFault::PositionExceedsSubjectLength,
         ));
     }
@@ -1327,6 +1334,7 @@ pub(super) fn gmatch_iter(state: &mut State) -> Result<u8> {
         )?),
         _ => {
             return Err(invalid_gmatch_state(
+                state,
                 GmatchStateFault::LastMatchFieldInvalid(gmatch_schema::LAST_MATCH_FIELD),
             ));
         }
@@ -1336,11 +1344,13 @@ pub(super) fn gmatch_iter(state: &mut State) -> Result<u8> {
     let subject_len = state.to_bytes(2)?.len();
     if pos > subject_len.saturating_add(1) {
         return Err(invalid_gmatch_state(
+            state,
             GmatchStateFault::PositionExceedsSubjectLength,
         ));
     }
     if lastmatch.is_some_and(|last| last > subject_len) {
         return Err(invalid_gmatch_state(
+            state,
             GmatchStateFault::LastMatchExceedsSubjectLength,
         ));
     }
@@ -1366,6 +1376,7 @@ pub(super) fn gmatch_iter(state: &mut State) -> Result<u8> {
     };
     if !cache_key_matches {
         return Err(invalid_gmatch_state(
+            state,
             GmatchStateFault::CompileFlagKeyMissing,
         ));
     }
@@ -1374,7 +1385,10 @@ pub(super) fn gmatch_iter(state: &mut State) -> Result<u8> {
         LuaType::Nil => false,
         LuaType::Boolean if state.to_boolean(-1) => true,
         _ => {
-            return Err(invalid_gmatch_state(GmatchStateFault::CompileFlagInvalid));
+            return Err(invalid_gmatch_state(
+                state,
+                GmatchStateFault::CompileFlagInvalid,
+            ));
         }
     };
     state.pop(1)?;

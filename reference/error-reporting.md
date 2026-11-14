@@ -11,9 +11,12 @@ receive the caller's source context. With no script caller, the shim keeps its
 own location and source context. Recognition uses the shared bytecode
 identities for the outer wrapper and its iterator, so a user chunk named
 `string.gmatch` retains ordinary attribution. Snapshot load gives a restored
-iterator the shared identity: a chunk qualifies only when a closure of it
-captures the private gmatch iterator function and its contents equal this
-build's shim. An iterator saved by a build whose shim differs keeps its own
+iterator the shared identity: a chunk qualifies when a closure of it captures
+a function saved under a gmatch iterator id and its contents equal this
+build's shim. That is a heuristic, not proof of provenance: a chunk compiled
+from the shim's exact source under its name, given a function registered
+under such an id, also qualifies, and so does every other closure of that
+chunk. An iterator saved by a build whose shim differs keeps its own
 bytecode and location. When a script tail calls the iterator
 (`return iter()`), the omitted shim frame takes its tail-call marker (see
 "Stack trace names") with it.

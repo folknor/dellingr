@@ -44,10 +44,10 @@ pub(crate) use rust_fn::RustFnId;
 use rust_fn::RustFnTable;
 #[cfg(feature = "snapshot")]
 pub use save_state::{
-    CorruptionReason, DecodeReason, DuplicateEntry, GmatchCorruption, InvalidBytecodeReason,
-    KeyForm, LoadError, MaterializedPart, SaveCollection, SaveDiagnostics, SaveError,
-    SaveInternalError, SaveState, SavedReference, SnapshotError, SnapshotField, TableCorruption,
-    TableLoadLocation, TableRestoreFailure,
+    CorruptionReason, DecodeReason, DuplicateEntry, InvalidBytecodeReason, KeyForm, LoadError,
+    MaterializedPart, SaveCollection, SaveDiagnostics, SaveError, SaveInternalError, SaveState,
+    SavedReference, SnapshotError, SnapshotField, TableCorruption, TableLoadLocation,
+    TableRestoreFailure,
 };
 pub(crate) use string_arg::StringArg;
 pub(crate) use table_ops::TostringRendering;

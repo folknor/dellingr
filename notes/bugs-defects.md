@@ -90,31 +90,6 @@ the documentation or fulfill the existing promise. `host` says listing the
 supported widths explicitly suffices and adding types is unnecessary to resolve
 the documentation defect.
 
-## BUG-006 - Gmatch validation rejects legitimate ordinary closures
-
-Hunter label: P2. Scope: `snapshot`. Site: iterator detection
-(`src/vm/save_state/verify.rs`, reported at line 742).
-
-Iterator detection assumes that any closure capturing `string.gmatch.iter` or
-`string.gmatch.empty_iter` is a built-in iterator wrapper.
-
-The public `registered_rust_fn` API exposes those callbacks. Push either handle as
-global `seed`, then execute:
-
-```lua
-local f = seed
-keep = function() return f end
-```
-
-Saving succeeds. Loading rejects the ordinary `keep` closure with
-`GmatchCorruption::StateTableMissing`, before setup runs. The same failure occurs
-in a raw State that legitimately registers a host function under either id.
-
-This breaks the documented persistence of closures and registered Rust functions,
-including the explicit permission for raw States to register stock ids. A captured
-registration id alone cannot establish that a closure owns the gmatch state
-schema. The hunter states this is source-traced.
-
 ## BUG-007 - A compilation error propagated through a Rust callback displays the caller's location instead of the rejected source's
 
 Hunter label: P2. Scope: `host`. Sites: `locate_error` (`src/vm/eval.rs`, reported

@@ -160,6 +160,11 @@ returns; the loaded State starts with an empty stack.
   not silently replaced, as are pins in an unsealed save.
 - Strings above `limits::MAX_STRING_BYTES` are rejected, also in saves written
   by earlier builds with the same format version.
+- Load does not check `string.gmatch` iterator state: a captured iterator
+  function id does not prove a closure is an iterator, since the handle is
+  public and a raw State may register those ids for its own functions. An
+  edited state table fails when the iterator reads it, with
+  `LibraryError::InvalidGmatchState`.
 - A table's saved logical array length is accepted up to the array limit
   without storage behind it (see [limits](limits.md)). A later write whose
   array growth cannot be reserved, such as one an edited save's impossible

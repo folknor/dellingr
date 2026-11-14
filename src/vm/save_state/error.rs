@@ -590,8 +590,6 @@ pub enum CorruptionReason {
     NotMaterialized(MaterializedPart),
     /// A saved table object is malformed.
     Table(TableCorruption),
-    /// A saved `string.gmatch` iterator is malformed.
-    Gmatch(GmatchCorruption),
     /// A pin of the global table or an environment table is not a string,
     /// or an unsealed save carries pins.
     InvalidPin,
@@ -613,7 +611,6 @@ impl fmt::Display for CorruptionReason {
             Self::NestedChunkCycle => f.write_str("nested chunk graph contains a cycle"),
             Self::NotMaterialized(part) => write!(f, "{part} was not materialized"),
             Self::Table(reason) => fmt::Display::fmt(reason, f),
-            Self::Gmatch(reason) => fmt::Display::fmt(reason, f),
             Self::InvalidPin => f.write_str("invalid pin"),
             Self::ChunkRuntimesNotAscending => {
                 f.write_str("chunk runtime ids are not strictly ascending")
@@ -754,74 +751,6 @@ impl fmt::Display for TableCorruption {
             Self::EntryStoresNil => "saved table entry stores nil",
             Self::MetatableNotTable => "saved table metatable is not a table",
             Self::MaterializedWrongType => "materialized table object has wrong type",
-        })
-    }
-}
-
-/// Why a saved `string.gmatch` iterator is malformed, named by
-/// [`CorruptionReason::Gmatch`].
-#[non_exhaustive]
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum GmatchCorruption {
-    /// The iterator closure's upvalue reference is out of range.
-    ClosureUpvalueOutOfRange,
-    /// The closure captures more than one iterator function.
-    MultipleIterators,
-    /// The closure captures more than one object.
-    MultipleStateObjects,
-    /// The closure captures no state table.
-    StateTableMissing,
-    /// The captured state is not a table.
-    StateNotTable,
-    /// The subject is missing or not a string.
-    SubjectInvalid,
-    /// The subject's string id is out of range.
-    SubjectStringOutOfRange,
-    /// The pattern is missing or not a string.
-    PatternInvalid,
-    /// The position is missing or not a valid index.
-    PositionInvalid,
-    /// The position is past the end of the subject.
-    PositionExceedsSubject,
-    /// An empty-pattern iterator's length is missing or invalid.
-    EmptyLengthInvalid,
-    /// An empty-pattern iterator's position is missing or invalid.
-    EmptyPositionInvalid,
-    /// An empty-pattern iterator's position is past its length.
-    EmptyPositionExceedsLength,
-    /// The last match position is invalid.
-    LastMatchInvalid,
-    /// The compile flag's key is missing.
-    CompileFlagKeyMissing,
-    /// The compile flag's key string id is out of range.
-    CompileFlagKeyOutOfRange,
-    /// The compile flag's key is not the expected field name.
-    CompileFlagKeyInvalid,
-    /// The compile flag is neither absent nor `true`.
-    CompileFlagInvalid,
-}
-
-impl fmt::Display for GmatchCorruption {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::ClosureUpvalueOutOfRange => "gmatch closure upvalue is out of range",
-            Self::MultipleIterators => "gmatch closure captures multiple iterators",
-            Self::MultipleStateObjects => "gmatch closure captures multiple state objects",
-            Self::StateTableMissing => "gmatch closure state table is missing",
-            Self::StateNotTable => "gmatch closure state is not a table",
-            Self::SubjectInvalid => "gmatch subject is missing or invalid",
-            Self::SubjectStringOutOfRange => "gmatch subject string id is out of range",
-            Self::PatternInvalid => "gmatch pattern is missing or invalid",
-            Self::PositionInvalid => "gmatch position is missing or invalid",
-            Self::PositionExceedsSubject => "gmatch position exceeds its subject",
-            Self::EmptyLengthInvalid => "empty gmatch length is missing or invalid",
-            Self::EmptyPositionInvalid => "empty gmatch position is missing or invalid",
-            Self::EmptyPositionExceedsLength => "empty gmatch position exceeds its length",
-            Self::LastMatchInvalid => "gmatch last match is invalid",
-            Self::CompileFlagKeyMissing => "gmatch compile flag key is missing",
-            Self::CompileFlagKeyOutOfRange => "gmatch compile flag key is out of range",
-            Self::CompileFlagKeyInvalid => "gmatch compile flag key is invalid",
-            Self::CompileFlagInvalid => "gmatch compile flag is invalid",
         })
     }
 }
@@ -1129,78 +1058,6 @@ mod tests {
                 "materialized table object has wrong type",
             ),
             (CorruptionReason::InvalidPin, "invalid pin"),
-            (
-                CorruptionReason::Gmatch(GmatchCorruption::ClosureUpvalueOutOfRange),
-                "gmatch closure upvalue is out of range",
-            ),
-            (
-                CorruptionReason::Gmatch(GmatchCorruption::MultipleIterators),
-                "gmatch closure captures multiple iterators",
-            ),
-            (
-                CorruptionReason::Gmatch(GmatchCorruption::MultipleStateObjects),
-                "gmatch closure captures multiple state objects",
-            ),
-            (
-                CorruptionReason::Gmatch(GmatchCorruption::StateTableMissing),
-                "gmatch closure state table is missing",
-            ),
-            (
-                CorruptionReason::Gmatch(GmatchCorruption::StateNotTable),
-                "gmatch closure state is not a table",
-            ),
-            (
-                CorruptionReason::Gmatch(GmatchCorruption::SubjectInvalid),
-                "gmatch subject is missing or invalid",
-            ),
-            (
-                CorruptionReason::Gmatch(GmatchCorruption::SubjectStringOutOfRange),
-                "gmatch subject string id is out of range",
-            ),
-            (
-                CorruptionReason::Gmatch(GmatchCorruption::PatternInvalid),
-                "gmatch pattern is missing or invalid",
-            ),
-            (
-                CorruptionReason::Gmatch(GmatchCorruption::PositionInvalid),
-                "gmatch position is missing or invalid",
-            ),
-            (
-                CorruptionReason::Gmatch(GmatchCorruption::PositionExceedsSubject),
-                "gmatch position exceeds its subject",
-            ),
-            (
-                CorruptionReason::Gmatch(GmatchCorruption::EmptyLengthInvalid),
-                "empty gmatch length is missing or invalid",
-            ),
-            (
-                CorruptionReason::Gmatch(GmatchCorruption::EmptyPositionInvalid),
-                "empty gmatch position is missing or invalid",
-            ),
-            (
-                CorruptionReason::Gmatch(GmatchCorruption::EmptyPositionExceedsLength),
-                "empty gmatch position exceeds its length",
-            ),
-            (
-                CorruptionReason::Gmatch(GmatchCorruption::LastMatchInvalid),
-                "gmatch last match is invalid",
-            ),
-            (
-                CorruptionReason::Gmatch(GmatchCorruption::CompileFlagKeyMissing),
-                "gmatch compile flag key is missing",
-            ),
-            (
-                CorruptionReason::Gmatch(GmatchCorruption::CompileFlagKeyOutOfRange),
-                "gmatch compile flag key is out of range",
-            ),
-            (
-                CorruptionReason::Gmatch(GmatchCorruption::CompileFlagKeyInvalid),
-                "gmatch compile flag key is invalid",
-            ),
-            (
-                CorruptionReason::Gmatch(GmatchCorruption::CompileFlagInvalid),
-                "gmatch compile flag is invalid",
-            ),
         ] {
             assert_eq!(reason.to_string(), text);
         }

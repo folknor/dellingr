@@ -567,6 +567,80 @@ fn empty_gmatch_closure_survives_save_load() {
 }
 
 #[test]
+fn ordinary_closures_capturing_gmatch_iterator_handles_round_trip() {
+    // The iterator handles are public, so an ordinary closure can capture one
+    // without any state table. Load must not take it for a gmatch iterator.
+    for id in ["string.gmatch.iter", "string.gmatch.empty_iter"] {
+        let mut state = State::new();
+        let handle = state.registered_rust_fn(id).expect("open_libs ran");
+        state.push_rust_fn(handle).unwrap();
+        state.set_global("seed").unwrap();
+        support::run(
+            &mut state,
+            "local f = seed\nkeep = function() return f end\n\
+             local t = {}\npair = function() return f, t end",
+        );
+        let mut loaded = support::reload(&state);
+        support::run(
+            &mut loaded,
+            "if keep() ~= seed then error('capture changed') end\n\
+             local f, t = pair()\nif f ~= seed or type(t) ~= 'table' then error('pair changed') end",
+        );
+    }
+}
+
+#[test]
+fn raw_state_host_function_under_a_gmatch_iterator_id_round_trips() {
+    fn host_value(state: &mut State) -> dellingr::Result<u8> {
+        state.push_number(42.0)?;
+        Ok(1)
+    }
+    fn setup(state: &mut State) -> Result<(), &'static str> {
+        state
+            .register_rust_fn("string.gmatch.iter", "host", host_value)
+            .map(drop)
+            .map_err(|_| "registration failed")
+    }
+
+    let mut state = State::raw();
+    setup(&mut state).unwrap();
+    let handle = state.registered_rust_fn("string.gmatch.iter").unwrap();
+    state.push_rust_fn(handle).unwrap();
+    state.set_global("seed").unwrap();
+    support::run(
+        &mut state,
+        "local f, n = seed, 1\nkeep = function() return f() + n end",
+    );
+    let save = state.save_state().unwrap();
+    let mut loaded = State::load_state(&save.bytes, Box::new(DefaultCallbacks), setup).unwrap();
+    support::run(
+        &mut loaded,
+        "if keep() ~= 43 then error('wrong result') end",
+    );
+}
+
+#[test]
+fn gmatch_iterator_handle_called_with_a_bad_table_is_a_library_error() {
+    // Not an internal error: no dellingr invariant broke, a caller passed a
+    // table that is not iterator state.
+    use dellingr::error::{ErrorKind, GmatchStateFault, LibraryError};
+    let mut state = State::new();
+    let handle = state.registered_rust_fn("string.gmatch.iter").unwrap();
+    state.push_rust_fn(handle).unwrap();
+    state.set_global("seed").unwrap();
+    let error = support::try_run(&mut state, "seed({})").expect_err("state is malformed");
+    assert!(
+        matches!(
+            error.kind(),
+            ErrorKind::LibraryError(LibraryError::InvalidGmatchState {
+                fault: GmatchStateFault::StringFieldInvalid("s")
+            })
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
 fn restored_gmatch_iterator_errors_point_at_the_script_caller() {
     // The unfinished capture fails lazily, on the first call after the load.
     // The restored iterator must be recognised as the gmatch wrapper, so the
