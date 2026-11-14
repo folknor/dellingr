@@ -173,11 +173,12 @@ be encouraged to write more code, not less. A host that must be able to stop
 such a script triggers its `Interrupt` (see "Stopping a script from the host"
 in [docs/budget.md](docs/budget.md)).
 
-Data-dependent native work in the string, pattern, and table libraries is
-generally charged for bytes examined or emitted, table elements visited, and
-matcher primitives. `table.insert`, `table.remove`, and `table.pack` instead
-cost a flat 1 regardless of elements shifted or stored; global `unpack` and
-`table.unpack` are free regardless of elements visited. Structural semantics
+A string library call costs 1, and `string.format` 1 per directive; pattern
+matching adds 1 per matcher step or substring-scan comparison. Bytes read and
+produced are free, as they are for `..`. `table.insert`, `table.remove`,
+`table.pack`, and `table.concat` cost a flat 1 regardless of elements shifted,
+stored, or joined, `table.move` and `table.sort` charge per element, and
+global `unpack` and `table.unpack` are free regardless of elements visited. Structural semantics
 remain free by design. A helper extraction, an intermediate name, or another
 legible refactor should not make a script more expensive, because the budget is
 a game-design instrument rather than a CPU meter. Per-function charges are

@@ -264,7 +264,9 @@ does.
 These have no reference-Lua analogue. See `budget.md`.
 
 - `while true do end` is free.
-- Native string, pattern and table work is generally charged for bytes,
-  elements or matcher primitives. `table.insert`, `table.remove` and
-  `table.pack` each cost a flat 1 regardless of elements shifted or stored;
-  global `unpack` and `table.unpack` are free regardless of elements visited.
+- A string library call costs 1 (`string.format` 1 per directive) plus 1 per
+  pattern-matcher step or substring-scan comparison; bytes read and produced
+  are free. `table.insert`, `table.remove`, `table.pack` and `table.concat`
+  each cost a flat 1 regardless of elements shifted, stored or joined;
+  `table.move` and `table.sort` charge per element; global `unpack` and
+  `table.unpack` are free regardless of elements visited.

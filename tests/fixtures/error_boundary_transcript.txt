@@ -339,13 +339,7 @@ string budget=1
 Ok(())
 notifications=[]
 top=3 values=["number=1234.0", "bytes=[115, 117, 114, 118, 105, 118, 111, 114]", "bytes=[97, 98]"] observed=nil
-cost=2
-reuse=7 notifications=[]
-string budget=2
-Ok(())
-notifications=[]
-top=3 values=["number=1234.0", "bytes=[115, 117, 114, 118, 105, 118, 111, 114]", "bytes=[97, 98]"] observed=nil
-cost=2
+cost=1
 reuse=7 notifications=[]
 rust_iterator budget=0
 Err(ErrorRepr { kind: BudgetExceeded { used: 0, budget: 0 }, line_num: 1, column: 0, context: Some(ErrorContext { name: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), reported: true }), stack_trace: [StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] })
@@ -530,140 +524,40 @@ top=2 values=["number=1234.0", "bytes=[115, 117, 114, 118, 105, 118, 111, 114]"]
 cost=0
 reuse=7 notifications=[]
 gsub budget=1
-Err(ErrorRepr { kind: BudgetExceeded { used: 4, budget: 1 }, line_num: 1, column: 0, context: Some(ErrorContext { name: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), reported: true }), stack_trace: [StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] })
-display=boundary-corpus:1: budget exceeded: used 4 cost with budget of 1
+Err(ErrorRepr { kind: BudgetExceeded { used: 1, budget: 1 }, line_num: 1, column: 0, context: Some(ErrorContext { name: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), reported: true }), stack_trace: [StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] })
+display=boundary-corpus:1: budget exceeded: used 1 cost with budget of 1
 stack traceback:
 	boundary-corpus:1: in main chunk
-kind=BudgetExceeded { used: 4, budget: 1 } source=Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]) position=1:0 traceback=[StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] vm_fault=None
-notifications=["boundary-corpus:1: budget exceeded: used 4 cost with budget of 1\nstack traceback:\n\tboundary-corpus:1: in main chunk"]
+kind=BudgetExceeded { used: 1, budget: 1 } source=Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]) position=1:0 traceback=[StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] vm_fault=None
+notifications=["boundary-corpus:1: budget exceeded: used 1 cost with budget of 1\nstack traceback:\n\tboundary-corpus:1: in main chunk"]
 top=2 values=["number=1234.0", "bytes=[115, 117, 114, 118, 105, 118, 111, 114]"] observed=nil
-cost=4
+cost=1
 reuse=7 notifications=[]
 gsub budget=2
-Err(ErrorRepr { kind: BudgetExceeded { used: 4, budget: 2 }, line_num: 1, column: 0, context: Some(ErrorContext { name: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), reported: true }), stack_trace: [StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] })
-display=boundary-corpus:1: budget exceeded: used 4 cost with budget of 2
+Err(ErrorRepr { kind: BudgetExceeded { used: 2, budget: 2 }, line_num: 1, column: 0, context: Some(ErrorContext { name: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), reported: true }), stack_trace: [StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] })
+display=boundary-corpus:1: budget exceeded: used 2 cost with budget of 2
 stack traceback:
 	boundary-corpus:1: in main chunk
-kind=BudgetExceeded { used: 4, budget: 2 } source=Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]) position=1:0 traceback=[StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] vm_fault=None
-notifications=["boundary-corpus:1: budget exceeded: used 4 cost with budget of 2\nstack traceback:\n\tboundary-corpus:1: in main chunk"]
+kind=BudgetExceeded { used: 2, budget: 2 } source=Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]) position=1:0 traceback=[StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] vm_fault=None
+notifications=["boundary-corpus:1: budget exceeded: used 2 cost with budget of 2\nstack traceback:\n\tboundary-corpus:1: in main chunk"]
 top=2 values=["number=1234.0", "bytes=[115, 117, 114, 118, 105, 118, 111, 114]"] observed=nil
-cost=4
+cost=2
 reuse=7 notifications=[]
 gsub budget=3
-Err(ErrorRepr { kind: BudgetExceeded { used: 4, budget: 3 }, line_num: 1, column: 0, context: Some(ErrorContext { name: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), reported: true }), stack_trace: [StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] })
-display=boundary-corpus:1: budget exceeded: used 4 cost with budget of 3
+Err(ErrorRepr { kind: BudgetExceeded { used: 3, budget: 3 }, line_num: 1, column: 0, context: Some(ErrorContext { name: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), reported: true }), stack_trace: [StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] })
+display=boundary-corpus:1: budget exceeded: used 3 cost with budget of 3
 stack traceback:
 	boundary-corpus:1: in main chunk
-kind=BudgetExceeded { used: 4, budget: 3 } source=Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]) position=1:0 traceback=[StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] vm_fault=None
-notifications=["boundary-corpus:1: budget exceeded: used 4 cost with budget of 3\nstack traceback:\n\tboundary-corpus:1: in main chunk"]
+kind=BudgetExceeded { used: 3, budget: 3 } source=Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]) position=1:0 traceback=[StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] vm_fault=None
+notifications=["boundary-corpus:1: budget exceeded: used 3 cost with budget of 3\nstack traceback:\n\tboundary-corpus:1: in main chunk"]
 top=2 values=["number=1234.0", "bytes=[115, 117, 114, 118, 105, 118, 111, 114]"] observed=nil
-cost=4
+cost=3
 reuse=7 notifications=[]
 gsub budget=4
-Err(ErrorRepr { kind: BudgetExceeded { used: 4, budget: 4 }, line_num: 1, column: 0, context: Some(ErrorContext { name: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), reported: true }), stack_trace: [StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] })
-display=boundary-corpus:1: budget exceeded: used 4 cost with budget of 4
-stack traceback:
-	boundary-corpus:1: in main chunk
-kind=BudgetExceeded { used: 4, budget: 4 } source=Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]) position=1:0 traceback=[StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] vm_fault=None
-notifications=["boundary-corpus:1: budget exceeded: used 4 cost with budget of 4\nstack traceback:\n\tboundary-corpus:1: in main chunk"]
-top=2 values=["number=1234.0", "bytes=[115, 117, 114, 118, 105, 118, 111, 114]"] observed=nil
-cost=4
-reuse=7 notifications=[]
-gsub budget=5
-Err(ErrorRepr { kind: BudgetExceeded { used: 5, budget: 5 }, line_num: 1, column: 0, context: Some(ErrorContext { name: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), reported: true }), stack_trace: [StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] })
-display=boundary-corpus:1: budget exceeded: used 5 cost with budget of 5
-stack traceback:
-	boundary-corpus:1: in main chunk
-kind=BudgetExceeded { used: 5, budget: 5 } source=Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]) position=1:0 traceback=[StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] vm_fault=None
-notifications=["boundary-corpus:1: budget exceeded: used 5 cost with budget of 5\nstack traceback:\n\tboundary-corpus:1: in main chunk"]
-top=2 values=["number=1234.0", "bytes=[115, 117, 114, 118, 105, 118, 111, 114]"] observed=nil
-cost=5
-reuse=7 notifications=[]
-gsub budget=6
-Err(ErrorRepr { kind: BudgetExceeded { used: 6, budget: 6 }, line_num: 1, column: 0, context: Some(ErrorContext { name: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), reported: true }), stack_trace: [StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] })
-display=boundary-corpus:1: budget exceeded: used 6 cost with budget of 6
-stack traceback:
-	boundary-corpus:1: in main chunk
-kind=BudgetExceeded { used: 6, budget: 6 } source=Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]) position=1:0 traceback=[StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] vm_fault=None
-notifications=["boundary-corpus:1: budget exceeded: used 6 cost with budget of 6\nstack traceback:\n\tboundary-corpus:1: in main chunk"]
-top=2 values=["number=1234.0", "bytes=[115, 117, 114, 118, 105, 118, 111, 114]"] observed=nil
-cost=6
-reuse=7 notifications=[]
-gsub budget=7
-Err(ErrorRepr { kind: BudgetExceeded { used: 7, budget: 7 }, line_num: 1, column: 0, context: Some(ErrorContext { name: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), reported: true }), stack_trace: [StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] })
-display=boundary-corpus:1: budget exceeded: used 7 cost with budget of 7
-stack traceback:
-	boundary-corpus:1: in main chunk
-kind=BudgetExceeded { used: 7, budget: 7 } source=Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]) position=1:0 traceback=[StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] vm_fault=None
-notifications=["boundary-corpus:1: budget exceeded: used 7 cost with budget of 7\nstack traceback:\n\tboundary-corpus:1: in main chunk"]
-top=2 values=["number=1234.0", "bytes=[115, 117, 114, 118, 105, 118, 111, 114]"] observed=nil
-cost=7
-reuse=7 notifications=[]
-gsub budget=8
-Err(ErrorRepr { kind: BudgetExceeded { used: 8, budget: 8 }, line_num: 1, column: 0, context: Some(ErrorContext { name: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), reported: true }), stack_trace: [StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] })
-display=boundary-corpus:1: budget exceeded: used 8 cost with budget of 8
-stack traceback:
-	boundary-corpus:1: in main chunk
-kind=BudgetExceeded { used: 8, budget: 8 } source=Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]) position=1:0 traceback=[StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] vm_fault=None
-notifications=["boundary-corpus:1: budget exceeded: used 8 cost with budget of 8\nstack traceback:\n\tboundary-corpus:1: in main chunk"]
-top=2 values=["number=1234.0", "bytes=[115, 117, 114, 118, 105, 118, 111, 114]"] observed=nil
-cost=8
-reuse=7 notifications=[]
-gsub budget=9
-Err(ErrorRepr { kind: BudgetExceeded { used: 9, budget: 9 }, line_num: 1, column: 0, context: Some(ErrorContext { name: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), reported: true }), stack_trace: [StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] })
-display=boundary-corpus:1: budget exceeded: used 9 cost with budget of 9
-stack traceback:
-	boundary-corpus:1: in main chunk
-kind=BudgetExceeded { used: 9, budget: 9 } source=Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]) position=1:0 traceback=[StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] vm_fault=None
-notifications=["boundary-corpus:1: budget exceeded: used 9 cost with budget of 9\nstack traceback:\n\tboundary-corpus:1: in main chunk"]
-top=2 values=["number=1234.0", "bytes=[115, 117, 114, 118, 105, 118, 111, 114]"] observed=nil
-cost=9
-reuse=7 notifications=[]
-gsub budget=10
-Err(ErrorRepr { kind: BudgetExceeded { used: 10, budget: 10 }, line_num: 1, column: 0, context: Some(ErrorContext { name: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), reported: true }), stack_trace: [StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] })
-display=boundary-corpus:1: budget exceeded: used 10 cost with budget of 10
-stack traceback:
-	boundary-corpus:1: in main chunk
-kind=BudgetExceeded { used: 10, budget: 10 } source=Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]) position=1:0 traceback=[StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] vm_fault=None
-notifications=["boundary-corpus:1: budget exceeded: used 10 cost with budget of 10\nstack traceback:\n\tboundary-corpus:1: in main chunk"]
-top=2 values=["number=1234.0", "bytes=[115, 117, 114, 118, 105, 118, 111, 114]"] observed=nil
-cost=10
-reuse=7 notifications=[]
-gsub budget=11
-Err(ErrorRepr { kind: BudgetExceeded { used: 11, budget: 11 }, line_num: 1, column: 0, context: Some(ErrorContext { name: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), reported: true }), stack_trace: [StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] })
-display=boundary-corpus:1: budget exceeded: used 11 cost with budget of 11
-stack traceback:
-	boundary-corpus:1: in main chunk
-kind=BudgetExceeded { used: 11, budget: 11 } source=Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]) position=1:0 traceback=[StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] vm_fault=None
-notifications=["boundary-corpus:1: budget exceeded: used 11 cost with budget of 11\nstack traceback:\n\tboundary-corpus:1: in main chunk"]
-top=2 values=["number=1234.0", "bytes=[115, 117, 114, 118, 105, 118, 111, 114]"] observed=nil
-cost=11
-reuse=7 notifications=[]
-gsub budget=12
-Err(ErrorRepr { kind: BudgetExceeded { used: 12, budget: 12 }, line_num: 1, column: 0, context: Some(ErrorContext { name: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), reported: true }), stack_trace: [StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] })
-display=boundary-corpus:1: budget exceeded: used 12 cost with budget of 12
-stack traceback:
-	boundary-corpus:1: in main chunk
-kind=BudgetExceeded { used: 12, budget: 12 } source=Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]) position=1:0 traceback=[StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] vm_fault=None
-notifications=["boundary-corpus:1: budget exceeded: used 12 cost with budget of 12\nstack traceback:\n\tboundary-corpus:1: in main chunk"]
-top=2 values=["number=1234.0", "bytes=[115, 117, 114, 118, 105, 118, 111, 114]"] observed=nil
-cost=12
-reuse=7 notifications=[]
-gsub budget=13
-Err(ErrorRepr { kind: BudgetExceeded { used: 13, budget: 13 }, line_num: 1, column: 0, context: Some(ErrorContext { name: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), reported: true }), stack_trace: [StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] })
-display=boundary-corpus:1: budget exceeded: used 13 cost with budget of 13
-stack traceback:
-	boundary-corpus:1: in main chunk
-kind=BudgetExceeded { used: 13, budget: 13 } source=Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]) position=1:0 traceback=[StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] vm_fault=None
-notifications=["boundary-corpus:1: budget exceeded: used 13 cost with budget of 13\nstack traceback:\n\tboundary-corpus:1: in main chunk"]
-top=2 values=["number=1234.0", "bytes=[115, 117, 114, 118, 105, 118, 111, 114]"] observed=nil
-cost=13
-reuse=7 notifications=[]
-gsub budget=14
 Ok(())
 notifications=[]
 top=3 values=["number=1234.0", "bytes=[115, 117, 114, 118, 105, 118, 111, 114]", "bytes=[98, 98, 98]"] observed=nil
-cost=14
+cost=4
 reuse=7 notifications=[]
 insert budget=0
 Err(ErrorRepr { kind: BudgetExceeded { used: 0, budget: 0 }, line_num: 1, column: 0, context: Some(ErrorContext { name: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), reported: true }), stack_trace: [StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] })
@@ -908,7 +802,7 @@ stack traceback:
 kind=PatternError(MalformedPattern(EndsWithPercent)) source=Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]) position=1:0 traceback=[StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] vm_fault=None
 notifications=["boundary-corpus:1: malformed pattern (ends with '%')\nstack traceback:\n\tboundary-corpus:1: in main chunk"]
 top=2 values=["number=1234.0", "bytes=[115, 117, 114, 118, 105, 118, 111, 114]"] observed=nil
-cost=4
+cost=2
 reuse=7 notifications=[]
 library natural
 Err(ErrorRepr { kind: LibraryError(InvalidNextKey), line_num: 1, column: 0, context: Some(ErrorContext { name: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), reported: true }), stack_trace: [StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] })
@@ -938,17 +832,17 @@ stack traceback:
 kind=StringSizeExceeded { size: 16777218, limit: 16777216 } source=Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]) position=1:0 traceback=[StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] vm_fault=None
 notifications=["boundary-corpus:1: string size 16777218 exceeds limit 16777216\nstack traceback:\n\tboundary-corpus:1: in main chunk"]
 top=2 values=["number=1234.0", "bytes=[115, 117, 114, 118, 105, 118, 111, 114]"] observed=nil
-cost=25165831
+cost=2
 reuse=7 notifications=[]
 gsub_literal_size natural
-Err(ErrorRepr { kind: StringSizeExceeded { size: 16777217, limit: 16777216 }, line_num: 1, column: 0, context: Some(ErrorContext { name: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), reported: true }), stack_trace: [StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] })
-display=boundary-corpus:1: string size 16777217 exceeds limit 16777216
+Err(ErrorRepr { kind: StringSizeExceeded { size: 16777218, limit: 16777216 }, line_num: 1, column: 0, context: Some(ErrorContext { name: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), reported: true }), stack_trace: [StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] })
+display=boundary-corpus:1: string size 16777218 exceeds limit 16777216
 stack traceback:
 	boundary-corpus:1: in main chunk
-kind=StringSizeExceeded { size: 16777217, limit: 16777216 } source=Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]) position=1:0 traceback=[StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] vm_fault=None
-notifications=["boundary-corpus:1: string size 16777217 exceeds limit 16777216\nstack traceback:\n\tboundary-corpus:1: in main chunk"]
+kind=StringSizeExceeded { size: 16777218, limit: 16777216 } source=Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]) position=1:0 traceback=[StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] vm_fault=None
+notifications=["boundary-corpus:1: string size 16777218 exceeds limit 16777216\nstack traceback:\n\tboundary-corpus:1: in main chunk"]
 top=2 values=["number=1234.0", "bytes=[115, 117, 114, 118, 105, 118, 111, 114]"] observed=nil
-cost=33554440
+cost=3
 reuse=7 notifications=[]
 gsub_function_size natural
 Err(ErrorRepr { kind: StringSizeExceeded { size: 16777218, limit: 16777216 }, line_num: 1, column: 0, context: Some(ErrorContext { name: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), reported: true }), stack_trace: [StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] })
@@ -958,7 +852,7 @@ stack traceback:
 kind=StringSizeExceeded { size: 16777218, limit: 16777216 } source=Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]) position=1:0 traceback=[StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] vm_fault=None
 notifications=["boundary-corpus:1: string size 16777218 exceeds limit 16777216\nstack traceback:\n\tboundary-corpus:1: in main chunk"]
 top=2 values=["number=1234.0", "bytes=[115, 117, 114, 118, 105, 118, 111, 114]"] observed=nil
-cost=8388617
+cost=3
 reuse=7 notifications=[]
 push_size natural
 Err(ErrorRepr { kind: StringSizeExceeded { size: 16777217, limit: 16777216 }, line_num: 1, column: 0, context: Some(ErrorContext { name: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), reported: true }), stack_trace: [StackFrame { function_name: None, source: Some([98, 111, 117, 110, 100, 97, 114, 121, 45, 99, 111, 114, 112, 117, 115]), line: 1, defined_line: 0, tail_called: false }] })

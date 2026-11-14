@@ -7,7 +7,31 @@ All notable changes to dellingr are documented here. The format follows
 ## [Unreleased]
 
 Saves from 0.7.x do not load: snapshot `FORMAT_VERSION` is 15.
-`COST_MODEL_VERSION` is 8 (unchanged).
+`COST_MODEL_VERSION` is 9 (was 8): string costs follow one rule. Re-measure
+tick budgets and re-record replays.
+
+### Changed (breaking)
+
+- **Replay-visible:** string costs follow one rule (docs/budget.md, "String
+  costs"): a string library call costs 1, `string.format` 1 per directive
+  (at least 1), and pattern matching adds 1 per matcher step or
+  substring-scan comparison. No byte read or produced is charged, as none is
+  for `..`. Gone: the subject and pattern charges of `find`, `match`,
+  `gmatch` and `gsub` (including `gmatch`'s first-call pattern charge and
+  `gsub`'s subject charge at a limit of zero), capture-byte charges, every
+  `gsub` output and replacement-template charge, `string.format`'s
+  format-string, literal-text, argument and output charges, and the
+  input-or-output byte charges of `sub`, `upper`, `lower` and `reverse`.
+  `table.concat` charges a flat 1 like `insert`, `remove` and `pack`,
+  admitted after its argument checks (so an argument error costs nothing)
+  and before the first element read. A `string.format` directive's unit is
+  admitted before its argument is rendered, so a refused directive runs no
+  `__tostring`. Charges named in a `CostModel` are unchanged; only their units
+  and admission are.
+- `string.gmatch` iterator state no longer carries the `compile_charged`
+  flag, so `GmatchStateFault::CompileFlagKeyMissing` and `CompileFlagInvalid`
+  are removed. A `string.format` literal run that crosses the string size cap
+  reports the size the whole run would reach.
 
 ### Fixed
 

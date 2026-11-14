@@ -107,6 +107,8 @@ at once.
 
 - Structural constructs, for example `while true do end`.
 - `..`: concatenation output bytes are uncharged; string size remains capped.
+  The same holds for every byte a library call reads or produces (see
+  "String costs").
 - `print`: host output is free by design.
 - `select`: it moves its arguments once, as passing `...` along does.
 - `unpack` and `table.unpack`: free however many elements they visit.
@@ -114,6 +116,47 @@ at once.
 - Base-library operations `type`, `tonumber`, `rawget`, `rawequal`, `rawlen`,
   `next`, `pairs`, `ipairs` and its iterator, `getmetatable`, `setmetatable`,
   and `error`.
+
+## String costs
+
+A string library call costs 1, and `string.format` 1 per directive (at least
+1); pattern matching adds 1 per matcher step or substring-scan comparison.
+Bytes read and produced are free, as `..`'s are. `table.concat` costs a flat
+1, like `insert`, `remove` and `pack`. "Native charges" below gives each
+function's charge as a consequence.
+
+Why this rule:
+
+- **Building strings is structural.** `..`, `tostring` and `#` are free, so a
+  charge for the bytes a library call produces only rewards spelling the same
+  string out by hand. Charging what a call reads would do the same: `"" .. s`
+  reads `s` for nothing.
+- **Matching is the priced work.** A pattern match is a search whose work,
+  backtracking included, is out of proportion to one call, so each step it
+  takes is charged. Its price is a game-design choice; it does not claim that
+  free code cannot search.
+- **One unit per call.** Every other string call costs what a math function
+  costs. `format` costs per directive because one call can run many number
+  conversions (rounding, base conversion) that would otherwise each be
+  separate charged operations.
+
+What the rule leaves open, by decision:
+
+- Free code can inspect and rebuild string content. Comparing a string with
+  `<` against a known prefix identifies its next byte, so comparison,
+  branching and `..` can read and rewrite any string at no cost, and a `"-"`
+  prefix through `tostring` and `tonumber` negates a number for free. This is
+  the structural-code-is-free rule at work, not a gap in the string charges.
+- A library call can stand in for several priced operations at its flat
+  price, as `table.insert` shifting many elements does. Charges are
+  deliberate prices, not an equivalence with the code a call replaces, under
+  the default model or any other.
+- Strings as a table substitute: appending with `..` saves the `TableWrite`
+  an append to a table would cost; reading a part back through the library
+  costs a call. Accepted.
+- Building a large string is free. It is bounded by `MAX_STRING_BYTES`
+  (16 MiB per string); the host copying behind repeated `..` is a
+  performance concern.
 
 ## Runaway loops are not the VM's problem
 
@@ -221,35 +264,24 @@ Math library: each function charges a flat 1: `abs`, `acos`, `asin`, `atan`,
 `atan2`, `ceil`, `cos`, `deg`, `exp`, `floor`, `fmod`, `log`, `max`, `min`,
 `modf`, `rad`, `random`, `sin`, `sqrt`, and `tan`.
 
-String library:
+String library (the rule and its reasoning are under "String costs" above):
 
-- `sub`: output bytes, at least 1.
-- `upper`, `lower`, `reverse`: input bytes processed, at least 1.
-- `find`, `match`, `gsub`: `max(1, subject bytes + pattern bytes)` up front,
-  plus `max(1, pattern bytes)`; scanning and matcher operations charge as they
-  run. `find` charges returned capture bytes only on its Lua-pattern path;
-  `match` and each `gmatch` result charge returned capture bytes. `gsub`
-  charges capture bytes passed to a function replacement or used as a table
-  lookup key. Position captures have no capture bytes.
-  `gsub` also charges every byte copied into its result, including unmatched
-  subject spans and whole matches kept by a nil or false function/table
-  replacement. A string or number replacement template charges its original
-  length once per applied match, in addition to the literal and capture bytes
-  it emits. With a replacement limit of zero it charges the subject length.
-- `gmatch`: `max(1, subject bytes + pattern bytes)` when the iterator is
-  created; `max(1, pattern bytes)` on the iterator's first call that reaches
-  the matcher, and matching work as it runs. A leading `^`, which `gmatch`
-  matches as a literal byte, counts as the one byte it is. An empty pattern
-  charges nothing after creation.
-- `format`: format string bytes, at least 1, plus output bytes appended and
-  input bytes consumed from string arguments. `%s` charges the full `tostring`
-  rendering of any argument, including numbers and `__tostring` results,
-  before precision truncation. Numeric conversions charge string input bytes
-  they parse, and `%q` charges string input bytes it quotes. Output bytes,
-  including padding, are charged separately. The format string bytes are one
-  atomic charge, and so is each directive's output; literal text, including
-  the `%` a `%%` escape emits, is charged per byte, so a budget can run out
-  part way through it.
+- `sub`, `upper`, `lower`, `reverse`: 1 per call.
+- `find`, `match`, `gsub`: 1 per call, plus 1 per matcher step on the
+  Lua-pattern path, or per substring-scan comparison on the plain path. A call
+  that runs no step (an empty pattern or needle, `init` past the end, a `gsub`
+  limit of zero) costs 1. Captures, `gsub` output and replacement templates
+  are free.
+- `gmatch`: 1 when the iterator is created, then the matcher steps of each
+  call. A leading `^`, which `gmatch` matches as a literal byte, runs the same
+  steps as `%^`. An empty pattern's iterator runs no matcher and charges
+  nothing.
+- `format`: 1 per directive, at least 1 per call. Each directive's unit is
+  atomic, charged after the directive parses and validates and before its
+  argument is rendered, so a refused directive runs no `__tostring`; a
+  budget crossed at one directive lets it finish and refuses the next. A
+  format string with no directive charges its 1 once the call has succeeded.
+  Literal text and `%%` escapes are free.
 
 Table library:
 
@@ -259,9 +291,9 @@ Table library:
   distance at or above `TABLE_SORT_MAX_LEN` with `SequenceShiftTooLarge`
   before any `__index` or `__newindex` shift access.
 - `move`: 1 per element copied, with an empty range charging 1.
-- `concat`: 1 per element visited, plus bytes consumed from the separator and
-  element values, plus bytes of separators appended. An empty range with an
-  empty separator charges 1.
+- `concat`: flat 1, however many elements it joins, admitted after every
+  argument check (including the length, which honours `__len`, and the range)
+  and before the first element is read. An argument error costs nothing.
 - `sort`: the length of the original range (at least 1), charged before any
   comparator runs. A Lua comparator also incurs its normal execution cost, as
   do sequence-library metamethod handlers.
@@ -272,7 +304,7 @@ Every costed operation is registered in `src/cost_model.rs` as a `Charge`:
 each costed operator opcode (`+ - * / % ^`, unary `-`, table creation, table
 write, and each array element a constructor stores) and each costed library
 function. A charge site measures its work in the units listed above (one per
-call, per byte, per element or per matcher step) and charges units times the
+call, per directive, per element or per matcher step) and charges units times the
 charge's weight, saturating. A library function's weight also covers the
 matcher and substring-scan work it runs. The default model weighs every charge
 1, which gives the charges this page lists. Free operations have no registry

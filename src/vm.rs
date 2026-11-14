@@ -666,17 +666,6 @@ impl State {
         self.consume_cost(self.cost.cost(charge, units))
     }
 
-    /// Charge `units` units of `charge` one unit at a time (see
-    /// [`CostMeter::consume_units`]): the charge stops at the first unit
-    /// that starts with no budget left, as the per-unit loop it batches would.
-    pub(crate) fn charge_units(&mut self, charge: Charge, units: u64) -> Result<()> {
-        if self.charge_meter(charge).consume_units(units) {
-            Ok(())
-        } else {
-            Err(self.budget_exceeded_error())
-        }
-    }
-
     /// A meter whose unit costs the weight of `charge`, for work that charges
     /// as it runs without VM state (the pattern matcher).
     pub(crate) fn charge_meter(&mut self, charge: Charge) -> CostMeter<'_> {

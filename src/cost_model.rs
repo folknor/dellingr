@@ -2,7 +2,7 @@
 //!
 //! Each [`Charge`] names one family of costed work: an operator opcode, or a
 //! costed library function. A charge site measures its work in units (one
-//! per operation, per byte, per element or per matcher step, as
+//! per operation, per directive, per element or per matcher step, as
 //! `docs/budget.md` describes) and charges `units * weight`, with the weight
 //! read from the State's [`CostModel`]. The default model gives every charge
 //! a weight of 1.

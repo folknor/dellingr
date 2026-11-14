@@ -470,7 +470,7 @@ mod tests {
         state
             .call(ArgCount::Fixed(0), RetCount::Fixed(0))
             .expect("native-call program should run");
-        assert_eq!(state.cost_used(), 6);
+        assert_eq!(state.cost_used(), 3);
     }
 
     #[test]

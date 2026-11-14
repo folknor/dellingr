@@ -1,7 +1,7 @@
 //! Lua 5.4-compatible `string.format`.
 
 use super::exact_integer_value;
-use super::string::{append_bytes, append_bytes_units};
+use super::string::append_bytes;
 use crate::cost_model::Charge;
 use crate::error::{ArgDetail, ArgError, Error, ErrorKind, LibraryError};
 use crate::limits::{MAX_FORMAT_FIELD_DIGITS, MAX_FORMAT_LEN};
@@ -64,19 +64,17 @@ pub(crate) fn format(state: &mut State) -> Result<u8> {
     } else {
         state.to_bytes(1)?.to_vec()
     };
-    state.charge(Charge::StringFormat, format_bytes.len().max(1) as u64)?;
     let argument_count = state.get_top();
     let mut output = Vec::new();
     let mut argument = 1usize;
-    // Literal bytes are output bytes charged 1 each (docs/budget.md). The
-    // pending run `literal_start..cursor` is appended unit-exactly
-    // (`append_bytes_units`), which stops and fails exactly where charging
-    // each byte on its own would, at the budget and at the size cap. It is
-    // flushed before every `%` polls and at the end, so each poll, argument
-    // check and directive error sees the same bytes charged as it would
-    // byte by byte. A `%%` escape is literal text: after its poll the run
-    // restarts at its second `%`, so that byte is charged where a lone
-    // literal `%` would be, and it never becomes a directive.
+    // Charges (docs/budget.md, "String costs"): 1 per directive, admitted
+    // after the directive parses and validates and before its argument is
+    // rendered (so before any `__tostring`), and 1 for a call with no
+    // directive, charged once it has succeeded. Literal text, `%%` escapes
+    // and every byte read or produced are free. The pending literal run
+    // `literal_start..cursor` is flushed before every `%` polls and at the
+    // end. A `%%` escape is literal text: after its poll the run restarts at
+    // its second `%`, and it never becomes a directive.
     let mut literal_start = 0usize;
     let mut cursor = 0usize;
 
@@ -87,12 +85,7 @@ pub(crate) fn format(state: &mut State) -> Result<u8> {
             cursor += 1;
             continue;
         }
-        append_bytes_units(
-            state,
-            Charge::StringFormat,
-            &mut output,
-            &format_bytes[literal_start..cursor],
-        )?;
+        append_bytes(&mut output, &format_bytes[literal_start..cursor])?;
         state.poll_interrupt()?;
         if format_bytes.get(cursor + 1) == Some(&b'%') {
             literal_start = cursor + 1;
@@ -107,20 +100,19 @@ pub(crate) fn format(state: &mut State) -> Result<u8> {
 
         let (directive, next) = parse_directive(state, &format_bytes, cursor)?;
         validate_directive(state, &directive)?;
+        state.charge(Charge::StringFormat, 1)?;
         let formatted = crate::native_call!(
             "format->format_argument",
             format_argument(state, argument, &directive)
         )?;
-        append_bytes(state, Charge::StringFormat, &mut output, &formatted)?;
+        append_bytes(&mut output, &formatted)?;
         literal_start = next;
         cursor = next;
     }
-    append_bytes_units(
-        state,
-        Charge::StringFormat,
-        &mut output,
-        &format_bytes[literal_start..],
-    )?;
+    append_bytes(&mut output, &format_bytes[literal_start..])?;
+    if argument == 1 {
+        state.charge(Charge::StringFormat, 1)?;
+    }
 
     state.set_top(0)?;
     state.push_bytes(output)?;
@@ -367,23 +359,17 @@ fn format_argument(state: &mut State, argument: usize, directive: &Directive) ->
             Ok(format_float(number, directive, kind))
         }
         Conversion::String => {
-            // Charge the full rendering before precision truncation. Appending
-            // the formatted bytes is charged separately: the budget counts
-            // both string argument bytes consumed and bytes emitted.
+            // The rendering and the bytes kept are free; the directive's one
+            // unit was charged before rendering.
             let rendering = crate::native_call!(
                 "format_argument->tostring_rendering",
                 state.tostring_rendering(idx)
             )?;
             let formatted = match rendering {
                 TostringRendering::Itself => {
-                    let len = state.to_bytes(idx)?.len();
-                    state.charge(Charge::StringFormat, len as u64)?;
                     format_string_rendering(state.to_bytes(idx)?, directive)
                 }
-                TostringRendering::Bytes(bytes) => {
-                    state.charge(Charge::StringFormat, bytes.len() as u64)?;
-                    format_string_rendering(&bytes, directive)
-                }
+                TostringRendering::Bytes(bytes) => format_string_rendering(&bytes, directive),
             };
             formatted.map_err(|detail| format_arg_error(state, argument, detail))
         }
@@ -427,8 +413,6 @@ fn number_argument(state: &mut State, idx: isize, argument: usize) -> Result<f64
     match state.typ(idx) {
         LuaType::Number => state.to_number(idx),
         LuaType::String => {
-            let len = state.to_bytes(idx)?.len();
-            state.charge(Charge::StringFormat, len as u64)?;
             let number = parse_lua_numeral(state.to_bytes(idx)?);
             number.ok_or_else(|| {
                 format_arg_type_error(state, argument, LuaType::Number, Some(LuaType::String))
@@ -840,11 +824,7 @@ fn pad_bytes(bytes: &[u8], width: Option<u8>, left: bool) -> Vec<u8> {
 
 fn quote_argument(state: &mut State, idx: isize, argument: usize) -> Result<Vec<u8>> {
     match state.typ(idx) {
-        LuaType::String => {
-            let len = state.to_bytes(idx)?.len();
-            state.charge(Charge::StringFormat, len as u64)?;
-            quote_string(state.to_bytes(idx)?)
-        }
+        LuaType::String => quote_string(state.to_bytes(idx)?),
         LuaType::Number => {
             let number = state.to_number(idx)?;
             let output = if number.is_nan() {

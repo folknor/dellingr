@@ -625,6 +625,8 @@ impl Frame {
                 // that a legible refactor must not make more expensive.
                 // The size is still bounded by `checked_string_growth`
                 // (MAX_STRING_BYTES), so the uncharged work is capped.
+                // String library calls leave the bytes they read and produce
+                // uncharged too (docs/budget.md, "String costs").
                 Instr::OP_CONCAT => {
                     fixed_cost!(Instr::OP_CONCAT);
                     state.reg_concat(ra, base + inst.b() as usize, inst.c() as usize)?;

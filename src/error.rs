@@ -172,10 +172,6 @@ pub enum GmatchStateFault {
     LastMatchExceedsSubjectLength,
     /// The named last-match field is neither a number nor nil.
     LastMatchFieldInvalid(&'static str),
-    /// Integer slot 0 does not hold the compile-flag key.
-    CompileFlagKeyMissing,
-    /// The compile flag is neither `true` nor nil.
-    CompileFlagInvalid,
 }
 
 #[cfg(feature = "snapshot")]
@@ -299,10 +295,6 @@ impl fmt::Display for GmatchStateFault {
             Self::LastMatchFieldInvalid(field) => {
                 write!(f, "field '{field}' is not a number or nil")
             }
-            Self::CompileFlagKeyMissing => {
-                f.write_str("compile flag key is missing from integer slot 0")
-            }
-            Self::CompileFlagInvalid => f.write_str("compile flag is not a boolean or nil"),
         }
     }
 }

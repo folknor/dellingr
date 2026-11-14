@@ -6,112 +6,78 @@ get deleted as they ship or stop being worth tracking.
 
 ## Next up
 
-### One rule for string costs (decide before the next release)
+### String cost model 9 is not yet approved (review before the next release)
 
-Goal: replace today's per-function string charges with one rule a script
-author can state in a sentence, write that rule into `docs/budget.md`, and
-make every string operation obey it. Any change in charges bumps
-`COST_MODEL_VERSION` (and is replay-visible through `cost_used`); do it once,
-before a release, and fold every string change into that one bump.
+The commit "One rule for string costs: cost model 9" (2026-11-14, the one
+that added this section) replaced the per-function string charges with one
+rule and bumped `COST_MODEL_VERSION` to 9. The user has not approved it and
+is unsure about it. It shipped on an inferred ruling and then went further
+than that ruling; nothing is released, so it can still be changed or
+reverted, and any further change should fold into the same unreleased bump.
 
-Why it matters: in the programming game (players' scripts compete per tick
-under one budget) players optimise against the cost model. A rule they can
-predict matters more than the exact numbers, and any free operation that can
-stand in for a priced one will be found and used. In the RTS nobody will
-notice either way.
+How it got here:
 
-#### The principle (settled with the user, 2026-11-05)
+- The backlog entry it closed recorded a principle settled with the user on
+  2026-11-05 (string work is charged only where it would otherwise be a proxy
+  for work the budget prices) and a leaning, explicitly "not yet the
+  decision": pattern work costs per primitive scanned, producing strings is
+  free. It said to ask the user before implementing.
+- Asked on 2026-11-14, the user replied "I thought we already ruled on
+  strings". That was taken to mean the leaning. The user never said so in
+  words.
+- The implementer then went past the leaning, on an argument from its codex
+  review partner.
 
-String work is charged only where it would otherwise be a proxy for work the
-budget prices. This is the same reasoning the README has used since May for
-excluding `string.rep`, `string.byte` and `string.char` ("could be used to
-work around restrictions the game wants to put on the user"), and it sits on
-the older rule that structural code is free so that authors are encouraged to
-write more code, not less. The budget is a game-design instrument, not a CPU
-meter (`docs/budget.md`): host work out of proportion to its charge is a
-performance concern, not a reason to charge.
+What shipped (`docs/budget.md`, "String costs"):
 
-Applied, the leaning (not yet the decision) is: **pattern work costs per
-primitive scanned; producing strings is free.**
+- A string library call costs 1.
+- `string.format` costs 1 per directive, at least 1.
+- Pattern matching adds 1 per matcher step or substring-scan comparison.
+- Bytes read and bytes produced are free, as for `..`.
+- `table.concat` costs a flat 1.
 
-- Pattern matching keeps its per-primitive charges. Matching is real
-  computation (backtracking can be superpolynomial), and making it free would
-  turn `find`/`gsub` into a free search-and-filter engine standing in for
-  charged arithmetic and table work.
-- Emitted bytes go free in `string.format`, `gsub` output and anything else
-  that charges for bytes it produces, because `..` already produces bytes
-  for free. Today a player avoids the `format` charge by concatenating by
-  hand, which is exactly the kind of trick the rule must not leave open.
+Where that differs from the leaning: the leaning dropped only the charges for
+bytes produced (`format`, `gsub` output, `table.concat`) and kept examination
+charges. Model 9 also drops every charge for bytes examined: `find`, `match`,
+`gmatch` and `gsub` no longer charge for the subject, the pattern, captures or
+the replacement template, and only the matcher's own steps remain.
 
-#### History: what was decided and what was only inferred
+The argument behind the wider rule, as the implementer reported it (not
+independently checked):
 
-- 2026-05-04 READMEs (`0d75771`, `acdd010`): structural semantics free; the
-  `rep`/`byte`/`char` exclusion as a proxy defence. Nothing about `..`.
-- 2026-07-25 `6f9db93` (released as 0.4.0): before it, no string or pattern
-  work was charged at all. Its plan, recoverable with
-  `git show 6f9db93:WORK.md`, is headed "Agreed design" and set the unit as
-  "bytes examined, bytes produced, elements visited", with the constraint
-  "never bill a script for our implementation artifacts" and "legibility is
-  never the more expensive option". That is where `format`, `gsub` and
-  `table.concat` got charged for emitted bytes. The plan never mentions `..`,
-  although its own motivation reads "a script could build a large subject
-  with a handful of concatenations": it closed the work done on a big string,
-  not the building of it.
-- `docs/budget.md` "Free by design" lists "`..`: concatenation output bytes
-  are uncharged". That line describes the status quo; the user never ruled
-  on `..`. The `-S` search places the wording in the docs restructure for the
-  0.4.0 release (`3170f83`, 2026-07-27), but that diff has not been read.
+- Free structural code can already read any string: comparing with `<`
+  against a known prefix identifies the next byte, and branching plus `..`
+  rebuilds it. So a per-byte examination charge protects nothing.
+- What a charge can still do is stop one library call from being a cheaper
+  spelling of a priced operation (`math.abs` through `sub` of `tostring`); a
+  flat 1 per call does that.
+- `format` is per directive because one call can pack several roundings
+  (`"%.0f%.0f"`).
 
-So the July design ("bytes produced cost") and today's leaning ("producing
-strings is free") point opposite ways, and `..` is the loose end either way:
+Questions for the user:
 
-- Keep "bytes produced cost": `..` starts charging per output byte. Large
-  change; ordinary string building gets expensive in both games.
-- Adopt "producing strings is free": drop the output-byte charges from
-  `format`, `gsub` and `table.concat` (check `upper`/`lower`/`reverse`/`sub`
-  too) and keep only examination and pattern charges.
+- Is "bytes examined are free" acceptable, or should the subject and pattern
+  charges come back? In the programming game this is the difference between a
+  `find` over a 10 KB string costing its matcher steps only and costing at
+  least 10 000.
+- Is a flat 1 per library call the right floor, given that a long `sub`,
+  `upper` or `reverse` now costs the same as a short one?
+- Does the premise hold, that the `<` comparison trick makes per-byte charges
+  pointless? It is slow in host terms and awkward to write; a player may still
+  never do it, in which case the old charges were pricing something real.
+- `string.format('%c', n)` produces any byte from a number, which is what the
+  README's won't-implement `string.char` would do. It costs 1 per directive
+  like any other, so it is not a cost bypass, but the `rep`/`byte`/`char`
+  exclusion exists because those "could be used to work around restrictions
+  the game wants to put on the user". Either `%c` is acceptable and the README
+  should say why `char` is excluded while `%c` is not, or `%c` should be
+  refused. This predates model 9; it was noticed during that work.
 
-The user has not chosen between these yet. Ask before implementing.
-
-#### Current charges to reconcile (from the earlier laterals list)
-
-Read the code to confirm each before acting; these were recorded from
-earlier reviews.
-
-- `string.format` charges a `%s` argument's bytes when it is consumed and
-  again when the result is appended; `%q` charges the argument, then the
-  longer quoted output. A code comment says the double charge is intended.
-- `string.find`, `match` and `gsub` charge the pattern bytes twice: inside
-  `max(1, subject + pattern)` and again as `max(1, pattern)` (the July plan's
-  "compilation reservation"). `gmatch` charges the sum at creation and the
-  pattern again on the first iterator call; an empty `gmatch` pattern charges
-  nothing after creation. Decide whether compiling a pattern is a priced step
-  of its own; if it is, document it as one.
-- A `gsub` string replacement template charges its length up front on each
-  applied match (the scan for `%1` captures) and then every byte it emits, so
-  a literal template `xyz` costs 6 per match while a function returning
-  `xyz` costs 3 (`CALL` is free). Under "producing strings is free" both
-  drop their output charge and the template keeps only its scan.
-
-#### The proxy check to run on every free string operation
-
-For each string operation the rule leaves free, ask whether a script can use
-it in place of something charged. The known case: strings as a table
-substitute. `t[i] = x` costs a `TableWrite`, while `s = s .. x` is free and
-reading back may be cheap (`string.sub` charges its returned bytes, per the
-July schedule; confirm). Each "write" copies the whole string, which is
-host work the budget does not price, and the 16 MiB string cap bounds it, so
-it may be self-limiting enough to accept. Record the verdict either way in
-`docs/budget.md`.
-
-#### Deliverables
-
-1. The user's choice between the two directions above.
-2. `docs/budget.md`: one stated rule for string costs, the per-function
-   charges as consequences of it, and the proxy verdicts.
-3. The code changes, one `COST_MODEL_VERSION` bump, regenerated
-   `tests/fixtures/corpus_cost.txt` after review, CHANGELOG entry calling out
-   the cost change as replay-visible.
+What a change of mind costs: the code and docs in that commit, plus the
+regenerated `cost_golden.txt`, `corpus_cost.txt`, error-boundary transcript
+and save golden, and the CHANGELOG "Changed (breaking)" entry. The `gmatch`
+iterator state also lost its `compile_charged` flag in that commit, which a
+return to a compile charge would need back.
 
 ### Housekeeping left from the `string.format` literal-run change (2026-11-05)
 
@@ -142,10 +108,10 @@ it may be self-limiting enough to accept. Record the verdict either way in
 Known laterals, pre-existing and deliberate (record, don't "fix" without a
 cost-model decision):
 
-- The string-library charges (`format`, `find`/`match`/`gsub`/`gmatch`,
-  `gsub` templates) moved to "One rule for string costs" above.
 - `table.insert` and `table.remove` charge their flat 1 before validating
-  their arguments, so an argument error still costs 1.
+  their arguments, so an argument error still costs 1. Since cost model 9,
+  `table.concat` and `string.gsub` admit their charge after argument checks,
+  so the table library is split on this.
 - `load_state` discards whatever setup charged or budgeted when it restores
   the saved counters; a host that wants a budget after loading sets it again.
 - `State::raw_field` reads own fields only, so option tables built on an

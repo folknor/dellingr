@@ -237,15 +237,11 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
 
         let sep = if state.is_none_or_nil(2)? {
             Vec::new()
+        } else if state.typ(2) == LuaType::Number {
+            state.bytes_with_default_string_coercion(2)?
         } else {
-            let bytes = if state.typ(2) == LuaType::Number {
-                state.bytes_with_default_string_coercion(2)?
-            } else {
-                check_type_named(state, 2, LuaType::String, "concat")?;
-                state.to_bytes(2)?.to_vec()
-            };
-            state.charge(Charge::TableConcat, bytes.len() as u64)?;
-            bytes
+            check_type_named(state, 2, LuaType::String, "concat")?;
+            state.to_bytes(2)?.to_vec()
         };
 
         let i = opt_integer(state, 3, "concat")?.unwrap_or(1);
@@ -253,10 +249,13 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
 
         state.set_top(1)?;
 
+        // A flat 1 per call, like insert, remove and pack (docs/budget.md,
+        // "String costs"): bytes read and joined are free. It is admitted
+        // after every argument check, including `__len`, and before the
+        // first element read, so argument errors cost nothing and no
+        // `__index` runs on a spent budget.
         if i > j {
-            if sep.is_empty() {
-                state.charge(Charge::TableConcat, 1)?;
-            }
+            state.charge(Charge::TableConcat, 1)?;
             state.set_top(0)?;
             state.push_bytes(b"")?;
             return Ok(1);
@@ -265,6 +264,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         // Keys past +-2^53 would round onto each other as f64 keys; refuse
         // such ranges as table.move, insert and remove do.
         check_sequence_keys(state, i, j, LibraryFunction::Concat)?;
+        state.charge(Charge::TableConcat, 1)?;
 
         let mut result = Vec::new();
         for idx in i..=j {
@@ -272,11 +272,9 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
             state.poll_interrupt()?;
             if idx > i {
                 let next = crate::limits::checked_string_growth(result.len(), sep.len())?;
-                state.charge(Charge::TableConcat, sep.len() as u64)?;
                 result.reserve(next - result.len());
                 result.extend_from_slice(&sep);
             }
-            state.charge(Charge::TableConcat, 1)?;
             state.push_number(idx as f64)?;
             crate::native_call!(
                 "lib:table.concat->get_table_unguarded",
@@ -287,7 +285,6 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
                 LuaType::String | LuaType::Number => {
                     let bytes = state.bytes_with_default_string_coercion(-1)?;
                     let next = crate::limits::checked_string_growth(result.len(), bytes.len())?;
-                    state.charge(Charge::TableConcat, bytes.len() as u64)?;
                     result.reserve(next - result.len());
                     result.extend_from_slice(&bytes);
                 }

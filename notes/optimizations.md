@@ -672,8 +672,7 @@ a `Vec<LuaCapture>` allocation. Beyond the cost, the table-backed state brings
 (`reference/error-reporting.md`), `gmatch_iterator_bytecode` substitution on
 snapshot load (load no longer schema-checks the state table: a captured
 iterator id cannot prove a closure is an iterator). A typed heap object
-(subject `StringPtr`, pattern `StringPtr`, `pos`, `lastmatch: Option`,
-`compile_charged`), or native closures with typed upvalues, would delete the
+(subject `StringPtr`, pattern `StringPtr`, `pos`, `lastmatch: Option`), or native closures with typed upvalues, would delete the
 shim, the identity hack, the field interning and most of the fault enum, and
 give snapshots one typed record. It changes the snapshot format and the
 error-frame rule, but no cost and no `pairs` order, since the table is
@@ -866,13 +865,12 @@ in todo.md's workload-registry entry).
   a digit `String` per integer (`unsigned_abs().to_string()`) and the
   `Directive.raw` Vec. On the `format_literals` probe that is about 1900
   short-lived allocations per `_bench()` (source-derived counts, unmeasured).
-  Exactness constraint, from the spar on the literal-run change: each
-  directive must stay one transaction - its input charges and validation
-  errors in today's order, then the aggregate cap check, then exactly one
-  atomic output charge, then the bytes. Charging output per fragment, before
-  validation (`%.1s` of a string with a zero), or checking the aggregate cap
-  inside `%q`'s own quoting each changes an exhaustion point or an error.
-  Doing only `%s` and `%d` would split directive output into two regimes.
+  Exactness constraint (cost model 9): each directive stays one
+  transaction - parse and validation errors in today's order, then its one
+  atomic unit before the argument is rendered, then the rendering's own
+  errors, then the aggregate cap check, then the bytes. Checking the
+  aggregate cap inside `%q`'s own quoting, or before a rendering error such
+  as `%.1s` of a string with a zero, changes which error is reported.
   The plain-pattern classifier treats `-` as magic even though a leading `-`
   with no preceding class item is literal; conservative is fine, just noting
   the fast path misses needles like `"-foo"`.

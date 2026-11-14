@@ -223,17 +223,16 @@ fn table_writes_are_weighted_per_write() {
 }
 
 #[test]
-fn library_weights_scale_flat_and_per_byte_charges() {
-    // string.upper charges its input bytes, at least 1.
+fn library_weights_scale_flat_charges() {
+    // A string call charges 1 however many bytes it reads or produces.
     let model = only(Charge::StringUpper, 3);
     assert_eq!(cost_under(&model, "string.upper('')"), 3);
-    assert_eq!(cost_under(&model, "string.upper('abcd')"), 12);
-    assert_eq!(cost_under(&model, "string.upper('abcdefgh')"), 24);
-    // string.sub charges its output bytes, at least 1.
+    assert_eq!(cost_under(&model, "string.upper('abcd')"), 3);
+    assert_eq!(cost_under(&model, "string.upper('abcdefgh')"), 3);
     let model = only(Charge::StringSub, 4);
-    assert_eq!(cost_under(&model, "string.sub('hello', 1, 3)"), 12);
+    assert_eq!(cost_under(&model, "string.sub('hello', 1, 3)"), 4);
     assert_eq!(cost_under(&model, "string.sub('hello', 1, 0)"), 4);
-    // The flat charges stay flat however much they move.
+    // The table-library flat charges stay flat however much they move.
     let model = only(Charge::TableInsert, 6);
     assert_eq!(cost_under(&model, "local t = {} table.insert(t, 1)"), 6);
     assert_eq!(
@@ -450,17 +449,15 @@ fn table_move_stops_at_the_first_element_that_starts_with_no_budget() {
     assert_eq!(after_move(10), (false, vec![1.0, 1.0, 2.0, 3.0, 4.0], 12));
 }
 
-/// `string.format` charges its format bytes as one atomic charge, each
-/// literal output byte (a `%%` escape's `%` included) as its own charge, and
-/// a directive's rendered output as one atomic charge. Every budget across
-/// the call must stop where that charge sequence does, however the
-/// implementation batches the literal bytes.
+/// `string.format` charges each directive as one atomic unit, admitted
+/// before its argument is rendered, and a call with no directive one unit
+/// once it has succeeded; literal text (a `%%` escape included) is free.
+/// Every budget across the call must stop where that charge sequence does.
 #[test]
-fn format_literal_bytes_stop_at_the_first_byte_that_starts_with_no_budget() {
+fn format_directives_stop_at_the_first_directive_that_starts_with_no_budget() {
     const WEIGHT: u32 = 3;
     enum Step {
         Atomic(u64),
-        PerByte(u64),
     }
     // One charge: refused only when it starts with no budget left.
     fn charge(remaining: &mut i64, used: &mut u64, cost: u64) -> bool {
@@ -478,9 +475,6 @@ fn format_literal_bytes_stop_at_the_first_byte_that_starts_with_no_budget() {
         for step in steps {
             let admitted = match *step {
                 Step::Atomic(units) => charge(&mut remaining, &mut used, units * weight),
-                Step::PerByte(units) => {
-                    (0..units).all(|_| charge(&mut remaining, &mut used, weight))
-                }
             };
             if !admitted {
                 return (true, used);
@@ -490,18 +484,11 @@ fn format_literal_bytes_stop_at_the_first_byte_that_starts_with_no_budget() {
     }
 
     for (source, steps) in [
+        ("string.format('ab%%cd')", vec![Step::Atomic(1)]),
+        ("string.format('ab%dcd%%', 42)", vec![Step::Atomic(1)]),
         (
-            "string.format('ab%%cd')",
-            vec![Step::Atomic(6), Step::PerByte(5)],
-        ),
-        (
-            "string.format('ab%dcd%%', 42)",
-            vec![
-                Step::Atomic(8),
-                Step::PerByte(2),
-                Step::Atomic(2),
-                Step::PerByte(3),
-            ],
+            "string.format('%d, %s and %q', 1, 'two', 'three')",
+            vec![Step::Atomic(1), Step::Atomic(1), Step::Atomic(1)],
         ),
     ] {
         let full = expected(&steps, i64::MAX).1;

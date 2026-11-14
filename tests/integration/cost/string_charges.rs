@@ -26,6 +26,8 @@ fn len_is_free_even_for_a_large_string() {
     );
 }
 
+/// Capture bytes are produced strings and free; a capture costs only the
+/// matcher steps of its open and close items, whatever it captures.
 #[test]
 fn captures_have_a_constant_cost_delta_independent_of_subject_size() {
     fn cost(subject_len: usize, pattern: &str) -> u64 {
@@ -71,29 +73,38 @@ fn extracting_a_helper_does_not_change_the_bill() {
 #[test]
 fn basic_native_charges_are_exact() {
     for (source, expected) in [
+        // One unit per call, whatever the bytes read or produced.
         ("return string.upper('')", 1),
-        ("return string.lower('')", 1),
-        ("return string.reverse('')", 1),
+        ("return string.upper('abcdef')", 1),
+        ("return string.lower('ABC')", 1),
+        ("return string.reverse('abc')", 1),
         ("return string.sub('', 1, 0)", 1),
-        ("return string.find('', '')", 2),
-        ("return string.match('', '')", 2),
+        ("return string.sub('abcdef', 2)", 1),
+        ("return string.find('', '')", 1),
+        ("return string.match('', '')", 1),
         ("return string.gmatch('', '')", 1),
-        ("return string.gsub('', '', '')", 2),
+        ("return string.gsub('', '', '')", 1),
+        ("return string.gsub('abcdef', 'x', 'y', 0)", 1),
+        // format: 1 per directive, at least 1; literal text is free.
         ("return string.format('')", 1),
+        ("return string.format('literal text %% only')", 1),
+        ("return string.format('%s', 'abcdef')", 1),
+        ("return string.format('%d %5.2f %q', 1, 2, 'x')", 3),
+        // Table constructor, its array elements, then concat's flat 1.
         ("return table.concat({}, '')", 2),
         ("return table.concat({}, 'x')", 2),
-        ("return table.concat({'a', 'b'}, '')", 7),
-        ("return table.concat({'a', 'bb'}, ',')", 10),
+        ("return table.concat({'a', 'b'}, '')", 4),
+        ("return table.concat({'a', 'bb'}, ',')", 4),
     ] {
         assert_eq!(support::cost_of(source), expected, "{source}");
     }
 }
 
-/// A literal run that crosses the string size cap charges the bytes that fit
-/// and then refuses the first byte that does not, as charging each literal
-/// byte on its own would: neither the whole run nor none of it.
+/// Output that crosses the string size cap is refused with the size error,
+/// and the bytes produced are free either way: both calls charge only their
+/// one directive.
 #[test]
-fn format_literal_run_across_the_size_cap_charges_the_bytes_that_fit() {
+fn format_output_across_the_size_cap_charges_only_its_directives() {
     fn after_format(format: &str) -> (dellingr::Result<()>, u64) {
         let mut state = State::new();
         state
@@ -109,13 +120,15 @@ fn format_literal_run_across_the_size_cap_charges_the_bytes_that_fit() {
     fits.expect("output exactly at the cap fits");
     let (crosses, crossing_cost) = after_format("%sxyzw");
     let error = crosses.expect_err("output past the cap is refused");
+    // The literal run is checked as one append, so the error names the size
+    // the whole run would reach.
     assert!(
         matches!(error.kind(), ErrorKind::StringSizeExceeded { size, limit }
-            if *size == MAX_STRING_BYTES + 1 && *limit == MAX_STRING_BYTES),
+            if *size == MAX_STRING_BYTES + 2 && *limit == MAX_STRING_BYTES),
         "{error}"
     );
-    // Two more format bytes up front; the same two literal bytes charged.
-    assert_eq!(crossing_cost, fitting_cost + 2);
+    assert_eq!(crossing_cost, fitting_cost);
+    assert_eq!(fitting_cost, 1);
 }
 
 #[test]
@@ -141,8 +154,7 @@ fn gsub_rejects_an_invalid_replacement_before_charging() {
 
 /// gmatch reads a leading `^` as a literal byte by compiling it that way, not
 /// by rewriting the pattern to `%^`, so `^a` and `%^a` run the same matcher
-/// program and differ only by the one extra pattern byte `%^a` is charged at
-/// creation and again at its first-call compilation.
+/// program and, with pattern bytes free, cost the same.
 #[test]
 fn gmatch_leading_caret_is_charged_as_written() {
     fn cost(pattern: &str) -> u64 {
@@ -152,18 +164,16 @@ fn gmatch_leading_caret_is_charged_as_written() {
         ))
     }
     assert_eq!(cost("%^a") - cost("^a"), pinned_cost("gmatch_caret_delta"));
-    // Subject 4 + pattern 2 at creation, 2 to compile on the first call,
-    // 5 + 5 + 2 matcher steps for two matches and the final miss, 2 + 2
-    // returned match bytes, and the two loop adds.
-    assert_eq!(cost("^a"), 26);
+    // 1 for the call, 5 + 5 + 2 matcher steps for two matches and the final
+    // miss, and the two loop adds.
+    assert_eq!(cost("^a"), 15);
 }
 
 /// `find` and `match` have no empty-pattern special case: the plain search
 /// and the matcher find an empty pattern for free. Each call here charges
-/// only its up-front `max(1, subject + pattern)` plus `max(1, pattern)`,
-/// wherever `init` falls.
+/// only its one call unit, wherever `init` falls.
 #[test]
-fn empty_find_and_match_charge_only_their_up_front_units() {
+fn empty_find_and_match_charge_only_their_call_unit() {
     for (source, results) in [
         ("return string.find('abc', '', 4)", "4 3"),
         ("return string.find('abc', '', 5)", "nil"),
@@ -208,7 +218,7 @@ fn matcher_refusal_is_a_budget_error_at_the_exact_budget() {
 fn gsub_does_not_return_a_partial_result_and_keeps_callback_effects() {
     let (mut state, error) = run_with_budget(
         "calls = 0; result = string.gsub('aaaa', 'a', function() calls = calls + 1; return 'xx' end)",
-        20,
+        3,
     );
     assert!(matches!(error.kind(), ErrorKind::BudgetExceeded { .. }));
     support::eval(&mut state, "return calls, result", 2);
@@ -232,43 +242,6 @@ fn gmatch_refusal_does_not_advance_the_iterator() {
     assert_eq!(
         state.to_string(-1).expect("iterator returns a string"),
         "one"
-    );
-}
-
-#[test]
-fn gmatch_capture_refusal_does_not_advance_the_iterator() {
-    let subject = "a".repeat(4096);
-    let setup = format!("iter = string.gmatch('{subject}', '(%a+)')");
-    let mut state = State::new();
-    support::run(&mut state, &setup);
-    support::eval(&mut state, "return iter()", 1);
-
-    support::run(&mut state, &setup);
-    state
-        .set_cost_budget(1_000_000)
-        .expect("the State is metered");
-    support::eval(&mut state, "return iter()", 1);
-    let successful_cost = state.cost_used();
-
-    support::run(&mut state, &setup);
-    state
-        .set_cost_budget(
-            i64::try_from(successful_cost - subject.len() as u64).expect("cost fits in a budget"),
-        )
-        .expect("the State is metered");
-    support::load(&mut state, "return iter()");
-    let error = state
-        .call(ArgCount::Fixed(0), RetCount::Fixed(1))
-        .expect_err("capture materialization refuses after matching");
-    assert!(matches!(error.kind(), ErrorKind::BudgetExceeded { .. }));
-
-    state
-        .set_cost_budget(1_000_000)
-        .expect("the State is metered");
-    support::eval(&mut state, "return iter()", 1);
-    assert_eq!(
-        state.to_string(-1).expect("iterator returns a string"),
-        subject
     );
 }
 
@@ -337,19 +310,10 @@ fn refusal_leaves_snapshot_state_quiescent() {
         .call(ArgCount::Fixed(0), RetCount::Fixed(1))
         .expect_err("matcher refusal occurs after the cache hit");
 
-    let subject = "a".repeat(1024);
-    let capture_source = format!("return string.match('{subject}', '(%a+)')");
-    let successful_cost = support::cost_of(&capture_source);
-    let (capture_state, capture_error) = run_with_budget(
-        &capture_source,
-        i64::try_from(successful_cost - subject.len() as u64).expect("cost fits in a budget"),
-    );
-
     let upper = run_with_budget("return string.upper('abcdef')", 0);
     for (label, (state, error)) in [
         ("upper", upper),
         ("matcher", (matcher_state, matcher_error)),
-        ("capture", (capture_state, capture_error)),
     ] {
         assert!(matches!(error.kind(), ErrorKind::BudgetExceeded { .. }));
         state
@@ -361,8 +325,8 @@ fn refusal_leaves_snapshot_state_quiescent() {
 #[test]
 fn table_concat_cost_is_identical_with_or_without_a_budget() {
     for (source, expected_cost, expect_invalid_value) in [
-        ("return table.concat({'a', 'bb'}, ',')", 10, false),
-        ("return table.concat({'a', false, 'bb'}, ',')", 9, true),
+        ("return table.concat({'a', 'bb'}, ',')", 4, false),
+        ("return table.concat({'a', false, 'bb'}, ',')", 5, true),
     ] {
         for budget in [None, Some(1_000_000)] {
             let mut state = State::new();

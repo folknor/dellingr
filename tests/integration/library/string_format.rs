@@ -89,13 +89,13 @@ fn numeric_strings_and_percent_are_supported() {
 }
 
 #[test]
-fn string_format_preserves_full_input_charges_after_precision() {
+fn string_format_charges_one_unit_per_directive_whatever_its_bytes() {
     for (source, expected, cost) in [
-        ("return string.format('%.1s', 'abcdef')", &b"a"[..], 11),
+        ("return string.format('%.1s', 'abcdef')", &b"a"[..], 1),
         (
             "return string.format('%q|%d', 'abc', '12')",
             &b"\"abc\"|12"[..],
-            18,
+            2,
         ),
     ] {
         let mut state = State::new();

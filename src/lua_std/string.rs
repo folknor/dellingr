@@ -76,24 +76,18 @@ pub(crate) fn gmatch_iterator_bytecode() -> Arc<crate::compiler::Bytecode> {
 }
 
 // Library charges are registered in `crate::cost_model`: the code here
-// measures units (per call, per byte, per element, per matcher step) and the
-// registry supplies the weight of the `Charge` of the function the work is
-// done for. Changing what a function charges under the default model
-// (including the repeated pattern-byte charge in `find`, `match`, `gsub` and
-// nonempty `gmatch`, or `gsub`'s per-application replacement-template length
-// charge in addition to emitted bytes, or the free `string.len`, `print`,
-// `tostring` and `select`) changes `cost_used` for existing scripts and
-// replays, so it still needs a COST_MODEL_VERSION bump and invalidates saves.
-// Native calls are opaque to the `analyze_cost` static walk, so it cannot see
-// these charges.
-fn charge_bytes(state: &mut State, charge: Charge, bytes: usize) -> Result<()> {
-    state.charge(charge, bytes.max(1) as u64)
-}
-
-/// Charge `units` scan comparisons with the exact semantics of charging
-/// them one at a time (see `CostMeter::consume_units`).
-fn charge_scan_units(state: &mut State, charge: Charge, units: usize) -> Result<()> {
-    state.charge_units(charge, units as u64)
+// measures units and the registry supplies the weight of the `Charge` of the
+// function the work is done for. The rule (docs/budget.md, "String costs"):
+// a string library call costs 1, `string.format` 1 per directive instead,
+// and pattern matching adds 1 per matcher step or substring-scan comparison.
+// Bytes read and produced are free, as `..`'s are, so no site here charges
+// for subject, pattern, template, capture or output bytes; do not add one
+// back. Changing what a function charges under the default model changes
+// `cost_used` for existing scripts and replays, so it needs a
+// COST_MODEL_VERSION bump and invalidates saves. Native calls are opaque to
+// the `analyze_cost` static walk, so it cannot see these charges.
+fn charge_call(state: &mut State, charge: Charge) -> Result<()> {
+    state.charge(charge, 1)
 }
 
 /// Plain substring search: a first-byte skip loop over candidate windows,
@@ -106,7 +100,7 @@ fn charge_scan_units(state: &mut State, charge: Charge, units: usize) -> Result<
 /// match), including where in the scan a finite budget runs out - the
 /// algorithm change is invisible through `cost_used`, only wall time moves.
 /// Both arguments are read in place (`StringArg`); the scan charges through
-/// the borrowed meter one unit at a time, as `State::charge_units` would.
+/// the borrowed meter with per-unit admission (`CostMeter::consume_units`).
 fn find_subslice(
     state: &mut State,
     charge: Charge,
@@ -300,16 +294,15 @@ fn push_capture_value(
 
 fn push_captures(
     state: &mut State,
-    charge: Charge,
     subject: &StringArg,
     pattern: &LuaPattern,
     function: StringPatternFunction,
 ) -> Result<u8> {
     let n = pattern.num_matches();
     if n > 1 {
-        preflight_capture_bytes(state, charge, (1..n).map(|i| pattern.capture(i)), function)?;
+        check_captures_finished(state, (1..n).map(|i| pattern.capture(i)), function)?;
     } else {
-        preflight_capture_bytes(state, charge, [pattern.capture(0)], function)?;
+        check_captures_finished(state, [pattern.capture(0)], function)?;
     }
     if n > 1 {
         // bounded: one step per capture, at most LUA_MAXCAPTURES.
@@ -323,30 +316,22 @@ fn push_captures(
     }
 }
 
-fn capture_byte_len(capture: LuaCapture) -> usize {
-    match capture {
-        LuaCapture::Bytes { start, end } => end - start,
-        LuaCapture::Position(_) | LuaCapture::Unfinished => 0,
-    }
-}
-
-fn preflight_capture_bytes(
-    state: &mut State,
-    charge: Charge,
+/// Capture bytes are produced strings and charge nothing; this only rejects
+/// an unclosed capture before any capture value reaches the stack.
+fn check_captures_finished(
+    state: &State,
     captures: impl IntoIterator<Item = LuaCapture>,
     function: StringPatternFunction,
 ) -> Result<()> {
-    // Every caller pushes exactly the captures it preflights, so reject an
+    // Every caller pushes exactly the captures it checks, so reject an
     // unclosed one before copying any capture bytes to the stack.
-    let mut total = 0usize;
     // bounded: one step per capture, at most LUA_MAXCAPTURES.
     for capture in captures {
         if capture == LuaCapture::Unfinished {
             return Err(unfinished_capture_error(state, function));
         }
-        total = total.saturating_add(capture_byte_len(capture));
     }
-    state.charge(charge, total as u64)
+    Ok(())
 }
 
 fn append_capture_bytes(
@@ -358,44 +343,35 @@ fn append_capture_bytes(
 ) -> Result<()> {
     match capture {
         LuaCapture::Bytes { start, end } => {
-            append_subject_range(state, Charge::StringGsub, out, subject, start..end)?;
+            append_subject_range(state, out, subject, start..end)?;
         }
         LuaCapture::Position(offset) => {
             let position = (offset + 1).to_string();
-            append_bytes(state, Charge::StringGsub, out, position.as_bytes())?;
+            append_bytes(out, position.as_bytes())?;
         }
         LuaCapture::Unfinished => return Err(unfinished_capture_error(state, function)),
     }
     Ok(())
 }
 
-/// `append_bytes` for a range of the subject, read in place after the
-/// charge: the same growth check, the same single charge, the same copy.
+/// `append_bytes` for a range of the subject, read in place.
 fn append_subject_range(
-    state: &mut State,
-    charge: Charge,
+    state: &State,
     out: &mut Vec<u8>,
     subject: &StringArg,
     range: std::ops::Range<usize>,
 ) -> Result<()> {
     let next = crate::limits::checked_string_growth(out.len(), range.len())?;
-    state.charge(charge, range.len() as u64)?;
     out.reserve(next - out.len());
     out.extend_from_slice(&state.string_arg_bytes(subject)?[range]);
     Ok(())
 }
 
-/// Append `bytes` as one atomic charge of 1 per byte: the size cap is checked
-/// for the whole append first, and a charge that crosses the budget
-/// completes. Literal text goes through [`append_bytes_units`] instead.
-pub(super) fn append_bytes(
-    state: &mut State,
-    charge: Charge,
-    out: &mut Vec<u8>,
-    bytes: &[u8],
-) -> Result<()> {
+/// Append `bytes` to a library result after checking the string size cap for
+/// the whole append. Produced bytes are free (docs/budget.md, "String
+/// costs"), so nothing is charged.
+pub(super) fn append_bytes(out: &mut Vec<u8>, bytes: &[u8]) -> Result<()> {
     let next = crate::limits::checked_string_growth(out.len(), bytes.len())?;
-    state.charge(charge, bytes.len() as u64)?;
     out.reserve(next - out.len());
     out.extend_from_slice(bytes);
     Ok(())
@@ -430,8 +406,6 @@ enum ReplSegment {
 
 struct ReplTemplate {
     segments: Vec<ReplSegment>,
-    /// Original template length; each application charges it up front.
-    repl_len: usize,
 }
 
 fn compile_replacement_template(repl: &[u8]) -> ReplTemplate {
@@ -469,39 +443,7 @@ fn compile_replacement_template(repl: &[u8]) -> ReplTemplate {
     if !literal.is_empty() {
         segments.push(ReplSegment::Literal(literal));
     }
-    ReplTemplate {
-        segments,
-        repl_len: repl.len(),
-    }
-}
-
-/// Append literal bytes (gsub replacement-template text, `string.format`
-/// text between directives), each byte its own charge of 1, batched: the
-/// outcome is that of calling [`append_bytes`] once per byte. On a finite
-/// budget the run stops at the first byte that starts with no budget left
-/// (`State::charge_units`). When the run would cross the string size cap
-/// it falls back to the byte-at-a-time appender, so the bytes that fit are
-/// charged and the first that does not reports the cap. The per-byte
-/// path's poison check is not repeated per unit: nothing runs between two
-/// bytes of a run, and a callback that returns with the State poisoned is
-/// abandoned by `invoke_rust_fn` before library code resumes.
-pub(super) fn append_bytes_units(
-    state: &mut State,
-    charge: Charge,
-    out: &mut Vec<u8>,
-    bytes: &[u8],
-) -> Result<()> {
-    let Ok(next) = crate::limits::checked_string_growth(out.len(), bytes.len()) else {
-        // bounded: one pass over a literal of the replacement string.
-        for byte in bytes {
-            append_bytes(state, charge, out, std::slice::from_ref(byte))?;
-        }
-        return Ok(());
-    };
-    charge_scan_units(state, charge, bytes.len())?;
-    out.reserve(next - out.len());
-    out.extend_from_slice(bytes);
-    Ok(())
+    ReplTemplate { segments }
 }
 
 fn append_templated_replacement(
@@ -510,18 +452,14 @@ fn append_templated_replacement(
     template: &ReplTemplate,
     subject: &StringArg,
     captures: &[LuaCapture],
-    first_application: bool,
 ) -> Result<()> {
-    if !first_application {
-        state.charge(Charge::StringGsub, template.repl_len as u64)?;
-    }
     // bounded: one pass over the compiled template, no longer than the
     // replacement string. The gsub loops that apply it repeatedly poll once
     // per application (`gsub_empty_pattern`, the matcher, `find_subslice`).
     for segment in &template.segments {
         match segment {
             ReplSegment::Literal(literal) => {
-                append_bytes_units(state, Charge::StringGsub, out, literal)?;
+                append_bytes(out, literal)?;
             }
             ReplSegment::Capture(idx) => {
                 let capture = if *idx == 0 || (captures.len() == 1 && *idx == 1) {
@@ -553,12 +491,7 @@ fn append_function_replacement(
     } else {
         &captures[..1]
     };
-    preflight_capture_bytes(
-        state,
-        Charge::StringGsub,
-        args.iter().copied(),
-        StringPatternFunction::Gsub,
-    )?;
+    check_captures_finished(state, args.iter().copied(), StringPatternFunction::Gsub)?;
     state.push_value(3)?;
     if captures.len() > 1 {
         // bounded: one step per capture, at most LUA_MAXCAPTURES.
@@ -597,7 +530,7 @@ fn append_function_replacement(
         }
         let val = state.bytes_with_default_string_coercion(-1)?;
         state.pop(1)?;
-        append_bytes(state, Charge::StringGsub, out, &val)?;
+        append_bytes(out, &val)?;
     }
     Ok(())
 }
@@ -612,27 +545,16 @@ fn append_gsub_replacement(
 ) -> Result<()> {
     match repl_type {
         LuaType::String | LuaType::Number => {
-            let first_application = if template.is_none() {
-                // Parse once when a match exists, but keep the first result's
-                // byte-at-a-time charges and lazy error position.
+            if template.is_none() {
+                // Parse once, when a match exists, keeping the lazy error
+                // position of a malformed template.
                 let repl = state.bytes_with_default_string_coercion(3)?;
-                state.charge(Charge::StringGsub, repl.len() as u64)?;
                 *template = Some(compile_replacement_template(&repl));
-                true
-            } else {
-                false
-            };
+            }
             let replacement_template = template.as_ref().ok_or_else(|| {
                 Error::internal_fault(InternalFault::GsubReplacementTemplateMissing)
             })?;
-            append_templated_replacement(
-                state,
-                out,
-                replacement_template,
-                subject,
-                captures,
-                first_application,
-            )?;
+            append_templated_replacement(state, out, replacement_template, subject, captures)?;
         }
         LuaType::Table => {
             let key = if captures.len() > 1 {
@@ -640,12 +562,7 @@ fn append_gsub_replacement(
             } else {
                 captures[0]
             };
-            preflight_capture_bytes(
-                state,
-                Charge::StringGsub,
-                [key],
-                StringPatternFunction::Gsub,
-            )?;
+            check_captures_finished(state, [key], StringPatternFunction::Gsub)?;
             state.push_value(3)?;
             push_capture_value(state, subject, key, StringPatternFunction::Gsub)?;
             crate::native_call!(
@@ -673,7 +590,7 @@ fn append_gsub_replacement(
                 }
                 let val = state.bytes_with_default_string_coercion(-1)?;
                 state.pop(2)?;
-                append_bytes(state, Charge::StringGsub, out, &val)?;
+                append_bytes(out, &val)?;
             }
         }
         LuaType::Function => {
@@ -711,7 +628,7 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
             lua_sub_bytes(&subject, i, j)
         };
 
-        charge_bytes(state, Charge::StringSub, bytes.len())?;
+        charge_call(state, Charge::StringSub)?;
 
         state.set_top(0)?;
         state.push_bytes(bytes)?;
@@ -723,11 +640,7 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         let pattern = string_or_number_arg(state, 2, "find")?;
         let subject_len = string_arg_len(state, &subject)?;
         let pattern_len = string_arg_len(state, &pattern)?;
-        state.charge(
-            Charge::StringFind,
-            (subject_len + pattern_len).max(1) as u64,
-        )?;
-        charge_bytes(state, Charge::StringFind, pattern_len)?;
+        charge_call(state, Charge::StringFind)?;
         let num_args = state.get_top();
 
         let init =
@@ -738,7 +651,7 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
             plain || crate::patterns::is_plain_for_find(state.string_arg_bytes(&pattern)?);
 
         if pattern_is_plain {
-            // An empty needle is found, uncharged, at `init` itself, up to
+            // An empty needle is found, with no comparison charged, at `init` itself, up to
             // and including the end of the subject, so `start - 1` is its
             // inclusive end.
             let result = if init > subject_len {
@@ -785,9 +698,8 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
                     state.push_number(range.end as f64)?;
 
                     let n = matcher.num_matches();
-                    preflight_capture_bytes(
+                    check_captures_finished(
                         state,
-                        Charge::StringFind,
                         (1..n).map(|i| matcher.capture(i)),
                         StringPatternFunction::Find,
                     )?;
@@ -830,7 +742,7 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // string.upper(s)
     ("string.upper", |state| {
         let mut s = string_or_number_bytes(state, 1, "upper")?;
-        charge_bytes(state, Charge::StringUpper, s.len())?;
+        charge_call(state, Charge::StringUpper)?;
         s.make_ascii_uppercase();
         state.set_top(0)?;
         state.push_bytes(s)?;
@@ -839,7 +751,7 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // string.lower(s)
     ("string.lower", |state| {
         let mut s = string_or_number_bytes(state, 1, "lower")?;
-        charge_bytes(state, Charge::StringLower, s.len())?;
+        charge_call(state, Charge::StringLower)?;
         s.make_ascii_lowercase();
         state.set_top(0)?;
         state.push_bytes(s)?;
@@ -848,7 +760,7 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // string.reverse(s)
     ("string.reverse", |state| {
         let mut s = string_or_number_bytes(state, 1, "reverse")?;
-        charge_bytes(state, Charge::StringReverse, s.len())?;
+        charge_call(state, Charge::StringReverse)?;
         s.reverse();
         state.set_top(0)?;
         state.push_bytes(s)?;
@@ -859,9 +771,7 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         let s = string_or_number_arg(state, 1, "match")?;
         let pattern = string_or_number_arg(state, 2, "match")?;
         let s_len = string_arg_len(state, &s)?;
-        let pattern_len = string_arg_len(state, &pattern)?;
-        state.charge(Charge::StringMatch, (s_len + pattern_len).max(1) as u64)?;
-        charge_bytes(state, Charge::StringMatch, pattern_len)?;
+        charge_call(state, Charge::StringMatch)?;
         let init = opt_integer(state, 3, "match")?.map_or(0, |init| lua_start_index(s_len, init));
 
         if init > s_len {
@@ -877,13 +787,7 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
             .map_err(|err| match_error(state, StringPatternFunction::Match, err))?;
         state.set_top(subject_floor(&s))?;
         if matched {
-            push_captures(
-                state,
-                Charge::StringMatch,
-                &s,
-                &matcher,
-                StringPatternFunction::Match,
-            )
+            push_captures(state, &s, &matcher, StringPatternFunction::Match)
         } else {
             state.push_nil()?;
             Ok(1)
@@ -895,16 +799,16 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         let pattern = string_or_number_arg(state, 2, "gmatch")?;
         let s_len = string_arg_len(state, &s)?;
         let pattern_len = string_arg_len(state, &pattern)?;
-        state.charge(Charge::StringGmatch, (s_len + pattern_len).max(1) as u64)?;
+        charge_call(state, Charge::StringGmatch)?;
         // Lua 5.4's optional `init`; past the end it parks the iterator at
         // `len + 1`, where the first call returns nothing.
         let init = opt_integer(state, 3, "gmatch")?
             .map_or(0, |init| lua_start_index(s_len, init))
             .min(s_len + 1);
 
-        // The general iterator would charge `max(1, 0)` for compiling an
-        // empty pattern on its first call; this one charges nothing, so it
-        // stays a separate iterator (with its own persisted schema).
+        // An empty pattern matches at every position without examining a
+        // byte, so it has its own iterator (with its own persisted schema)
+        // that runs no matcher.
         if pattern_len == 0 {
             state.set_top(0)?;
             state.new_table()?;
@@ -928,12 +832,6 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         // keeps it beyond the call.
         state.set_top(2)?;
         state.new_table()?;
-        // Keep the interned flag key as a value under an integer key. The
-        // iterator can fetch and reuse that string without interning it on
-        // each match.
-        state.push_number(gmatch_schema::COMPILE_CHARGED_SLOT)?;
-        state.push_string(gmatch_schema::COMPILE_CHARGED_FIELD)?;
-        state.set_table_raw(-3)?;
         state.push_string(gmatch_schema::SUBJECT_FIELD)?;
         state.push_string_arg(&s)?;
         state.set_table_raw(-3)?;
@@ -956,7 +854,6 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     ("string.gsub", |state| {
         let s = string_or_number_arg(state, 1, "gsub")?;
         let pattern = string_or_number_arg(state, 2, "gsub")?;
-        let s_len = string_arg_len(state, &s)?;
         let pattern_len = string_arg_len(state, &pattern)?;
         let repl_type = state.typ(3);
 
@@ -974,10 +871,8 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         // A negative count replaces nothing; one past `usize::MAX` behaves
         // exactly like `usize::MAX`.
         let max_replacements = opt_integer(state, 4, "gsub")?.map(saturating_cast::<usize, i64>);
-        state.charge(Charge::StringGsub, (s_len + pattern_len).max(1) as u64)?;
-        charge_bytes(state, Charge::StringGsub, pattern_len)?;
+        charge_call(state, Charge::StringGsub)?;
         if max_replacements == Some(0) {
-            state.charge(Charge::StringGsub, s_len as u64)?;
             // The subject is the result: a string is returned as the value
             // it already is, a number's rendering interned.
             state.set_top(subject_floor(&s))?;
@@ -991,11 +886,8 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         // runs (docs/limits.md, "Native stack").
         //
         // The empty pattern keeps its own path: the plain path would never
-        // advance, and the Lua-pattern path gives the same results and
-        // unbudgeted total but, once a replacement limit stops it, appends
-        // the rest of the subject in one charge where this path charges per
-        // byte. A finite budget can run out inside that tail, so the two
-        // differ in where exhaustion is reported.
+        // advance, and this one needs no matcher, examines no subject byte
+        // and so charges nothing beyond the call, polling once per position.
         if pattern_len == 0 {
             crate::native_call!(
                 "lib:string.gsub->gsub_empty_pattern",
@@ -1039,7 +931,7 @@ fn gsub_empty_pattern(
             count += 1;
         }
         if i < s_len {
-            append_subject_range(state, Charge::StringGsub, &mut result, s, i..i + 1)?;
+            append_subject_range(state, &mut result, s, i..i + 1)?;
         }
     }
 
@@ -1077,7 +969,7 @@ fn gsub_plain_pattern(
 
         let start = pos + match_start;
         let end = start + pattern_len;
-        append_subject_range(state, Charge::StringGsub, &mut result, s, pos..start)?;
+        append_subject_range(state, &mut result, s, pos..start)?;
 
         let captures = [LuaCapture::Bytes { start, end }];
         crate::native_call!(
@@ -1089,7 +981,7 @@ fn gsub_plain_pattern(
         count += 1;
     }
 
-    append_subject_range(state, Charge::StringGsub, &mut result, s, pos..s_len)?;
+    append_subject_range(state, &mut result, s, pos..s_len)?;
     state.set_top(0)?;
     state.push_bytes(result)?;
     state.push_number(count as f64)?;
@@ -1142,11 +1034,11 @@ fn gsub_lua_pattern(
             if pos == s_len {
                 break;
             }
-            append_subject_range(state, Charge::StringGsub, &mut result, s, pos..pos + 1)?;
+            append_subject_range(state, &mut result, s, pos..pos + 1)?;
             pos += 1;
             continue;
         }
-        append_subject_range(state, Charge::StringGsub, &mut result, s, pos..range.start)?;
+        append_subject_range(state, &mut result, s, pos..range.start)?;
         captures.clear();
         captures.extend((0..matcher.num_matches()).map(|i| matcher.capture(i)));
         crate::native_call!(
@@ -1161,7 +1053,7 @@ fn gsub_lua_pattern(
         }
     }
 
-    append_subject_range(state, Charge::StringGsub, &mut result, s, pos..s_len)?;
+    append_subject_range(state, &mut result, s, pos..s_len)?;
 
     state.set_top(0)?;
     state.push_bytes(result)?;
@@ -1360,49 +1252,6 @@ pub(super) fn gmatch_iter(state: &mut State) -> Result<u8> {
         return Ok(0);
     }
 
-    state.push_number(gmatch_schema::COMPILE_CHARGED_SLOT)?;
-    state.get_table_raw(1)?;
-    let cache_key_matches = if state.typ(-1) == LuaType::String {
-        state
-            .to_bytes(-1)?
-            .iter()
-            .copied()
-            .eq(gmatch_schema::COMPILE_CHARGED_FIELD
-                .as_bytes()
-                .iter()
-                .copied())
-    } else {
-        false
-    };
-    if !cache_key_matches {
-        return Err(invalid_gmatch_state(
-            state,
-            GmatchStateFault::CompileFlagKeyMissing,
-        ));
-    }
-    state.get_table_raw(1)?;
-    let compile_charged = match state.typ(-1) {
-        LuaType::Nil => false,
-        LuaType::Boolean if state.to_boolean(-1) => true,
-        _ => {
-            return Err(invalid_gmatch_state(
-                state,
-                GmatchStateFault::CompileFlagInvalid,
-            ));
-        }
-    };
-    state.pop(1)?;
-    if !compile_charged {
-        // Charge once per iterator, not per cache miss. This flag is part of
-        // the saved Lua table, so GC, eviction and snapshot load cannot change
-        // the deterministic cost of continuing an existing iterator.
-        let pattern_len = state.to_bytes(3)?.len();
-        charge_bytes(state, Charge::StringGmatch, pattern_len)?;
-        state.push_number(gmatch_schema::COMPILE_CHARGED_SLOT)?;
-        state.get_table_raw(1)?;
-        state.push_boolean(true)?;
-        state.set_table_raw(1)?;
-    }
     let (matched, range, captures) =
         state.with_gmatch_matcher(2, 3, |subject, matcher, mut meter, interrupt| {
             // Lua 5.4 semantics: an empty match ending where the previous accepted
@@ -1448,9 +1297,8 @@ pub(super) fn gmatch_iter(state: &mut State) -> Result<u8> {
         } else {
             &captures[..1]
         };
-        preflight_capture_bytes(
+        check_captures_finished(
             state,
-            Charge::StringGmatch,
             returned.iter().copied(),
             StringPatternFunction::Gmatch,
         )?;

@@ -282,11 +282,12 @@ fn error_boundary_natural_failures() {
             let cap = dellingr::limits::MAX_STRING_BYTES;
             assert!(
                 matches!(error.kind(), ErrorKind::StringSizeExceeded { size, limit }
-                if *size == cap + 1 && *limit == cap)
+                if *size == 2 * (cap / 2 + 1) && *limit == cap)
             );
-            // Two replacement scans, two search comparisons, the four-unit
-            // gsub entry charge, and exactly the accepted byte prefix.
-            assert_eq!(outcome.cost, (cap + 2 * (cap / 2 + 1) + 6) as u64);
+            // The template's literal run is checked as one append, so the
+            // error names the size the second copy would reach. The call unit
+            // and two search comparisons; the bytes produced are free.
+            assert_eq!(outcome.cost, 3);
         }
     }
 }

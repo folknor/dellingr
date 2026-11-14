@@ -12,5 +12,3 @@ pub(crate) const PATTERN_FIELD: &str = "p";
 pub(crate) const POSITION_FIELD: &str = "pos";
 pub(crate) const LENGTH_FIELD: &str = "len";
 pub(crate) const LAST_MATCH_FIELD: &str = "lastmatch";
-pub(crate) const COMPILE_CHARGED_FIELD: &str = "compile_charged";
-pub(crate) const COMPILE_CHARGED_SLOT: f64 = 0.0;

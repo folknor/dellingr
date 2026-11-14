@@ -227,7 +227,7 @@ fn fixture_fingerprint(fixture: &str) -> u64 {
 /// Never edit or remove an existing entry; a diff that does is the signal a
 /// reviewer looks for. The history starts at version 8, when this fixture
 /// replaced the in-test corpus.
-const COST_MODEL_HISTORY: &[(u16, u64)] = &[(8, 0x7731_8aae_9088_6a97)];
+const COST_MODEL_HISTORY: &[(u16, u64)] = &[(8, 0x7731_8aae_9088_6a97), (9, 0xc724_4687_ecc5_8014)];
 
 const PIN_CONSUMER_SOURCES: &[(&str, &str)] = &[
     ("cost_golden", include_str!("cost_golden.rs")),

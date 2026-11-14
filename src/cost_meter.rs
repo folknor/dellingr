@@ -39,8 +39,14 @@ use crate::cost_model::{Charge, CostModel, Costing};
 /// that never reach the stack cap charge exactly as under version 6. Version 8
 /// charges one unit for each `rawset` call, like a `TableWrite` opcode, and
 /// `string.gsub` rejects an invalid replacement argument before charging for
-/// its subject and pattern.
-pub const COST_MODEL_VERSION: u16 = 8;
+/// its subject and pattern. Version 9 adopts one rule for string costs: a
+/// string library call charges 1 (`string.format` 1 per directive, at least
+/// 1), pattern matching adds its matcher steps and substring-scan
+/// comparisons, and no byte read or produced is charged; `table.concat`
+/// charges a flat 1 admitted after its argument checks. The subject, pattern,
+/// replacement-template, capture, output and separator byte charges are gone,
+/// and so is `string.gmatch`'s first-call pattern charge.
+pub const COST_MODEL_VERSION: u16 = 9;
 
 /// Debug-only dispatch batching controls and charged-opcode observations.
 #[cfg(feature = "cost-check-interval")]
@@ -305,7 +311,7 @@ impl<'a> CostMeter<'a> {
     /// `consume(unit)` calls: on a finite budget the charge stops at the
     /// first unit that starts with nothing remaining and reports blocked,
     /// leaving `used`/`remaining` exactly where the unit-at-a-time loop would
-    /// have left them. This lets scans that charge per byte batch their
+    /// have left them. This lets scans that charge per comparison batch their
     /// accounting without becoming observably different from the loop they
     /// replaced.
     #[inline]
