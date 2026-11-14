@@ -6,11 +6,6 @@ get deleted as they ship or stop being worth tracking.
 
 ## Next up
 
-### Housekeeping left from the 2026-10-22 loops
-
-- Possible CORE-MATH bug: `is_exact` in pow.c measures the bit length of `m`
-  rather than `m^y`. Ported as is; unobservable here (the sweeps pass).
-
 ### One rule for string costs (decide before the next release)
 
 Goal: replace today's per-function string charges with one rule a script

@@ -499,7 +499,7 @@ macro_rules! kernel {
         /// of Lauter and Lefèvre). `z` approximates x^y with relative error below
         /// 2^-117.
         $(#[$feature])*
-        fn exact_pow(x: f64, y: f64, z: &Dint, exact: bool) -> Option<f64> {
+        fn exact_pow(x: f64, y: f64, z: &Dint) -> Option<f64> {
             let s: i64 = if z.sgn != 0 { -1 } else { 1 };
             let (e, mut m) = extract(x); // x = 2^E * m with m odd
             if m == 1 {
@@ -536,11 +536,9 @@ macro_rules! kernel {
                 }
                 let g = (e >> -f) * n as i64; // g = E * y
                 let (big_g, k) = round_54(z); // z is rounded to k * 2^G
-                // The upstream bit-length quirk in `is_exact` only controls this
-                // conservative proximity check. The integer/exponent constraints
-                // below still gate the candidate; the checked worst-case corpus has
-                // exposed no result difference, so keep the quirk as ported.
-                if !exact {
+                // Upstream computes this predicate up front in `pow`; this is its
+                // only reader, so it is evaluated here.
+                if !is_exact_root(e, m, f, n) {
                     let cnt = k.leading_zeros();
                     let mut d = Dint {
                         hi: (k as u64) << cnt,
@@ -596,18 +594,19 @@ macro_rules! kernel {
             Some(pow2(r, g))
         }
 
-        /// Whether x^y is exact and exactly representable as a binary64 value.
+        /// Whether x^y is exact and representable as a binary64 value, for
+        /// `exact_pow`'s case (b) only: x = 2^e * m with m odd and m != 1, and
+        /// y = 2^f * n with n odd, n <= 33 and -5 <= f < 0 (a positive
+        /// non-integer, as `exact_pow` has already checked).
+        ///
+        /// Upstream's `is_exact` takes (x, y) and also answers |x| = 1, integer
+        /// y and negative y. `exact_pow` reads the answer only in case (b), so
+        /// those branches produced values nothing read and are not ported. That
+        /// removes upstream's integer-y quirk with them: it bounds the exponent
+        /// with the bit length of m rather than of m^y, which never mattered
+        /// here. The domain also implies upstream's opening low-bits filter on y.
         $(#[$feature])*
-        fn is_exact(x: f64, y: f64) -> bool {
-            let v = bits(x);
-            let w = bits(y);
-            if (v << 1) != 0x7fe0000000000000 && (w << 22) != 0 {
-                return false;
-            }
-            if (v << 1) == 0x7fe0000000000000 {
-                return true; // |x| = 1
-            }
-            // XMAX[y] for 1 <= y <= 33 is the largest odd m with m^y below 2^53.
+        fn is_exact_root(e: i64, m: u64, f: i64, n: u64) -> bool {
             const XMAX: [u64; 34] = [
                 0,
                 0xffffffffffffffff,
@@ -644,84 +643,9 @@ macro_rules! kernel {
                 3,
                 3,
             ];
-            if y >= 0.0 && is_int(y) {
-                let mut m = v & 0xfffffffffffff;
-                let mut e = ((v << 1) >> 53) as i64 - 0x433;
-                if e >= -1074 {
-                    m |= 0x10000000000000;
-                } else {
-                    e += 1;
-                }
-                let t = m.trailing_zeros();
-                m >>= t;
-                e += i64::from(t);
-                if y == 0.0 || y == 1.0 {
-                    return true;
-                }
-                if m == 1 {
-                    let ye = y * e as f64;
-                    return (-1074.0..1024.0).contains(&ye);
-                }
-                if !(0.0..=33.0).contains(&y) {
-                    return false;
-                }
-                let y_int = y as i32;
-                if m > XMAX[y_int as usize] {
-                    return false;
-                }
-                // Upstream computes m^y here and then uses the bit length of m (not
-                // of m^y) below; kept as is.
-                let t = 64 - i64::from(m.leading_zeros());
-                let ez = e * i64::from(y_int) + t;
-                if ez <= -1074 || 1024 < ez {
-                    return false;
-                }
-                return e * i64::from(y_int) >= -1074;
-            }
-            let mut n = w & 0xfffffffffffff;
-            let mut f = ((w << 1) >> 53) as i64 - 0x433;
-            if f >= -1074 {
-                n |= 0x10000000000000;
-            } else {
-                f += 1;
-            }
-            let t = n.trailing_zeros();
-            n >>= t;
-            f += i64::from(t);
-            // |y| = n * 2^f with n odd
-            let mut m = v & 0xfffffffffffff;
-            let mut e = ((v << 1) >> 53) as i64 - 0x433;
-            if e >= -1074 {
-                m |= 0x10000000000000;
-            } else {
-                e += 1;
-            }
-            let t = m.trailing_zeros();
-            m >>= t;
-            e += i64::from(t);
-            // |x| = m * 2^e with m odd
-            if y < 0.0 {
-                if m != 1 {
-                    return false;
-                }
-                let ez = if f >= 0 {
-                    if f < 12 {
-                        (n as i64).wrapping_neg().wrapping_mul(e) << f
-                    } else {
-                        1024
-                    }
-                } else {
-                    // 2^-f must divide e.
-                    let t = i64::from(e.trailing_zeros());
-                    if -f > t {
-                        return false;
-                    }
-                    (-e >> (-f)) * n as i64
-                };
-                return (-1074..1024).contains(&ez);
-            }
-            // Now y > 0 is not an integer: y = n * 2^f with n odd and f < 0, so x
-            // must be an exact 2^-f-th power.
+
+            // x must be an exact 2^-f-th power.
+            let (mut e, mut m, mut f) = (e, m, f);
             while f != 0 {
                 f += 1;
                 if e & 1 != 0 {
@@ -912,7 +836,6 @@ macro_rules! kernel {
             let err = ERR[usize::from(cancel)];
             let res_min = res_h + fma(err, -res_h, res_l);
             let res_max = res_h + fma(err, res_h, res_l);
-            let exact = is_exact(x, y);
             if res_min == res_max {
                 return res_max;
             }
@@ -961,7 +884,7 @@ macro_rules! kernel {
             if rd {
                 return dint_tod(&r);
             }
-            if let Some(e) = exact_pow(x0, y, &r, exact) {
+            if let Some(e) = exact_pow(x0, y, &r) {
                 return e;
             }
 
@@ -1065,9 +988,9 @@ macro_rules! kernel {
                             sgn: 1,
                         };
                         assert_eq!(qint_tod(&q).to_bits(), f64::NEG_INFINITY.to_bits());
-                        assert_eq!(exact_pow(2.0, huge, &z, true), Some(f64::NEG_INFINITY));
+                        assert_eq!(exact_pow(2.0, huge, &z), Some(f64::NEG_INFINITY));
                         assert_eq!(
-                            exact_pow(2.0, -huge, &z, true)
+                            exact_pow(2.0, -huge, &z)
                                 .expect("power of two is exact")
                                 .to_bits(),
                             (-0.0f64).to_bits()

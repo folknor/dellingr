@@ -93,6 +93,12 @@ NaN's bits), and the VM never lets a script observe them.
   shifts that C leaves undefined at the limb width are made total, and every
   `__builtin_fma` becomes a call to `fma`, which each kernel instance binds
   to its backend.
+- One structural exception: pow's exactness predicate (upstream `is_exact`)
+  is narrowed to the one case its only reader, `exact_pow`, consults
+  (positive non-integer y, x not a power of two) and evaluated there rather
+  than up front. The branches dropped produced values nothing read, so the
+  results are bit-identical; the doc comment on `is_exact_root` has the
+  argument.
 - Hex float literals are written as `h!("0x1.921fb54442d18p+0")`, evaluated at
   compile time by `crmath::hf`, which rejects any literal that is not exactly
   representable.
