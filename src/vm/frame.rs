@@ -970,6 +970,91 @@ mod tests {
             .expect("the error boundary leaves the state callable");
     }
 
+    /// Admission does not prove that a call, tail call or open vararg window
+    /// starts above every captured local (see `validate_bytecode`), so
+    /// `check_window` refuses it at run time. Each case captures register
+    /// 0 (the window's first slot) or 1 (strictly inside it), publishes the
+    /// capturing closure as `f`, then opens the window at register 0.
+    #[test]
+    fn admitted_window_below_an_open_upvalue_returns_internal_error() {
+        let windows: [&[Instr]; 3] = [
+            &[Instr::call(
+                0,
+                ArgCount::Fixed(0),
+                RetCount::Fixed(0),
+                false,
+            )],
+            &[
+                Instr::call(0, ArgCount::Fixed(0), RetCount::Fixed(0), false).into_tail_call(),
+                Instr::ret(0, RetCount::Fixed(0)),
+            ],
+            &[
+                Instr::vararg(0, RetCount::All),
+                Instr::ret(0, RetCount::All),
+            ],
+        ];
+        for window in windows {
+            for captured in 0..2u8 {
+                check_window_below_open_upvalue(window, captured);
+            }
+        }
+    }
+
+    fn check_window_below_open_upvalue(window: &[Instr], captured: u8) {
+        use crate::compiler::UpvalueDesc;
+        let child = Bytecode {
+            code: vec![Instr::get_upval(0, 0), Instr::ret(0, RetCount::Fixed(1))],
+            line_info: vec![1; 2],
+            max_stack: 1,
+            upvalues: vec![UpvalueDesc::Local(captured)],
+            ..Bytecode::default()
+        };
+        let mut code = vec![
+            Instr::load_num(u16::from(captured), 0),
+            Instr::closure(2, 0),
+            Instr::set_global(2, 0, None),
+        ];
+        code.extend_from_slice(window);
+        code.push(Instr::ret(0, RetCount::Fixed(0)));
+        let bytecode = Bytecode {
+            line_info: vec![1; code.len()],
+            code,
+            number_literals: vec![7.0],
+            string_literals: vec![b"f".to_vec()],
+            max_stack: 4,
+            is_vararg: true,
+            nested: vec![Arc::new(child)],
+            ..Bytecode::default()
+        };
+        crate::compiler::verify::validate_bytecode(&bytecode)
+            .expect("admission does not prove windows start above captured locals");
+        let mut state = State::new();
+        state
+            .push_chunk(Arc::new(bytecode))
+            .expect("the admitted chunk fits in the state");
+        let error = state
+            .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+            .expect_err("a window over an open upvalue must return an error without panicking");
+        assert!(matches!(
+            error.kind(),
+            super::super::ErrorKind::InternalError(_)
+        ));
+        assert!(
+            error
+                .to_string()
+                .contains("a register window overlaps an open upvalue"),
+            "{error}"
+        );
+        assert!(!state.is_poisoned());
+        assert!(state.in_flight.open_upvalues.is_empty());
+        // The unwind closed the capture with the value it held.
+        state.get_global("f").expect("the closure was published");
+        state
+            .call(ArgCount::Fixed(0), RetCount::Fixed(1))
+            .expect("the error boundary leaves the state callable");
+        assert_eq!(state.to_number(-1).expect("the capture is a number"), 7.0);
+    }
+
     #[test]
     fn documented_opcode_charges_match_static_costs() {
         use crate::cost_model::CostModel;

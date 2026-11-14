@@ -456,6 +456,15 @@ fn jump_target(pc: usize, inst: Instr, code_len: usize) -> Option<usize> {
 // no jump may enter, and the consumer's own operand range must start at or
 // below the producer's.
 //
+// Nothing here proves that a call, tail call or open vararg window starts
+// above every register an open upvalue points at, though compiled code always
+// places them there. Admitted bytecode can open such a window (a forged save,
+// say); `State::check_window` refuses it at run time with an internal error,
+// and a return closes the frame's upvalues before cutting the stack. A static
+// proof is possible (a forward dataflow of possibly-open capture slots:
+// CLOSURE adds, CLOSE removes a suffix, joins union) but buys no safety the
+// runtime check does not already give, so it is deliberately not done.
+//
 // This checks a function body, not a closure's supplied captures. Compiled
 // program roots have no upvalue descriptors by construction, but a snapshot
 // can retain a captured function without its original parent chunk. Requiring

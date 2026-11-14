@@ -170,17 +170,6 @@ Cosmetic:
   fixed-width integer"; the trait doc now lists the actual set (8- to 64-bit,
   signed and unsigned).
 
-### Codegen scope never defect-hunted
-
-The 2026-11 defect hunt covered every scope except `codegen`
-(`src/compiler.rs`, `src/compiler/codegen.rs`, `src/compiler/verify.rs`,
-`src/instr.rs`, `src/disassemble.rs`); its run was stopped by the provider's
-safety filter. Its one unconfirmed progress note: the verifier checks register
-bounds but does not establish that stack-shrinking instructions preserve slots
-held by open upvalues, so edited snapshot bytecode might bypass the compiler's
-convention of keeping call and open-vararg windows above live locals. The
-hunter was tracing a minimal case through return cleanup when it stopped.
-
 ## Deferred forward-looking ideas
 
 ### Execution trace hook for a stepping debugger
