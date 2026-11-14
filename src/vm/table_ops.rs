@@ -254,8 +254,9 @@ impl State {
     /// as the `t[k]` opcode does (`State::resolve_index`), so `("abc")["upper"]` gives
     /// the host what it gives a script.
     ///
-    /// Validation and dispatch preflight failures leave the stack unchanged.
-    /// An error from calling an `__index` function consumes the key and clears
+    /// Validation and dispatch preflight failures leave the stack unchanged,
+    /// as does an `__index` function call refused before entry (stack or call
+    /// depth, or a pending interrupt). An error from calling an `__index` function consumes the key and clears
     /// handler temporaries, preserving every earlier stack slot. Writes made
     /// by the handler survive the error.
     ///
@@ -434,7 +435,7 @@ impl State {
     /// stack unchanged: a bad index, too few operands, a non-table receiver,
     /// an invalid key for a raw store, a handler that can be neither indexed
     /// nor called, the metamethod depth limit, a refused table growth, and a
-    /// handler call refused before entry. An error from an entered handler
+    /// handler call refused before entry, including by a pending interrupt. An error from an entered handler
     /// consumes the key and value and clears handler temporaries, preserving
     /// every earlier stack slot. Writes made by the handler survive the error.
     ///

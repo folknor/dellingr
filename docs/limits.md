@@ -290,7 +290,9 @@ they pop. Every rejection detectable up front leaves the stack as it was:
 bad index, wrong type, invalid key, invalid position. `get_table` and
 `set_table` also leave it unchanged when metamethod dispatch fails before a
 handler runs (a handler that can be neither indexed nor called, the
-metamethod depth limit, a handler call refused for stack or call depth).
+metamethod depth limit, a handler call refused for stack or call depth, or
+refused by a pending interrupt), so the host can reset the interrupt and retry
+with the same operands.
 
 Exception: when `get_table` calls an `__index` function, or `set_table` a
 `__newindex` function, and that call fails, the key (and for `set_table` the

@@ -19,6 +19,11 @@ Saves from 0.7.x do not load: snapshot `FORMAT_VERSION` is 15.
   resave dropped its id record. The save now lists every saved function
   that has been instantiated, after the bytecode arena, and load rebuilds
   exactly those.
+- Host `get_table` and `set_table` keep their key (and value) when a
+  pending interrupt refuses a Rust `__index` or `__newindex` function before
+  it runs, so the host can reset the interrupt and retry. The handler used
+  to be recorded as entered before the interrupt poll, and the operands were
+  consumed as if it had run.
 
 ## [0.7.1] - 2026-11-06
 

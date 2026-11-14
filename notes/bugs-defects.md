@@ -50,54 +50,6 @@ request more input.
 Hunter's suggested direction: preserve permanent escape failures at EOF while
 keeping incomplete valid prefixes such as `\x4` recoverable.
 
-## BUG-002 - An interrupt refusal consumes host table operands before the Rust handler runs
-
-Hunter label: P2, from both `dispatch` and `host`, reported independently. Sites:
-`begin_call` (`src/vm/eval.rs`, reported at lines 449-450), the entry poll in
-`invoke_rust_fn` (`src/vm/eval.rs`, reported at line 662), the `get_table`
-cleanup (`src/vm/table_ops.rs`, reported at line 324), and the `set_table`
-cleanup (`src/vm/table_ops.rs`, reported at line 508).
-
-The broken claim is in `docs/limits.md`, under "Host table methods": `get_table`
-and `set_table` preserve their operands when metamethod dispatch fails before
-handler entry. `set_table`'s API documentation explicitly includes a handler
-call refused before entry.
-
-`begin_call` sets the entry observer before calling `invoke_rust_fn`. That
-function can immediately return `Interrupted` from its entry poll, without
-invoking the handler. The cleanup nevertheless sees "entered": the `get_table`
-cleanup discards the key, and the `set_table` cleanup discards the key and value.
-
-`dispatch` trigger: a host holding the table returned by:
-
-```lua
-return setmetatable({}, {__index = tostring, __newindex = rawset})
-```
-
-With that table alone at stack index 1:
-
-- Push `"missing"`, trigger the interrupt, then call `get_table(1)`. It returns
-  `Interrupted` with stack height 1, although the promised height is 2.
-- Independently, push `"missing"` and `42`, trigger the interrupt, then call
-  `set_table(1)`. It returns `Interrupted` with height 1, although the promised
-  height is 3. No write occurs.
-
-`host` gave the same reproducer with
-`setmetatable({}, {__index = print, __newindex = print})`, and noted that neither
-handler executes.
-
-This prevents the host from resetting the interrupt and retrying with the
-preserved operands. Lua handlers preserve them because their observer is updated
-after admission succeeds.
-
-Hunters' suggested direction: commit the entry observer at the Rust invocation
-boundary, after its interrupt poll and immediately before the Rust body runs.
-
-`dispatch` states this is established by tracing the entry and cleanup paths, and
-that the existing default-sweep runtime, host table atomicity, host set-table and
-direct Rust-entry interrupt tests pass without covering this combination. `host`
-states its findings are source-traced, not runtime-tested.
-
 ## BUG-003 - Upvalue allocation silently wraps and aliases an existing capture
 
 Hunter label: P2. Scope: `heap`. Sites: `UpvaluePool::alloc` (`src/vm/object.rs`,

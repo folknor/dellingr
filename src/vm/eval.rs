@@ -447,7 +447,13 @@ impl State {
         // callable object pays for the resolution loop's setup.
         let func_val = self.stack[idx];
         if let Val::RustFn(f) = func_val {
-            entered.mark_entered();
+            // The entry observer is marked inside `invoke_rust_fn`, after its
+            // interrupt poll: marking here would report a callback refused
+            // before it ran as entered, and a host get_table or set_table
+            // would consume operands it promises to keep. A second poll here
+            // would not close that, since the flag can be set from another
+            // thread between the two.
+            //
             // The contiguous Rust ABI needs these arguments relocated: the
             // callback starts at idx and may use every slot up to the global
             // stack cap. Leaving the function at idx and starting at idx + 1
@@ -460,7 +466,7 @@ impl State {
             self.stack.remove(idx);
             return crate::native_call!(
                 "begin_call->invoke_rust_fn",
-                self.invoke_rust_fn(f, idx, shape.method())
+                self.invoke_rust_fn(f, idx, shape.method(), entered)
             )
             .map(Some);
         }
@@ -500,7 +506,7 @@ impl State {
                 self.stack.remove(idx);
                 break crate::native_call!(
                     "begin_callable_call->invoke_rust_fn",
-                    self.invoke_rust_fn(f, idx, shape.method())
+                    self.invoke_rust_fn(f, idx, shape.method(), ())
                 )
                 .map(Some);
             }
@@ -622,7 +628,10 @@ impl State {
     /// enter here, so the callback ABI (frame boundary, active function and
     /// result validation) has a single implementation. The interrupt is
     /// polled before callback bookkeeping changes; the enclosing call boundary
-    /// or invocation unwind owns error reporting.
+    /// or invocation unwind owns error reporting. `entered` is marked right
+    /// after that poll succeeds, so an interrupt refusal leaves a host table
+    /// access's observer unmarked and its operands preserved; nothing after
+    /// the mark can refuse before the callback runs.
     ///
     /// Precondition: the callee's arguments occupy `stack[call_base..]` and
     /// the function value itself is no longer on the stack. On success the
@@ -653,6 +662,7 @@ impl State {
         function: RustFnId,
         call_base: usize,
         method: bool,
+        entered: impl CallEntry,
     ) -> Result<u8> {
         // Every Rust callee passes here, including library functions and
         // metamethods. Poll before changing callback bookkeeping so a pending
@@ -660,6 +670,7 @@ impl State {
         // Straight-line Lua can otherwise chain expensive native calls
         // without reaching a backward jump or another Lua admission.
         self.poll_interrupt()?;
+        entered.mark_entered();
         let f = self.rust_fns.function(function);
         let old_stack_bottom = self.in_flight.stack_bottom;
         self.in_flight.stack_bottom = call_base;

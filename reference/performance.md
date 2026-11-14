@@ -302,6 +302,15 @@ table library's writes, which used the shared, outlined
 1056 in release, 1200 to 1056 with snapshot). Dev writes grow 80 bytes per
 cycle.
 
+### 2026-11-14: the entry observer marked inside `invoke_rust_fn`
+
+Moving the observer's mark from `begin_call` to just after the interrupt poll
+in `invoke_rust_fn` (so an interrupt-refused Rust handler is not reported as
+entered) passes the observer as a generic argument. `native_bytes_per_level`,
+host bygg, base 684ea4b: every release and release-snapshot scenario is
+unchanged; every dev and native-call-coverage scenario that reaches a Rust
+callback grows 16 bytes per level (`host_get_table` 10896 to 10912 dev).
+
 ### 2026-10-23: invocation driver inlined into `call_unguarded`
 
 Baseline 97973d1, against unmodified 22a263a, against 22a263a with

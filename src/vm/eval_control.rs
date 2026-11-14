@@ -253,7 +253,7 @@ impl State {
         self.push_unchecked(control);
         let num_ret_reported = crate::native_call!(
             "instr_tfor_call_rust_fn->invoke_rust_fn",
-            self.invoke_rust_fn(f, call_base, false)
+            self.invoke_rust_fn(f, call_base, false, ())
         )?;
         // The callback's results are at `call_base`, in slots it pushed.
         self.take_tfor_results(base, num_vars, call_base, usize::from(num_ret_reported));
