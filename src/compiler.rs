@@ -97,6 +97,16 @@ impl Bytecode {
     ///
     /// Every cache-bearing operand is rewritten, whatever it held before, so
     /// the pass is idempotent.
+    ///
+    /// The per-family cap (`MAX_CACHE_SLOTS`, in instruction order) is kept
+    /// on purpose. Lifting it was considered: runtime cache metadata indexed
+    /// by instruction position, a wider operand (a format bump), or caches
+    /// shared per key literal (which removes the cliff but lets sites on
+    /// different receivers evict each other). None was taken because no
+    /// workload shows coverage pressure: the largest generated function in
+    /// the example corpus stays well under the cap in every family, and a
+    /// site past it is correct, only uncached. What matters is the count of
+    /// cache-bearing sites per family in one function, not function size.
     fn assign_cache_slots(&mut self) {
         /// Allocate the next slot of one cache family, or `None` once the
         /// family holds `MAX_CACHE_SLOTS` slots.

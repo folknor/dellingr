@@ -541,21 +541,21 @@ mirror entry", which it would remove.
 
 Raised by the lookup hunter.
 
-- **Carry lookup results through stores.** On an absent field `store_field`
-  (`metamethod.rs`) searches, `store_new_key` inserts, and `store_field`
-  searches again to fill the cache. In `walk_newindex` a terminal existing
-  entry is read with `get` then written through `insert`, which finds it again.
-  Return a mutation result holding the resulting slot and carry it into the
-  write; an absent insertion position cannot survive user code. Mostly helps
-  misses, insertions and delegated writes.
-- **Remove the static cache coverage cliff.** `assign_cache_slots`
-  (`compiler.rs`) stops at 255 entries per family in instruction order, so a
-  hot site late in a large function stays uncached. Index runtime access
-  metadata independently of the serialized cache operand.
+Residue: SET_FIELD stores, `__newindex` terminal tables and host `set_table`
+now carry their lookup's slot into the write (`Table::store_string_key`
+reports the slot a string insert wrote). Still two probes: an absent key on
+a receiver that has a metatable, outside SET_FIELD's string path. `reg_set_table`
+(`try_insert_table_direct` misses with `get_with_index`, then
+`store_absent_key` inserts) and `store_new_key`'s non-string insert look the
+key up again inside `Table::insert`. Closing it needs an insert that takes
+the miss's probe (a hashbrown-style vacant entry), which `__newindex`
+dispatch between the probe and the insert must not invalidate; that fits
+PERF-018's table-owned index better than today's IndexMap. Unmeasured.
 
-(The lookup hunter's key-checked position reuse across receivers is appended
-to `optimizations.md` "Shape-based polymorphic field IC", whose lighter-weight
-variant it is. Constant string indexing is in PERF-004.)
+(The 255-per-family cache cap was weighed and kept; the reasoning sits at
+`assign_cache_slots`. Key-checked position reuse across receivers is in
+`optimizations.md` "Shape-based polymorphic field IC"; constant string
+indexing is in PERF-004.)
 
 **Classification:** local.
 

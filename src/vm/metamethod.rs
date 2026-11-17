@@ -25,6 +25,7 @@ use super::caches::{
 use super::frame::Frame;
 use super::lua_val::Val;
 use super::object::ObjectPtr;
+use super::table::SlotRef;
 use crate::error::{ErrorKind, TypeError};
 
 use crate::limits::MAX_METAMETHOD_DEPTH;
@@ -357,10 +358,12 @@ impl State {
     }
 
     /// Store `receiver.key = val` for a bytecode field write the set cache
-    /// did not answer: one raw lookup on the receiver (an existing key is
-    /// overwritten or removed there and refills the cache), then
-    /// `State::store_new_key`. `Some(units)` is a pushed `__newindex` call
-    /// window, as for `State::resolve_newindex`.
+    /// did not answer. A receiver with no metatable takes the store raw in
+    /// one insert. Otherwise one raw lookup on the receiver (an existing key
+    /// is overwritten or removed there), then `State::store_new_key`'s rule.
+    /// Every raw store of a value into the receiver fills the cache with the
+    /// slot it wrote. `Some(units)` is a pushed `__newindex` call window, as
+    /// for `State::resolve_newindex`.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     #[inline(never)]
     pub(super) fn store_field(
@@ -377,33 +380,59 @@ impl State {
         else {
             return Err(self.index_handler_error(receiver));
         };
+        // A string key with a value is a raw store whose insert reports the
+        // slot it wrote, so the cache is filled without a second lookup.
+        let raw_string = match (key, val) {
+            (_, Val::Nil) => None,
+            (Val::Str(name), _) => Some(name),
+            _ => None,
+        };
         let tbl = self
             .heap
             .as_table(ptr)
             .expect("checked to be a table just above");
+        // With no metatable there is no `__newindex` to consult, so the
+        // store needs no presence lookup first.
+        if let Some(name) = raw_string
+            && tbl.get_metatable().is_none()
+        {
+            let slot = tbl.store_string_key(name, val);
+            Self::fill_set_cache(cache, ptr, slot);
+            return Ok(None);
+        }
         if let Some((slot, _)) = tbl.find_slot(&key) {
             if matches!(val, Val::Nil) {
                 tbl.remove_slot(slot);
             } else {
                 tbl.store_slot(slot, val);
-                if let Some(cache) = cache {
-                    cache.set(FieldLookupCacheEntry { table: ptr, slot });
-                }
+                Self::fill_set_cache(cache, ptr, slot);
             }
             return Ok(None);
         }
-        let pending = self.store_new_key(ptr, key, val, local_cost)?;
-        // A raw insert into the receiver makes the next store a cache hit.
-        // After a handler nothing reads the receiver again: the handler may
-        // have dropped every other root of it.
-        if pending.is_none()
-            && let Some(cache) = cache
-            && let Some(tbl) = self.heap.as_table_ref(ptr)
-            && let Some((slot, _)) = tbl.find_slot(&key)
-        {
-            cache.set(FieldLookupCacheEntry { table: ptr, slot });
+        // Absent: `State::store_new_key`, inlined here so a raw insert into
+        // the receiver can fill the cache with the slot it wrote. A slot
+        // only ever names the receiver's own storage; a store that went
+        // through a handler leaves the cache alone, since the handler may
+        // have dropped every other root of the receiver.
+        let handler = self.newindex_handler(ptr);
+        if !matches!(handler, Val::Nil) {
+            return self.resolve_newindex(Val::Obj(ptr), handler, key, val, local_cost);
         }
-        Ok(pending)
+        let tbl = self.heap.as_table(ptr).expect("the receiver is a table");
+        if let Some(name) = raw_string {
+            let slot = tbl.store_string_key(name, val);
+            Self::fill_set_cache(cache, ptr, slot);
+        } else {
+            tbl.insert(key, val)?;
+        }
+        Ok(None)
+    }
+
+    #[inline(always)]
+    fn fill_set_cache(cache: Option<&SetFieldLookupCacheSlot>, table: ObjectPtr, slot: SlotRef) {
+        if let Some(cache) = cache {
+            cache.set(FieldLookupCacheEntry { table, slot });
+        }
     }
 
     /// Store `key = val` in table `ptr`, whose raw lookup has proved the key
@@ -486,20 +515,34 @@ impl State {
                         let existing = self
                             .heap
                             .as_table_ref(ptr)
-                            .map_or(Val::Nil, |table| table.get(&key));
-                        if matches!(existing, Val::Nil) {
-                            let next = self.newindex_handler(ptr);
-                            if !matches!(next, Val::Nil) {
-                                // A table step that continues holds a unit
-                                // until the store ends.
-                                self.take_metamethod_unit()?;
-                                *units += 1;
-                                target = handler;
-                                handler = next;
-                                continue;
+                            .and_then(|table| table.find_slot(&key));
+                        if let Some((slot, _)) = existing {
+                            // A terminal table that holds the key: write
+                            // through the slot just found, unit-free.
+                            let table = self
+                                .heap
+                                .as_table(ptr)
+                                .expect("checked to be a table just above");
+                            if matches!(val, Val::Nil) {
+                                table.remove_slot(slot);
+                            } else {
+                                table.store_slot(slot, val);
                             }
+                            return Ok(true);
                         }
-                        // A terminal table step stores raw and takes no unit.
+                        let next = self.newindex_handler(ptr);
+                        if !matches!(next, Val::Nil) {
+                            // A table step that continues holds a unit
+                            // until the store ends.
+                            self.take_metamethod_unit()?;
+                            *units += 1;
+                            target = handler;
+                            handler = next;
+                            continue;
+                        }
+                        // A terminal table step without the key, and with no
+                        // `__newindex` of its own, stores raw and takes no
+                        // unit.
                         self.heap
                             .as_table(ptr)
                             .expect("checked to be a table just above")

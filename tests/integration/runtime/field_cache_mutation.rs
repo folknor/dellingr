@@ -85,6 +85,74 @@ fn cached_fields_follow_readded_keys_and_compaction() {
     );
 }
 
+/// A raw new-key store fills the set cache with the slot its insert
+/// reports, so the next store through the same site writes there without a
+/// lookup. Each scenario reaches a different insert branch (inline append,
+/// promotion to a map, inline re-add of a dead key, map re-add of a dead
+/// key, compaction) and then stores again through the warmed site.
+#[test]
+fn set_field_cache_uses_the_slot_a_new_key_insert_reports() {
+    expect_ok(
+        r#"
+        local function put(t, v) t.k = v end
+        local function check(t, want, label)
+            put(t, want)
+            put(t, want + 1)
+            if t.k ~= want + 1 then error(label .. ': warmed store missed k') end
+            for key, value in pairs(t) do
+                if key ~= 'k' and value ~= key then
+                    error(label .. ': store overwrote ' .. key)
+                end
+            end
+        end
+
+        check({}, 10, 'inline append')
+        check({ a = 'a', b = 'b', c = 'c', d = 'd' }, 20, 'promotion')
+
+        local inline = { a = 'a', k = 0, b = 'b' }
+        inline.k = nil
+        check(inline, 30, 'inline re-add')
+
+        local map = { a = 'a', b = 'b', c = 'c', d = 'd', e = 'e', k = 0, f = 'f' }
+        map.k = nil
+        check(map, 40, 'map re-add')
+
+        local compact = { a = 'a', b = 'b', c = 'c', d = 'd', e = 'e', f = 'f' }
+        compact.a = nil
+        compact.b = nil
+        compact.c = nil
+        check(compact, 50, 'compaction')
+        local order = ''
+        for key in pairs(compact) do order = order .. key end
+        if order ~= 'defk' then error('compaction order: ' .. order) end
+
+        local meta = setmetatable({ a = 'a' }, {})
+        check(meta, 60, 'metatable without __newindex')
+    "#,
+    );
+}
+
+/// A `__newindex` table that holds the key takes the store through the slot
+/// its lookup found: an overwrite in place, and nil as a removal.
+#[test]
+fn newindex_table_holding_the_key_overwrites_and_removes_in_place() {
+    expect_ok(
+        r#"
+        local backing = { a = 1, k = 2, b = 3 }
+        local proxy = setmetatable({}, { __newindex = backing })
+        proxy.k = 20
+        if backing.k ~= 20 or rawget(proxy, 'k') ~= nil then error('overwrite') end
+        proxy.k = nil
+        if backing.k ~= nil then error('removal') end
+        proxy.k = 30
+        if backing.k ~= 30 then error('re-add') end
+        local order = ''
+        for key in pairs(backing) do order = order .. key end
+        if order ~= 'abk' then error('order: ' .. order) end
+    "#,
+    );
+}
+
 #[test]
 fn field_cache_revalidates_after_table_mutation() {
     let val = support::eval_number(

@@ -478,10 +478,16 @@ impl State {
             .heap
             .as_table(ptr)
             .expect("table_operand_below_top validated the table");
-        let stored = if matches!(tbl.get(&key), Val::Nil) {
-            self.store_new_key(ptr, key, val, &mut local_cost)
+        // An existing key is written through the slot its lookup found.
+        let stored = if let Some((slot, _)) = tbl.find_slot(&key) {
+            if matches!(val, Val::Nil) {
+                tbl.remove_slot(slot);
+            } else {
+                tbl.store_slot(slot, val);
+            }
+            Ok(None)
         } else {
-            tbl.insert(key, val).map(|()| None).map_err(Into::into)
+            self.store_new_key(ptr, key, val, &mut local_cost)
         };
         let result = match stored {
             Ok(Some(units)) => {
