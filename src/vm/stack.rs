@@ -338,8 +338,14 @@ impl State {
     /// that would exceed `MAX_STRING_BYTES` is rejected before conversion.
     pub fn to_string(&mut self, idx: isize) -> Result<String> {
         self.check_usable()?;
+        let i = self.convert_idx(idx)?;
+        // A string converts straight from its heap bytes: one validation
+        // pass and one copy, with no owned intermediate.
+        if let Some(raw) = self.stack[i].as_string(&self.heap) {
+            return Self::lossy_utf8_from_slice(raw);
+        }
         let raw = self.bytes_with_default_string_coercion(idx)?;
-        Self::lossy_utf8_checked(&raw)
+        Self::lossy_utf8_from_vec(raw)
     }
 
     /// Byte length of `raw` after lossy UTF-8 conversion: each invalid UTF-8
@@ -358,11 +364,42 @@ impl State {
             .sum()
     }
 
-    /// Lossy UTF-8 conversion preflighted against `MAX_STRING_BYTES`: invalid
-    /// bytes expand up to threefold, so a capped Lua string can otherwise
-    /// produce an over-cap Rust `String`.
-    pub(crate) fn lossy_utf8_checked(raw: &[u8]) -> Result<String> {
-        crate::limits::checked_string_growth(0, Self::lossy_utf8_len(raw))?;
+    /// Lossy UTF-8 conversion of borrowed bytes, preflighted against
+    /// `MAX_STRING_BYTES`: invalid bytes expand up to threefold, so a capped
+    /// Lua string can otherwise produce an over-cap Rust `String`. The
+    /// expanded length is computed in full before any rejection, so the
+    /// reported size is exact. Valid input is validated once and copied once;
+    /// invalid input rescans only from the first invalid byte.
+    pub(crate) fn lossy_utf8_from_slice(raw: &[u8]) -> Result<String> {
+        match std::str::from_utf8(raw) {
+            Ok(text) => {
+                crate::limits::checked_string_growth(0, text.len())?;
+                Ok(text.to_owned())
+            }
+            Err(e) => Self::lossy_utf8_after_error(raw, e.valid_up_to()),
+        }
+    }
+
+    /// [`State::lossy_utf8_from_slice`] for owned bytes: valid input becomes
+    /// the `String` in place, without a copy.
+    pub(crate) fn lossy_utf8_from_vec(raw: Vec<u8>) -> Result<String> {
+        match String::from_utf8(raw) {
+            Ok(text) => {
+                crate::limits::checked_string_growth(0, text.len())?;
+                Ok(text)
+            }
+            Err(e) => {
+                let valid_up_to = e.utf8_error().valid_up_to();
+                Self::lossy_utf8_after_error(&e.into_bytes(), valid_up_to)
+            }
+        }
+    }
+
+    /// The lossy path once `raw[..valid_up_to]` is known valid: the prefix
+    /// contributes its own length, so only the rest is walked for the size.
+    fn lossy_utf8_after_error(raw: &[u8], valid_up_to: usize) -> Result<String> {
+        let len = valid_up_to + Self::lossy_utf8_len(&raw[valid_up_to..]);
+        crate::limits::checked_string_growth(0, len)?;
         Ok(String::from_utf8_lossy(raw).into_owned())
     }
 

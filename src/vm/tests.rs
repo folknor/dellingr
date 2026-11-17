@@ -994,6 +994,26 @@ fn table_next_preflights_its_net_growth_before_replacing_the_key() {
 }
 
 #[test]
+fn lossy_utf8_forms_agree_on_text_and_expanded_length() {
+    // The lossy length skips the valid prefix found by validation, so mixed
+    // inputs must still count every replacement character.
+    let cases: [&[u8]; 6] = [
+        b"",
+        b"plain",
+        "caf\u{e9}".as_bytes(),
+        b"ok\xffmid\xc3",
+        b"\xe2\x82",
+        b"\xff\xfe\xfdtail",
+    ];
+    for raw in cases {
+        let expected = String::from_utf8_lossy(raw).into_owned();
+        assert_eq!(State::lossy_utf8_len(raw), expected.len());
+        assert_eq!(State::lossy_utf8_from_slice(raw).unwrap(), expected);
+        assert_eq!(State::lossy_utf8_from_vec(raw.to_vec()).unwrap(), expected);
+    }
+}
+
+#[test]
 fn table_remove_at_does_not_mutate_when_the_result_has_nowhere_to_go() {
     // The removed value can only be returned by pushing it. If the push is
     // going to fail, the element must still be in the table afterwards.

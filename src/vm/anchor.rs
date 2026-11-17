@@ -177,6 +177,15 @@ impl Registry {
         }
     }
 
+    // Synchronization overhead, from the source: one mutex acquisition (the
+    // drain's swap) and one Arc clone per insert; one mutex acquisition and
+    // one Arc drop per armed handle drop. The shared queue is what lets a
+    // handle drop on any thread and after its State is gone. A cheaper
+    // scoped root for values that never escape a host callback was weighed
+    // and not built: no host shows anchor churn (the documented pattern
+    // reuses one anchor across ticks), and such roots would be a separate
+    // host API with its own root lifetime, shaped like `with_rooted_values`,
+    // not a change to this queue.
     pub(crate) fn insert(&mut self, value: Val) -> Anchor {
         // Recycle dropped slots first, so a host that never collects still
         // keeps the registry at its live size.

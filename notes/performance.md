@@ -942,7 +942,8 @@ access moves keys and values through stack operations.
 validated probe while still reading the current binding; a record view
 validating its table once; field descriptors resolving names and keeping
 validated slot information; reads converting straight to scalars or borrowed
-bytes; writes through slot stores with today's semantic fallback. The
+bytes (owned `String` decoding already validates once and copies once; a
+borrowed `&str` form must keep its strict invalid-UTF-8 error); writes through slot stores with today's semantic fallback. The
 primitives exist (`find_slot`, `read_slot`, `renew_slot`, `store_slot`, global
 `HashProbe`; `eval_index.rs` shows identity plus slot validation). No temporary
 map or vector of decoded fields. Persistent entity tables benefit from slot
@@ -979,27 +980,6 @@ outer binding changes, nested restrictions and discarded writes stay exact.
 
 **Classification:** full representation rewrite, conditional: near the top if
 the game restricts around every tick, irrelevant if restriction is setup-only.
-
-## PERF-035 - Local host-boundary changes
-
-Raised by the host-boundary hunter.
-
-- **Transient anchors for temporary values.** Anchor insertion drains a
-  mutex-protected release queue and clones an `Arc`; dropping queues the key
-  under the mutex (`anchor.rs`). Scoped values could stay in invocation-owned
-  root storage and take an owned anchor only when they escape. Ordinary anchor
-  lookup takes no lock, and reusing one function anchor across ticks already
-  avoids creation and release.
-- **`State::to_string` intermediate.** It gets owned bytes, then builds a Rust
-  string, an extra allocation and copy for a valid UTF-8 Lua string
-  (`stack.rs`); field decoding has no borrowed form. Rendered numbers and
-  metamethod results keep byte-exact behaviour.
-
-The hunter notes `HostCallbacks` handles printing and error notification only,
-so making it generic would not touch the multiplier, and Rust function
-dispatch is already an indexed function-pointer lookup.
-
-**Classification:** local.
 
 ---
 

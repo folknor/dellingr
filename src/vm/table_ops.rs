@@ -962,7 +962,7 @@ impl State {
                 "to_string_with_meta->tostring_bytes_unguarded",
                 state.tostring_bytes_unguarded(idx)
             )?;
-            Self::lossy_utf8_checked(&raw)
+            Self::lossy_utf8_from_vec(raw)
         })
     }
 
