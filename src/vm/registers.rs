@@ -475,21 +475,27 @@ impl State {
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     #[inline(never)]
     pub(super) fn reg_closure(&mut self, frame: &Frame, dst: usize, nested: u16) -> Result<()> {
-        let bytecode = frame.get_nested_bytecode(nested);
-        let runtime = self.resolve_bytecode_runtime(&bytecode)?;
-        let mut captured_upvalues = Vec::with_capacity(bytecode.upvalues.len());
-        for desc in &bytecode.upvalues {
-            let uv_ref = match desc {
-                // A local of the running frame.
-                UpvalueDesc::Local(idx) => {
-                    self.find_or_create_upvalue(frame.stack_bottom + *idx as usize)
-                }
-                // Shared with the running closure.
-                UpvalueDesc::Upvalue(idx) => frame.upvalues[*idx as usize],
-            };
-            captured_upvalues.push(uv_ref);
-        }
-        let obj = self.alloc_closure(bytecode, runtime, captured_upvalues);
+        let runtime = self.resolve_bytecode_runtime(frame.nested_bytecode(nested))?;
+        let descs = &runtime.bytecode.upvalues;
+        // Built straight into the closure's shared list: an exact-size
+        // iterator, so the collect allocates once with no staging buffer.
+        // Captures are made in descriptor order.
+        let upvalues = if descs.is_empty() {
+            self.heap.empty_upvalues()
+        } else {
+            descs
+                .iter()
+                .map(|desc| match desc {
+                    // A local of the running frame.
+                    UpvalueDesc::Local(idx) => {
+                        self.find_or_create_upvalue(frame.stack_bottom + *idx as usize)
+                    }
+                    // Shared with the running closure.
+                    UpvalueDesc::Upvalue(idx) => frame.upvalues[*idx as usize],
+                })
+                .collect()
+        };
+        let obj = self.alloc_closure(runtime, upvalues);
         self.stack[dst] = Val::Obj(obj);
         Ok(())
     }

@@ -1,10 +1,9 @@
 //! State collection protocol and explicit allocation modes.
 
 use super::{GcHeap, Markable, ObjectPtr, StringPtr, UpvalueRef};
-use crate::compiler::Bytecode;
+use crate::det_hash::IndexSet;
 use crate::vm::inventory::{GcCleanup, GcRoot};
 use crate::vm::{BytecodeRuntime, State, Val};
-use std::collections::BTreeSet;
 use std::sync::Arc;
 
 /// A single allocation which cannot collect while graph edges are installed.
@@ -27,11 +26,10 @@ impl GcHeap {
 impl NoGcAllocator<'_> {
     pub(in crate::vm) fn alloc_lua_fn(
         self,
-        bytecode: Arc<Bytecode>,
         runtime: Arc<BytecodeRuntime>,
-        upvalues: Vec<UpvalueRef>,
+        upvalues: Arc<[UpvalueRef]>,
     ) -> ObjectPtr {
-        self.heap.alloc_lua_fn_raw(bytecode, runtime, upvalues)
+        self.heap.alloc_lua_fn_raw(runtime, upvalues)
     }
 
     pub(in crate::vm) fn alloc_table(self) -> ObjectPtr {
@@ -64,13 +62,18 @@ impl NoGcAllocator<'_> {
 }
 
 /// Runtime-cache identities the root visit retained, for
-/// `State::sweep_bytecode_caches`.
+/// `State::sweep_bytecode_caches`. Collection scratch: the heap keeps one
+/// between collections (`GcHeap::take_live_chunks`), emptied but with its
+/// capacity, so a steady-state collection allocates nothing for it.
 #[derive(Default)]
 pub(in crate::vm) struct LiveChunks {
-    /// Active chunks with their nested prototype trees, each fully
+    /// Active chunks with their nested prototype graphs, each fully
     /// traversed: `State::retain_bytecode_tree` stops at an identity already
-    /// here, which is only sound because every entry's tree is in too.
-    pub(in crate::vm) trees: BTreeSet<usize>,
+    /// here, which is only sound because every entry's graph is in too. It
+    /// holds every identity walked, with or without a runtime entry, so a
+    /// prototype shared by several parents (a loaded save can share nested
+    /// chunks) is expanded once, not once per path to it.
+    pub(in crate::vm) trees: IndexSet<usize>,
     /// Pending closure-shell identities, retained exactly and not
     /// traversed. Kept apart from `trees` until every tree is in, or a
     /// pending identity would stop a marked closure of the same chunk from
@@ -159,12 +162,13 @@ impl State {
         self.registry.drain_released();
         // Mark all roots
         let mut worklist = self.heap.take_mark_worklist();
-        let mut live_chunks = LiveChunks::default();
+        let mut live_chunks = self.heap.take_live_chunks();
         self.mark_roots(&mut worklist, &mut live_chunks, |_| true);
         self.heap
             .drain_mark_worklist(&mut worklist, &self.upvalue_pool);
         self.heap.restore_mark_worklist(worklist);
-        self.sweep_bytecode_caches(live_chunks);
+        self.sweep_bytecode_caches(&mut live_chunks);
+        self.heap.restore_live_chunks(live_chunks);
         // Sweep unmarked objects
         self.heap.collect();
         // Weak references: clear runtime cache entries naming what a sweep
@@ -203,6 +207,7 @@ mod tests {
                 .heap
                 .as_lua_function_ref(main)
                 .expect("a closure")
+                .runtime
                 .bytecode,
         ) as usize;
         state.push_val(Val::Obj(main)).expect("push");

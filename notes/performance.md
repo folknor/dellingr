@@ -510,41 +510,33 @@ cache was declined at `array_len`. What remains:
 
 **Classification:** local.
 
-## PERF-020 - Closure creation through several allocations and owners
+## PERF-036 - One-capture closures still allocate a capture list
 
-Raised by the heap hunter (its third rewrite; the per-call `Arc` half is
-appended to `optimizations.md` "Call path after the frame-stack flattening").
+Raised while closing the closure-allocation entry. A capturing closure now
+costs one allocation, its `Arc<[UpvalueRef]>` capture list (`reg_closure` in
+`registers.rs`). An empty / one inline `UpvalueRef` / shared slice
+representation in both `Closure` and `Frame` would remove it for the
+one-capture case (the `closure` workload's shape), with the same cell
+identity. Select the representation once on entry to `run_frame` and borrow
+the inline word as a one-element slice, so `GET_UPVAL`/`SET_UPVAL` keep
+indexing a slice. The cost is a wider `Frame` written per call and a slice
+kept live in dispatch; measure `native_bytes_per_level` and the call-heavy
+workloads against the allocation saved.
 
-**Bottleneck:** `reg_closure` (`registers.rs`) allocates a temporary capture
-`Vec`; `alloc_lua_fn_raw` (`object.rs`) converts it to an `Arc` slice; the
-closure gets a `Box`; the box occupies a table-sized slotmap slot; the closure
-owns separate `Arc`s for bytecode and runtime. Collection gathers active chunk
-identities into a fresh `BTreeSet`, recursively retains prototype trees, flags
-runtimes while tracing closures, then scans the runtime map to reconcile
-(`LiveChunks` in `collector.rs`, `sweep_bytecode_caches` in `vm.rs`). Both
-halves are allocated fresh per collection; reusing them would keep only the
-`pending` `Vec`'s capacity, since a cleared `BTreeSet` frees its nodes, so the
-scratch cost goes with this restructure rather than with a reuse patch. Any
-replacement keeps the one-collection grace for a dropped runtime's literals.
+**Classification:** experiment.
 
-**Redesign:** a closure is a compact arena record holding an executable-record
-ID and its capture references, filled in final storage, with size classes for
-common capture counts. One State-owned executable record holds the bytecode
-owner, runtime literals, caches and links to nested records; closures, frames
-and activation records carry IDs; `Program` keeps its outer `Arc`. Executable
-records carry collection epochs and direct child IDs, marked from active
-frames, pending construction and traced closures through an iterative work
-queue, with no temporary ordered set.
+## PERF-037 - `CLOSURE` finds its runtime by a pointer-keyed map lookup
 
-**Risks:** keep capture aliasing exact (sibling closures sharing a mutable
-cell, scope exits, tail calls, error cleanup); snapshots record shared upvalue
-identities, so copying apparently immutable captures by value needs extra work
-to reproduce the saved graph. The one-collection grace for literals of
-discarded runtime records must survive, or weak string identity and
-allocation counts change. Afterwards, if this works, compiler-proven immutable
-captures are a separate opportunity.
+Raised while closing the closure-allocation entry. `reg_closure` resolves the
+nested chunk's runtime through `State::bytecode_caches` keyed by bytecode
+address (a hash lookup per closure created). Direct child indices on the
+parent runtime (a per-runtime vector of the nested runtimes, filled lazily,
+since eager bundles would intern literals the continuous State never
+interned and change `%p` identities and save membership) would make it an
+index. Entry lifetime is still decided by the cache sweep, so a child slot
+must not keep a dropped runtime alive or name a stale one.
 
-**Classification:** rewrite, high conviction.
+**Classification:** experiment.
 
 ## PERF-021 - Marking scans scalar payload
 

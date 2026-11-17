@@ -24,6 +24,13 @@ use crate::instr::{ArgCount, CompareOp, RetCount};
 /// Its length can differ while an instruction's call window is open, and
 /// between a verified open-result producer and its next-instruction consumer,
 /// when it can be shorter or longer than `top`.
+///
+/// The frame owns its code handles rather than naming a State-owned record
+/// by id: the dispatch loop holds them by shared reference while it mutates
+/// the State, which an id resolved through the State cannot give without a
+/// lookup per access or a raw pointer whose validity would rest on rooting
+/// (and a Rust tail callee may collect the retired caller's closure while its
+/// activation record remains).
 pub(super) struct Frame {
     /// The bytecode being executed (shared via Arc; cheap to clone, immutable).
     bytecode: Arc<Bytecode>,
@@ -116,8 +123,8 @@ impl Frame {
     }
 
     #[must_use]
-    pub(super) fn get_nested_bytecode(&self, i: u16) -> Arc<Bytecode> {
-        Arc::clone(&self.bytecode.nested[i as usize])
+    pub(super) fn nested_bytecode(&self, i: u16) -> &Arc<Bytecode> {
+        &self.bytecode.nested[i as usize]
     }
 
     #[must_use]
@@ -1027,7 +1034,7 @@ mod tests {
             .expect("admission checks bounds but does not prove numeric control types");
         let mut state = State::new();
         state
-            .push_chunk(Arc::new(bytecode))
+            .push_chunk(&Arc::new(bytecode))
             .expect("the admitted chunk fits in the state");
         let error = state
             .call(ArgCount::Fixed(0), RetCount::Fixed(0))
@@ -1110,7 +1117,7 @@ mod tests {
             .expect("admission does not prove windows start above captured locals");
         let mut state = State::new();
         state
-            .push_chunk(Arc::new(bytecode))
+            .push_chunk(&Arc::new(bytecode))
             .expect("the admitted chunk fits in the state");
         let error = state
             .call(ArgCount::Fixed(0), RetCount::Fixed(0))

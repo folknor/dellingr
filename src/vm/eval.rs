@@ -1014,7 +1014,7 @@ impl State {
             Val::Obj(ptr) => self
                 .heap
                 .as_lua_function_ref(ptr)
-                .map(|closure| Arc::clone(&closure.bytecode)),
+                .map(|closure| Arc::clone(closure.bytecode())),
             _ => None,
         }
     }
@@ -1027,7 +1027,7 @@ impl State {
             .and_then(|ptr| self.heap.as_lua_function_ref(ptr))
             .expect("an admitted Lua activation's function slot holds its closure");
         Frame::new(
-            Arc::clone(&closure.bytecode),
+            Arc::clone(closure.bytecode()),
             Arc::clone(&closure.runtime),
             Arc::clone(&closure.upvalues),
             self.in_flight.stack_bottom,
@@ -1330,32 +1330,25 @@ impl State {
         error.with_vm_fault(instruction, inst.opcode(), bytecode.name.as_ref())
     }
 
-    pub(crate) fn push_chunk(&mut self, bytecode: Arc<Bytecode>) -> Result<()> {
-        self.push_closure(bytecode, Vec::new())
-    }
-
+    /// Push a closure of `bytecode` with no captures.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    pub(super) fn push_closure(
-        &mut self,
-        bytecode: Arc<Bytecode>,
-        upvalues: Vec<UpvalueRef>,
-    ) -> Result<()> {
+    pub(crate) fn push_chunk(&mut self, bytecode: &Arc<Bytecode>) -> Result<()> {
         self.check_stack_space(1)?;
-        let runtime = self.resolve_bytecode_runtime(&bytecode)?;
-        let obj = self.alloc_closure(bytecode, runtime, upvalues);
+        let runtime = self.resolve_bytecode_runtime(bytecode)?;
+        let upvalues = self.heap.empty_upvalues();
+        let obj = self.alloc_closure(runtime, upvalues);
         self.push_unchecked(Val::Obj(obj));
         Ok(())
     }
 
-    /// Allocate a closure over `bytecode` with its resolved `runtime`. The
-    /// caller roots the result before anything else can collect.
+    /// Allocate a closure with its resolved `runtime`. The caller roots the
+    /// result before anything else can collect.
     pub(super) fn alloc_closure(
         &mut self,
-        bytecode: Arc<Bytecode>,
         runtime: Arc<super::BytecodeRuntime>,
-        upvalues: Vec<UpvalueRef>,
+        upvalues: Arc<[UpvalueRef]>,
     ) -> super::object::ObjectPtr {
-        let identity = Arc::as_ptr(&bytecode) as usize;
+        let identity = Arc::as_ptr(&runtime.bytecode) as usize;
         // No host callback or fallible operation occurs from this push through
         // its matching pop. The allocator's collection check must see the
         // pending identity so its cache sweep retains the runtime before the
@@ -1363,13 +1356,13 @@ impl State {
         // Nested captures finish beforehand.
         self.in_flight.pending_bytecode_caches.push(identity);
         let runtime_ptr = Arc::as_ptr(&runtime);
-        let obj = self.allocator().alloc_lua_fn(bytecode, runtime, upvalues);
+        let obj = self.allocator().alloc_lua_fn(runtime, upvalues);
         // A collection inside `allocator` must have kept this runtime as the
         // cached one, or the weak cache processing would no longer reach it.
         debug_assert!(
             self.bytecode_caches
                 .get(&identity)
-                .is_some_and(|entry| std::ptr::eq(Arc::as_ptr(&entry.runtime), runtime_ptr))
+                .is_some_and(|runtime| std::ptr::eq(Arc::as_ptr(runtime), runtime_ptr))
         );
         let pending = self
             .in_flight
@@ -1433,7 +1426,7 @@ impl State {
         // a call would have it.
         let bytecode = Arc::new(bytecode);
         let func_slot = self.stack.len() - num_args as usize;
-        self.push_chunk(Arc::clone(&bytecode))?;
+        self.push_chunk(&bytecode)?;
         let func = self.pop_val();
         self.stack.insert(func_slot, func);
         let old_stack_bottom = self.in_flight.stack_bottom;

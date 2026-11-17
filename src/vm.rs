@@ -53,8 +53,7 @@ pub use save_state::{
 pub(crate) use string_arg::StringArg;
 pub(crate) use table_ops::{ConcatRead, TostringRendering};
 
-use crate::det_hash::IndexMap;
-use std::collections::BTreeSet;
+use crate::det_hash::{IndexMap, IndexSet};
 use std::sync::Arc;
 
 use super::Instr;
@@ -190,17 +189,15 @@ impl State {
     }
 }
 
-/// State-local runtime data for one immutable bytecode chunk.
+/// State-local runtime data for one immutable bytecode chunk, and the owner
+/// of that chunk for the State's closures.
 #[derive(Debug)]
 struct BytecodeRuntime {
+    /// The chunk. Also pins the pointer-derived `State::bytecode_caches`
+    /// identity against allocator ABA reuse.
+    bytecode: Arc<Bytecode>,
     literals: Box<[Val]>,
     caches: RuntimeCaches,
-}
-
-struct BytecodeCacheEntry {
-    /// Pins the pointer-derived map identity against allocator ABA reuse.
-    bytecode: Arc<Bytecode>,
-    runtime: Arc<BytecodeRuntime>,
 }
 
 /// The main interface into the Lua VM.
@@ -231,8 +228,9 @@ pub struct State {
     pub(super) in_flight: InFlight,
     /// The heap which holds any garbage-collected Objects.
     pub(super) heap: GcHeap,
-    /// State-local runtime data, keyed by the pinned Bytecode allocation.
-    bytecode_caches: IndexMap<usize, BytecodeCacheEntry>,
+    /// State-local runtime data, keyed by the address of the Bytecode
+    /// allocation each runtime pins.
+    bytecode_caches: IndexMap<usize, Arc<BytecodeRuntime>>,
     /// Environments suspended by `with_restricted_env`, innermost last.
     /// Host-held, like `stack`: non-empty while a host callback runs inside
     /// a restricted environment, refused by a snapshot.
@@ -962,25 +960,27 @@ impl State {
     /// every closure's runtime is its bytecode's entry here, so the flagged
     /// entries are exactly the bytecodes of the marked closures. They are
     /// added here, before the pending identities.
-    fn sweep_bytecode_caches(&mut self, live: object::LiveChunks) {
+    fn sweep_bytecode_caches(&mut self, live: &mut object::LiveChunks) {
         // Bytecode identity deduplication also covers nested prototypes and
         // active/pending functions with no reachable heap closure. Keep one
-        // ordered set for all three sources rather than treating the heap's
-        // marked closures as the complete runtime-cache root set.
-        let object::LiveChunks {
-            trees: mut live,
-            pending,
-        } = live;
-        for entry in self.bytecode_caches.values() {
+        // set for all three sources rather than treating the heap's marked
+        // closures as the complete runtime-cache root set. The set's order
+        // is never read: `retain` walks the map in its own order.
+        let object::LiveChunks { trees, pending } = live;
+        for runtime in self.bytecode_caches.values() {
             // Take every flag, even for an entry already retained through a
             // tree, so none is left set for the next collection.
-            if entry.runtime.caches.take_reached() {
-                Self::retain_bytecode_tree(&mut live, &entry.bytecode);
+            if runtime.caches.take_reached() {
+                Self::retain_bytecode_tree(trees, &runtime.bytecode);
             }
         }
-        live.extend(pending);
+        // One insert each, not `extend`: that reserves for the whole input,
+        // duplicates included.
+        for identity in pending.drain(..) {
+            trees.insert(identity);
+        }
         self.bytecode_caches
-            .retain(|identity, _| live.contains(identity));
+            .retain(|identity, _| trees.contains(identity));
     }
 
     /// Clear every runtime cache entry that names an object the sweep freed
@@ -996,8 +996,8 @@ impl State {
     #[inline(never)]
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn drop_dead_cache_entries(&self) {
-        for entry in self.bytecode_caches.values() {
-            entry.runtime.caches.drop_dead_entries(&self.heap);
+        for runtime in self.bytecode_caches.values() {
+            runtime.caches.drop_dead_entries(&self.heap);
         }
     }
 
@@ -1009,18 +1009,18 @@ impl State {
     #[cfg(debug_assertions)]
     fn check_closure_runtimes(&self) {
         for closure in self.heap.closures() {
-            let identity = Arc::as_ptr(&closure.bytecode) as usize;
+            let identity = Arc::as_ptr(closure.bytecode()) as usize;
             debug_assert!(
                 self.bytecode_caches
                     .get(&identity)
-                    .is_some_and(|entry| Arc::ptr_eq(&entry.runtime, &closure.runtime)),
+                    .is_some_and(|runtime| Arc::ptr_eq(runtime, &closure.runtime)),
                 "a surviving closure's runtime is not the cached runtime for its bytecode, \
                  so weak cache processing would miss it"
             );
         }
     }
 
-    fn retain_bytecode_tree(live: &mut BTreeSet<usize>, bytecode: &Arc<Bytecode>) {
+    fn retain_bytecode_tree(live: &mut IndexSet<usize>, bytecode: &Arc<Bytecode>) {
         if !live.insert(Arc::as_ptr(bytecode) as usize) {
             return;
         }
@@ -1037,8 +1037,8 @@ impl State {
         bytecode: &Arc<Bytecode>,
     ) -> Result<Arc<BytecodeRuntime>> {
         let identity = Arc::as_ptr(bytecode) as usize;
-        if let Some(entry) = self.bytecode_caches.get(&identity) {
-            return Ok(Arc::clone(&entry.runtime));
+        if let Some(runtime) = self.bytecode_caches.get(&identity) {
+            return Ok(Arc::clone(runtime));
         }
         for literal in &bytecode.string_literals {
             check_string_size(literal.len())?;
@@ -1052,16 +1052,11 @@ impl State {
                 literals.push(value);
             }
             let runtime = Arc::new(BytecodeRuntime {
+                bytecode: Arc::clone(bytecode),
                 literals: literals.into_boxed_slice(),
                 caches: RuntimeCaches::new(bytecode),
             });
-            self.bytecode_caches.insert(
-                identity,
-                BytecodeCacheEntry {
-                    bytecode: Arc::clone(bytecode),
-                    runtime: Arc::clone(&runtime),
-                },
-            );
+            self.bytecode_caches.insert(identity, Arc::clone(&runtime));
             Ok(runtime)
         })();
         self.in_flight.rooted_values.truncate(watermark);
@@ -1071,8 +1066,8 @@ impl State {
     #[cfg(feature = "snapshot")]
     fn resolve_bytecode_runtime_no_gc(&mut self, bytecode: &Arc<Bytecode>) -> Arc<BytecodeRuntime> {
         let identity = Arc::as_ptr(bytecode) as usize;
-        if let Some(entry) = self.bytecode_caches.get(&identity) {
-            return Arc::clone(&entry.runtime);
+        if let Some(runtime) = self.bytecode_caches.get(&identity) {
+            return Arc::clone(runtime);
         }
         let literals = bytecode
             .string_literals
@@ -1081,16 +1076,11 @@ impl State {
             .collect::<Vec<_>>()
             .into_boxed_slice();
         let runtime = Arc::new(BytecodeRuntime {
+            bytecode: Arc::clone(bytecode),
             literals,
             caches: RuntimeCaches::new(bytecode),
         });
-        self.bytecode_caches.insert(
-            identity,
-            BytecodeCacheEntry {
-                bytecode: Arc::clone(bytecode),
-                runtime: Arc::clone(&runtime),
-            },
-        );
+        self.bytecode_caches.insert(identity, Arc::clone(&runtime));
         runtime
     }
 
@@ -1783,10 +1773,10 @@ mod runtime_tests {
             ..Bytecode::default()
         });
         state
-            .push_closure(Arc::clone(&bytecode), Vec::new())
+            .push_chunk(&bytecode)
             .expect("first closure allocates");
         state
-            .push_closure(Arc::clone(&bytecode), Vec::new())
+            .push_chunk(&bytecode)
             .expect("second closure allocates");
         let second = state
             .pop_val()
@@ -1845,9 +1835,7 @@ mod runtime_tests {
             string_literals: vec![b"temporary".to_vec()],
             ..Bytecode::default()
         });
-        state
-            .push_closure(Arc::clone(&bytecode), Vec::new())
-            .expect("closure allocates");
+        state.push_chunk(&bytecode).expect("closure allocates");
         state.pop_val();
         state.gc_collect();
         assert!(state.bytecode_caches.is_empty());
@@ -1916,7 +1904,7 @@ mod runtime_tests {
                 tfor_cursor,
                 // The collector's mark flag, not a cache family.
                 reached: _,
-            } = &entry.runtime.caches;
+            } = &entry.caches;
             // Register each enumeration even if its slots are all empty.
             // The exhaustive bundle destructuring above requires new fields
             // to be assigned an enumeration here.
@@ -2210,7 +2198,7 @@ mod runtime_tests {
         // The same invariant through the collector's own enumeration, which
         // covers every family and handle field.
         for entry in state.bytecode_caches.values() {
-            for val in entry.runtime.caches.named_handles() {
+            for val in entry.caches.named_handles() {
                 assert!(live(&val), "a cache entry names a freed value");
             }
         }
@@ -2220,7 +2208,7 @@ mod runtime_tests {
     fn method_positions(state: &State) -> Vec<[Option<ObjectPtr>; caches::METHOD_ENTRIES]> {
         let mut sites = Vec::new();
         for entry in state.bytecode_caches.values() {
-            for slot in &entry.runtime.caches.field_lookup {
+            for slot in &entry.caches.field_lookup {
                 let positions = std::array::from_fn(|position| {
                     slot.get_method(position).map(|e| e.receiver_metatable)
                 });
@@ -2301,13 +2289,9 @@ mod runtime_tests {
             nested: vec![Arc::clone(&child)],
             ..Bytecode::default()
         });
-        state
-            .push_closure(Arc::clone(&child), Vec::new())
-            .expect("child closure allocates");
+        state.push_chunk(&child).expect("child closure allocates");
         state.pop_val();
-        state
-            .push_closure(Arc::clone(&parent), Vec::new())
-            .expect("parent closure allocates");
+        state.push_chunk(&parent).expect("parent closure allocates");
         state.gc_collect();
         assert_eq!(state.bytecode_caches.len(), 2);
         state.pop_val();

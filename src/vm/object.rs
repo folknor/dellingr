@@ -220,17 +220,28 @@ impl UpvaluePool {
 
 /// A Lua closure: a function with captured upvalues.
 ///
-/// `bytecode` is immutable and `Arc`-shareable. `runtime` is State-local,
-/// shared by every closure of this bytecode and any executing frames; its
-/// caches are never serialized and its literals are GC roots.
+/// `runtime` is State-local, shared by every closure of its bytecode and any
+/// executing frames, and owns that immutable bytecode (`Self::bytecode`), so
+/// a closure holds one handle for both; its caches are never serialized and
+/// its literals are GC roots. Stored inline in its heap slot: the slot is
+/// table-sized anyway, and a box would cost an allocation per closure and a
+/// dependent load on every call admission.
 #[derive(Clone, Debug)]
 pub(super) struct Closure {
-    pub(super) bytecode: Arc<Bytecode>,
     pub(super) runtime: Arc<BytecodeRuntime>,
     /// `Arc<[..]>` lets admitted frames share the immutable upvalue-reference
     /// list with the closure. Writes go through the `UpvaluePool` slots the
     /// refs point at, so the list never needs to be copied for a call.
+    /// Captures stored inline in the heap slot would save this allocation
+    /// but force a copy into every frame (frames cannot borrow the heap).
     pub(super) upvalues: Arc<[UpvalueRef]>,
+}
+
+impl Closure {
+    /// The closure's immutable bytecode, owned by its runtime.
+    pub(super) fn bytecode(&self) -> &Arc<Bytecode> {
+        &self.runtime.bytecode
+    }
 }
 
 /// The raw object data managed by GC.
@@ -239,12 +250,15 @@ pub(super) struct Closure {
 /// pay for this enum's largest variant. Boxing tables would add an allocation
 /// and indirection to every table, including small records; keep them inline
 /// unless measurements justify that tradeoff.
-#[expect(
-    clippy::large_enum_variant,
-    reason = "Table is stored inline so table access takes no extra indirection; the exact live-slot count pushed it past the lint threshold"
+#[cfg_attr(
+    debug_assertions,
+    expect(
+        clippy::large_enum_variant,
+        reason = "Table is stored inline so table access takes no extra indirection; its debug-only state pushes the gap to the inline closure past the lint threshold, which release builds stay under"
+    )
 )]
 pub(super) enum RawObject {
-    LuaFn(Box<Closure>),
+    LuaFn(Closure),
     Table(Table),
 }
 
@@ -419,6 +433,8 @@ pub(crate) struct GcHeap {
     strings: StringPool,
     /// Reused scratch space for the iterative GC mark phase.
     mark_worklist: Vec<ObjectPtr>,
+    /// Reused scratch space for the runtime-cache sweep's chunk retention.
+    live_chunks: LiveChunks,
     /// Shared empty upvalue list for closures without captures, so their
     /// construction stays allocation-free (a fresh `Arc<[_]>` would pay an
     /// Arc-header allocation where a `Vec::new` paid nothing).
@@ -445,6 +461,7 @@ impl GcHeap {
             policy,
             strings: StringPool::new(),
             mark_worklist: Vec::new(),
+            live_chunks: LiveChunks::default(),
             empty_upvalues: Arc::from([]),
             watched: ObjectPtr(ObjectKey::null()),
             watched_epoch: 0,
@@ -473,6 +490,7 @@ impl GcHeap {
             policy: GcPolicy::default(),
             strings: StringPool::new(),
             mark_worklist: Vec::new(),
+            live_chunks: LiveChunks::default(),
             empty_upvalues: Arc::from([]),
             watched: ObjectPtr(ObjectKey::null()),
             watched_epoch: 0,
@@ -553,7 +571,7 @@ impl GcHeap {
     #[cfg(test)]
     pub(super) fn as_lua_function(&self, ptr: ObjectPtr) -> Option<Closure> {
         match &self.get(ptr).raw {
-            RawObject::LuaFn(closure) => Some((**closure).clone()),
+            RawObject::LuaFn(closure) => Some(closure.clone()),
             _ => None,
         }
     }
@@ -592,25 +610,19 @@ impl GcHeap {
     // Allocation
     // ========================================================================
 
+    /// The shared capture list of every closure without captures.
+    pub(super) fn empty_upvalues(&self) -> Arc<[UpvalueRef]> {
+        Arc::clone(&self.empty_upvalues)
+    }
+
     /// Allocate a new Lua function.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn alloc_lua_fn_raw(
         &mut self,
-        bytecode: Arc<Bytecode>,
         runtime: Arc<BytecodeRuntime>,
-        upvalues: Vec<UpvalueRef>,
+        upvalues: Arc<[UpvalueRef]>,
     ) -> ObjectPtr {
-        let upvalues = if upvalues.is_empty() {
-            Arc::clone(&self.empty_upvalues)
-        } else {
-            upvalues.into()
-        };
-        let closure = Closure {
-            bytecode,
-            runtime,
-            upvalues,
-        };
-        let raw = RawObject::LuaFn(Box::new(closure));
+        let raw = RawObject::LuaFn(Closure { runtime, upvalues });
         let wrapped = WrappedObject {
             raw,
             color: Cell::new(Color::Unmarked),
@@ -694,6 +706,17 @@ impl GcHeap {
             obj.color.set(Color::Reachable);
             worklist.push(ptr);
         }
+    }
+
+    pub(super) fn take_live_chunks(&mut self) -> LiveChunks {
+        std::mem::take(&mut self.live_chunks)
+    }
+
+    /// Keep the scratch for the next collection, emptied.
+    pub(super) fn restore_live_chunks(&mut self, mut live: LiveChunks) {
+        live.trees.clear();
+        live.pending.clear();
+        self.live_chunks = live;
     }
 
     pub(super) fn take_mark_worklist(&mut self) -> Vec<ObjectPtr> {
@@ -817,7 +840,7 @@ impl GcHeap {
         self.objects
             .values()
             .filter_map(|object| match &object.raw {
-                RawObject::LuaFn(closure) => Some(&**closure),
+                RawObject::LuaFn(closure) => Some(closure),
                 RawObject::Table(_) => None,
             })
     }

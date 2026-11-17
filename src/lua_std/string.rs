@@ -1431,7 +1431,7 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
 }
 
 fn push_gmatch_wrapper(state: &mut State, iterator: crate::vm::RustFnId) -> Result<u8> {
-    state.push_chunk(gmatch_wrapper())?;
+    state.push_chunk(&gmatch_wrapper())?;
     state.push_rust_fn_id(iterator)?;
     state.push_value(1)?;
     state.remove(1)?;

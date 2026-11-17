@@ -364,9 +364,9 @@ impl State {
 
         visit(GcRoot::Stack(stack));
         visit(GcRoot::Globals(global_env));
-        for (identity, entry) in bytecode_caches {
-            debug_assert_eq!(*identity, Arc::as_ptr(&entry.bytecode) as usize);
-            visit(GcRoot::ChunkLiterals(&entry.runtime.literals));
+        for (identity, runtime) in bytecode_caches {
+            debug_assert_eq!(*identity, Arc::as_ptr(&runtime.bytecode) as usize);
+            visit(GcRoot::ChunkLiterals(&runtime.literals));
         }
         visit(GcRoot::MetaNames(meta_names));
         if let Some(mt) = string_metatable {
@@ -482,7 +482,7 @@ mod tests {
             InFlight {
                 stack_bottom: 1,
                 call_stack: vec![CallInfo {
-                    bytecode: closure.bytecode,
+                    bytecode: Arc::clone(closure.bytecode()),
                     ip: 0,
                     vararg_start: 0,
                     chain: crate::vm::ChainUnits::NONE,
@@ -603,7 +603,7 @@ mod tests {
             "a call pools its frame stack"
         );
         state.frame_stacks[0].push(super::super::frame::Frame::new(
-            closure.bytecode,
+            Arc::clone(closure.bytecode()),
             closure.runtime,
             closure.upvalues,
             0,

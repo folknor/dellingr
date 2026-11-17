@@ -864,8 +864,8 @@ impl<'a> SaveBuilder<'a> {
         let mut chunks: Vec<_> = self.bytecode_ids.iter().collect();
         chunks.sort_unstable_by_key(|(_, id)| **id);
         for (key, _) in chunks {
-            if let Some(entry) = self.state.bytecode_caches.get(key) {
-                identity_strings.extend(entry.runtime.literals.iter().copied());
+            if let Some(runtime) = self.state.bytecode_caches.get(key) {
+                identity_strings.extend(runtime.literals.iter().copied());
             }
         }
         for value in identity_strings {
@@ -1320,7 +1320,7 @@ impl<'a> SaveBuilder<'a> {
                 }
             }
             RawObject::LuaFn(closure) => {
-                let chunk = self.encode_bytecode(&closure.bytecode)?;
+                let chunk = self.encode_bytecode(closure.bytecode())?;
                 for (idx, uv_ref) in closure.upvalues.iter().copied().enumerate().rev() {
                     tasks.push(EncodeTask::Upvalue {
                         upvalue: uv_ref,
@@ -1731,19 +1731,23 @@ fn materialize_payload(
                 chunk,
                 upvalues: saved_upvalues,
             } => {
-                let bc = Arc::clone(bytecode.get(*chunk as usize).ok_or_else(|| {
+                let bc = bytecode.get(*chunk as usize).ok_or_else(|| {
                     corrupt_arena(
                         CorruptionReason::IdOutOfRange(SavedReference::ClosureChunk),
                         *chunk as usize,
                         SaveLocation::Bytecode,
                     )
-                })?);
-                let mut refs = Vec::with_capacity(saved_upvalues.len());
-                for uv_id in saved_upvalues {
-                    refs.push(*upvalues_ref(&upvalues, *uv_id)?);
-                }
-                let runtime = state.resolve_bytecode_runtime_no_gc(&bc);
-                state.heap.no_gc_allocator().alloc_lua_fn(bc, runtime, refs)
+                })?;
+                let refs = if saved_upvalues.is_empty() {
+                    state.heap.empty_upvalues()
+                } else {
+                    saved_upvalues
+                        .iter()
+                        .map(|uv_id| upvalues_ref(&upvalues, *uv_id).copied())
+                        .collect::<Result<_, _>>()?
+                };
+                let runtime = state.resolve_bytecode_runtime_no_gc(bc);
+                state.heap.no_gc_allocator().alloc_lua_fn(runtime, refs)
             }
         };
         objects.push(ptr);

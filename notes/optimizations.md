@@ -300,6 +300,14 @@ since 27ee714. What B-O1 listed and is still open:
   admission, then `admitted_frame`); on `composite/benchmark` at afcd2f0
   (plantasjen) the two lookups' instrumented total matched c2932f8's single
   lookup plus `initialize_frame`, so this is not a measured regression.
+  The closure's bytecode is now read through its runtime (one owner), so the
+  bytecode clones load one hop further. A route that removes the clones
+  without raw pointers (from a 2026-11-17 spar): split dispatch into segments
+  that end at every operation that can collect or re-enter, resolve an
+  executable id once per segment and borrow its descriptor beside disjoint
+  mutable services; a Rust tail callee keeps the id rooted through the
+  diagnostic activation. The cost is segment exits and re-resolution at those
+  boundaries, so it hinges on how often they occur.
 - `CallInfo` still parallels the frame stack (bytecode + ip for tracebacks,
   `print` locations and the cache sweep). Merging needs the traceback to read
   every invocation's frames, including the current frame of each natively

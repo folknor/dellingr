@@ -348,7 +348,7 @@ impl State {
     /// and heap; only the immutable bytecode is shared).
     pub fn load(&mut self, program: &Program) -> Result<()> {
         self.check_usable()?;
-        self.push_chunk(Arc::clone(&program.bytecode))?;
+        self.push_chunk(&program.bytecode)?;
         Ok(())
     }
 }

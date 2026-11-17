@@ -195,6 +195,30 @@ with an unrelated metatable or a `__len` handler. Native bytes per level
 release rows are unchanged; in the dev profile the `concat_*` rows shrank
 128 bytes and the `unpack_*` rows grew 48.
 
+## Closure creation in one allocation, 2026-11-17
+
+A closure is stored inline in its heap slot (no `Box`), its runtime owns
+its bytecode (one handle instead of two), and `reg_closure` collects its
+captures straight into the shared `Arc<[UpvalueRef]>` with no staging
+`Vec`: a capturing closure went from three allocations, one immediate free
+and two reference-count increments to one allocation and one increment; a
+capture-free one (every `string.gmatch` call makes one) allocates nothing
+of its own. The cache sweep's chunk-retention set is a reused hash set kept
+by the heap instead of a fresh `BTreeSet` per collection. Against its parent
+851d129 on bygg, `brokkr bench wall` (best of 3), base and change
+interleaved as A B B A:
+
+| Workload | 851d129 | Change |
+|---|---|---|
+| `closure` | 3.5 s, 3.5 s | 2.9 s, 2.9 s |
+| `gc_churn` | 3.2 s, 3.2 s | 2.9 s, 2.9 s |
+| `arithmetic` | 2.9 s | 2.9 s |
+| `method` | 3.1 s | 3.2 s |
+
+`arithmetic` and `method` are one pair each, a check that the call path
+(which now reads a closure's bytecode through its runtime) did not regress;
+the `method` step is inside the layout-noise band.
+
 ## Native stack frames and cycles
 
 The log behind reference/native-calls.md's current table: the frame-size
