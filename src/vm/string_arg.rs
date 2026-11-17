@@ -76,27 +76,9 @@ impl State {
         charge: Charge,
         operation: impl FnOnce(&[u8], &[u8], CostMeter<'_>, &AtomicBool) -> T,
     ) -> Result<T> {
-        let first_slot = first
-            .slot()
-            .map(|idx| self.expect_string_at(idx))
-            .transpose()?;
-        let second_slot = second
-            .slot()
-            .map(|idx| self.expect_string_at(idx))
-            .transpose()?;
-        let State {
-            stack,
-            heap,
-            cost,
-            interrupt,
-            ..
-        } = self;
-        Ok(operation(
-            resolved_bytes(first, first_slot, stack, heap),
-            resolved_bytes(second, second_slot, stack, heap),
-            cost.charge_meter(charge),
-            interrupt.flag(),
-        ))
+        self.with_string_arg_slices([first, second], charge, |[first, second], meter, flag| {
+            operation(first, second, meter, flag)
+        })
     }
 
     /// `with_string_args` for one argument: the subject a matcher runs over.
@@ -106,10 +88,30 @@ impl State {
         charge: Charge,
         operation: impl FnOnce(&[u8], CostMeter<'_>, &AtomicBool) -> T,
     ) -> Result<T> {
-        let slot = arg
-            .slot()
-            .map(|idx| self.expect_string_at(idx))
-            .transpose()?;
+        self.with_string_arg_slices([arg], charge, |[bytes], meter, flag| {
+            operation(bytes, meter, flag)
+        })
+    }
+
+    /// Run `operation` over the bytes of `N` arguments with a meter for
+    /// `charge` and the interrupt flag. Every slot is resolved and
+    /// type-checked before any byte is borrowed; the borrow ends when
+    /// `operation` returns, so a whole scan that never re-enters Lua (a
+    /// string-replacement `gsub`) can run inside one borrow.
+    pub(crate) fn with_string_arg_slices<const N: usize, T>(
+        &mut self,
+        args: [&StringArg; N],
+        charge: Charge,
+        operation: impl FnOnce([&[u8]; N], CostMeter<'_>, &AtomicBool) -> T,
+    ) -> Result<T> {
+        let mut slots = [None; N];
+        // bounded: one step per argument, at most three.
+        for (slot, arg) in slots.iter_mut().zip(args) {
+            *slot = arg
+                .slot()
+                .map(|idx| self.expect_string_at(idx))
+                .transpose()?;
+        }
         let State {
             stack,
             heap,
@@ -117,8 +119,11 @@ impl State {
             interrupt,
             ..
         } = self;
+        let stack: &[Val] = stack;
+        let heap: &GcHeap = heap;
+        let bytes = std::array::from_fn(|i| resolved_bytes(args[i], slots[i], stack, heap));
         Ok(operation(
-            resolved_bytes(arg, slot, stack, heap),
+            bytes,
             cost.charge_meter(charge),
             interrupt.flag(),
         ))

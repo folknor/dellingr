@@ -207,6 +207,19 @@ host and compiler, so its row does not compare with the one above it); the
 | `string.format` literal runs batched on top of d98e154 | 16096 | 3184 | 3216 |
 | bygg, `rustc` of 2026-11-05: `__call` resolution out of line on top of ef5f81a | 15904 | 3136 | 3136 |
 | bygg, same `rustc`: unchanged string results returned as values, on top of 380266b | 15840 | 3184 | 3184 |
+| bygg, same `rustc`: string-replacement `gsub` in one borrow, on top of c4d8fe1 (the table measured 16816 / 3184 / 3200 there) | 16528 | 3040 | 2992 |
+
+### 2026-11-17: string-replacement `gsub` in one borrow
+
+A string or number replacement no longer goes through the per-match
+replacement dispatch: `gsub_with_string` runs the whole scan inside one borrow
+of the subject, the replacement bytes (and the needle on the plain path), one
+meter and the interrupt flag, reads captures off the matcher as the
+replacement names them, and interprets the replacement bytes per application
+instead of compiling an owned template. Costs are unchanged (no corpus cost
+row moved). `bench wall`, bygg, matched pairs against c4d8fe1 with the same
+workload files: `gsub_replace` 633, 631 ms -> 470, 470 ms; `patterns` 1.4, 1.3
+s -> 1.3, 1.3 s (best of 3 each).
 
 ### 2026-11-05: proper tail calls
 

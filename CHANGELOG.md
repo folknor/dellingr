@@ -56,6 +56,10 @@ tick budgets and re-record replays.
   flag, so `GmatchStateFault::CompileFlagKeyMissing` and `CompileFlagInvalid`
   are removed. A `string.format` literal run that crosses the string size cap
   reports the size the whole run would reach.
+- `string.gsub` with a string or number replacement runs its whole scan in
+  one borrow of its arguments and reads the replacement in place instead of
+  compiling a template, so `InternalFault::GsubReplacementTemplateMissing` is
+  removed. Results, costs, error order and collection points are unchanged.
 
 ### Fixed
 

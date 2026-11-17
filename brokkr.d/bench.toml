@@ -123,6 +123,10 @@ xxhash = "21878ee46042ea3cba3c546a14622a78"
 file = "bench/failed_scan.lua"
 xxhash = "343ca033b4b5ac40c9a2cff1904dac7f"
 
+[data.workloads.bench.gsub_replace]
+file = "bench/gsub_replace.lua"
+xxhash = "c7d3a61dd5dc7b986c626438d69a650c"
+
 [data.workloads.bench.format_literals]
 file = "bench/format_literals.lua"
 xxhash = "7eae0d9472643385ecdd9d8d9d1bf6b3"
@@ -246,6 +250,10 @@ xxhash = "9f4c6b26f375b932a1b4df86c09ab426"
 [data.workloads.hotpath.failed_scan]
 file = "examples/strings/failed_scan.lua"
 xxhash = "20d62957347ab59ead0ec4c6eb89a5f1"
+
+[data.workloads.hotpath.gsub_replace]
+file = "examples/strings/gsub_replace.lua"
+xxhash = "96ec84440b1c475ed994e90e25e7011c"
 
 [data.workloads.hotpath.format_literals]
 file = "examples/strings/format_literals.lua"

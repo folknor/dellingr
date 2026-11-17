@@ -775,11 +775,13 @@ struct Leaf {
 const LEAVES: &[Leaf] = &[
     Leaf {
         // The matcher at MAXCCALLS - 1 active calls through each recursive
-        // item kind, then a collection that walks the deepest chunk tree.
+        // item kind, once more under a string-replacement gsub's frames,
+        // then a collection that walks the deepest chunk tree.
         name: "accept",
         headroom: 0,
         meta_room: false,
         lua: r#"if string.find(OPTIONAL_SUBJECT, OPTIONAL_PATTERN) ~= 1 then error("optional") end
+            if select(2, string.gsub(OPTIONAL_SUBJECT, OPTIONAL_PATTERN, "%0")) ~= 1 then error("gsub") end
             if string.find(GREEDY_SUBJECT, GREEDY_PATTERN) ~= 1 then error("greedy") end
             if string.find("a", LAZY_PATTERN) ~= 1 then error("lazy") end
             arm_gc()

@@ -95,7 +95,6 @@ pub(crate) enum InternalFault {
         function: Option<Arc<str>>,
         error: crate::compiler::verify::BytecodeValidationError,
     },
-    GsubReplacementTemplateMissing,
     #[cfg(feature = "snapshot")]
     SnapshotTable(SnapshotTableFault),
     /// Injected by unit tests that need an internal error escaping dispatch.
@@ -203,9 +202,6 @@ impl fmt::Display for InternalFault {
                     None => f.write_str("unnamed chunk")?,
                 }
                 write!(f, " {error}")
-            }
-            Self::GsubReplacementTemplateMissing => {
-                f.write_str("gsub replacement template was not initialized")
             }
             #[cfg(feature = "snapshot")]
             Self::SnapshotTable(fault) => fmt::Display::fmt(fault, f),

@@ -227,12 +227,12 @@ marker, which is the quickest way to see what a change touched.
 The recurring native stack of each scenario's cycle, as printed by the
 on-demand probe `brokkr test native_bytes_per_level`, which covers dev and
 release through the sweeps configured in `brokkr.toml`. Measured on the tree
-of the commit that gives the default `table.sort` number and string
-backends (parent 1c3efba), on bygg (x86-64 Linux),
+of the commit that runs a string-replacement `string.gsub` in one borrow of
+its arguments (parent c4d8fe1), on bygg (x86-64 Linux),
 `rustc 1.101.0-nightly (249c1e4e3 2026-11-05)`, with that host's global
 cargo configuration. Release is Cargo's default release profile (the
 repository sets no overrides). Dev default and dev snapshot agree in every
-row; release and release with snapshot differ by 16 bytes in a few rows.
+row; release and release with snapshot differ in a few rows.
 
 These are compiler-dependent measurements of one build, not limits and not
 assertions of headroom for another build; a different compiler version or
@@ -297,13 +297,13 @@ separately.
 | `move_write` | 12480 | 992 | 992 |
 | `unpack_length` | 11744 | 992 | 992 |
 | `unpack_read` | 12048 | 960 | 960 |
-| `gsub_empty_function` | 13584 | 1536 | 1536 |
-| `gsub_plain_function` | 13472 | 1536 | 1536 |
-| `gsub_pattern_function` | 16816 | 3184 | 3200 |
-| `gsub_pattern_captures` | 16816 | 3184 | 3200 |
-| `gsub_empty_table` | 13472 | 1472 | 1472 |
-| `gsub_plain_table` | 13360 | 1472 | 1472 |
-| `gsub_pattern_table` | 16704 | 3120 | 3136 |
+| `gsub_empty_function` | 13264 | 1392 | 1392 |
+| `gsub_plain_function` | 13120 | 1392 | 1392 |
+| `gsub_pattern_function` | 16528 | 3040 | 2992 |
+| `gsub_pattern_captures` | 16528 | 3040 | 2992 |
+| `gsub_empty_table` | 13152 | 1328 | 1328 |
+| `gsub_plain_table` | 13008 | 1328 | 1328 |
+| `gsub_pattern_table` | 16416 | 2976 | 2928 |
 | `tfor_lua` | 10560 | 720 | 720 |
 | `tfor_ipairs` | 12240 | 1056 | 1056 |
 | `tfor_host_iterator` | 12032 | 960 | 960 |

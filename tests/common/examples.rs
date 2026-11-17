@@ -78,6 +78,7 @@ examples! {
     strings_failed_scan: "examples/strings/failed_scan.lua",
     strings_format_literals: "examples/strings/format_literals.lua",
     strings_g14_reference: "examples/strings/g14_reference.lua",
+    strings_gsub_replace: "examples/strings/gsub_replace.lua",
     strings_large_subject: "examples/strings/large_subject.lua",
     strings_literal_find: "examples/strings/literal_find.lua",
     strings_mixed: "examples/strings/mixed.lua",

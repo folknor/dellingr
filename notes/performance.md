@@ -683,33 +683,28 @@ backtracking bill could eat the savings.
 
 **Classification:** rewrite, highest ceiling in the scope.
 
-## PERF-025 - Pure gsub replacement crosses a callback-capable interface per match
+## PERF-025 - Callback gsub replacements copy the returned value and captures
 
-Raised by the strings hunter.
+Raised by the strings hunter. The string and number replacement half landed
+(`gsub_with_string`: one borrow for the whole scan, replacement read in
+place, no template, no plan cache); what remains is the callback half.
 
-**Bottleneck:** in `gsub_lua_pattern` (`string.rs`) each accepted match copies
-capture descriptions into a vector, enters replacement dispatch and resolves
-subject ranges through `State` again. Template compilation copies the
-replacement bytes, then allocates owned literal segments. Function and table
-replacements clone the returned value into a temporary vector before
-appending.
+**Bottleneck:** `append_function_replacement` and the table arm of
+`append_gsub_replacement` (`string.rs`) copy the returned string into a
+temporary `Vec` (`bytes_with_default_string_coercion(-1)`) before appending
+it, and `gsub_lua_pattern` still copies the matcher's captures into a `Vec`
+per match for those paths.
 
-**Redesign:** choose the replacement mode once before scanning. For string or
-numeric replacement, acquire the compiled pattern, a replacement plan, subject
-bytes, replacement bytes, meter, interrupt flag and output buffer together and
-run the whole loop over those borrows, consuming captures straight from matcher
-state. Replacement literals are spans with explicit operations for `%%` and
-capture references; cache plans for repeated replacement strings, with
-malformed escapes cached as deferred failures. Function and table replacement
-stay separate re-entry paths, appending returned bytes while the value is
-still rooted.
+**Redesign:** append the returned bytes straight from the stack slot before
+popping it, and hand the callback paths the published captures without the
+copy. Keep the matcher-live-across-callback frame cost in view
+(notes/optimizations.md, "Lua-pattern gsub keeps the matcher live across the
+replacement call"): any new local must not grow the re-entry cycle.
 
-**Risks:** unfinished captures error only when consumed; empty-match
-suppression and anchoring stay exact; callback effects survive a later
-failure; no global output-size preflight ahead of callbacks or deferred
-template errors.
+**Risks:** callback effects survive a later failure; the copy is per match
+against a Lua call per match, so the payoff is small and unmeasured.
 
-**Classification:** rewrite, high conviction, narrower coverage.
+**Classification:** local, low conviction.
 
 ## PERF-029 - Certified fast phase for transcendental math
 

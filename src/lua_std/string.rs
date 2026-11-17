@@ -8,8 +8,7 @@ use crate::compiler;
 use crate::cost_meter::CostMeter;
 use crate::cost_model::Charge;
 use crate::error::{
-    Error, ErrorKind, GmatchStateFault, InternalFault, LibraryError, PatternErrorDetail,
-    StringPatternFunction,
+    Error, ErrorKind, GmatchStateFault, LibraryError, PatternErrorDetail, StringPatternFunction,
 };
 use crate::instr::{ArgCount, RetCount};
 use crate::patterns::{LuaCapture, LuaPattern, MatchError, PatternError};
@@ -432,87 +431,353 @@ fn invalid_gsub_escape_error(state: &State) -> Error {
     state.library_error(LibraryError::InvalidGsubEscape)
 }
 
-/// A string replacement parsed once: literal runs (with `%%` unescaped) and
-/// `%N` capture references. Compiled on the first match. Invalid escapes
-/// remain failure segments, so a malformed template errors only when
-/// replacement reaches that position.
-enum ReplSegment {
-    Literal(Vec<u8>),
-    Capture(usize),
+/// Why a string-replacement `gsub` scan stopped. The scan runs inside a
+/// borrow of the State's arguments, so it carries the cause out and
+/// `gsub_stop_error` builds the error once the borrow has ended. The scan
+/// stops at its first failure, so the failure that wins is the one the
+/// ordered scan reaches first.
+enum GsubStop {
+    Match(MatchError),
+    Error(Error),
+    InvalidCapture(usize),
     InvalidEscape,
+    Unfinished,
 }
 
-struct ReplTemplate {
-    segments: Vec<ReplSegment>,
+impl From<Error> for GsubStop {
+    fn from(error: Error) -> Self {
+        Self::Error(error)
+    }
 }
 
-fn compile_replacement_template(repl: &[u8]) -> ReplTemplate {
-    let mut segments = Vec::new();
-    let mut literal = Vec::new();
+fn gsub_stop_error(state: &State, stop: GsubStop) -> Error {
+    match stop {
+        GsubStop::Match(error) => match_error(state, StringPatternFunction::Gsub, error),
+        GsubStop::Error(error) => error,
+        GsubStop::InvalidCapture(index) => invalid_gsub_capture_error(state, index),
+        GsubStop::InvalidEscape => invalid_gsub_escape_error(state),
+        GsubStop::Unfinished => unfinished_capture_error(state, StringPatternFunction::Gsub),
+    }
+}
+
+/// Apply a string replacement for one match, read straight from the
+/// replacement's bytes as reference Lua's `add_s` does: literal runs (each
+/// `%%` one `%`), `%0` the whole match, `%1`-`%9` a capture (`%1` the whole
+/// match when the pattern has no captures), anything else after `%` an
+/// invalid escape. Nothing is validated ahead of use: a capture or escape
+/// fails only when an application reaches it, after the output before it
+/// is appended, so a call with no match never looks at the replacement.
+fn apply_string_replacement(
+    out: &mut Vec<u8>,
+    repl: &[u8],
+    subject: &[u8],
+    n_captures: usize,
+    capture: impl Fn(usize) -> LuaCapture,
+) -> std::result::Result<(), GsubStop> {
     let mut i = 0usize;
-    // bounded: one pass over the replacement string's bytes.
+    // bounded: one pass over the replacement's bytes. The scans that apply
+    // it repeatedly poll once per application (the empty-pattern position
+    // loop, the matcher, `scan_subslice`).
     while i < repl.len() {
-        if repl[i] == b'%' {
-            match repl.get(i + 1) {
-                Some(&b'%') => {
-                    literal.push(b'%');
-                    i += 2;
-                }
-                Some(next) if next.is_ascii_digit() => {
-                    if !literal.is_empty() {
-                        segments.push(ReplSegment::Literal(std::mem::take(&mut literal)));
-                    }
-                    segments.push(ReplSegment::Capture(usize::from(*next - b'0')));
-                    i += 2;
-                }
-                _ => {
-                    if !literal.is_empty() {
-                        segments.push(ReplSegment::Literal(std::mem::take(&mut literal)));
-                    }
-                    segments.push(ReplSegment::InvalidEscape);
+        if repl[i] != b'%' || repl.get(i + 1) == Some(&b'%') {
+            i = append_literal_run(out, repl, i)?;
+            continue;
+        }
+        let Some(digit) = repl.get(i + 1).filter(|b| b.is_ascii_digit()) else {
+            return Err(GsubStop::InvalidEscape);
+        };
+        let idx = usize::from(digit - b'0');
+        let selected = if idx == 0 || (n_captures == 1 && idx == 1) {
+            capture(0)
+        } else if idx < n_captures {
+            capture(idx)
+        } else {
+            return Err(GsubStop::InvalidCapture(idx));
+        };
+        append_replacement_capture(out, subject, selected)?;
+        i += 2;
+    }
+    Ok(())
+}
+
+/// Append the replacement's literal run from `start`: its bytes up to the
+/// next escape other than `%%`, each `%%` as one `%`. The string size cap
+/// is checked once for the whole run, so a run that crosses it is refused
+/// naming the size the whole run would reach. Returns the index past it.
+fn append_literal_run(
+    out: &mut Vec<u8>,
+    repl: &[u8],
+    start: usize,
+) -> std::result::Result<usize, GsubStop> {
+    let mut len = 0usize;
+    let mut end = start;
+    // bounded: one pass over the rest of the replacement.
+    while end < repl.len() {
+        if repl[end] != b'%' {
+            end += 1;
+        } else if repl.get(end + 1) == Some(&b'%') {
+            end += 2;
+        } else {
+            break;
+        }
+        len += 1;
+    }
+    let next = crate::limits::checked_string_growth(out.len(), len)?;
+    out.reserve(next - out.len());
+    let mut i = start;
+    // bounded: one pass over the run just measured.
+    while i < end {
+        let stop = repl[i..end]
+            .iter()
+            .position(|&b| b == b'%')
+            .map_or(end, |offset| i + offset);
+        out.extend_from_slice(&repl[i..stop]);
+        if stop == end {
+            break;
+        }
+        // A `%` inside the run is always the first of a `%%` pair.
+        out.push(b'%');
+        i = stop + 2;
+    }
+    Ok(end)
+}
+
+/// Append one capture a string replacement names: a subject range, or a
+/// position as its decimal integer.
+fn append_replacement_capture(
+    out: &mut Vec<u8>,
+    subject: &[u8],
+    capture: LuaCapture,
+) -> std::result::Result<(), GsubStop> {
+    match capture {
+        LuaCapture::Bytes { start, end } => append_bytes(out, &subject[start..end])?,
+        LuaCapture::Position(offset) => {
+            let mut digits = [0u8; 20];
+            let mut at = digits.len();
+            let mut value = offset + 1;
+            // bounded: one step per decimal digit of a usize, at most 20.
+            loop {
+                at -= 1;
+                digits[at] = b'0' + saturating_cast::<u8, usize>(value % 10);
+                value /= 10;
+                if value == 0 {
                     break;
                 }
             }
-        } else {
-            literal.push(repl[i]);
-            i += 1;
+            append_bytes(out, &digits[at..])?;
         }
-    }
-    if !literal.is_empty() {
-        segments.push(ReplSegment::Literal(literal));
-    }
-    ReplTemplate { segments }
-}
-
-fn append_templated_replacement(
-    state: &mut State,
-    out: &mut Vec<u8>,
-    template: &ReplTemplate,
-    subject: &StringArg,
-    captures: &[LuaCapture],
-) -> Result<()> {
-    // bounded: one pass over the compiled template, no longer than the
-    // replacement string. The gsub loops that apply it repeatedly poll once
-    // per application (`gsub_empty_pattern`, the matcher, `find_subslice`).
-    for segment in &template.segments {
-        match segment {
-            ReplSegment::Literal(literal) => {
-                append_bytes(out, literal)?;
-            }
-            ReplSegment::Capture(idx) => {
-                let capture = if *idx == 0 || (captures.len() == 1 && *idx == 1) {
-                    captures[0]
-                } else {
-                    *captures
-                        .get(*idx)
-                        .ok_or_else(|| invalid_gsub_capture_error(state, *idx))?
-                };
-                append_capture_bytes(state, out, subject, capture, StringPatternFunction::Gsub)?;
-            }
-            ReplSegment::InvalidEscape => return Err(invalid_gsub_escape_error(state)),
-        }
+        LuaCapture::Unfinished => return Err(GsubStop::Unfinished),
     }
     Ok(())
+}
+
+/// What a string-replacement scan built: the output up to `copied` (the
+/// rest of the subject is appended by `finish_gsub`) and the count.
+struct GsubScan {
+    result: Vec<u8>,
+    copied: usize,
+    count: usize,
+}
+
+/// `string.gsub` with a string or number replacement. No Lua runs during
+/// the scan, so the whole scan runs in one borrow of the subject, the
+/// replacement (a number's rendering, made up front: it allocates no heap
+/// object) and the pattern's needle on the plain path, with one meter and
+/// the interrupt flag. The charges, safepoints, size-cap checks and failure
+/// order are the per-match ones of the callback paths. The replacement is
+/// read in place on every application rather than compiled, so there is no
+/// per-call plan to build and none worth caching across calls.
+#[inline(never)]
+fn gsub_with_string(
+    state: &mut State,
+    s: &StringArg,
+    pattern: &StringArg,
+    max_replacements: Option<usize>,
+) -> Result<u8> {
+    let repl = state.string_arg(3)?;
+    let scanned = if string_arg_len(state, pattern)? == 0 {
+        state.with_string_arg_slices(
+            [s, &repl],
+            Charge::StringGsub,
+            |[subject, repl], _, interrupt| {
+                gsub_empty_with_string(subject, repl, interrupt, max_replacements)
+            },
+        )?
+    } else if crate::patterns::is_plain(state.string_arg_bytes(pattern)?) {
+        state.with_string_arg_slices(
+            [s, pattern, &repl],
+            Charge::StringGsub,
+            |[subject, needle, repl], mut meter, interrupt| {
+                gsub_plain_with_string(
+                    subject,
+                    needle,
+                    repl,
+                    &mut meter,
+                    interrupt,
+                    max_replacements,
+                )
+            },
+        )?
+    } else {
+        let mut matcher = pattern_matcher(state, pattern)?;
+        state.with_string_arg_slices(
+            [s, &repl],
+            Charge::StringGsub,
+            |[subject, repl], mut meter, interrupt| {
+                gsub_lua_with_string(
+                    &mut matcher,
+                    subject,
+                    repl,
+                    &mut meter,
+                    interrupt,
+                    max_replacements,
+                )
+            },
+        )?
+    };
+    let scan = scanned.map_err(|stop| gsub_stop_error(state, stop))?;
+    finish_gsub(state, s, scan.result, scan.copied, scan.count)
+}
+
+/// The empty pattern: a replacement at every position, which examines no
+/// subject byte and so charges nothing beyond the call.
+fn gsub_empty_with_string(
+    subject: &[u8],
+    repl: &[u8],
+    interrupt: &AtomicBool,
+    max_replacements: Option<usize>,
+) -> std::result::Result<GsubScan, GsubStop> {
+    let mut result = Vec::with_capacity(subject.len());
+    let mut count = 0usize;
+    for i in 0..=subject.len() {
+        // A safepoint per position: no matcher runs here, and a long
+        // replacement of empty captures applies once per subject byte.
+        if crate::vm::interrupt_requested(interrupt) {
+            return Err(GsubStop::Match(MatchError::Interrupted));
+        }
+        if max_replacements.is_none_or(|max| count < max) {
+            apply_string_replacement(&mut result, repl, subject, 1, |_| LuaCapture::Bytes {
+                start: i,
+                end: i,
+            })?;
+            count += 1;
+        }
+        if i < subject.len() {
+            append_bytes(&mut result, &subject[i..=i])?;
+        }
+    }
+    Ok(GsubScan {
+        result,
+        copied: subject.len(),
+        count,
+    })
+}
+
+/// A plain pattern: `scan_subslice` per match, charged and polled per
+/// candidate exactly as `find_subslice` does.
+fn gsub_plain_with_string(
+    subject: &[u8],
+    needle: &[u8],
+    repl: &[u8],
+    meter: &mut CostMeter<'_>,
+    interrupt: &AtomicBool,
+    max_replacements: Option<usize>,
+) -> std::result::Result<GsubScan, GsubStop> {
+    let mut result = Vec::new();
+    let mut pos = 0usize;
+    let mut count = 0usize;
+    // safepoint: every iteration searches with `scan_subslice`, which polls
+    // once per candidate, and a match advances past a non-empty needle.
+    while pos < subject.len() {
+        if max_replacements.is_some_and(|max| count >= max) {
+            break;
+        }
+        let Some(offset) =
+            scan_subslice(meter, interrupt, &subject[pos..], needle).map_err(GsubStop::Match)?
+        else {
+            break;
+        };
+        let start = pos + offset;
+        let end = start + needle.len();
+        if count == 0 {
+            // Sized at the first match: a call with no match returns the
+            // subject.
+            result.reserve(subject.len());
+        }
+        append_bytes(&mut result, &subject[pos..start])?;
+        apply_string_replacement(&mut result, repl, subject, 1, |_| LuaCapture::Bytes {
+            start,
+            end,
+        })?;
+        pos = end;
+        count += 1;
+    }
+    Ok(GsubScan {
+        result,
+        copied: pos,
+        count,
+    })
+}
+
+/// A Lua pattern, with the empty-match rule and pending-copy cursor of
+/// `gsub_lua_pattern`; captures are read off the matcher as the
+/// replacement names them.
+fn gsub_lua_with_string(
+    matcher: &mut LuaPattern,
+    subject: &[u8],
+    repl: &[u8],
+    meter: &mut CostMeter<'_>,
+    interrupt: &AtomicBool,
+    max_replacements: Option<usize>,
+) -> std::result::Result<GsubScan, GsubStop> {
+    let s_len = subject.len();
+    let mut result = Vec::new();
+    let mut pos = 0usize;
+    let mut copied = 0usize;
+    let mut count = 0usize;
+    let anchored = matcher.is_anchored();
+    let mut lastmatch = None;
+    // safepoint: every iteration runs the matcher, whose first step polls
+    // (`MatchState::charge`).
+    loop {
+        if max_replacements.is_some_and(|max| count >= max) {
+            break;
+        }
+        if !matcher
+            .matches_bytes_from(subject, pos, meter, interrupt)
+            .map_err(GsubStop::Match)?
+        {
+            break;
+        }
+        let range = matcher.range();
+        if range.start == range.end && lastmatch == Some(range.end) {
+            if pos == s_len {
+                break;
+            }
+            crate::limits::checked_string_growth(result.len(), pos + 1 - copied)?;
+            pos += 1;
+            continue;
+        }
+        if count == 0 {
+            result.reserve(s_len);
+        }
+        append_bytes(&mut result, &subject[copied..range.start])?;
+        apply_string_replacement(&mut result, repl, subject, matcher.num_matches(), |i| {
+            matcher.capture(i)
+        })?;
+        count += 1;
+        pos = range.end;
+        copied = range.end;
+        lastmatch = Some(range.end);
+        if anchored {
+            break;
+        }
+    }
+    Ok(GsubScan {
+        result,
+        copied,
+        count,
+    })
 }
 
 /// The function-replacement arm of `append_gsub_replacement`, out of line
@@ -579,21 +844,10 @@ fn append_gsub_replacement(
     repl_type: &LuaType,
     subject: &StringArg,
     captures: &[LuaCapture],
-    template: &mut Option<ReplTemplate>,
 ) -> Result<()> {
+    // String and number replacements take `gsub_with_string`; only a table
+    // or a function reaches here.
     match repl_type {
-        LuaType::String | LuaType::Number => {
-            if template.is_none() {
-                // Parse once, when a match exists, keeping the lazy error
-                // position of a malformed template.
-                let repl = state.bytes_with_default_string_coercion(3)?;
-                *template = Some(compile_replacement_template(&repl));
-            }
-            let replacement_template = template.as_ref().ok_or_else(|| {
-                Error::internal_fault(InternalFault::GsubReplacementTemplateMissing)
-            })?;
-            append_templated_replacement(state, out, replacement_template, subject, captures)?;
-        }
         LuaType::Table => {
             let key = if captures.len() > 1 {
                 captures[1]
@@ -631,19 +885,12 @@ fn append_gsub_replacement(
                 append_bytes(out, &val)?;
             }
         }
-        LuaType::Function => {
+        _ => {
             crate::native_call!(
                 "append_gsub_replacement->append_function_replacement",
                 append_function_replacement(state, out, subject, captures)
             )?;
         }
-        _ => append_capture_bytes(
-            state,
-            out,
-            subject,
-            captures[0],
-            StringPatternFunction::Gsub,
-        )?,
     }
     Ok(())
 }
@@ -930,9 +1177,17 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
             return Ok(2);
         }
 
-        // Each path is its own out-of-line function so that only the path
-        // in use is live on the native stack while a replacement function
-        // runs (docs/limits.md, "Native stack").
+        // A string or number replacement never runs Lua, so its whole scan
+        // runs in one borrow of the arguments (`gsub_with_string`), out of
+        // line so none of it is in this frame while a callback path below
+        // re-enters Lua.
+        if matches!(repl_type, LuaType::String | LuaType::Number) {
+            return gsub_with_string(state, &s, &pattern, max_replacements);
+        }
+
+        // Each callback path is its own out-of-line function so that only
+        // the path in use is live on the native stack while a replacement
+        // function runs (docs/limits.md, "Native stack").
         //
         // The empty pattern keeps its own path: the plain path would never
         // advance, and this one needs no matcher, examines no subject byte
@@ -963,7 +1218,6 @@ fn gsub_empty_pattern(
     repl_type: &LuaType,
     max_replacements: Option<usize>,
 ) -> Result<u8> {
-    let mut template = None;
     let s_len = string_arg_len(state, s)?;
     let mut result = Vec::with_capacity(s_len);
     let mut count = 0usize;
@@ -975,7 +1229,7 @@ fn gsub_empty_pattern(
             let captures = [LuaCapture::Bytes { start: i, end: i }];
             crate::native_call!(
                 "gsub_empty_pattern->append_gsub_replacement",
-                append_gsub_replacement(state, &mut result, repl_type, s, &captures, &mut template)
+                append_gsub_replacement(state, &mut result, repl_type, s, &captures)
             )?;
             count += 1;
         }
@@ -998,7 +1252,6 @@ fn gsub_plain_pattern(
     repl_type: &LuaType,
     max_replacements: Option<usize>,
 ) -> Result<u8> {
-    let mut template = None;
     let s_len = string_arg_len(state, s)?;
     let pattern_len = string_arg_len(state, pattern)?;
     // Sized at the first match: a call with no match returns the subject.
@@ -1027,7 +1280,7 @@ fn gsub_plain_pattern(
         let captures = [LuaCapture::Bytes { start, end }];
         crate::native_call!(
             "gsub_plain_pattern->append_gsub_replacement",
-            append_gsub_replacement(state, &mut result, repl_type, s, &captures, &mut template)
+            append_gsub_replacement(state, &mut result, repl_type, s, &captures)
         )?;
 
         pos = end;
@@ -1069,7 +1322,6 @@ fn gsub_lua_pattern(
     repl_type: &LuaType,
     max_replacements: Option<usize>,
 ) -> Result<u8> {
-    let mut template = None;
     let mut matcher = pattern_matcher(state, pattern)?;
     let s_len = string_arg_len(state, s)?;
     // Sized at the first match: a call with no match returns the subject.
@@ -1126,7 +1378,7 @@ fn gsub_lua_pattern(
         captures.extend((0..matcher.num_matches()).map(|i| matcher.capture(i)));
         crate::native_call!(
             "gsub_lua_pattern->append_gsub_replacement",
-            append_gsub_replacement(state, &mut result, repl_type, s, &captures, &mut template)
+            append_gsub_replacement(state, &mut result, repl_type, s, &captures)
         )?;
         count += 1;
         pos = range.end;
