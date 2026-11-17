@@ -160,7 +160,9 @@ compiler-dependent measurements, not limits.
 The largest cycle (a `gsub_*_table` or `gsub_pattern_*` scenario, one native
 level) in bytes. Release before 0779c08 is under the old fat-LTO,
 one-codegen-unit profile and does not compare with the default profile.
-Hosts: plantasjen from 4a722cf on; the 2026-10-23 rows name x86-64 Linux only.
+Hosts: plantasjen from 4a722cf on, bygg where the row says so (a different
+host and compiler, so its row does not compare with the one above it); the
+2026-10-23 rows name x86-64 Linux only.
 
 | Revision | Dev (also snapshot) | Release | Release + snapshot |
 |---|---|---|---|
@@ -178,6 +180,7 @@ Hosts: plantasjen from 4a722cf on; the 2026-10-23 rows name x86-64 Linux only.
 | proper tail calls on top of 2a566c8 | 16304 | 3296 | 3312 |
 | matcher capture state per search on top of 58e2808 | 16096 | 3168 | 3216 |
 | `string.format` literal runs batched on top of d98e154 | 16096 | 3184 | 3216 |
+| bygg, `rustc` of 2026-11-05: `__call` resolution out of line on top of ef5f81a | 15904 | 3136 | 3136 |
 
 ### 2026-11-05: proper tail calls
 
@@ -301,6 +304,24 @@ table library's writes, which used the shared, outlined
 `call_unguarded::<ArgCount>` before, shrink (`sort_metamethods_write` 1168 to
 1056 in release, 1200 to 1056 with snapshot). Dev writes grow 80 bytes per
 cycle.
+
+### 2026-11-17: `__call` resolution out of line
+
+`begin_callable_call` used to resolve a callable object and call the Rust
+handler it reached in one frame, which stays live across that callback. It
+now calls `State::resolve_callable` (out of line, returned before the
+callback runs) and keeps only the invocation: release frames 232 to 56
+bytes, the resolver 216. A Rust-valued handler is now called on the receiver
+and arguments unmoved instead of being placed and removed again; inside the
+old single frame that shortcut alone grew it from 216 to 232 in every shape
+tried, the lookup's result slot apparently staying beside the callback's.
+The Rust-callee surplus cut in `call_from_lua` lives in its own function for
+the same reason (inline, it grew every dev cycle through `call_from_lua` by
+16 bytes). `native_bytes_per_level`, host bygg, base ef5f81a: release and
+release + snapshot `callable_rust` 1712 to 1552 and `tail_callable_rust` 1040
+to 880, every other release row unchanged; dev `callable_rust` 12976 to
+12656, `tail_callable_rust` 11264 to 10960, and every dev cycle through a
+call from Lua into Rust 16 bytes smaller (`host_call` 10576 to 10560).
 
 ### 2026-11-14: the entry observer marked inside `invoke_rust_fn`
 

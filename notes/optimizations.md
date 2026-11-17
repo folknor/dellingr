@@ -315,8 +315,9 @@ since 27ee714. What B-O1 listed and is still open:
   function slot already roots all of them. Its suggested shape is one stack:
   merge the activation record into the frame, with records owned by
   invocations and tracebacks walking frames. Tail calls now exist
-  (`State::tail_call_from_lua`, `State::replace_tail_caller`): with the merge,
-  replacing the caller would be one record instead of a record and a frame,
+  (`State::tail_call_from_lua`; a tail admission overwrites the caller's
+  record in place and `State::replace_tail_frame` swaps the frame): with the
+  merge, replacing the caller would be one record instead of a record and a frame,
   and the caller record a Rust tail callee keeps for diagnostics would be its
   frame.
 

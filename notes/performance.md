@@ -350,24 +350,6 @@ snapshot bytecode can read an untouched register and get nil today.
 activation and continuation rewrites; real frame shapes decide whether the
 metadata beats the bulk writes.
 
-## PERF-011 - Local call-path changes
-
-Raised by the calls hunter.
-
-- **Project fixed results once.** `collect_returns` moves every returned value
-  before `finish_call` discards the surplus. Copy only the requested prefix,
-  after validating the full count and closing upvalues. Discarded results are
-  still computed, charged and validated.
-- **Replace tail activations directly.** Tail replacement (`eval.rs`) admits
-  another record, pops it, assigns it over the caller, then drops and rebuilds
-  the execution frame. Replace directly, keeping the caller's diagnostic state
-  until admission succeeds.
-- **Assemble `__call` receiver prefixes once.** `begin_callable_call` inserts
-  each receiver separately, shifting the arguments repeatedly; resolve the
-  prefix before one placement. Secondary: direct calls bypass this path.
-
-**Classification:** local.
-
 ## PERF-012 - Calls with independent callee, argument and result locations, then inlining
 
 Raised by the codegen hunter (its second rewrite); the host-boundary hunter

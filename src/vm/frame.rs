@@ -224,7 +224,7 @@ impl Frame {
             frame.ip.set(ip);
             match leave? {
                 Leave::Call => frames.extend(std::iter::once_with(|| state.admitted_frame())),
-                Leave::TailCall => state.replace_tail_caller(frames),
+                Leave::TailCall => state.replace_tail_frame(frames),
                 Leave::Return { first, count } => {
                     if frames.len() == 1 {
                         // The entry frame: its Rust caller finishes the call.
