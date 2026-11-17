@@ -90,6 +90,14 @@ tick budgets and re-record replays.
 
 ### Fixed
 
+- A `State::with_restricted_env` closure that moves its State out of the
+  `&mut` (`mem::take`, `mem::swap`) no longer panics on exit or resumes a
+  suspension another level owns: it gets the new
+  `ErrorKind::StateReplacedInRestrictedEnv`, nothing is restored, and the
+  moved-out State stays restricted. Putting the State back before returning
+  restores normally. A `State::load_state` setup that moves the State out or
+  leaves a restriction suspended gets the new
+  `LoadError::StateReplacedInSetup` instead of materializing into it.
 - **Replay-visible to hosts:** a NaN reaches the host as one canonical quiet
   NaN (`0x7ff8_0000_0000_0000`) through `State::to_number`,
   `State::raw_field` as `f64` or `Option<f64>`, and the numeric

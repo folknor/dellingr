@@ -1474,6 +1474,16 @@ impl State {
     /// (for example by catching a panic from a nested `call`). A panic out of
     /// `f` poisons the State and is resumed; the environment is still
     /// restored on the way out, but that does not make the State reusable.
+    ///
+    /// Returns [`ErrorKind::StateReplacedInRestrictedEnv`] if `f` returns
+    /// with a State other than the one it was given behind the reference
+    /// (it moved the State out with `mem::take`, `mem::swap` or
+    /// `mem::replace`), or with an inner restriction still suspended on it.
+    /// Nothing is restored then: the State in the slot is left as it is, and
+    /// the moved-out State keeps the restricted environment for good. Moving
+    /// the State out and putting it back before `f` returns is fine. If the
+    /// State in the slot is poisoned, [`ErrorKind::StatePoisoned`] takes
+    /// precedence, as on every guarded entry.
     pub fn with_restricted_env<F, R>(&mut self, whitelist: &[&str], f: F) -> Result<R>
     where
         F: FnOnce(&mut Self) -> R,
@@ -1481,6 +1491,18 @@ impl State {
         self.guarded(|state| {
             let saved = state.global_env.restrict(&mut state.heap, whitelist);
             state.suspended_envs.push(saved);
+            // Which suspension this level owns: the State's identity and the
+            // stack depth. `f` gets `&mut State`, so it can move the State
+            // out and leave another behind; identity alone is not enough,
+            // because an inner level of the same State that refused this way
+            // leaves its own entry on top, which this level must not pop.
+            // Handing `f` a facade that cannot yield `&mut State` instead was
+            // weighed and not done here: a facade that derefs to State reopens
+            // the move, one that does not duplicates the host API, and any
+            // `call` inside `f` runs `RustFunc`s that receive `&mut State`
+            // anyway, so the hole is only closed for the whole host surface
+            // at once.
+            let owner = (state.registry.state_id(), state.suspended_envs.len());
 
             // Restore the environment on unwind too. This keeps the global
             // bindings coherent for whatever the host still reads before it
@@ -1488,13 +1510,24 @@ impl State {
             // is poisoned by the panic either way.
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(state)));
 
-            let saved = state
-                .suspended_envs
-                .pop()
-                .expect("suspended environment missing during restoration");
-            state.global_env.resume(&mut state.heap, saved);
+            // A State that is not the owner is left alone: popping it would
+            // panic on an empty stack or resume a suspension some other level
+            // owns. The moved-out owner stays restricted; nothing here can
+            // reach it. A panic still poisons whatever State is in the slot,
+            // through `guarded`.
+            let owned = (state.registry.state_id(), state.suspended_envs.len()) == owner;
+            if owned {
+                let saved = state
+                    .suspended_envs
+                    .pop()
+                    .expect("this level's suspension is on top: checked by `owned`");
+                state.global_env.resume(&mut state.heap, saved);
+            }
 
             match result {
+                Ok(_) if !owned => Err(Error::without_location(
+                    ErrorKind::StateReplacedInRestrictedEnv,
+                )),
                 Ok(r) => Ok(r),
                 Err(payload) => {
                     state.poisoned = true;

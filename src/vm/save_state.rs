@@ -1551,7 +1551,10 @@ impl State {
     /// setup error is returned as [`LoadError::Setup`] without materializing
     /// any saved values. A setup that returns success after a panic unwound
     /// through the State (it caught the panic) gets
-    /// [`LoadError::StatePoisoned`].
+    /// [`LoadError::StatePoisoned`]. A setup that returns success after
+    /// moving the State out of its `&mut` (`mem::take`, `mem::swap`), or
+    /// with a restricted environment still suspended on it, gets
+    /// [`LoadError::StateReplacedInSetup`].
     ///
     /// The calling thread's floating-point environment is checked on entry
     /// and again after `setup`, which is host code and may change it, before
@@ -1604,7 +1607,16 @@ impl State {
         // Anchors created by setup are deliberately retained and participate
         // in the final collection.
         state.global_env.begin_load_setup();
+        let prepared = state.registry.state_id();
         setup(&mut state).map_err(LoadError::Setup)?;
+        // `setup` holds `&mut State`, so it can move this State out and leave
+        // another, or leave a restriction suspended (a restricted closure
+        // that moved the State out and had it put back). Neither is the
+        // State this loader prepared, and materializing into restricted
+        // globals would lose setup's own bindings.
+        if state.registry.state_id() != prepared || state.in_restricted_env() {
+            return Err(LoadError::StateReplacedInSetup);
+        }
         if state.poisoned {
             return Err(LoadError::StatePoisoned);
         }

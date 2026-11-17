@@ -122,19 +122,37 @@ Cosmetic:
 
 Source-reading findings from codex, not reproduced yet:
 
-- A `with_restricted_env` closure can `std::mem::take` (State implements
-  `Default`) or `mem::swap` its `&mut State`. Exit then pops the
-  replacement's empty suspension stack (a panic), and the moved-out original
-  stays restricted. Suggested direction: compare the State identity
-  (`anchor.rs`) before popping anything and refuse with an explicit host
-  error; poisoning only the replacement leaves the escaped original usable.
-  A full fix hands the callback a facade that cannot yield `&mut State`.
 - The cached `next` cursor may ignore array precedence: warm
   `for k in next, t, control do return k end` on a table with hash keys
   `2`, `"a"`, `"b"` in that order, then add `t[1]` and `t[3]`. Key `2`
   migrates to the array and leaves a hash tombstone; with control `2` the
   cached cursor accepts the tombstone and returns `"a"` where raw `next`
   returns `3` (cursor validation in `table.rs`).
+
+### Raised by the restricted-environment State-swap spar (2026-11-18)
+
+- Possible soundness hole, source reading only: a `RustFunc` gets
+  `&mut State` mid-dispatch and can `mem::take` it, send the original to
+  another thread and return `Ok(0)`. `invoke_rust_fn` (`vm/eval.rs`) and the
+  dispatch loop then continue on the replacement while still holding the
+  original frame's `Arc<BytecodeRuntime>`, whose inline caches are `Cell`s
+  behind an `unsafe impl Sync` that assumes one executing State
+  (`vm/caches.rs`). A worker that loads the same `Program` into the moved
+  State reaches the same cache cells concurrently: a data race from safe host
+  code. `HostCallbacks` methods do not get `&mut State` and cannot do this.
+  Interim shape argued with codex: compare the State identity
+  (`Registry::state_id`) right after the callback returns, before touching
+  its result or bookkeeping, and on mismatch leave by a nonlocal marker
+  unwind like `PoisonUnwind` (an ordinary `Err` would run activation cleanup
+  against the replacement); unwind owners such as `with_rooted_values` need
+  the same ownership check, and the moved-out State would carry abandoned
+  activation records unpoisoned unless an invalidation flag travels with
+  it. Full shape: an owned State plus one borrowed VM interface handed to
+  `RustFunc`, restricted closures and `load_state` setup, so host code never
+  holds the owning slot; that changes every `RustFunc` signature, and would
+  let the identity checks `with_restricted_env` and `load_state` now make
+  go away. Needs its own spar, and `native_bytes_per_level` measured, since
+  it touches `invoke_rust_fn`.
 
 ## Deferred forward-looking ideas
 
