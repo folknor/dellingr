@@ -79,15 +79,6 @@ and save golden, and the CHANGELOG "Changed (breaking)" entry. The `gmatch`
 iterator state also lost its `compile_charged` flag in that commit, which a
 return to a compile charge would need back.
 
-### Housekeeping left from the `string.format` literal-run change (2026-11-05)
-
-- reference/native-calls.md ("Current native bytes per level") still says
-  `--release` makes the debug-assertion-only sweeps fail to build. Remove
-  that obsolete parenthetical: commit 2ddf06b pinned all four sweeps to dev
-  with `profile_required`, so `--release` skips them instead. The AGENTS.md
-  instruction to measure dev and release is valid; the plain invocation
-  already covers both profiles.
-
 ### Housekeeping left from the `_G`-as-real-table change (2026-10-23)
 
 - Several `bench/` verdict headers (arithmetic, pairs, fill, queue, mixed,

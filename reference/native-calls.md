@@ -221,12 +221,9 @@ marker, which is the quickest way to see what a change touched.
 ## Current native bytes per level
 
 The recurring native stack of each scenario's cycle, as printed by the
-on-demand probe `brokkr test native_bytes_per_level`: its `default` and
-`snapshot` sweeps run the dev profile, its `release-native-stack` and
-`release-native-stack-snapshot` sweeps run release. (Adding `--release`
-forces release onto every sweep, and the sweeps whose features require
-debug assertions then fail to build.) Measured on the tree of the commit
-that batches `string.format` literal runs (parent d98e154), on
+on-demand probe `brokkr test native_bytes_per_level`, which covers dev and
+release through the sweeps configured in `brokkr.toml`. Measured on the tree
+of the commit that batches `string.format` literal runs (parent d98e154), on
 plantasjen (x86-64 Linux), `rustc 1.101.0-nightly (e9bbadf68 2026-10-12)`,
 with that host's global rustflags (`-Ctarget-cpu=native`, the `wild` linker
 through clang). Release is Cargo's default release profile (the repository
