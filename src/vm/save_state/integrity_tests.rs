@@ -234,7 +234,7 @@ fn canonical_environment_tokens_survive_load_without_renaming() {
 fn environment_fifo_snapshot_is_compact_and_byte_stable() {
     let mut original = State::new();
     let ptr = env_table(&original, "math");
-    let table = original.heap.as_table(ptr).expect("math is a table");
+    let mut table = original.heap.edit_table(ptr).expect("math is a table");
     for key in 1..=10_000 {
         table
             .insert(Val::Num(f64::from(key)), Val::Bool(true))
@@ -270,7 +270,7 @@ fn environment_fifo_snapshot_is_compact_and_byte_stable() {
 fn environment_empty_array_span_retains_logical_length() {
     let mut original = State::new();
     let ptr = env_table(&original, "math");
-    let table = original.heap.as_table(ptr).expect("math is a table");
+    let mut table = original.heap.edit_table(ptr).expect("math is a table");
     for key in 1..=10_000 {
         table
             .insert(Val::Num(f64::from(key)), Val::Bool(true))

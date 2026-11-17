@@ -213,7 +213,10 @@ returns; the loaded State starts with an empty stack.
   data. A loaded State starts with the default automatic policy unless its
   setup callback changes it. If setup calls `gc_set_policy`, the final load
   collection recomputes the threshold from that policy and the loaded live
-  allocations. A threshold set with `gc_set_threshold` in setup remains fixed
+  score. That score can differ from the saving State's, because a save
+  trims nil array ends and a load rebuilds table backing at its own
+  capacity, so a loaded State's collection timing can drift from a
+  continuous run's. A threshold set with `gc_set_threshold` in setup remains fixed
   across the final collection. See
   [the GC policy](limits.md#garbage-collection-policy) for the policy and
   threshold controls.

@@ -440,7 +440,9 @@ impl State {
     pub(super) fn reset_in_flight(&mut self) {
         self.in_flight.clear();
         self.stack.clear();
-        self.suspended_envs.clear();
+        for env in self.suspended_envs.drain(..) {
+            env.release(&mut self.heap);
+        }
     }
 }
 

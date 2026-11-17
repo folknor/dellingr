@@ -298,13 +298,13 @@ impl State {
         &mut self,
         table: usize,
         operation: ConstructorTableOperation,
-    ) -> Result<&mut super::table::Table> {
+    ) -> Result<super::table::TableEditor<'_>> {
         let tbl_val = self.stack[table];
         let typ = tbl_val.typ(&self.heap);
         match tbl_val.as_object_ptr() {
             Some(ptr) if self.heap.as_table_ref(ptr).is_some() => Ok(self
                 .heap
-                .as_table(ptr)
+                .edit_table(ptr)
                 .expect("checked to be a table just above")),
             _ => Err(Error::internal_fault(
                 InternalFault::ConstructorTableMissing {
@@ -341,7 +341,7 @@ impl State {
     ) -> Result<()> {
         let key = frame.literal(name);
         let val = self.stack[src];
-        let tbl = self.constructor_table(table, ConstructorTableOperation::InitFieldPinned)?;
+        let mut tbl = self.constructor_table(table, ConstructorTableOperation::InitFieldPinned)?;
         if !tbl.init_at_index(usize::from(entry), key, val) {
             tbl.insert(key, val)?;
         }
@@ -377,9 +377,9 @@ impl State {
         // Nothing in `set_list` can enter the collector or a callback, so
         // the values are read in place.
         let values = &self.stack[table + 1..table + 1 + count];
-        let tbl = self
+        let mut tbl = self
             .heap
-            .as_table(ptr)
+            .edit_table(ptr)
             .expect("checked to be a table just above");
         tbl.set_list(first_key, values.iter().copied())?;
         Ok(())

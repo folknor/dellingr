@@ -45,7 +45,7 @@ SAFE_INFALLIBLE = {
     "set_rng_seed", "cost_used", "cost_remaining", "costing",
     "set_user_data", "user_data", "user_data_mut", "clear_user_data",
     "callbacks_mut", "replace_callbacks", "object_count", "string_count",
-    "heap_size", "gc_should_run", "gc_threshold", "gc_set_threshold",
+    "heap_size", "gc_score", "gc_should_run", "gc_threshold", "gc_set_threshold",
     "gc_set_policy", "gc_set_auto_threshold", "gc_disable_auto",
     "current_source", "seal_globals", "globals_sealed", "is_poisoned",
     "error", "get_top", "to_boolean", "typ", "raw_equal", "release_anchor",

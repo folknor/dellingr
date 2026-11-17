@@ -33,8 +33,8 @@ use crate::instr::Builtin;
 
 use super::Val;
 use super::caches::{GlobalLookupCacheEntry, GlobalLookupCacheSlot};
-use super::object::{GcHeap, Markable, ObjectPtr, StringPtr};
-use super::table::{SlotPolicy, Table};
+use super::object::{GcHeap, Markable, ObjectPtr, ResidentBytes, StringPtr};
+use super::table::{SlotPolicy, Table, TableEditor};
 
 /// Hash slots the global table starts with: past inline storage, because
 /// only map storage carries a slot policy.
@@ -141,6 +141,16 @@ pub(super) struct SuspendedEnv {
 }
 
 impl SuspendedEnv {
+    #[cfg(debug_assertions)]
+    pub(super) fn resident_bytes(&self) -> usize {
+        self.contents.resident_bytes()
+    }
+
+    #[cfg(feature = "snapshot")]
+    pub(super) fn release(self, heap: &mut GcHeap) {
+        heap.release_table_backing(&self.contents);
+    }
+
     /// A suspended environment that came from no State, for tests of the
     /// bookkeeping that holds one.
     #[cfg(all(test, feature = "snapshot"))]
@@ -167,7 +177,7 @@ impl GlobalEnv {
         let table = heap
             .no_gc_allocator()
             .alloc_table_with_capacity(INITIAL_GLOBAL_SLOTS);
-        heap.as_table(table)
+        heap.edit_table(table)
             .expect("just allocated as a table")
             .set_slot_policy(slot_policy(Phase::Initializing));
         heap.watch(table);
@@ -212,7 +222,7 @@ impl GlobalEnv {
             .iter()
             .filter(|old| !tables.iter().any(|(ptr, _)| *ptr == old.table))
         {
-            if let Some(table) = heap.as_table(retired.table) {
+            if let Some(mut table) = heap.edit_table(retired.table) {
                 table.set_slot_policy(SlotPolicy::default());
             }
         }
@@ -223,8 +233,8 @@ impl GlobalEnv {
                 self.env_tables.push(kept);
                 continue;
             }
-            let table = heap
-                .as_table(ptr)
+            let mut table = heap
+                .edit_table(ptr)
                 .expect("an environment object is a table");
             table.set_slot_policy(slot_policy(self.phase));
             self.env_tables.push(EnvTable {
@@ -232,7 +242,7 @@ impl GlobalEnv {
                 role,
                 #[cfg(feature = "snapshot")]
                 pins: if self.phase == Phase::Sealed {
-                    string_slot_keys(table).collect()
+                    string_slot_keys(&table).collect()
                 } else {
                     Vec::new()
                 },
@@ -256,8 +266,8 @@ impl GlobalEnv {
     // Their invalidation belongs at the heap mutable-access boundary; making
     // this the sole epoch owner would leave the builtin mirror stale.
     #[inline(always)]
-    fn contents_mut<'h>(&self, heap: &'h mut GcHeap) -> &'h mut Table {
-        heap.as_table(self.table)
+    fn contents_mut<'h>(&self, heap: &'h mut GcHeap) -> TableEditor<'h> {
+        heap.edit_table(self.table)
             .expect("the global table lives as long as the State")
     }
 
@@ -278,19 +288,19 @@ impl GlobalEnv {
             return;
         }
         self.phase = Phase::Sealed;
-        let table = self.contents_mut(heap);
+        let mut table = self.contents_mut(heap);
         #[cfg(feature = "snapshot")]
         {
-            self.pins = string_slot_keys(table).collect();
+            self.pins = string_slot_keys(&table).collect();
         }
         table.set_slot_policy(slot_policy(Phase::Sealed));
         for env in &mut self.env_tables {
-            let table = heap
-                .as_table(env.table)
+            let mut table = heap
+                .edit_table(env.table)
                 .expect("an environment table is rooted by the global environment");
             #[cfg(feature = "snapshot")]
             {
-                env.pins = string_slot_keys(table).collect();
+                env.pins = string_slot_keys(&table).collect();
             }
             table.set_slot_policy(slot_policy(Phase::Sealed));
         }
@@ -387,7 +397,7 @@ impl GlobalEnv {
         val: Val,
         cache: Option<&GlobalLookupCacheSlot>,
     ) {
-        let table = self.contents_mut(heap);
+        let mut table = self.contents_mut(heap);
         let (probe, _) = table.probe_hash(&key);
         if probe.has_slot() {
             assert!(
@@ -480,7 +490,9 @@ impl GlobalEnv {
     pub(super) fn restrict(&mut self, heap: &mut GcHeap, whitelist: &[&str]) -> SuspendedEnv {
         let outer = self.contents(heap);
         let mut restricted = Table::with_capacity(INITIAL_GLOBAL_SLOTS.max(whitelist.len()));
-        restricted.set_slot_policy(slot_policy(Phase::Sealed));
+        let mut resident = ResidentBytes::new(restricted.resident_bytes());
+        let mut editor = restricted.edit(&mut resident);
+        editor.set_slot_policy(slot_policy(Phase::Sealed));
         for name in whitelist {
             let Some(key) = heap.find_string(name.as_bytes()) else {
                 continue;
@@ -488,12 +500,13 @@ impl GlobalEnv {
             let key = Val::Str(key);
             let value = outer.get(&key);
             if !matches!(value, Val::Nil) {
-                restricted
+                editor
                     .insert(key, value)
                     .expect("a string key lives in the hash part, whose insertion cannot fail");
             }
         }
         restricted.set_metatable(outer.get_metatable());
+        heap.charge_table_backing(&restricted);
         let contents = self.swap_contents(heap, restricted);
         let phase = std::mem::replace(&mut self.phase, Phase::Sealed);
         SuspendedEnv { contents, phase }
@@ -501,7 +514,8 @@ impl GlobalEnv {
 
     /// Resume a suspended environment, discarding the restricted one.
     pub(super) fn resume(&mut self, heap: &mut GcHeap, suspended: SuspendedEnv) {
-        self.swap_contents(heap, suspended.contents);
+        let discarded = self.swap_contents(heap, suspended.contents);
+        heap.release_table_backing(&discarded);
         self.phase = suspended.phase;
     }
 
@@ -580,8 +594,8 @@ impl GlobalEnv {
             Phase::Initializing
         };
         for env_table in &mut self.env_tables {
-            let table = heap
-                .as_table(env_table.table)
+            let mut table = heap
+                .edit_table(env_table.table)
                 .expect("an environment table is rooted by the global environment");
             env_table.pins = match env.iter().position(|(ptr, _)| *ptr == env_table.table) {
                 Some(index) => {
@@ -592,7 +606,7 @@ impl GlobalEnv {
                 None => {
                     table.set_slot_policy(slot_policy(phase));
                     if sealed {
-                        string_slot_keys(table).collect()
+                        string_slot_keys(&table).collect()
                     } else {
                         Vec::new()
                     }
@@ -634,7 +648,7 @@ pub(super) struct SavedEnvTable {
 /// the name. The table takes `phase`'s slot policy.
 #[cfg(feature = "snapshot")]
 fn restore_environment_table(
-    table: &mut Table,
+    mut table: TableEditor<'_>,
     saved: SavedEnvTable,
     phase: Phase,
 ) -> Result<Vec<StringPtr>, super::table::TableError> {
@@ -646,7 +660,7 @@ fn restore_environment_table(
         metatable,
         pins: saved_pins,
     } = saved;
-    let setup: Vec<StringPtr> = string_slot_keys(table).collect();
+    let setup: Vec<StringPtr> = string_slot_keys(&table).collect();
     let setup_slots = table.snapshot_hash_slots();
     let mut mentioned: IndexSet<TableKey> =
         IndexSet::with_capacity_and_hasher(entries.len() + saved_pins.len(), FixedState::default());
@@ -835,7 +849,7 @@ mod tests {
         let epoch = state.heap.watched_epoch();
         state
             .heap
-            .as_table(env.table())
+            .edit_table(env.table())
             .expect("global table")
             .insert(env.builtin_key(slot), Val::Num(2.0))
             .expect("string key fits the hash part");

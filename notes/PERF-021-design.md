@@ -80,11 +80,29 @@ mark work per allocation is about N/L, with no bound. The premise holds.
     collection timing") are rewritten. docs/save-state.md: the threshold stays
     host configuration, and a loaded State can derive a different score than a
     continuous one, because saves trim nil array ends.
-11. **W** is a tuning constant in `src/limits/tuning.rs`. Candidates are
-    chosen from a measured slot-scan cost against an object mark and sweep,
-    and decided on retained garbage and pause tails across these shapes:
-    scalar slots, hash pairs, duplicate references, small-object churn, and
-    payload-carrying churn.
+11. **W = 256 bytes**, `GC_RESIDENT_BYTES_PER_UNIT` in
+    `src/limits/tuning.rs` (amended at link 3, spar with codex
+    write-sol-high). W is an exchange rate between payload and objects, not
+    a measured cost ratio: about one heap object's footprint (16 `Val`
+    slots), so the score reads as resident memory in object-sized units. It
+    sets a tradeoff, not correctness: at growth g a cycle admits about
+    (g-1) * (live bytes + W per live object) of new payload, and a scalar
+    table is rescanned about W/16 slots per unit of headroom. The measurement
+    campaign the original ruling asked for was refused: slot checks,
+    already-marked references and slot-map sweep steps have different costs
+    and access patterns, so a probe ratio would pick a point on one machine
+    for a constant that has to be a fixed literal anyway. Never `size_of`:
+    object layout differs between debug and release, and timing is
+    replay-visible. Host-configurable W was refused (a new replay-visible
+    host input nobody asked for). Known tradeoff, accepted: a large string
+    that survives a sweep buys headroom that persists after it dies, so its
+    own reclamation can wait a full cycle; that is proportional pacing, not a
+    reason to move W.
+12. **Growth factors 0 and 1.** The next threshold is
+    `max(live * g, minimum, live + 1)`, saturating. The guarantee is only
+    one unit of headroom for a score below `usize::MAX`: an unchanged heap
+    (a rooted intern hit right after a collection) does not collect again.
+    One allocation can still consume it.
 
 ## Link plan
 
@@ -112,3 +130,85 @@ mark work per allocation is about N/L, with no bound. The premise holds.
    with commit and host to reference/performance.md.
 6. **Green agent.** `brokkr fmt`, then `brokkr check` to green, then
    CHANGELOG, then remove the PERF-021 entry and this document, then commit.
+
+### Link 1 implementation
+
+Both workload pairs retain the same dense array of 1,000,000 numeric slots.
+Each kernel reads its last slot, keeping the array reachable across calls.
+`gc_scalar_churn` allocates 2,048 two-element tables per kernel.
+`gc_payload_churn` allocates 128 tables and fills each with 1,024 numeric
+slots. The first shape emphasizes allocation frequency and repeated scans.
+The second adds backing growth and dead payload while keeping the live scan
+the same. Both examples run one kernel for the profiling scale. The wall
+wrappers repeat the respective kernels with identical bytecode.
+
+The wall baselines ran serially on bygg with the unchanged VM at
+`5c2cd0766`. All three iterations of each workload agreed to the reported
+precision:
+
+| Workload | Best wall of 3 | Brokkr run |
+|---|---:|---|
+| `gc_scalar_churn` | 12.2 s | `40bffd8be80f43618abac2d0cdac2ed1` |
+| `gc_payload_churn` | 1.7 s | `651d68c066a7461c921654b9bbadc677` |
+
+`brokkr check` passed all 15 sweeps. The example list and corpus cost
+fixture include both profiling scripts. No design decision was handed back.
+
+The session has read-only access to .git, so the link is uncommitted and
+Brokkr saved both runs as dirty. Remaining work (small): commit link 1 on
+main with Git write access before editing the VM, and rerun the two wall
+arms from that clean revision to store comparable baselines. Use that
+pre-meter revision for link 5's matched A/B cells.
+
+### Link 2 implementation
+
+The heap now counts array vector capacity, hash slot vector capacity and
+index allocation size, and interned string payload lengths. The table editor
+passes the meter to array reservations and shrinks, hash reservations and slot
+growth, and inline-to-map promotion. Existing reservation preflights cover
+the subsequent array pushes, batch extend, and downward splice. Map
+compaction keeps its backing and makes no debit. Slot-only stores and default
+sort writeback do not update the meter.
+
+Constructors and successful snapshot rebuilds account for complete backing at
+publication. A failed rebuild keeps the previous table and its charge. A
+restricted environment builds against a local meter until installation. The
+heap keeps the outgoing environment's charge across suspension, and releases
+the discarded backing on resume or when resetting suspended state. String
+pool hits do not update the meter. Sweep debits dead table backing and string
+payloads without changing their sweep order.
+
+Debug collection compares the meter with a census both before and after
+sweep. The first comparison includes garbage and catches growth accounting
+errors even when the affected object dies in that sweep. The second checks
+the sweep's debits. Both include all suspended environments. Existing tests
+now also check string byte totals across hits and sweeps, and collect again
+after both restricted environments resume.
+
+The collection threshold and trigger still use the existing allocation count.
+Link 2 has no replay-visible change and hands back no design decision.
+
+`brokkr check` passed all 15 sweeps. Link 2 is complete and remains
+uncommitted on main because the session has read-only access to .git. The
+clean baseline reruns listed under link 1 are still pending.
+
+### Link 3 implementation
+
+The handback asked for a probe campaign to choose W. It was settled instead
+by reasoning (ruling 11) and W = 256. `GcHeap::is_full` compares the
+pacing score (`pacing_score`: objects + strings + resident / W) in
+Automatic mode and the allocation count under a Manual threshold;
+`GcHeap::collect` derives the next Automatic threshold from the score with
+the ruling 12 floor. `State::gc_score` exposes the score; `heap_size`,
+`object_count` and `string_count` keep their units. Policy tests in
+`tests/integration/runtime/gc_policy.rs` cover payload in the score, the
+Manual threshold ignoring it, and growth factors 0 and 1. docs/limits.md,
+docs/determinism.md, docs/save-state.md, the `State` API docs and
+CHANGELOG carry the replay-visible change.
+
+Lateral, filed in notes/performance.md: the sweep visits every slot-map
+slot up to its high-water mark, so a heap that once held many objects keeps
+paying for vacant slots on every later collection.
+
+Links 1 to 3 were committed together, so link 5 has no clean pre-meter
+revision in the tree's history after the fact: use 5c2cd07 as the A side.

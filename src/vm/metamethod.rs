@@ -389,9 +389,9 @@ impl State {
             (Val::Str(name), _) => Some(name),
             _ => None,
         };
-        let tbl = self
+        let mut tbl = self
             .heap
-            .as_table(ptr)
+            .edit_table(ptr)
             .expect("checked to be a table just above");
         // With no metatable there is no `__newindex` to consult, so the
         // store needs no presence lookup first.
@@ -420,7 +420,7 @@ impl State {
         if !matches!(handler, Val::Nil) {
             return self.resolve_newindex(Val::Obj(ptr), handler, key, val, local_cost);
         }
-        let tbl = self.heap.as_table(ptr).expect("the receiver is a table");
+        let mut tbl = self.heap.edit_table(ptr).expect("the receiver is a table");
         if let Some(name) = raw_string {
             let slot = tbl.store_string_key(name, val);
             Self::fill_set_cache(cache, ptr, slot);
@@ -451,7 +451,7 @@ impl State {
         let handler = self.newindex_handler(ptr);
         if matches!(handler, Val::Nil) {
             self.heap
-                .as_table(ptr)
+                .edit_table(ptr)
                 .expect("the receiver is a table")
                 .insert(key, val)?;
             return Ok(None);
@@ -546,7 +546,7 @@ impl State {
                         // `__newindex` of its own, stores raw and takes no
                         // unit.
                         self.heap
-                            .as_table(ptr)
+                            .edit_table(ptr)
                             .expect("checked to be a table just above")
                             .insert(key, val)?;
                         return Ok(true);

@@ -25,6 +25,7 @@ use super::BytecodeRuntime;
 use super::LuaType;
 use super::Table;
 use super::Val;
+use super::table::TableEditor;
 
 // ============================================================================
 // Upvalue Pool - Arena-based upvalue storage
@@ -418,19 +419,45 @@ impl GcThreshold {
     }
 }
 
+/// Bytes in table backing and interned string payloads owned by the heap,
+/// including table backing temporarily held by suspended environments.
+#[derive(Default)]
+pub(super) struct ResidentBytes(usize);
+
+impl ResidentBytes {
+    pub(super) fn new(bytes: usize) -> Self {
+        Self(bytes)
+    }
+
+    pub(super) fn add(&mut self, bytes: usize) {
+        self.0 += bytes;
+    }
+
+    pub(super) fn remove(&mut self, bytes: usize) {
+        self.0 -= bytes;
+    }
+
+    #[cfg(any(feature = "snapshot", test))]
+    pub(super) fn replace(&mut self, old: usize, new: usize) {
+        self.remove(old);
+        self.add(new);
+    }
+}
+
 /// A collection of objects which need to be garbage-collected.
 /// Uses slotmap for safe, generational access to objects.
 pub(crate) struct GcHeap {
     /// SlotMap storing all GC-managed objects.
     objects: SlotMap<ObjectKey, WrappedObject>,
-    /// When total heap allocations (objects plus distinct interned strings)
-    /// reach this threshold, run the GC.
+    /// When the pacing score (automatic mode) or the allocation count
+    /// (manual mode) reaches this threshold, run the GC.
     threshold: GcThreshold,
     /// Automatic threshold changes are derived from this policy after each
     /// collection. Manual thresholds and disabled mode are kept separately.
     policy: GcPolicy,
     /// Pool for interned strings.
     strings: StringPool,
+    resident: ResidentBytes,
     /// Reused scratch space for the iterative GC mark phase.
     mark_worklist: Vec<ObjectPtr>,
     /// Reused scratch space for the runtime-cache sweep's chunk retention.
@@ -460,6 +487,7 @@ impl GcHeap {
             threshold: GcThreshold::from_initial(policy.initial_threshold),
             policy,
             strings: StringPool::new(),
+            resident: ResidentBytes::default(),
             mark_worklist: Vec::new(),
             live_chunks: LiveChunks::default(),
             empty_upvalues: Arc::from([]),
@@ -489,6 +517,7 @@ impl GcHeap {
             threshold: GcThreshold::manual(threshold),
             policy: GcPolicy::default(),
             strings: StringPool::new(),
+            resident: ResidentBytes::default(),
             mark_worklist: Vec::new(),
             live_chunks: LiveChunks::default(),
             empty_upvalues: Arc::from([]),
@@ -525,13 +554,15 @@ impl GcHeap {
     /// Get a mutable reference to the wrapped object.
     /// Panics if the key is invalid (use-after-free detection).
     #[inline]
-    pub(super) fn get_mut(&mut self, ptr: ObjectPtr) -> &mut WrappedObject {
+    fn get_mut(&mut self, ptr: ObjectPtr) -> (&mut WrappedObject, &mut ResidentBytes) {
         if ptr == self.watched {
-            self.watched_epoch = self.watched_epoch.wrapping_add(1);
+            self.mark_watched_changed();
         }
-        self.objects
+        let object = self
+            .objects
             .get_mut(ptr.0)
-            .expect("Invalid ObjectPtr: object was freed (use-after-free detected)")
+            .expect("Invalid ObjectPtr: object was freed (use-after-free detected)");
+        (object, &mut self.resident)
     }
 
     /// Move the watched object's epoch, for a store made through
@@ -578,10 +609,43 @@ impl GcHeap {
 
     /// Get a mutable reference to the object as a table, if it is one.
     pub(super) fn as_table(&mut self, ptr: ObjectPtr) -> Option<&mut Table> {
-        match &mut self.get_mut(ptr).raw {
+        match &mut self.get_mut(ptr).0.raw {
             RawObject::Table(t) => Some(t),
             _ => None,
         }
+    }
+
+    /// Borrow the table and its backing meter for capacity-changing writes.
+    pub(super) fn edit_table(&mut self, ptr: ObjectPtr) -> Option<TableEditor<'_>> {
+        let (object, resident) = self.get_mut(ptr);
+        match &mut object.raw {
+            RawObject::Table(table) => Some(table.edit(resident)),
+            RawObject::LuaFn(_) => None,
+        }
+    }
+
+    pub(super) fn charge_table_backing(&mut self, table: &Table) {
+        self.resident.add(table.resident_bytes());
+    }
+
+    pub(super) fn release_table_backing(&mut self, table: &Table) {
+        self.resident.remove(table.resident_bytes());
+    }
+
+    #[cfg(debug_assertions)]
+    fn check_resident_bytes(&self, suspended: usize) {
+        let tables: usize = self
+            .objects
+            .values()
+            .map(|object| match &object.raw {
+                RawObject::Table(table) => table.resident_bytes(),
+                RawObject::LuaFn(_) => 0,
+            })
+            .sum();
+        assert_eq!(
+            self.resident.0,
+            tables + self.strings.resident_bytes() + suspended
+        );
     }
 
     /// Get an immutable reference to the object as a table, if it is one.
@@ -643,7 +707,9 @@ impl GcHeap {
 
     /// Allocate a new table with room for `capacity` entries.
     fn alloc_table_with_capacity_raw(&mut self, capacity: usize) -> ObjectPtr {
-        let raw = RawObject::Table(Table::with_capacity(capacity));
+        let table = Table::with_capacity(capacity);
+        self.charge_table_backing(&table);
+        let raw = RawObject::Table(table);
         let wrapped = WrappedObject {
             raw,
             color: Cell::new(Color::Unmarked),
@@ -653,7 +719,9 @@ impl GcHeap {
 
     /// Allocate a new table pre-filled from a constructor template.
     fn alloc_table_with_template_raw(&mut self, key_ids: &[u16], literals: &[Val]) -> ObjectPtr {
-        let raw = RawObject::Table(Table::with_template_keys(key_ids, literals));
+        let table = Table::with_template_keys(key_ids, literals);
+        self.charge_table_backing(&table);
+        let raw = RawObject::Table(table);
         let wrapped = WrappedObject {
             raw,
             color: Cell::new(Color::Unmarked),
@@ -664,8 +732,11 @@ impl GcHeap {
     /// Allocate or intern a string.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn alloc_string_raw(&mut self, bytes: &[u8]) -> StringPtr {
-        self.strings
-            .intern(bytes, crate::det_hash::hash_bytes(bytes))
+        self.strings.intern(
+            bytes,
+            crate::det_hash::hash_bytes(bytes),
+            &mut self.resident,
+        )
     }
 
     /// Intern `range` of the pooled string `source`, reading the bytes in
@@ -676,17 +747,30 @@ impl GcHeap {
         source: StringPtr,
         range: std::ops::Range<usize>,
     ) -> Option<StringPtr> {
-        self.strings.intern_range(source, range)
+        self.strings.intern_range(source, range, &mut self.resident)
     }
 
     // ========================================================================
     // Garbage Collection
     // ========================================================================
 
-    /// Check whether the configured allocation threshold has been reached.
+    /// Check whether the configured threshold has been reached.
     #[must_use]
     pub(super) fn is_full(&self) -> bool {
-        self.allocation_count() >= self.threshold.value()
+        match self.threshold {
+            GcThreshold::Automatic(threshold) => self.pacing_score() >= threshold,
+            GcThreshold::Manual(threshold) => self.allocation_count() >= threshold,
+            GcThreshold::Disabled => false,
+        }
+    }
+
+    /// The automatic pacing score: objects plus distinct strings plus
+    /// resident payload bytes in units of `GC_RESIDENT_BYTES_PER_UNIT`.
+    /// Manual thresholds keep counting allocations only.
+    #[inline]
+    pub(super) fn pacing_score(&self) -> usize {
+        self.allocation_count()
+            .saturating_add(self.resident.0 / tuning::GC_RESIDENT_BYTES_PER_UNIT)
     }
 
     /// Mark an object as reachable. Call this for all root objects.
@@ -792,25 +876,36 @@ impl GcHeap {
     /// Call this after marking all roots.
     #[cfg_attr(feature = "hotpath", hotpath::measure(label = "object::heap_collect"))]
     fn collect(&mut self) {
+        let resident = &mut self.resident;
         // Sweep phase: remove unmarked objects
         self.objects.retain(|_, obj| match obj.color.get() {
             Color::Reachable => {
                 obj.color.set(Color::Unmarked);
                 true
             }
-            Color::Unmarked => false,
+            Color::Unmarked => {
+                if let RawObject::Table(table) = &obj.raw {
+                    resident.remove(table.resident_bytes());
+                }
+                false
+            }
         });
 
         // String collection
-        self.strings.collect();
+        self.strings.collect(resident);
 
         // Preserve manual and disabled modes across explicit collections.
         // Automatic mode follows the State's policy rather than replacing it.
+        // The `live + 1` floor gives growth factors 0 and 1 one unit of
+        // headroom whenever the score is below `usize::MAX`, so an unchanged
+        // heap (a rooted intern hit straight after this collection) does not
+        // collect again at once. It promises nothing beyond that one unit.
         if matches!(self.threshold, GcThreshold::Automatic(_)) {
+            let live = self.pacing_score();
             self.threshold = GcThreshold::Automatic(
-                self.allocation_count()
-                    .saturating_mul(self.policy.growth_factor)
-                    .max(self.policy.minimum_threshold),
+                live.saturating_mul(self.policy.growth_factor)
+                    .max(self.policy.minimum_threshold)
+                    .max(live.saturating_add(1)),
             );
         }
     }
@@ -1080,7 +1175,7 @@ impl StringPool {
     /// writes the prepared bucket without rehashing. At exhausted capacity
     /// a hit can take that reserve; it is the one the next miss would take.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    pub(super) fn intern(&mut self, bytes: &[u8], hash: u64) -> StringPtr {
+    fn intern(&mut self, bytes: &[u8], hash: u64, resident: &mut ResidentBytes) -> StringPtr {
         let strings = &self.strings;
         let vacant = match self.index.entry(
             hash,
@@ -1090,12 +1185,14 @@ impl StringPool {
             hashbrown::hash_table::Entry::Occupied(found) => return StringPtr(*found.get()),
             hashbrown::hash_table::Entry::Vacant(vacant) => vacant,
         };
+        let bytes_len = bytes.len();
         let key = self.strings.insert(StringEntry {
             data: bytes.into(),
             hash,
             color: Cell::new(Color::Unmarked),
         });
         vacant.insert(key);
+        resident.add(bytes_len);
         StringPtr(key)
     }
 
@@ -1107,6 +1204,7 @@ impl StringPool {
         &mut self,
         source: StringPtr,
         range: std::ops::Range<usize>,
+        resident: &mut ResidentBytes,
     ) -> Option<StringPtr> {
         let strings = &self.strings;
         let bytes = Self::data(strings, source).get(range)?;
@@ -1119,6 +1217,7 @@ impl StringPool {
             hashbrown::hash_table::Entry::Occupied(found) => return Some(StringPtr(*found.get())),
             hashbrown::hash_table::Entry::Vacant(vacant) => vacant,
         };
+        let bytes_len = bytes.len();
         let data: Box<[u8]> = bytes.into();
         let key = self.strings.insert(StringEntry {
             data,
@@ -1126,6 +1225,7 @@ impl StringPool {
             color: Cell::new(Color::Unmarked),
         });
         vacant.insert(key);
+        resident.add(bytes_len);
         Some(StringPtr(key))
     }
 
@@ -1148,6 +1248,11 @@ impl StringPool {
         }
     }
 
+    #[cfg(debug_assertions)]
+    fn resident_bytes(&self) -> usize {
+        self.strings.values().map(|entry| entry.data.len()).sum()
+    }
+
     /// Collect unreachable strings.
     #[cfg_attr(
         feature = "hotpath",
@@ -1163,7 +1268,7 @@ impl StringPool {
     /// order rather than sequentially to save the per-dead probes, which
     /// wins only after a large share of the pool dies, so neither order
     /// dominates and this one keeps the free-list order unchanged.
-    pub(super) fn collect(&mut self) {
+    fn collect(&mut self, resident: &mut ResidentBytes) {
         let index = &mut self.index;
         self.strings.retain(|key, entry| match entry.color.get() {
             Color::Reachable => {
@@ -1171,6 +1276,7 @@ impl StringPool {
                 true
             }
             Color::Unmarked => {
+                resident.remove(entry.data.len());
                 match index.find_entry(entry.hash, |k| *k == key) {
                     Ok(found) => {
                         found.remove();
@@ -1217,8 +1323,9 @@ mod tests {
     #[should_panic(expected = "GC marked a vacant string key")]
     fn marking_a_swept_string_reports_the_stale_root() {
         let mut pool = StringPool::new();
-        let ptr = pool.intern(b"unrooted", 1);
-        pool.collect();
+        let mut resident = ResidentBytes::default();
+        let ptr = pool.intern(b"unrooted", 1, &mut resident);
+        pool.collect(&mut resident);
         pool.mark(ptr);
     }
 
@@ -1349,7 +1456,7 @@ mod tests {
             let mut root = heap.no_gc_allocator().alloc_table();
             for _ in 0..100_000 {
                 let next = heap.no_gc_allocator().alloc_table();
-                heap.as_table(next)
+                heap.edit_table(next)
                     .expect("newly allocated object is a table")
                     .insert(Val::Num(1.0), Val::Obj(root))
                     .expect("table key is valid");
@@ -1400,19 +1507,20 @@ mod tests {
         // slots, then grow again: every rehash must still find each live
         // key's hash, and lookups must still resolve by content.
         let mut pool = StringPool::new();
+        let mut resident = ResidentBytes::default();
         let mut live = Vec::new();
         for i in 0..200u32 {
             let bytes = format!("s{i}").into_bytes();
             // Every fourth string shares a forced hash with its neighbours.
             let hash = if i % 4 == 0 { 7 } else { u64::from(i) };
-            live.push((pool.intern(&bytes, hash), bytes, hash));
+            live.push((pool.intern(&bytes, hash, &mut resident), bytes, hash));
         }
         for (index, (ptr, _, _)) in live.iter().enumerate() {
             if index % 3 == 0 {
                 pool.mark(*ptr);
             }
         }
-        pool.collect();
+        pool.collect(&mut resident);
         let mut survivors: Vec<_> = live
             .into_iter()
             .enumerate()
@@ -1423,16 +1531,23 @@ mod tests {
         for i in 0..400u32 {
             let bytes = format!("t{i}").into_bytes();
             let hash = if i % 2 == 0 { 7 } else { 1000 + u64::from(i) };
-            survivors.push((pool.intern(&bytes, hash), bytes, hash));
+            survivors.push((pool.intern(&bytes, hash, &mut resident), bytes, hash));
         }
         pool.reserve(1000);
         for (ptr, bytes, hash) in &survivors {
             assert_eq!(pool.find_by_hash(bytes, *hash), Some(*ptr));
             assert_eq!(pool.get(*ptr), bytes.as_slice());
             // A hit through the fused probe returns the live pointer.
-            assert_eq!(pool.intern(bytes, *hash), *ptr);
+            assert_eq!(pool.intern(bytes, *hash, &mut resident), *ptr);
         }
         assert_eq!(pool.find_by_hash(b"s1", 1), None);
+        assert_eq!(
+            resident.0,
+            survivors
+                .iter()
+                .map(|(_, bytes, _)| bytes.len())
+                .sum::<usize>()
+        );
     }
 
     #[test]
@@ -1453,15 +1568,16 @@ mod tests {
     #[test]
     fn string_pool_sweep_preserves_moved_and_colliding_buckets() {
         let mut pool = StringPool::new();
+        let mut resident = ResidentBytes::default();
         // Control the hashes to exercise a partially collected collision
         // bucket and live buckets moved by removal of an earlier bucket.
-        pool.intern(b"dead first", 1);
-        let kept = pool.intern(b"keep", 2);
-        let collided = pool.intern(b"keep collision", 3);
-        pool.intern(b"dead collision", 3);
+        pool.intern(b"dead first", 1, &mut resident);
+        let kept = pool.intern(b"keep", 2, &mut resident);
+        let collided = pool.intern(b"keep collision", 3, &mut resident);
+        pool.intern(b"dead collision", 3, &mut resident);
         pool.mark(kept);
         pool.mark(collided);
-        pool.collect();
+        pool.collect(&mut resident);
 
         assert_eq!(pool.len(), 2);
         assert_eq!(pool.find_by_hash(b"dead first", 1), None);
@@ -1469,11 +1585,12 @@ mod tests {
         assert_eq!(pool.find_by_hash(b"keep", 2), Some(kept));
         assert_eq!(pool.find_by_hash(b"keep collision", 3), Some(collided));
 
-        let replacement = pool.intern(b"replacement", 1);
+        let replacement = pool.intern(b"replacement", 1, &mut resident);
         assert_eq!(pool.find_by_hash(b"replacement", 1), Some(replacement));
         pool.mark(collided);
-        pool.collect();
+        pool.collect(&mut resident);
         assert_eq!(pool.len(), 1);
+        assert_eq!(resident.0, b"keep collision".len());
         assert_eq!(pool.find_by_hash(b"keep", 2), None);
         assert_eq!(pool.find_by_hash(b"replacement", 1), None);
         assert_eq!(pool.find_by_hash(b"keep collision", 3), Some(collided));

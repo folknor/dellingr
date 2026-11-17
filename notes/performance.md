@@ -540,7 +540,9 @@ That puts mark work per allocation at about N/L, which has no bound.
 
 **Redesign:** pace collections in Automatic mode by objects + strings +
 resident_bytes / W. Charge resident bytes at table and string backing growth,
-and service the pressure at Lua back-edges and call admission. The settled
+and service the pressure at Lua back-edges and call admission. The meter
+and the weighted threshold at the allocator gate (W = 256) have landed; the
+GC checkpoints, the measurement and the close-out remain. The settled
 rulings and the link plan are in `notes/PERF-021-design.md`. Reference
 summaries were refused, with the reasoning at `mark_values`.
 
@@ -719,6 +721,27 @@ outer binding changes, nested restrictions and discarded writes stay exact.
 
 **Classification:** full representation rewrite, conditional: near the top if
 the game restricts around every tick, irrelevant if restriction is setup-only.
+
+## PERF-038 - Sweep visits vacant slot-map slots up to the high-water mark
+
+Raised by the PERF-021 link 3 spar. Verified by reading the code. Not
+measured.
+
+**Bottleneck:** `GcHeap::collect` sweeps with `SlotMap::retain`, which visits
+every slot up to the map's historical high-water mark, occupied or not. A heap
+that once held K objects pays K slot visits on every later collection, even
+when few objects are live and collections come every few dozen allocations.
+Weighted pacing adds a route to a high-water mark: a large live string buys
+headroom for many small objects that then die together.
+
+**Redesign:** sweep only occupied slots, freeing in the existing slot order so
+free-list reuse and the version stepping `CACHE_PRUNE_INTERVAL` relies on stay
+the same. Related: the paged sweep in `optimizations.md` "8-byte NaN-boxed
+`Val`".
+
+**Risks:** free-list order is replay-visible through `%p` ids.
+
+**Classification:** local collector change.
 
 ---
 

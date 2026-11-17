@@ -195,6 +195,14 @@ xxhash = "69948cfa2e1cb8ea44e935f481d3fa16"
 file = "bench/gc_churn.lua"
 xxhash = "1ed1ab2e97827b61e317a94d3f197a5a"
 
+[data.workloads.bench.gc_scalar_churn]
+file = "bench/gc_scalar_churn.lua"
+xxhash = "4e036878f02794a61a5d0fe1f41e9297"
+
+[data.workloads.bench.gc_payload_churn]
+file = "bench/gc_payload_churn.lua"
+xxhash = "54214b49afe9ca382f0854b22ec7926a"
+
 [data.workloads.bench.result_adjust]
 file = "bench/result_adjust.lua"
 xxhash = "fc03bdf3c2faafa7c72e56ee78bab09b"
@@ -338,6 +346,14 @@ xxhash = "f1242d5988d552fa7c7f3d23855f9696"
 [data.workloads.hotpath.gc_churn]
 file = "examples/alloc/gc_churn.lua"
 xxhash = "9c89ca315d197f5c3bd4c31cfd79d065"
+
+[data.workloads.hotpath.gc_scalar_churn]
+file = "examples/alloc/gc_scalar_churn.lua"
+xxhash = "8397a64179ed4a9de32c2b8d9023db4a"
+
+[data.workloads.hotpath.gc_payload_churn]
+file = "examples/alloc/gc_payload_churn.lua"
+xxhash = "85e25efbde98d6745783a18940292b92"
 
 [data.workloads.hotpath.result_adjust]
 file = "examples/calls/result_adjust.lua"

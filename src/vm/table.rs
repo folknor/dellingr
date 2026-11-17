@@ -11,7 +11,7 @@ use hash_slots::HashSlots;
 use super::Error;
 use super::TypeError;
 use super::Val;
-use super::object::{GcHeap, Markable, ObjectPtr};
+use super::object::{GcHeap, Markable, ObjectPtr, ResidentBytes, StringPtr};
 #[cfg(feature = "snapshot")]
 use crate::error::{InternalFault, SnapshotTableFault};
 
@@ -587,6 +587,21 @@ fn may_migrate(key: &Val) -> bool {
 }
 
 impl Table {
+    pub(super) fn resident_bytes(&self) -> usize {
+        let hash = match &self.storage {
+            TableStorage::Inline { .. } => 0,
+            TableStorage::Map(map, _) => map.resident_bytes(),
+        };
+        self.array.capacity() * size_of::<Val>() + hash
+    }
+
+    pub(super) fn edit<'a>(&'a mut self, resident: &'a mut ResidentBytes) -> TableEditor<'a> {
+        TableEditor {
+            table: self,
+            resident,
+        }
+    }
+
     pub(super) fn with_capacity(capacity: usize) -> Self {
         if capacity <= INLINE_CAPACITY {
             Self::default()
@@ -1212,9 +1227,9 @@ impl Table {
     /// Reserve room for `additional` more hash slots. Inline storage has its
     /// fixed capacity and reserves nothing. Infallible like all hash-part
     /// allocation; `reserve_array` says why only array growth can fail.
-    pub(super) fn reserve_hash(&mut self, additional: usize) {
+    fn reserve_hash_tracked(&mut self, resident: &mut ResidentBytes, additional: usize) {
         if let TableStorage::Map(map, _) = &mut self.storage {
-            map.reserve(additional);
+            map.reserve(additional, resident);
         }
     }
 
@@ -1223,7 +1238,7 @@ impl Table {
     /// cache family) is current afterwards. The global table swaps its
     /// contents with a restricted environment's this way, keeping its
     /// identity.
-    pub(super) fn swap_contents(&mut self, mut incoming: Table) -> Table {
+    fn swap_contents(&mut self, mut incoming: Table) -> Table {
         std::mem::swap(self, &mut incoming);
         self.version
             .set(self.version.get().max(incoming.version()).wrapping_add(1));
@@ -1301,7 +1316,7 @@ impl Table {
     /// environment deltas included, passes the canonical live span; the
     /// rebuild also accepts a wider span with nil ends.
     #[cfg(feature = "snapshot")]
-    pub(super) fn rebuild_from_snapshot(
+    fn rebuild_from_snapshot(
         &mut self,
         vlen: usize,
         array_slots: usize,
@@ -1604,7 +1619,12 @@ impl Table {
     }
 
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    pub(super) fn insert(&mut self, key: Val, value: Val) -> std::result::Result<(), TableError> {
+    fn insert_tracked(
+        &mut self,
+        resident: &mut ResidentBytes,
+        key: Val,
+        value: Val,
+    ) -> std::result::Result<(), TableError> {
         if let Some(position) = self.array_slot(&key) {
             self.write_window(position, value);
             #[cfg(debug_assertions)]
@@ -1627,16 +1647,16 @@ impl Table {
         }
 
         if self.is_array_append_key(&key) {
-            self.append(value)?;
+            self.append_tracked(resident, value)?;
             return Ok(());
         }
 
         if let Some(array_key) = self.array_key(&key) {
-            self.write_outside_window(array_key, value)?;
+            self.write_outside_window(resident, array_key, value)?;
             return Ok(());
         }
 
-        self.insert_hash(table_key, value);
+        self.insert_hash(resident, table_key, value);
         Ok(())
     }
 
@@ -1645,12 +1665,13 @@ impl Table {
     /// string never routes to the array part, so this is `insert`'s hash
     /// half and cannot fail. The caller decides `__newindex` beforehand:
     /// this revives a dead slot like any raw insert.
-    pub(super) fn store_string_key(
+    fn store_string_key_tracked(
         &mut self,
-        key: super::object::StringPtr,
+        resident: &mut ResidentBytes,
+        key: StringPtr,
         value: Val,
     ) -> SlotRef {
-        let index = self.insert_hash(TableKey::from_prevalidated(Val::Str(key)), value);
+        let index = self.insert_hash(resident, TableKey::from_prevalidated(Val::Str(key)), value);
         SlotRef {
             version: self.version(),
             index,
@@ -1660,11 +1681,16 @@ impl Table {
     /// The hash half of `insert`: `key` is valid and not an array key,
     /// `value` is non-nil. Returns the hash index now holding `key`, live;
     /// any version move the store made has happened by the time it returns.
-    fn insert_hash(&mut self, table_key: TableKey, value: Val) -> usize {
+    fn insert_hash(
+        &mut self,
+        resident: &mut ResidentBytes,
+        table_key: TableKey,
+        value: Val,
+    ) -> usize {
         debug_assert!(!matches!(value, Val::Nil), "a hash insert stores a value");
         let key = table_key.value();
         if self.dead_count == 0 {
-            return self.insert_without_tombstones(table_key, value);
+            return self.insert_without_tombstones(resident, table_key, value);
         }
 
         let updated_live_inline_entry = match &mut self.storage {
@@ -1714,10 +1740,12 @@ impl Table {
                     self.hash_migratable += usize::from(may_migrate(&key));
                     index
                 } else {
-                    self.promote_to_map(table_key, value)
+                    self.promote_to_map(resident, table_key, value)
                 }
             }
-            TableStorage::Map(..) => self.insert_into_map_with_tombstones(table_key, value),
+            TableStorage::Map(..) => {
+                self.insert_into_map_with_tombstones(resident, table_key, value)
+            }
         };
         #[cfg(debug_assertions)]
         self.debug_assert_invariants();
@@ -1769,11 +1797,17 @@ impl Table {
     /// reservation out of proportion to what the table holds. An allocator
     /// refusal there aborts like any other VM allocation (`docs/limits.md`,
     /// "State-local growth").
-    fn reserve_array(&mut self, len: usize) -> std::result::Result<(), TableError> {
+    fn reserve_array_tracked(
+        &mut self,
+        resident: &mut ResidentBytes,
+        len: usize,
+    ) -> std::result::Result<(), TableError> {
         if len > self.array.capacity() {
+            let old = self.array.capacity();
             self.array
                 .try_reserve(len - self.array.len())
                 .map_err(|_| TableError::GrowthFailed)?;
+            resident.add((self.array.capacity() - old) * size_of::<Val>());
         }
         Ok(())
     }
@@ -1810,14 +1844,17 @@ impl Table {
         Ok(end - self.vlen)
     }
 
-    fn reserve_append(&mut self) -> std::result::Result<(), TableError> {
+    fn reserve_append(
+        &mut self,
+        resident: &mut ResidentBytes,
+    ) -> std::result::Result<(), TableError> {
         let end = self.vlen + self.append_growth()?;
         let len = if self.array_live == 0 {
             end - self.vlen
         } else {
             end - self.base
         };
-        self.reserve_array(len)
+        self.reserve_array_tracked(resident, len)
     }
 
     /// Whether an append, and every append after it with no other write in
@@ -1838,7 +1875,11 @@ impl Table {
     /// and `table.insert` inside a full sequence extend the array with it.
     /// Ordinary nil writes never reach here.
     #[inline]
-    fn append(&mut self, value: Val) -> std::result::Result<(), TableError> {
+    fn append_tracked(
+        &mut self,
+        resident: &mut ResidentBytes,
+        value: Val,
+    ) -> std::result::Result<(), TableError> {
         self.advance_lead();
         let len = self.array.len();
         if self.vlen == MAX_ARRAY_LEN
@@ -1848,7 +1889,7 @@ impl Table {
             || len == self.array.capacity()
             || self.hash_migratable != 0
         {
-            return self.append_slow(value);
+            return self.append_slow(resident, value);
         }
         self.vlen += 1;
         self.array.push(value);
@@ -1862,10 +1903,14 @@ impl Table {
     /// or hash migration is needed. Keep fallible allocation off the hot path.
     #[cold]
     #[inline(never)]
-    fn append_slow(&mut self, value: Val) -> std::result::Result<(), TableError> {
+    fn append_slow(
+        &mut self,
+        resident: &mut ResidentBytes,
+        value: Val,
+    ) -> std::result::Result<(), TableError> {
         self.check_vlen_growth(1)?;
-        self.prepare_append_after_lead()?;
-        self.reserve_append()?;
+        self.prepare_append_after_lead(resident)?;
+        self.reserve_append(resident)?;
         self.vlen += 1;
         self.array.push(value);
         self.array_live += usize::from(!matches!(value, Val::Nil));
@@ -1878,9 +1923,12 @@ impl Table {
     /// append key, and a dead prefix of at least half the window is dropped.
     /// Both run only on an append, never on a nil write, so a traversal that
     /// clears keys never sees the window move.
-    fn prepare_append(&mut self) -> std::result::Result<(), TableError> {
+    fn prepare_append(
+        &mut self,
+        resident: &mut ResidentBytes,
+    ) -> std::result::Result<(), TableError> {
         self.advance_lead();
-        self.prepare_append_after_lead()
+        self.prepare_append_after_lead(resident)
     }
 
     /// Release dead storage and fill a saved nil tail after lead catch-up.
@@ -1891,22 +1939,25 @@ impl Table {
     /// of 30bbdcc), while constructor workloads were flat either way.
     #[cold]
     #[inline(never)]
-    fn prepare_append_after_lead(&mut self) -> std::result::Result<(), TableError> {
+    fn prepare_append_after_lead(
+        &mut self,
+        resident: &mut ResidentBytes,
+    ) -> std::result::Result<(), TableError> {
         let len = self.array.len();
         if self.array_live == 0 {
             if len > 0 || self.base != self.vlen {
-                self.reset_window(self.vlen);
+                self.reset_window(resident, self.vlen);
             }
             return Ok(());
         }
         if self.lead * 2 >= len {
-            self.drop_dead_prefix();
+            self.drop_dead_prefix(resident);
         }
         if self.base + self.array.len() < self.vlen {
             // A snapshot omits trailing nil slots, even after structural nil
             // appends. The gap is therefore legitimate and unbounded by the
             // saved span. Resetting this window would discard its live values.
-            self.reserve_array(self.vlen - self.base)?;
+            self.reserve_array_tracked(resident, self.vlen - self.base)?;
             self.array.resize(self.vlen - self.base, Val::Nil);
         }
         Ok(())
@@ -1914,21 +1965,27 @@ impl Table {
 
     /// Drop the hinted dead prefix from the window. The memmove costs at most
     /// the prefix length, which the hint paid for one step at a time.
-    fn drop_dead_prefix(&mut self) {
+    fn drop_dead_prefix(&mut self, resident: &mut ResidentBytes) {
         self.array.drain(..self.lead);
         self.base += self.lead;
         self.lead = 0;
         let keep = self.array.len().max(EMPTIED_WINDOW_CAPACITY);
         if self.array.capacity() > 4 * keep {
-            self.array.shrink_to(2 * keep);
+            self.shrink_array(2 * keep, resident);
         }
     }
 
+    fn shrink_array(&mut self, minimum: usize, resident: &mut ResidentBytes) {
+        let old = self.array.capacity();
+        self.array.shrink_to(minimum);
+        resident.remove((old - self.array.capacity()) * size_of::<Val>());
+    }
+
     /// Empty the window and restart it just above key `base`.
-    fn reset_window(&mut self, base: usize) {
+    fn reset_window(&mut self, resident: &mut ResidentBytes, base: usize) {
         self.array.clear();
         self.array_live = 0;
-        self.array.shrink_to(EMPTIED_WINDOW_CAPACITY);
+        self.shrink_array(EMPTIED_WINDOW_CAPACITY, resident);
         self.base = base;
         self.lead = 0;
     }
@@ -1940,6 +1997,7 @@ impl Table {
     /// cases and must change with it.
     fn reserve_outside_window(
         &mut self,
+        resident: &mut ResidentBytes,
         key: usize,
         extra: usize,
         live_delta: usize,
@@ -1955,7 +2013,7 @@ impl Table {
         } else {
             key - self.base
         };
-        self.reserve_array(needed)
+        self.reserve_array_tracked(resident, needed)
     }
 
     /// Store a live `value` at array key `key`, which lies outside the
@@ -1965,13 +2023,14 @@ impl Table {
     /// of a deque stay amortized O(1).
     fn write_outside_window(
         &mut self,
+        resident: &mut ResidentBytes,
         key: usize,
         value: Val,
     ) -> std::result::Result<(), TableError> {
-        self.reserve_outside_window(key, 0, 0)?;
+        self.reserve_outside_window(resident, key, 0, 0)?;
         debug_assert!(!matches!(value, Val::Nil));
         if self.array_live == 0 {
-            self.reset_window(key - 1);
+            self.reset_window(resident, key - 1);
             self.array.push(value);
         } else if key <= self.base {
             let pad = (key - 1).min(self.array_live.div_ceil(2));
@@ -2034,7 +2093,12 @@ impl Table {
         occupied - self.dead_count
     }
 
-    fn insert_into_map_with_tombstones(&mut self, key: TableKey, value: Val) -> usize {
+    fn insert_into_map_with_tombstones(
+        &mut self,
+        resident: &mut ResidentBytes,
+        key: TableKey,
+        value: Val,
+    ) -> usize {
         let key = key.value();
         let TableStorage::Map(map, policy) = &mut self.storage else {
             unreachable!("map insertion requires map storage");
@@ -2079,18 +2143,18 @@ impl Table {
                     // Compaction drops the old tombstone with every other
                     // one, so the key has no slot left to vacate.
                     self.compact_dead();
-                    self.map_mut().push_new(key, value)
+                    self.map_mut().push_tracked(key, value, resident)
                 } else {
                     // The old slot turns vacant, still a dead slot, so
                     // `dead_count` is unchanged.
-                    self.map_mut().relocate(old, value)
+                    self.map_mut().relocate(old, value, resident)
                 }
             }
             None => {
                 if compacts {
                     self.compact_dead();
                 }
-                self.map_mut().push_new(key, value)
+                self.map_mut().push_tracked(key, value, resident)
             }
         };
         self.hash_migratable += usize::from(may_migrate(&key));
@@ -2109,7 +2173,12 @@ impl Table {
     }
 
     /// Returns the hash index now holding `key`.
-    fn insert_without_tombstones(&mut self, key: TableKey, value: Val) -> usize {
+    fn insert_without_tombstones(
+        &mut self,
+        resident: &mut ResidentBytes,
+        key: TableKey,
+        value: Val,
+    ) -> usize {
         let key_value = key.value();
         let index = match &mut self.storage {
             TableStorage::Inline { entries, len } => {
@@ -2127,7 +2196,7 @@ impl Table {
                     self.hash_migratable += usize::from(may_migrate(&key_value));
                     index
                 } else {
-                    self.promote_to_map(key, value)
+                    self.promote_to_map(resident, key, value)
                 }
             }
             TableStorage::Map(map, _) => {
@@ -2139,7 +2208,7 @@ impl Table {
                     index
                 } else {
                     self.hash_migratable += usize::from(may_migrate(&key_value));
-                    map.push_new(key_value, value)
+                    map.push_tracked(key_value, value, resident)
                 }
             }
         };
@@ -2152,7 +2221,12 @@ impl Table {
     /// pair, which its callers have proved absent. Every moved entry keeps
     /// its index; returns the new key's.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    fn promote_to_map(&mut self, new_key: TableKey, new_value: Val) -> usize {
+    fn promote_to_map(
+        &mut self,
+        resident: &mut ResidentBytes,
+        new_key: TableKey,
+        new_value: Val,
+    ) -> usize {
         debug_assert_eq!(self.dead_count, 0);
         let old_storage = std::mem::take(&mut self.storage);
         let TableStorage::Inline { mut entries, len } = old_storage else {
@@ -2170,6 +2244,7 @@ impl Table {
             // The moved entries keep their count; only the new key adds one.
             self.hash_migratable += usize::from(may_migrate(&new_key.value()));
             let index = map.push_new(new_key.value(), new_value);
+            resident.add(map.resident_bytes());
             self.storage = TableStorage::Map(map, SlotPolicy::default());
             #[cfg(debug_assertions)]
             self.debug_assert_invariants();
@@ -2190,13 +2265,14 @@ impl Table {
     /// is therefore moved to a map first, every slot (tombstones included) at
     /// the same index, so no cached index moves and the version stays put.
     /// A snapshot rebuild resets the policy; its owner sets it again.
-    pub(super) fn set_slot_policy(&mut self, policy: SlotPolicy) {
+    fn set_slot_policy_tracked(&mut self, resident: &mut ResidentBytes, policy: SlotPolicy) {
         if let TableStorage::Inline { entries, len } = &mut self.storage {
             let mut map = HashSlots::with_capacity((INLINE_CAPACITY + 1).next_power_of_two());
             for (key, value) in entries.iter_mut().take(usize::from(*len)) {
                 let (key, value) = (std::mem::take(key), std::mem::take(value));
                 map.push_new(TableKey::from_prevalidated(key).value(), value);
             }
+            resident.add(map.resident_bytes());
             self.storage = TableStorage::Map(map, policy);
         } else if let TableStorage::Map(_, current) = &mut self.storage {
             *current = policy;
@@ -2293,13 +2369,17 @@ impl Table {
     }
 
     /// Reserve a positional batch against the window the append will keep.
-    fn prepare_list_append(&mut self, count: usize) -> std::result::Result<(), TableError> {
+    fn prepare_list_append(
+        &mut self,
+        resident: &mut ResidentBytes,
+        count: usize,
+    ) -> std::result::Result<(), TableError> {
         // Constructors normally have an empty or already plain window. Keep
         // their reservation independent of the cold window-maintenance path.
         if !(self.appends_are_plain() || self.array.is_empty() && self.base == self.vlen) {
-            self.prepare_append()?;
+            self.prepare_append(resident)?;
         }
-        self.reserve_array(self.array.len().saturating_add(count))
+        self.reserve_array_tracked(resident, self.array.len().saturating_add(count))
     }
 
     /// Stores the values of a table constructor's positional fields at keys
@@ -2314,8 +2394,9 @@ impl Table {
     /// between appending (nil included) and a hash insert, and migration after
     /// each append can extend the array past the reservation.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    pub(super) fn set_list(
+    fn set_list_tracked(
         &mut self,
+        resident: &mut ResidentBytes,
         first: usize,
         mut values: impl ExactSizeIterator<Item = Val>,
     ) -> std::result::Result<(), TableError> {
@@ -2336,7 +2417,7 @@ impl Table {
                 // same end state.
                 let count = 1 + values.len();
                 self.check_vlen_growth(count)?;
-                self.reserve_array(self.array.len().saturating_add(count))?;
+                self.reserve_array_tracked(resident, self.array.len().saturating_add(count))?;
                 self.vlen += count;
                 let mut live = usize::from(!matches!(value, Val::Nil));
                 self.array.push(value);
@@ -2353,13 +2434,13 @@ impl Table {
             if key == self.vlen + 1 && !reserved {
                 // The bulk path above needs no window maintenance. Other
                 // appends release dead storage before reserving the batch.
-                self.prepare_list_append(1 + values.len())?;
+                self.prepare_list_append(resident, 1 + values.len())?;
                 reserved = true;
             }
             if key == self.vlen + 1 {
-                self.append(value)?;
+                self.append_tracked(resident, value)?;
             } else {
-                self.insert(Val::Num(key as f64), value)?;
+                self.insert_tracked(resident, Val::Num(key as f64), value)?;
             }
             key += 1;
         }
@@ -2381,8 +2462,9 @@ impl Table {
     /// `len` is `array_len()`, which the caller has already computed to
     /// validate `pos`; nothing may change the table in between.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    pub(super) fn array_insert_at_len(
+    fn array_insert_at_len_tracked(
         &mut self,
+        resident: &mut ResidentBytes,
         pos: usize,
         len: usize,
         value: Val,
@@ -2394,7 +2476,7 @@ impl Table {
         );
         if pos == len + 1 {
             // Nothing shifts. Nil is a no-op, as `t[#t + 1] = nil` is.
-            self.insert(Val::Num(pos as f64), value)?;
+            self.insert_tracked(resident, Val::Num(pos as f64), value)?;
             #[cfg(debug_assertions)]
             self.debug_assert_invariants();
             return Ok(());
@@ -2412,9 +2494,9 @@ impl Table {
             // the downward write and increases its padding requirement. Reserve
             // for that final count before changing slots or removing hash keys.
             let live_delta = if structural { extra - 1 } else { 0 };
-            self.reserve_outside_window(pos, extra, live_delta)?;
+            self.reserve_outside_window(resident, pos, extra, live_delta)?;
         } else {
-            self.reserve_array(self.array.len() + extra)?;
+            self.reserve_array_tracked(resident, self.array.len() + extra)?;
         }
         if structural {
             self.vlen += 1;
@@ -2435,7 +2517,7 @@ impl Table {
         if pos > self.base {
             self.write_window(pos - self.base - 1, value);
         } else if !matches!(value, Val::Nil) {
-            self.write_outside_window(pos, value)?;
+            self.write_outside_window(resident, pos, value)?;
         }
         #[cfg(debug_assertions)]
         self.debug_assert_invariants();
@@ -2448,8 +2530,9 @@ impl Table {
     /// `array_len() + 1`) it returns `t[pos]` and clears it. `len` is
     /// `array_len()`, already computed by the caller to validate `pos`.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    pub(super) fn array_remove_at_len(
+    fn array_remove_at_len_tracked(
         &mut self,
+        resident: &mut ResidentBytes,
         pos: usize,
         len: usize,
     ) -> std::result::Result<Val, TableError> {
@@ -2459,7 +2542,7 @@ impl Table {
             if pos <= self.base && !matches!(self.array[0], Val::Nil) {
                 // The shift resets lead to zero before extending downward.
                 let pad = (self.base - 1).min(self.array.len().div_ceil(2));
-                self.reserve_array(self.array.len() + 1 + pad)?;
+                self.reserve_array_tracked(resident, self.array.len() + 1 + pad)?;
             }
             let removed = self.array_value(pos);
             let end = len - self.base;
@@ -2478,7 +2561,7 @@ impl Table {
                 self.array_live -= usize::from(!matches!(first, Val::Nil));
                 self.lead = 0;
                 if !matches!(first, Val::Nil) {
-                    self.write_outside_window(self.base, first)?;
+                    self.write_outside_window(resident, self.base, first)?;
                 }
             }
             #[cfg(debug_assertions)]
@@ -2499,12 +2582,14 @@ impl Table {
         pos: usize,
         value: Val,
     ) -> std::result::Result<(), TableError> {
-        self.array_insert_at_len(pos, self.array_len(), value)
+        let mut resident = ResidentBytes::new(self.resident_bytes());
+        self.array_insert_at_len_tracked(&mut resident, pos, self.array_len(), value)
     }
 
     #[cfg(test)]
     pub(super) fn array_remove(&mut self, pos: usize) -> std::result::Result<Val, TableError> {
-        self.array_remove_at_len(pos, self.array_len())
+        let mut resident = ResidentBytes::new(self.resident_bytes());
+        self.array_remove_at_len_tracked(&mut resident, pos, self.array_len())
     }
 
     /// Returns the sequence `t[1..=#t]` as a Vec for sorting.
@@ -2535,9 +2620,13 @@ impl Table {
     /// the original sort range survive even if a comparator added them.
     /// Each write is O(1), so the writeback is linear in the sorted range.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    pub(super) fn set_array(&mut self, values: &[Val]) -> std::result::Result<(), TableError> {
+    fn set_array_tracked(
+        &mut self,
+        resident: &mut ResidentBytes,
+        values: &[Val],
+    ) -> std::result::Result<(), TableError> {
         for (i, &v) in values.iter().enumerate() {
-            self.insert(Val::Num((i + 1) as f64), v)?;
+            self.insert_tracked(resident, Val::Num((i + 1) as f64), v)?;
         }
         #[cfg(debug_assertions)]
         self.debug_assert_invariants();
@@ -2738,9 +2827,160 @@ impl Table {
     }
 }
 
+/// A table and the heap meter for its backing. Shared reads can use the
+/// table directly, while mutable operations go through explicit methods.
+pub(super) struct TableEditor<'a> {
+    table: &'a mut Table,
+    resident: &'a mut ResidentBytes,
+}
+
+impl std::ops::Deref for TableEditor<'_> {
+    type Target = Table;
+
+    fn deref(&self) -> &Table {
+        self.table
+    }
+}
+
+impl TableEditor<'_> {
+    pub(super) fn reserve_hash(&mut self, additional: usize) {
+        self.table.reserve_hash_tracked(self.resident, additional);
+    }
+
+    pub(super) fn insert(&mut self, key: Val, value: Val) -> Result<(), TableError> {
+        self.table.insert_tracked(self.resident, key, value)
+    }
+
+    pub(super) fn store_string_key(&mut self, key: StringPtr, value: Val) -> SlotRef {
+        self.table
+            .store_string_key_tracked(self.resident, key, value)
+    }
+
+    pub(super) fn set_slot_policy(&mut self, policy: SlotPolicy) {
+        self.table.set_slot_policy_tracked(self.resident, policy);
+    }
+
+    pub(super) fn set_list(
+        &mut self,
+        first: usize,
+        values: impl ExactSizeIterator<Item = Val>,
+    ) -> Result<(), TableError> {
+        self.table.set_list_tracked(self.resident, first, values)
+    }
+
+    pub(super) fn array_insert_at_len(
+        &mut self,
+        pos: usize,
+        len: usize,
+        value: Val,
+    ) -> Result<(), TableError> {
+        self.table
+            .array_insert_at_len_tracked(self.resident, pos, len, value)
+    }
+
+    pub(super) fn array_remove_at_len(
+        &mut self,
+        pos: usize,
+        len: usize,
+    ) -> Result<Val, TableError> {
+        self.table
+            .array_remove_at_len_tracked(self.resident, pos, len)
+    }
+
+    pub(super) fn set_array(&mut self, values: &[Val]) -> Result<(), TableError> {
+        self.table.set_array_tracked(self.resident, values)
+    }
+
+    pub(super) fn store_slot(&mut self, slot: SlotRef, value: Val) -> bool {
+        self.table.store_slot(slot, value)
+    }
+
+    pub(super) fn remove_slot(&mut self, slot: SlotRef) -> bool {
+        self.table.remove_slot(slot)
+    }
+
+    pub(super) fn store_probe(&mut self, probe: &HashProbe, value: &Val) -> bool {
+        self.table.store_probe(probe, value)
+    }
+
+    pub(super) fn init_at_index(&mut self, index: usize, key: Val, value: Val) -> bool {
+        self.table.init_at_index(index, key, value)
+    }
+
+    #[cfg(feature = "snapshot")]
+    pub(super) fn set_metatable(&mut self, mt: Option<ObjectPtr>) {
+        self.table.set_metatable(mt);
+    }
+
+    pub(super) fn set_at_index(&mut self, index: usize, value: Val) -> bool {
+        self.table.set_at_index(index, value)
+    }
+
+    pub(super) fn remove_at_index(&mut self, index: usize) -> bool {
+        self.table.remove_at_index(index)
+    }
+
+    pub(super) fn swap_contents(&mut self, incoming: Table) -> Table {
+        self.table.swap_contents(incoming)
+    }
+
+    #[cfg(feature = "snapshot")]
+    pub(super) fn rebuild_from_snapshot(
+        &mut self,
+        array_len: usize,
+        array_slots: usize,
+        entries: Vec<(Val, Val)>,
+    ) -> Result<(), TableError> {
+        let old = self.table.resident_bytes();
+        self.table
+            .rebuild_from_snapshot(array_len, array_slots, entries)?;
+        self.resident.replace(old, self.table.resident_bytes());
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn replace_for_test(&mut self, incoming: Table) {
+        self.resident
+            .replace(self.table.resident_bytes(), incoming.resident_bytes());
+        *self.table = incoming;
+    }
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
+
+#[cfg(test)]
+impl Table {
+    fn insert(&mut self, key: Val, value: Val) -> Result<(), TableError> {
+        let mut resident = ResidentBytes::new(self.resident_bytes());
+        self.insert_tracked(&mut resident, key, value)
+    }
+
+    fn set_list(
+        &mut self,
+        first: usize,
+        values: impl ExactSizeIterator<Item = Val>,
+    ) -> Result<(), TableError> {
+        let mut resident = ResidentBytes::new(self.resident_bytes());
+        self.set_list_tracked(&mut resident, first, values)
+    }
+
+    fn set_array(&mut self, values: &[Val]) -> Result<(), TableError> {
+        let mut resident = ResidentBytes::new(self.resident_bytes());
+        self.set_array_tracked(&mut resident, values)
+    }
+
+    fn append(&mut self, value: Val) -> Result<(), TableError> {
+        let mut resident = ResidentBytes::new(self.resident_bytes());
+        self.append_tracked(&mut resident, value)
+    }
+
+    fn reserve_array(&mut self, len: usize) -> Result<(), TableError> {
+        let mut resident = ResidentBytes::new(self.resident_bytes());
+        self.reserve_array_tracked(&mut resident, len)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -3397,7 +3637,9 @@ mod tests {
         array.extend_from_slice(&t.array);
         t.array = array;
         let before = array_shape(&t);
-        t.reserve_outside_window(50, extra, extra - 1).unwrap();
+        let mut resident = ResidentBytes::new(t.resident_bytes());
+        t.reserve_outside_window(&mut resident, 50, extra, extra - 1)
+            .unwrap();
         assert_eq!(array_shape(&t), before);
         assert!(t.array.capacity() >= 77);
         let capacity = t.array.capacity();
@@ -3438,7 +3680,8 @@ mod tests {
             table.insert(n(key), Val::Nil).unwrap();
         }
         assert_eq!(table.array_live, 0);
-        table.prepare_list_append(32).unwrap();
+        let mut resident = ResidentBytes::new(table.resident_bytes());
+        table.prepare_list_append(&mut resident, 32).unwrap();
         assert_eq!(table.base, 4096);
         assert!(table.array.is_empty());
         assert!(table.array.capacity() < 4096);
@@ -3919,7 +4162,11 @@ mod tests {
         let mut state = State::new();
         state.new_table().unwrap();
         let ptr = state.stack[0].as_object_ptr().unwrap();
-        *state.heap.as_table(ptr).unwrap() = window_table(MAX_ARRAY_LEN, Some(MAX_ARRAY_LEN));
+        state
+            .heap
+            .edit_table(ptr)
+            .unwrap()
+            .replace_for_test(window_table(MAX_ARRAY_LEN, Some(MAX_ARRAY_LEN)));
         state.push_boolean(false).unwrap();
         let before = state.stack.clone();
         let error = state.table_insert_at(1, 1).unwrap_err();
@@ -3948,13 +4195,13 @@ mod tests {
             state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
             state.get_global("t").unwrap();
             let ptr = state.pop_val().as_object_ptr().unwrap();
-            let table = state.heap.as_table(ptr).unwrap();
+            let mut table = state.heap.edit_table(ptr).unwrap();
             let (logical_len, live_key) = if source.starts_with("table.insert") {
                 (MAX_ARRAY_LEN, MAX_ARRAY_LEN)
             } else {
                 (len, 1)
             };
-            *table = window_table(logical_len, Some(live_key));
+            table.replace_for_test(window_table(logical_len, Some(live_key)));
             let program = Program::compile(&source, None).unwrap();
             state.load(&program).unwrap();
             let error = state

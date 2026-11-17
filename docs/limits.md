@@ -139,17 +139,28 @@ implementation tuning values, not additional script-level resource limits.
 
 ## Garbage collection policy
 
-The heap counts GC-managed objects plus distinct interned strings. It checks
-that count before each heap allocation and collects when the count is at least
-the current threshold. The default automatic policy uses
+Automatic mode paces collections by a score: GC-managed objects, plus
+distinct interned strings, plus resident payload bytes divided (rounding down)
+by `GC_RESIDENT_BYTES_PER_UNIT` (256). Resident bytes are the backing capacity
+of table arrays and hash parts (including hash index storage) and the byte
+length of interned strings; a table's inline entries count only as the object.
+`State::gc_score` reports the score. A host-set threshold
+(`gc_set_threshold`) counts objects plus distinct strings only, as
+`State::heap_size` does. The heap checks the active measure before each heap
+allocation and collects when it is at least the current threshold. Counting
+payload keeps a large live table from being rescanned at every handful of
+unrelated allocations, and lets large dead payload bring a collection forward.
+The default automatic policy uses
 `DEFAULT_GC_INITIAL_THRESHOLD` as its initial threshold,
 `DEFAULT_GC_MIN_THRESHOLD` as its minimum, and
 `DEFAULT_GC_THRESHOLD_GROWTH_FACTOR` as its growth factor. These crate-private
 defaults are defined in `src/limits/tuning.rs`. Each State stores its own
 policy; these are the defaults used when a State is created.
 After a collection while automatic mode is active, the next threshold is
-`max(live_allocations * growth_factor, minimum_threshold)`, using saturating
-multiplication. A calculated `usize::MAX` remains an automatic threshold and
+`max(live_score * growth_factor, minimum_threshold, live_score + 1)`, using
+saturating arithmetic. The `live_score + 1` term gives growth factors 0 and 1
+one unit of headroom, so an unchanged heap does not collect again at the next
+allocation check; it promises no more than that one unit. A calculated `usize::MAX` remains an automatic threshold and
 later collections recompute it. Allocation-triggered collection is disabled
 by an initial or host-set threshold of `usize::MAX`, or by `gc_disable_auto`.
 

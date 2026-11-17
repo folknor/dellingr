@@ -281,8 +281,8 @@ impl State {
             let obj_ptr = state.stack[idx].as_object_ptr();
             let typ = state.stack[idx].typ(&state.heap);
 
-            match obj_ptr.and_then(|ptr| state.heap.as_table(ptr)) {
-                Some(t) => {
+            match obj_ptr.and_then(|ptr| state.heap.edit_table(ptr)) {
+                Some(mut t) => {
                     t.insert(key, val)?;
                     Ok(())
                 }
@@ -479,7 +479,7 @@ impl State {
         })?;
         self.stack[idx]
             .as_object_ptr()
-            .and_then(|ptr| self.heap.as_table(ptr))
+            .and_then(|ptr| self.heap.edit_table(ptr))
             .expect("table_operand_below_top validated the table")
             .insert(key, val)?;
         self.stack.truncate(top - 2);
@@ -540,9 +540,9 @@ impl State {
         let ptr = self.stack[idx]
             .as_object_ptr()
             .expect("table_operand_below_top validated the table");
-        let tbl = self
+        let mut tbl = self
             .heap
-            .as_table(ptr)
+            .edit_table(ptr)
             .expect("table_operand_below_top validated the table");
         // An existing key is written through the slot its lookup found.
         let stored = if let Some((slot, _)) = tbl.find_slot(&key) {
@@ -748,7 +748,7 @@ impl State {
             for (slot, key) in (first..first + count).zip(1_u32..) {
                 let value = self.stack[slot];
                 self.heap
-                    .as_table(ptr)
+                    .edit_table(ptr)
                     .expect("new_table pushed a table")
                     .insert(Val::Num(f64::from(key)), value)?;
             }
@@ -757,7 +757,7 @@ impl State {
         let key = self.alloc_string(b"n")?;
         self.check_stack_slot_at(len + 1)?;
         self.heap
-            .as_table(ptr)
+            .edit_table(ptr)
             .expect("new_table pushed a table")
             .insert(key, Val::Num(count as f64))?;
         Ok(())
@@ -961,7 +961,7 @@ impl State {
         let value = self.stack[self.stack.len() - 1];
         self.stack[idx]
             .as_object_ptr()
-            .and_then(|ptr| self.heap.as_table(ptr))
+            .and_then(|ptr| self.heap.edit_table(ptr))
             .expect("the caller validated the table")
             .array_insert_at_len(pos, len, value)?;
         Ok(())
@@ -1008,7 +1008,7 @@ impl State {
         self.check_stack_space(1)?;
         let removed = self.stack[idx]
             .as_object_ptr()
-            .and_then(|ptr| self.heap.as_table(ptr))
+            .and_then(|ptr| self.heap.edit_table(ptr))
             .expect("the caller validated the table")
             .array_remove_at_len(pos, len)?;
         self.push_unchecked(removed);
@@ -1086,8 +1086,8 @@ impl State {
                 // the argument slot's contents.
                 let obj_ptr = state.stack[idx].as_object_ptr();
                 let sorted = &state.in_flight.rooted_values[base..base + n];
-                match obj_ptr.and_then(|ptr| state.heap.as_table(ptr)) {
-                    Some(t) => {
+                match obj_ptr.and_then(|ptr| state.heap.edit_table(ptr)) {
+                    Some(mut t) => {
                         t.set_array(sorted)?;
                         Ok(n)
                     }

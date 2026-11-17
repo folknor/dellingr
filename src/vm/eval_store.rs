@@ -21,9 +21,9 @@ impl State {
         let tbl_val = self.stack[table_idx];
         match tbl_val
             .as_object_ptr()
-            .and_then(|ptr| self.heap.as_table(ptr))
+            .and_then(|ptr| self.heap.edit_table(ptr))
         {
-            Some(tbl) => {
+            Some(mut tbl) => {
                 if tbl.get_metatable().is_none() {
                     tbl.insert(key, val)?;
                     Ok(true)

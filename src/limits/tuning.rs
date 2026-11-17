@@ -22,6 +22,19 @@ pub(crate) const DEFAULT_GC_INITIAL_THRESHOLD: usize = DEFAULT_GC_MIN_THRESHOLD;
 /// Automatic GC threshold multiplier for a State using the default policy.
 pub(crate) const DEFAULT_GC_THRESHOLD_GROWTH_FACTOR: usize = 2;
 
+/// Resident bytes (table backing capacity and interned string payload) that
+/// count as one unit of the automatic GC pacing score, alongside one per
+/// object and one per distinct string. It is an exchange rate between payload
+/// and objects, set to about one heap object's footprint (16 `Val` slots), so
+/// the score reads as resident memory in object-sized units. It is reasoned,
+/// not measured: it does not affect correctness, only how much dead payload a
+/// collection cycle admits (about `W` bytes per live object plus the live
+/// bytes, times growth minus one) against how many slots it rescans per unit
+/// of headroom (about 16 at this value). A fixed literal, never a
+/// `size_of`, because collection timing is replay-visible and object layout
+/// differs between debug and release builds.
+pub(crate) const GC_RESIDENT_BYTES_PER_UNIT: usize = 256;
+
 /// Initial VM value-stack reservation.
 pub(crate) const INITIAL_VM_STACK_CAPACITY: usize = 256;
 

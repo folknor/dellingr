@@ -10,6 +10,8 @@
 examples! {
     alloc_closure: "examples/alloc/closure.lua",
     alloc_gc_churn: "examples/alloc/gc_churn.lua",
+    alloc_gc_payload_churn: "examples/alloc/gc_payload_churn.lua",
+    alloc_gc_scalar_churn: "examples/alloc/gc_scalar_churn.lua",
     alloc_list_literals: "examples/alloc/list_literals.lua",
     alloc_record_tables: "examples/alloc/record_tables.lua",
     alloc_short_tables: "examples/alloc/short_tables.lua",

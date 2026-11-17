@@ -25,7 +25,7 @@ use std::hash::BuildHasher;
 
 use hashbrown::HashTable;
 
-use super::{TableLookupKey, Val};
+use super::{ResidentBytes, TableLookupKey, Val};
 use crate::det_hash::FixedState;
 
 #[inline(always)]
@@ -61,11 +61,17 @@ impl HashSlots {
         &self.entries
     }
 
-    pub(super) fn reserve(&mut self, additional: usize) {
+    pub(super) fn resident_bytes(&self) -> usize {
+        self.entries.capacity() * size_of::<(Val, Val)>() + self.index.allocation_size()
+    }
+
+    pub(super) fn reserve(&mut self, additional: usize, resident: &mut ResidentBytes) {
+        let old = self.resident_bytes();
         self.entries.reserve(additional);
         let entries = &self.entries;
         self.index
             .reserve(additional, |&at| hash_key(entries[at].0));
+        resident.add(self.resident_bytes() - old);
     }
 
     /// The position of real key `key`, live or dead. Nil and NaN find
@@ -107,6 +113,23 @@ impl HashSlots {
         position
     }
 
+    /// Append to published backing, charging any vector or index growth.
+    pub(super) fn push_tracked(
+        &mut self,
+        key: Val,
+        value: Val,
+        resident: &mut ResidentBytes,
+    ) -> usize {
+        if self.entries.len() < self.entries.capacity() && self.index.len() < self.index.capacity()
+        {
+            return self.push_new(key, value);
+        }
+        let old = self.resident_bytes();
+        let position = self.push_new(key, value);
+        resident.add(self.resident_bytes() - old);
+        position
+    }
+
     /// Append real key `key` unless it already has a slot. Returns the
     /// position and whether a slot was added.
     pub(super) fn push_if_absent(&mut self, key: Val, value: Val) -> (usize, bool) {
@@ -125,12 +148,21 @@ impl HashSlots {
     /// Move the real key at `old` to a new slot at the back holding
     /// `value`, leaving `old` vacant. One probe: the key's index entry is
     /// retargeted, nothing is erased or inserted. Returns the new position.
-    pub(super) fn relocate(&mut self, old: usize, value: Val) -> usize {
+    pub(super) fn relocate(
+        &mut self,
+        old: usize,
+        value: Val,
+        resident: &mut ResidentBytes,
+    ) -> usize {
         let key = self.entries[old].0;
         debug_assert!(super::is_valid_table_key(&key));
         let position = self.entries.len();
+        let capacity = self.entries.capacity();
         // Push first: a failed allocation leaves the old binding intact.
         self.entries.push((key, value));
+        if self.entries.capacity() != capacity {
+            resident.add((self.entries.capacity() - capacity) * size_of::<(Val, Val)>());
+        }
         let slot = self
             .index
             .find_mut(hash_key(key), |&at| at == old)

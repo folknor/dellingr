@@ -579,6 +579,7 @@ fn gc_preserves_nested_suspended_environments() {
         })
         .expect("state is not poisoned");
 
+    state.gc_collect();
     let original = state
         .global_env
         .get(&state.heap, "original")
@@ -713,19 +714,20 @@ fn string_allocations_drive_automatic_gc_threshold() {
     // An automatic policy, not a fixed host threshold, so collection adapts.
     state.gc_set_policy(THRESHOLD, THRESHOLD, 2);
 
-    // Keep enough distinct strings rooted to reach the threshold. The State's
-    // global table and its interned metamethod and builtin names are live
-    // from construction on.
-    let permanent_strings = super::MetaName::ALL.len() + crate::instr::Builtin::COUNT;
-    for i in 0..THRESHOLD - 1 - permanent_strings {
+    // Keep distinct strings rooted until the score reaches the threshold. The
+    // check runs before each allocation, so the string that reaches it does
+    // not collect. The State's global table, its backing and its interned
+    // metamethod and builtin names count from construction on.
+    let mut i = 0;
+    while !state.gc_should_run() {
         state
             .push_string(format!("live-{i}"))
             .expect("short test string fits");
+        i += 1;
     }
-
-    assert_eq!(state.object_count(), 1);
-    assert_eq!(state.string_count(), THRESHOLD - 1);
-    assert!(state.gc_should_run());
+    assert_eq!(state.gc_threshold(), THRESHOLD);
+    let strings = state.string_count();
+    let live_score = state.gc_score();
 
     // This allocation must collect first. Everything survives, so the
     // adaptive threshold must include it all and double.
@@ -733,8 +735,8 @@ fn string_allocations_drive_automatic_gc_threshold() {
         .push_string("trigger")
         .expect("short test string fits");
 
-    assert_eq!(state.string_count(), THRESHOLD);
-    assert_eq!(state.gc_threshold(), 2 * THRESHOLD);
+    assert_eq!(state.string_count(), strings + 1);
+    assert_eq!(state.gc_threshold(), 2 * live_score);
     assert!(!state.gc_should_run());
 
     // Drop every live string, then verify string-only churn is collected

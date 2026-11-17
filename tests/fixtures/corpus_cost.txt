@@ -3,6 +3,8 @@ cost_model=9
 # path|XXH3-128 of the source bytes|cost_used of one CLI run. See tests/common/corpus_cost_golden.rs.
 examples/alloc/closure.lua|6c3b54c67fadaa55c51db6f64916d331|1001000
 examples/alloc/gc_churn.lua|9c89ca315d197f5c3bd4c31cfd79d065|483401
+examples/alloc/gc_payload_churn.lua|85e25efbde98d6745783a18940292b92|1262401
+examples/alloc/gc_scalar_churn.lua|8397a64179ed4a9de32c2b8d9023db4a|1010241
 examples/alloc/list_literals.lua|f1242d5988d552fa7c7f3d23855f9696|19371500
 examples/alloc/record_tables.lua|759fd927309e69e0623bf3eff2fcff13|10812000
 examples/alloc/short_tables.lua|e9c83a5f4ee78010eb0182c070505bb5|7206000

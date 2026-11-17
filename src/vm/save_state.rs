@@ -1819,7 +1819,7 @@ fn materialize_payload(
                     },
                 };
                 let ptr = objects[idx];
-                let table = state.heap.as_table(ptr).ok_or_else(|| {
+                let mut table = state.heap.edit_table(ptr).ok_or_else(|| {
                     corrupt_arena(
                         CorruptionReason::Table(TableCorruption::MaterializedWrongType),
                         idx,

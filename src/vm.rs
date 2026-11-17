@@ -379,7 +379,8 @@ impl StateBuilder {
     ///
     /// The initial threshold is active while the standard library is opened.
     /// After a collection while automatic mode is active, the next threshold is
-    /// `max(live_allocations * growth_factor, minimum_threshold)`. These values
+    /// `max(live_score * growth_factor, minimum_threshold, live_score + 1)`
+    /// (saturating), in `State::gc_score` units. These values
     /// are runtime policy and are not written to snapshots. A calculated
     /// `usize::MAX` remains automatic and is recomputed by later collections.
     ///
@@ -883,16 +884,24 @@ impl State {
     // Host-controlled GC
     // ========================================================================
 
-    /// Returns true if `heap_size()` has reached the GC threshold.
-    /// The threshold counts objects plus distinct interned strings and is
-    /// checked before allocation.
+    /// Returns the automatic GC pacing score: `heap_size()` plus resident
+    /// table backing and interned string bytes, counted in fixed-size units
+    /// (docs/limits.md, "Garbage collection policy").
+    pub fn gc_score(&self) -> usize {
+        self.heap.pacing_score()
+    }
+
+    /// Returns true if the GC threshold has been reached: `gc_score()` in
+    /// automatic mode, `heap_size()` under a host-set threshold. Checked
+    /// before allocation.
     pub fn gc_should_run(&self) -> bool {
         self.heap.is_full()
     }
 
-    /// Returns the current GC threshold in total heap allocations (objects plus
-    /// distinct interned strings). Automatic thresholds are recomputed from the
-    /// configured policy after collection; host-set thresholds stay fixed.
+    /// Returns the current GC threshold. In automatic mode it is in
+    /// `gc_score()` units and recomputed from the configured policy after
+    /// collection; a host-set threshold is in `heap_size()` units and stays
+    /// fixed.
     pub fn gc_threshold(&self) -> usize {
         self.heap.threshold()
     }
@@ -911,7 +920,8 @@ impl State {
     /// `initial_threshold`.
     ///
     /// After each collection while automatic mode is active, the next threshold is
-    /// `max(live_allocations * growth_factor, minimum_threshold)`. This also
+    /// `max(live_score * growth_factor, minimum_threshold, live_score + 1)`
+    /// (saturating), where `live_score` is `gc_score()` after the sweep. This also
     /// switches a manually set or disabled threshold back to automatic mode.
     /// A calculated `usize::MAX` remains automatic and is recomputed by later
     /// collections.

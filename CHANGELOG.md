@@ -12,6 +12,17 @@ tick budgets and re-record replays.
 
 ### Changed (breaking)
 
+- **Replay-visible:** automatic garbage collection paces by a score of
+  objects, distinct strings and resident table backing and string bytes (one
+  unit per 256 bytes), not by objects and strings alone (docs/limits.md,
+  "Garbage collection policy"). A large live table no longer forces a rescan
+  of all its slots every few unrelated allocations, and large dead payload
+  brings a collection forward. Collection timing, and with it `%p` ids,
+  `object_count` and snapshot contents, moves in any State holding table or
+  string payload. Automatic thresholds (`gc_threshold`) are in the new
+  `State::gc_score` units; a `gc_set_threshold` threshold still counts
+  `heap_size`. The next automatic threshold is at least the live score plus
+  one, so growth factors 0 and 1 no longer collect again on an unchanged heap.
 - **Replay-visible:** string costs follow one rule (docs/budget.md, "String
   costs"): a string library call costs 1, `string.format` 1 per directive
   (at least 1), and pattern matching adds 1 per matcher step or

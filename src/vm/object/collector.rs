@@ -169,8 +169,18 @@ impl State {
         self.heap.restore_mark_worklist(worklist);
         self.sweep_bytecode_caches(&mut live_chunks);
         self.heap.restore_live_chunks(live_chunks);
+        #[cfg(debug_assertions)]
+        let suspended = self
+            .suspended_envs
+            .iter()
+            .map(crate::vm::global_env::SuspendedEnv::resident_bytes)
+            .sum();
+        #[cfg(debug_assertions)]
+        self.heap.check_resident_bytes(suspended);
         // Sweep unmarked objects
         self.heap.collect();
+        #[cfg(debug_assertions)]
+        self.heap.check_resident_bytes(suspended);
         // Weak references: clear runtime cache entries naming what a sweep
         // freed, on the cadence `CACHE_PRUNE_INTERVAL` sets.
         if self.heap.runtime_cache_prune_due() {
