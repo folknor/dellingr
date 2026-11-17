@@ -383,49 +383,40 @@ diagnostic boundaries.
 investment. `optimizations.md` "Compile-time table-shape prediction" (b)
 defers on the absence of exactly this analysis.
 
-## PERF-015 - Resolved lookup routes with mutation-driven invalidation
+## PERF-015 - Inherited reads re-resolve every table on the path
 
-Raised by the lookup hunter (its second rewrite, designed together with the
-shared layouts appended to `optimizations.md` "Shape-based polymorphic field
-IC").
+Raised by the lookup hunter; narrowed after a build and measurement.
 
-**Bottleneck:** a warm inherited read fails the receiver's own-field cache,
-searches the receiver's raw contents, gets its metatable, searches the two
-method-cache entries, reads and key-checks the metatable's `__index` slot,
-compares the current handler, then validates and reads the destination slot.
-Only the own-field hit is on the dispatch-side fast path; inherited hits enter
-`resolve_index`. The method cache covers a raw hit in the first handler table
-only; deeper inheritance and inherited misses keep walking (`walk_index`,
-`metamethod.rs`); delegated writes have no route cache. `MetaNames`
-(`meta_name.rs`) avoids interning event names but event access is still
-ordinary table lookup or key-checked slot access.
+Residue: an inherited read through more than one handler table walks it
+in full each time (`walk_index`, `metamethod.rs`); the method cache
+covers only a raw hit in the first handler table. A validate-on-hit route
+cache for deeper chains was built and measured and did not pay: each hit
+still resolves every table on the path to compare its live links, so it
+saves only the keyed scans (numbers at `MethodLookupCacheEntry`,
+`caches.rs`). The access-plan rewrite with a dependency registry beneath
+every table writer is refused on the same measurement: the one-level hit
+is already near its floor (`resolve_index` about 12 ns warm on
+`examples/calls/method.lua`), and the receiver's own-key absence still
+needs its raw probe without shared layouts across tables, which no entry
+proposes.
 
-**Redesign:** replace the separate own-field, method and string-method ladders
-with access plans describing the resolved action (own slot; slot in a given
-prototype; proven terminal miss returns nil; live slot in a delegated
-destination; continue to a function handler with receiver and depth
-requirement). The receiver guard proves the metatable and the absence of an
-overriding own value, cheap with shared layouts. Register dependencies on the
-shared prototype route; installing an overriding field, deleting a terminal
-field, replacing `__index`/`__newindex`, changing an intermediate metatable or
-moving a referenced slot invalidates. The hot read checks a route token and
-reads the terminal slot. Metatables expose direct event descriptors with
-explicit absence and mutation notification, acquired lazily; the string
-metatable uses the same mechanism. The mutation contract lives beneath all
-writers (bytecode stores, raw ops, host writes, pinned initialization), which
-means changing the table mutation interface.
+What could still pay, untested:
 
-**Risks:** invalidation completeness and dependency fanout; not one VM-wide
-epoch (routine entity writes would destroy the benefit). Live-to-live
-replacement of a terminal value can stay cheap if the plan reads the slot
-live. Handler results are never cached. Depth requirements stay explicit: with
-insufficient headroom, take the original resolver for the exact error. Method
-lookup timing: `SELF` runs before explicit arguments, so `obj:m(change())`
-has already selected its value; preserve that and the receiver.
+- A writer-side witness with constant work per mutation instead of
+  dependency lists: mark tables when a route is filled through them, and
+  move one epoch on any mutation of a marked table (raw ops, host writes,
+  `set_metatable`, cached global writes and other bypasses included). A
+  hit checks the epoch, guards the receiver, and reads the terminal slot
+  live. A write to one marked prototype invalidates unrelated routes;
+  ordinary instance writes do not. Baseline workloads: `method_chain`
+  (two-key classes) and `method_chain_wide` (map-storage classes), 2749
+  and 3111 ms wall at 8f6a6bb on bygg.
+- The self-index idiom (`C.__index = C`) resolves the same table handle
+  twice in the cold walk: once as the receiver's metatable, again as the
+  first handler. Reusing the borrowed table when the handler equals the
+  metatable removes one heap resolution per inherited read, with no cache.
 
-**Classification:** rewrite, high conviction for methods and inheritance.
-Overlaps `optimizations.md` "GET_FIELD slow-path cache repopulation after
-`__index` resolution" and the method-IC entry, which this would replace.
+**Classification:** local (second bullet), rewrite (first), unmeasured.
 
 ## PERF-016 - Global bindings as authoritative cells
 

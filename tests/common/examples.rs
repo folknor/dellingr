@@ -25,6 +25,7 @@ examples! {
     calls_method: "examples/calls/method.lua",
     calls_method_cached: "examples/calls/method_cached.lua",
     calls_method_chain: "examples/calls/method_chain.lua",
+    calls_method_chain_wide: "examples/calls/method_chain_wide.lua",
     calls_method_polymorphic: "examples/calls/method_polymorphic.lua",
     calls_result_adjust: "examples/calls/result_adjust.lua",
     calls_rust_boundary: "examples/calls/rust_boundary.lua",

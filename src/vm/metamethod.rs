@@ -173,7 +173,9 @@ impl State {
     ) -> Result<Option<Val>> {
         let index_key = self.meta_names.get(MetaName::Index);
         // The receiver's metatable and the slot of its `__index`, while the
-        // first handler table may still fill the method cache.
+        // first handler table may still fill the method cache. Only that
+        // first table step fills anything: a cached route through further
+        // tables did not pay (see `MethodLookupCacheEntry`).
         let mut method_fill = None;
         let (mut receiver, mut handler) = match start {
             IndexStart::AfterRawMiss(metatable) => {

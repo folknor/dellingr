@@ -175,6 +175,18 @@ pub(super) struct FieldLookupCacheEntry {
 /// unchanged version and slot count), but validating it walks the same
 /// tables as the uncached miss, so measured on a two-level inheritance site
 /// it saved nothing; the miss is simply looked up again.
+///
+/// Routes through more than one handler table are not cached either. One
+/// was built and measured against 8f6a6bb on bygg: a per-site entry recording,
+/// for each intermediate table, a `HashProbe` absence proof, its metatable
+/// and that metatable's `__index` slot, validated in full before taking the
+/// route's depth units. It hit, but each hit still resolves every table on
+/// the path to compare its live links, which is most of what the cold walk
+/// does; it only skipped the keyed scans. `bench/method_chain` (two-key
+/// classes) went 2749 to about 3110 ms and `bench/method_chain_wide`
+/// (map-storage classes) stayed at about 3110. Skipping those table reads
+/// needs a witness outside the route that every writer to a prototype
+/// moves, which a validate-on-hit entry cannot provide.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct MethodLookupCacheEntry {
     pub(super) receiver_metatable: ObjectPtr,
