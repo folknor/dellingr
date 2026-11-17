@@ -361,7 +361,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
                 let i = if backwards { count - 1 - step } else { step };
                 // Before the charge, so an interruption has paid only for
                 // the copies attempted.
-                state.poll_interrupt()?;
+                state.poll_gc_checkpoint()?;
                 state.charge(Charge::TableMove, 1)?;
                 crate::native_call!(
                     "lib:table.move->move_element:metamethods",
@@ -390,7 +390,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
             if backwards {
                 for step in 0..paid {
                     let i = count - 1 - step;
-                    state.poll_interrupt()?;
+                    state.poll_gc_checkpoint()?;
                     crate::native_call!(
                         "lib:table.move->move_element:raw-backward",
                         move_element(state, f + i, t + i, dest_idx, false)
@@ -400,7 +400,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
                 }
             } else {
                 for i in 0..paid {
-                    state.poll_interrupt()?;
+                    state.poll_gc_checkpoint()?;
                     crate::native_call!(
                         "lib:table.move->move_element:raw-forward",
                         move_element(state, f + i, t + i, dest_idx, false)

@@ -100,6 +100,30 @@ impl State {
         }
     }
 
+    /// Poll at a checkpoint where all live heap values are rooted. The
+    /// source is normally the host interrupt, switched to a set flag when
+    /// the automatic threshold is reached.
+    #[inline(always)]
+    pub(crate) fn poll_gc_checkpoint(&mut self) -> crate::Result<()> {
+        if self.heap.gc_poll_requested() {
+            return self.service_gc_checkpoint();
+        }
+        Ok(())
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn service_gc_checkpoint(&mut self) -> crate::Result<()> {
+        self.poll_interrupt()?;
+        if self.heap.automatic_gc_due() {
+            self.collect_garbage();
+        } else {
+            // A shrink may have cleared the pressure since the flag was set.
+            self.heap.refresh_gc_watermark();
+        }
+        Ok(())
+    }
+
     /// Forces a full garbage collection cycle.
     /// This marks all reachable objects and frees unreachable ones.
     ///

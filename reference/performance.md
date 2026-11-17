@@ -219,6 +219,59 @@ interleaved as A B B A:
 (which now reads a closure's bytecode through its runtime) did not regress;
 the `method` step is inside the layout-noise band.
 
+## Resident-payload GC pacing, 2026-11-17
+
+Measured on bygg with `brokkr bench wall`, using the same pinned workloads
+for both arms in A B B A order. A used the Rust sources from `5c2cd0766`.
+B used `f285ceedf` plus the GC checkpoint changes. The Rust sources were
+swapped in place on main because the historical build required writes to
+`.git`. Both arms are stored as `f285ceed-dirty`, with artifact prefixes
+`5aebd0c4` for A and `731bfbab` for B. All verdicts and warm opcode costs
+agreed across arms.
+
+Each cell is the best of three launches in seconds, followed by its Brokkr
+run ID. The change compares the median of the two cells per arm.
+
+| Workload | A1 | B1 | B2 | A2 | Median wall change |
+|---|---:|---:|---:|---:|---:|
+| `gc_scalar_churn` | 9.279 (66e68d81) | 0.177 (b21458fd) | 0.177 (af8fce56) | 9.035 (becb7e2b) | -98.1% |
+| `gc_payload_churn` | 1.630 (91436e36) | 1.524 (4de0b14b) | 1.447 (c54e115f) | 1.687 (d679f06e) | -10.4% |
+| `gc_churn` | 2.901 (9d310100) | 2.956 (622e1599) | 2.999 (891b096d) | 2.894 (a83819d2) | +2.8% |
+| `fill` | 1.546 (76c57f13) | 1.539 (63b777fb) | 1.528 (53efff3f) | 1.544 (ba7fdfa1) | -0.7% |
+| `queue` | 1.458 (86a53e3a) | 1.443 (5e51badb) | 1.442 (0bc0dc82) | 1.454 (8d56e016) | -0.9% |
+| `list_literals` | 2.699 (7b74ad21) | 3.115 (682304a3) | 3.132 (bc15163c) | 2.681 (f6d032e7) | +16.1% |
+| `rekey` | 1.013 (5a156d6d) | 1.018 (0d8d5026) | 1.020 (4dc75714) | 1.012 (0f2038c6) | +0.7% |
+
+Both pairs agree in direction for every workload. The six launches per
+workload and artifact show the within-binary spread. In scalar churn,
+the A launches ranged from 9.03 to 12.17 s. Sidecars put most of that
+variation in SETUP, which ranged from 3.97 to 7.07 s. WARM took 4.63 to
+4.84 s on A and 60 to 61 ms on B. Payload churn also improved in WARM,
+from 636-701 ms on A to 558-593 ms on B, with a smaller margin.
+
+List literals slowed by 15.4% and 16.8% in the two pairs. The WARM ranges
+were 1.063-1.098 s on A and 1.207-1.240 s on B, with a slowdown in SETUP
+as well. These builds measure the whole pacing change together, so they
+leave the cause of the list-literal slowdown open, including code layout.
+The shifts in `gc_churn`, `fill`, `queue` and `rekey` are small enough
+that this campaign leaves them inconclusive.
+
+Follow-up on the list-literal slowdown (bygg, same day). It was already
+present at `f285ceedf` (3.1 s against 2.7 s for `5c2cd0766`), so the GC
+checkpoints did not cause it. It survived when payload pacing was
+neutralized (collection count back to the A count) and when the meter's
+add and remove were no-ops. The two builds allocated the same bytes per
+function. On perf, cycles went from 14.8G to 17.0G and
+`ex_no_retire.load_not_complete` from 5.06G to 7.56G, while L1 misses
+fell. The stall sat in the bulk append of `Table::set_list`. In the
+metered build, `array.extend(values.inspect(..))` was outlined into a
+`spec_extend` that spilled each `Val` through overlapping stack slots and
+then reloaded it, a store-forwarding failure. `set_list` now takes a
+`&[Val]` and copies with `extend_from_slice`. With that change the
+workload measures 2.5 s best of 3 (run `b0083be9`, dirty tree). Stall
+cycles in `insert` and the hash push also rose by about 0.5G. They were
+left alone because the fixed build beats the baseline.
+
 ## Native stack frames and cycles
 
 The log behind reference/native-calls.md's current table: the frame-size

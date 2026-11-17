@@ -2398,11 +2398,11 @@ impl Table {
         &mut self,
         resident: &mut ResidentBytes,
         first: usize,
-        mut values: impl ExactSizeIterator<Item = Val>,
+        values: &[Val],
     ) -> std::result::Result<(), TableError> {
-        let mut key = first;
         let mut reserved = false;
-        while let Some(value) = values.next() {
+        for (at, &value) in values.iter().enumerate() {
+            let key = first + at;
             if key == self.vlen + 1
                 && (matches!(self.array.first(), Some(first) if !matches!(first, Val::Nil))
                     && self.base + self.array.len() == self.vlen
@@ -2415,26 +2415,24 @@ impl Table {
                 // preparation and hash migration would do nothing, so
                 // the rest of the batch lands in one extend with the
                 // same end state.
-                let count = 1 + values.len();
-                self.check_vlen_growth(count)?;
-                self.reserve_array_tracked(resident, self.array.len().saturating_add(count))?;
-                self.vlen += count;
-                let mut live = usize::from(!matches!(value, Val::Nil));
-                self.array.push(value);
-                // The complete batch was reserved fallibly above. Extend
-                // can fill that storage without a capacity check for
-                // every push; accumulate locally rather than writing
-                // table metadata for every element.
-                self.array.extend(values.inspect(|value| {
-                    live += usize::from(!matches!(value, Val::Nil));
-                }));
-                self.array_live += live;
+                let rest = &values[at..];
+                self.check_vlen_growth(rest.len())?;
+                self.reserve_array_tracked(resident, self.array.len().saturating_add(rest.len()))?;
+                self.vlen += rest.len();
+                // The complete batch was reserved fallibly above, so the
+                // copy needs no per-element capacity check. It is a slice
+                // copy on purpose: an element-wise `extend` over an
+                // iterator adapter, once outlined, spilled each `Val`
+                // through overlapping stack slots and stalled on store
+                // forwarding (bench/list_literals ran about 15% slower).
+                self.array_live += rest.iter().filter(|v| !matches!(v, Val::Nil)).count();
+                self.array.extend_from_slice(rest);
                 break;
             }
             if key == self.vlen + 1 && !reserved {
                 // The bulk path above needs no window maintenance. Other
                 // appends release dead storage before reserving the batch.
-                self.prepare_list_append(resident, 1 + values.len())?;
+                self.prepare_list_append(resident, values.len() - at)?;
                 reserved = true;
             }
             if key == self.vlen + 1 {
@@ -2442,7 +2440,6 @@ impl Table {
             } else {
                 self.insert_tracked(resident, Val::Num(key as f64), value)?;
             }
-            key += 1;
         }
         #[cfg(debug_assertions)]
         self.debug_assert_invariants();
@@ -2860,11 +2857,7 @@ impl TableEditor<'_> {
         self.table.set_slot_policy_tracked(self.resident, policy);
     }
 
-    pub(super) fn set_list(
-        &mut self,
-        first: usize,
-        values: impl ExactSizeIterator<Item = Val>,
-    ) -> Result<(), TableError> {
+    pub(super) fn set_list(&mut self, first: usize, values: &[Val]) -> Result<(), TableError> {
         self.table.set_list_tracked(self.resident, first, values)
     }
 
@@ -2957,11 +2950,7 @@ impl Table {
         self.insert_tracked(&mut resident, key, value)
     }
 
-    fn set_list(
-        &mut self,
-        first: usize,
-        values: impl ExactSizeIterator<Item = Val>,
-    ) -> Result<(), TableError> {
+    fn set_list(&mut self, first: usize, values: &[Val]) -> Result<(), TableError> {
         let mut resident = ResidentBytes::new(self.resident_bytes());
         self.set_list_tracked(&mut resident, first, values)
     }
@@ -3451,8 +3440,7 @@ mod tests {
         fill(&mut t, 1..=3);
         // Appending 3 migrated key 4 through `hash_remove`.
         assert_eq!((t.vlen, t.hash_migratable), (4, 0));
-        t.set_list(5, [Val::Num(5.0), Val::Num(6.0)].into_iter())
-            .unwrap();
+        t.set_list(5, &[Val::Num(5.0), Val::Num(6.0)]).unwrap();
         assert_eq!(t.array_len(), 6);
     }
 
@@ -3491,12 +3479,11 @@ mod tests {
     #[test]
     fn set_list_keeps_nil_positional_slots_in_the_array() {
         let mut t = Table::default();
-        t.set_list(1, [Val::Num(1.0), Val::Nil, Val::Num(3.0)].into_iter())
+        t.set_list(1, &[Val::Num(1.0), Val::Nil, Val::Num(3.0)])
             .unwrap();
         assert_eq!(t.array.len(), 3);
         assert_eq!(t.array_len(), 3);
-        t.set_list(1, [Val::Num(1.0), Val::Nil].into_iter())
-            .unwrap();
+        t.set_list(1, &[Val::Num(1.0), Val::Nil]).unwrap();
         t.insert(n(3), Val::Nil).unwrap();
         assert_eq!(t.array_len(), 1);
     }
@@ -3559,7 +3546,7 @@ mod tests {
                 setup(&mut bulk);
                 setup(&mut reference);
                 let first = bulk.vlen + 1;
-                bulk.set_list(first, batch.iter().copied()).unwrap();
+                bulk.set_list(first, batch).unwrap();
                 key_by_key(&mut reference, first, batch);
                 assert_eq!(bulk.array, reference.array);
                 assert_eq!(bulk.array_live, reference.array_live);
@@ -3685,9 +3672,7 @@ mod tests {
         assert_eq!(table.base, 4096);
         assert!(table.array.is_empty());
         assert!(table.array.capacity() < 4096);
-        table
-            .set_list(4097, [Val::Nil, Val::Bool(true)].into_iter())
-            .unwrap();
+        table.set_list(4097, &[Val::Nil, Val::Bool(true)]).unwrap();
         assert_eq!(table.vlen, 4098);
         assert_eq!(table.get(&n(4097)), Val::Nil);
         assert_eq!(keys(&table), vec![n(4098)]);
@@ -4137,7 +4122,7 @@ mod tests {
             Err(TableError::GrowthFailed)
         ));
         assert!(matches!(
-            table.set_list(MAX_ARRAY_LEN + 1, [Val::Nil, Val::Nil].into_iter()),
+            table.set_list(MAX_ARRAY_LEN + 1, &[Val::Nil, Val::Nil]),
             Err(TableError::GrowthFailed)
         ));
         assert_eq!(table.get(&n(MAX_ARRAY_LEN)), Val::Bool(true));
@@ -4222,11 +4207,9 @@ mod tests {
     #[test]
     fn snapshot_live_span_does_not_bound_structural_nil_tail() {
         let mut table = Table::default();
-        table.set_list(1, [Val::Bool(true)].into_iter()).unwrap();
+        table.set_list(1, &[Val::Bool(true)]).unwrap();
         for _ in 0..32 {
-            table
-                .set_list(table.vlen + 1, [Val::Nil].into_iter())
-                .unwrap();
+            table.set_list(table.vlen + 1, &[Val::Nil]).unwrap();
         }
         let (len, slots, entries) = table.snapshot_entries();
         assert_eq!((len, slots), (33, 1));

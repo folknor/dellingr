@@ -529,28 +529,6 @@ must not keep a dropped runtime alive or name a stale one.
 
 **Classification:** experiment.
 
-## PERF-021 - Collections are paced by object count, not resident payload
-
-Raised by the heap hunter. Verified by reading the code. Not measured.
-
-**Bottleneck:** the threshold counts objects plus distinct strings. A live
-table with N slots counts as 1, so `Table::mark_values` rescans all N slots
-every time unrelated allocations reach L, the number of live allocations.
-That puts mark work per allocation at about N/L, which has no bound.
-
-**Redesign:** pace collections in Automatic mode by objects + strings +
-resident_bytes / W. Charge resident bytes at table and string backing growth,
-and service the pressure at Lua back-edges and call admission. The meter
-and the weighted threshold at the allocator gate (W = 256) have landed; the
-GC checkpoints, the measurement and the close-out remain. The settled
-rulings and the link plan are in `notes/PERF-021-design.md`. Reference
-summaries were refused, with the reasoning at `mark_values`.
-
-**Risks:** collection timing becomes replay-visible. A missed charge mistimes
-collections but is never unsound.
-
-**Classification:** architectural collector change, chained.
-
 ## PERF-025 - Callback gsub replacements copy the returned value and captures
 
 Raised by the strings hunter. The string and number replacement half landed
@@ -724,7 +702,7 @@ the game restricts around every tick, irrelevant if restriction is setup-only.
 
 ## PERF-038 - Sweep visits vacant slot-map slots up to the high-water mark
 
-Raised by the PERF-021 link 3 spar. Verified by reading the code. Not
+Raised by the resident-payload pacing spar. Verified by reading the code. Not
 measured.
 
 **Bottleneck:** `GcHeap::collect` sweeps with `SlotMap::retain`, which visits

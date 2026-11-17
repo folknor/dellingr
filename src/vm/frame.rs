@@ -105,18 +105,16 @@ impl Frame {
         }
     }
 
-    /// Take a jump that may go backward: move the cursor `ip` by a verified
-    /// `offset`, polling the interrupt first when the jump is backward. `JMP`,
-    /// the compare-and-branch and test opcodes and `FOR_LOOP` jump through
-    /// here; admission requires `FOR_PREP` and `TFOR_LOOP` offsets to be
-    /// forward, so every backward transfer in admitted bytecode is a
-    /// safepoint. The poll comes
-    /// before the cursor moves, so an interruption names the jumping
-    /// instruction (`locate_fault` reads `cursor - 1`).
+    /// Take a jump by a verified `offset`. `JMP`, compare-and-branch and
+    /// test opcodes, `FOR_LOOP` and `TFOR_LOOP` poll for interrupt and GC
+    /// pressure on backward jumps. Admission requires `FOR_PREP` to go
+    /// forward, so every backward transfer passes through this checkpoint.
+    /// The poll comes before the cursor moves, so an interruption names the
+    /// jumping instruction (`locate_fault` reads `cursor - 1`).
     #[inline(always)]
-    pub(super) fn branch(state: &State, ip: &mut usize, offset: i32) -> Result<()> {
+    pub(super) fn branch(state: &mut State, ip: &mut usize, offset: i32) -> Result<()> {
         if offset < 0 {
-            state.poll_interrupt()?;
+            state.poll_gc_checkpoint()?;
         }
         *ip = Self::jumped(*ip, offset);
         Ok(())

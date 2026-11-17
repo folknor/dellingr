@@ -113,11 +113,7 @@ impl State {
                 .transpose()?;
         }
         let State {
-            stack,
-            heap,
-            cost,
-            interrupt,
-            ..
+            stack, heap, cost, ..
         } = self;
         let stack: &[Val] = stack;
         let heap: &GcHeap = heap;
@@ -125,7 +121,7 @@ impl State {
         Ok(operation(
             bytes,
             cost.charge_meter(charge),
-            interrupt.flag(),
+            heap.interrupt().flag(),
         ))
     }
 

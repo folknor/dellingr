@@ -239,9 +239,6 @@ pub struct State {
     pub(super) upvalue_pool: UpvaluePool,
     /// Runtime cost accounting and optional budget.
     pub(super) cost: CostState,
-    /// The host's request to stop running Lua, polled at safepoints (see
-    /// `vm/interrupt.rs`). Host state: never saved, never a root.
-    pub(super) interrupt: Interrupt,
     /// Compiled pattern programs shared by `string.find`, `string.match`,
     /// `string.gsub` and `string.gmatch` iterators.
     ///
@@ -418,7 +415,7 @@ impl StateBuilder {
         let callbacks = self.callbacks.unwrap_or_else(|| Box::new(DefaultCallbacks));
         let mut state = State::build_raw(callbacks, self.gc_policy, self.costing);
         if let Some(interrupt) = self.interrupt {
-            state.interrupt = interrupt;
+            state.set_interrupt(interrupt);
         }
         if self.standard_library {
             state
@@ -505,7 +502,6 @@ impl State {
             suspended_envs: Vec::new(),
             upvalue_pool: UpvaluePool::new(),
             cost: CostState::new(costing),
-            interrupt: Interrupt::new(),
             patterns: IndexMap::default(),
             pattern_bytes: 0,
             #[cfg(test)]
@@ -594,7 +590,7 @@ impl State {
     /// another thread or a signal handler while it runs Lua.
     #[must_use]
     pub fn interrupt(&self) -> Interrupt {
-        self.interrupt.clone()
+        self.heap.interrupt().clone()
     }
 
     /// Poll `interrupt` from now on instead of the current handle, for
@@ -603,14 +599,14 @@ impl State {
     /// safepoint reads the new handle, so a request set only on the old one
     /// no longer applies. Stickiness belongs to the handle, not to a run.
     pub fn set_interrupt(&mut self, interrupt: Interrupt) {
-        self.interrupt = interrupt;
+        self.heap.set_interrupt(interrupt);
     }
 
     /// A safepoint: fail with [`ErrorKind::Interrupted`] while the host's
     /// interrupt is triggered (see `vm/interrupt.rs` for where they are).
     #[inline(always)]
     pub(crate) fn poll_interrupt(&self) -> Result<()> {
-        if interrupt::requested(self.interrupt.flag()) {
+        if interrupt::requested(self.heap.interrupt().flag()) {
             return Err(self.interrupted_error());
         }
         Ok(())
@@ -892,8 +888,9 @@ impl State {
     }
 
     /// Returns true if the GC threshold has been reached: `gc_score()` in
-    /// automatic mode, `heap_size()` under a host-set threshold. Checked
-    /// before allocation.
+    /// automatic mode, `heap_size()` under a host-set threshold. The VM
+    /// checks before allocation and also services automatic pressure at Lua
+    /// back edges, Lua call admission and between copies in `table.move`.
     pub fn gc_should_run(&self) -> bool {
         self.heap.is_full()
     }

@@ -17,7 +17,9 @@ tick budgets and re-record replays.
   unit per 256 bytes), not by objects and strings alone (docs/limits.md,
   "Garbage collection policy"). A large live table no longer forces a rescan
   of all its slots every few unrelated allocations, and large dead payload
-  brings a collection forward. Collection timing, and with it `%p` ids,
+  brings a collection forward. Automatic collection also services pressure
+  at taken backward jumps, Lua call admission (including tail calls), and
+  between copies in `table.move`. Collection timing, and with it `%p` ids,
   `object_count` and snapshot contents, moves in any State holding table or
   string payload. Automatic thresholds (`gc_threshold`) are in the new
   `State::gc_score` units; a `gc_set_threshold` threshold still counts

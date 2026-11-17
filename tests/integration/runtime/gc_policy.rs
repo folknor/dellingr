@@ -121,3 +121,58 @@ fn threshold_set_during_load_setup_survives_materialization_collection() {
 
     assert_eq!(loaded.gc_threshold(), host_threshold);
 }
+
+#[test]
+fn back_edges_reclaim_staged_table_backing_without_new_allocations() {
+    let mut state = State::builder().gc_policy(512, 512, 2).build();
+    crate::support::eval(
+        &mut state,
+        r"
+        local staged = {}
+        for i = 1, 64 do staged[i] = {} end
+
+        for i = 1, 64 do
+            local t = staged[i]
+            for j = 1, 4096 do t[j] = j end
+            staged[i] = nil
+        end
+        ",
+        0,
+    );
+    // Without back-edge collection, all 64 payloads are still resident,
+    // contributing at least 64 * 4096 / 16 = 16384 units on their own.
+    assert!(
+        state.gc_score() < 2_048,
+        "retained score: {}",
+        state.gc_score()
+    );
+}
+
+#[test]
+fn tail_call_admission_services_pressure_and_keeps_callee_and_arguments_rooted() {
+    let mut state = State::new();
+    crate::support::run(&mut state, "t = {} for i = 1, 1024 do t[i] = i end");
+    crate::support::load(
+        &mut state,
+        r"
+        local function finish(arg) return arg[1025] end
+        local value = t
+        t = nil
+        value[1025] = 42
+        return finish(value)
+        ",
+    );
+    state.gc_collect();
+    // Leave room for the closure. The table growth arms the checkpoint.
+    let initial = state.gc_score() + 4;
+    state.gc_set_policy(initial, initial, 2);
+
+    state
+        .call(dellingr::ArgCount::Fixed(0), dellingr::RetCount::Fixed(1))
+        .expect("tail call runs after the collection");
+    assert!(state.gc_threshold() > initial);
+    assert_eq!(
+        state.to_number(1).expect("finish returns the new entry"),
+        42.0
+    );
+}

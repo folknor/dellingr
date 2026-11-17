@@ -367,7 +367,7 @@ pub(crate) fn modf_of(x: f64) -> (f64, f64) {
 /// is an interrupt safepoint; an interrupted draw leaves the stream unmoved
 /// (`VmRng::random_range_i64`).
 pub(crate) fn draw_range(state: &mut State, m: i64, n: i64) -> Result<f64> {
-    let flag = state.interrupt.flag();
+    let flag = state.heap.interrupt().flag();
     match state.rng.random_range_i64(m, n, flag) {
         // Dellingr numbers are f64, so draws outside +-2^53 can round.
         Some(v) => Ok(v as f64),

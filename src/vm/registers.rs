@@ -381,7 +381,7 @@ impl State {
             .heap
             .edit_table(ptr)
             .expect("checked to be a table just above");
-        tbl.set_list(first_key, values.iter().copied())?;
+        tbl.set_list(first_key, values)?;
         Ok(())
     }
 

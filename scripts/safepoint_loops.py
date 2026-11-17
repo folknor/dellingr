@@ -9,8 +9,8 @@ its trip count comes from, which a lexer cannot decide, so this check forces
 the decision to be written down instead. Every `for`, `while` and `loop` in
 the scoped files, outside test code, must either
 
-- call `poll_interrupt(` (or, where the State is not at hand,
-  `interrupt_requested(` on the flag) directly in its body, or
+- call `poll_interrupt(` or `poll_gc_checkpoint(` directly in its body
+  (or `interrupt_requested(` on the flag where the State is not at hand), or
 - sit under a comment, in the comment lines directly above it, containing
   `bounded:` (why one pass of it is bounded: a string under
   MAX_STRING_BYTES, a table's storage, a fixed count) or `safepoint:` (where
@@ -34,7 +34,7 @@ SCOPE_FILES = ("src/lua_std.rs", "src/vm/rng.rs", "src/vm/table_ops.rs")
 
 # `for` not followed by `<` (a higher-ranked bound), `while` and `loop`.
 LOOP = re.compile(r"\b(?:(for)\b(?!\s*<)|while\b|loop\b)")
-POLL = re.compile(r"\b(?:poll_interrupt|interrupt_requested)\s*\(")
+POLL = re.compile(r"\b(?:poll_interrupt|poll_gc_checkpoint|interrupt_requested)\s*\(")
 DECISION = re.compile(r"//.*\b(?:bounded|safepoint):\s*\S")
 
 

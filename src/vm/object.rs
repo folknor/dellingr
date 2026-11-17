@@ -421,20 +421,69 @@ impl GcThreshold {
 
 /// Bytes in table backing and interned string payloads owned by the heap,
 /// including table backing temporarily held by suspended environments.
-#[derive(Default)]
-pub(super) struct ResidentBytes(usize);
+pub(super) struct ResidentBytes {
+    bytes: usize,
+    // The first byte count that makes the automatic score reach its threshold.
+    // MAX also serves as the sentinel for disabled or unreachable watermarks
+    // and while a pending poll already covers further growth.
+    watermark: usize,
+    interrupt: super::Interrupt,
+    poll_source: super::Interrupt,
+}
+
+impl Default for ResidentBytes {
+    fn default() -> Self {
+        Self::new(0)
+    }
+}
+
+// This request is private to the collector and is never reset or handed out
+// to hosts. Each State selects it independently when it has GC pressure.
+static GC_PENDING: std::sync::LazyLock<super::Interrupt> = std::sync::LazyLock::new(|| {
+    let flag = super::Interrupt::new();
+    flag.trigger();
+    flag
+});
 
 impl ResidentBytes {
     pub(super) fn new(bytes: usize) -> Self {
-        Self(bytes)
+        let interrupt = super::Interrupt::new();
+        Self {
+            bytes,
+            watermark: usize::MAX,
+            poll_source: interrupt.clone(),
+            interrupt,
+        }
     }
 
     pub(super) fn add(&mut self, bytes: usize) {
-        self.0 += bytes;
+        self.bytes += bytes;
+        if self.bytes >= self.watermark {
+            self.arm_gc_poll();
+        }
     }
 
     pub(super) fn remove(&mut self, bytes: usize) {
-        self.0 -= bytes;
+        self.bytes -= bytes;
+    }
+
+    #[cold]
+    fn arm_gc_poll(&mut self) {
+        self.poll_source = GC_PENDING.clone();
+        self.watermark = usize::MAX;
+    }
+
+    fn refresh_watermark(&mut self, watermark: usize) {
+        if self.bytes >= watermark {
+            if self.poll_source.same_as(&self.interrupt) {
+                self.arm_gc_poll();
+            }
+        } else {
+            self.watermark = watermark;
+            if !self.poll_source.same_as(&self.interrupt) {
+                self.poll_source = self.interrupt.clone();
+            }
+        }
     }
 
     #[cfg(any(feature = "snapshot", test))]
@@ -482,7 +531,7 @@ pub(crate) struct GcHeap {
 
 impl GcHeap {
     pub(super) fn with_policy(policy: GcPolicy) -> Self {
-        Self {
+        let mut heap = Self {
             objects: SlotMap::with_key(),
             threshold: GcThreshold::from_initial(policy.initial_threshold),
             policy,
@@ -494,7 +543,9 @@ impl GcHeap {
             watched: ObjectPtr(ObjectKey::null()),
             watched_epoch: 0,
             cache_prune_countdown: CACHE_PRUNE_INTERVAL,
-        }
+        };
+        heap.refresh_gc_watermark();
+        heap
     }
 
     /// Count mutable accesses to `ptr` in [`Self::watched_epoch`] from now on.
@@ -643,7 +694,7 @@ impl GcHeap {
             })
             .sum();
         assert_eq!(
-            self.resident.0,
+            self.resident.bytes,
             tables + self.strings.resident_bytes() + suspended
         );
     }
@@ -691,7 +742,7 @@ impl GcHeap {
             raw,
             color: Cell::new(Color::Unmarked),
         };
-        ObjectPtr(self.objects.insert(wrapped))
+        self.publish_object(wrapped)
     }
 
     /// Allocate a new table.
@@ -702,7 +753,7 @@ impl GcHeap {
             raw,
             color: Cell::new(Color::Unmarked),
         };
-        ObjectPtr(self.objects.insert(wrapped))
+        self.publish_object(wrapped)
     }
 
     /// Allocate a new table with room for `capacity` entries.
@@ -714,7 +765,7 @@ impl GcHeap {
             raw,
             color: Cell::new(Color::Unmarked),
         };
-        ObjectPtr(self.objects.insert(wrapped))
+        self.publish_object(wrapped)
     }
 
     /// Allocate a new table pre-filled from a constructor template.
@@ -726,17 +777,29 @@ impl GcHeap {
             raw,
             color: Cell::new(Color::Unmarked),
         };
-        ObjectPtr(self.objects.insert(wrapped))
+        self.publish_object(wrapped)
+    }
+
+    #[inline]
+    fn publish_object(&mut self, object: WrappedObject) -> ObjectPtr {
+        let ptr = ObjectPtr(self.objects.insert(object));
+        self.refresh_gc_watermark();
+        ptr
     }
 
     /// Allocate or intern a string.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn alloc_string_raw(&mut self, bytes: &[u8]) -> StringPtr {
-        self.strings.intern(
+        let count = self.strings.len();
+        let ptr = self.strings.intern(
             bytes,
             crate::det_hash::hash_bytes(bytes),
             &mut self.resident,
-        )
+        );
+        if self.strings.len() != count {
+            self.refresh_gc_watermark();
+        }
+        ptr
     }
 
     /// Intern `range` of the pooled string `source`, reading the bytes in
@@ -747,12 +810,47 @@ impl GcHeap {
         source: StringPtr,
         range: std::ops::Range<usize>,
     ) -> Option<StringPtr> {
-        self.strings.intern_range(source, range, &mut self.resident)
+        let count = self.strings.len();
+        let ptr = self.strings.intern_range(source, range, &mut self.resident);
+        if self.strings.len() != count {
+            self.refresh_gc_watermark();
+        }
+        ptr
     }
 
     // ========================================================================
     // Garbage Collection
     // ========================================================================
+
+    pub(crate) fn interrupt(&self) -> &super::Interrupt {
+        &self.resident.interrupt
+    }
+
+    pub(super) fn set_interrupt(&mut self, interrupt: super::Interrupt) {
+        self.resident.interrupt = interrupt;
+        self.resident.poll_source = self.resident.interrupt.clone();
+        self.refresh_gc_watermark();
+    }
+
+    #[inline(always)]
+    pub(super) fn gc_poll_requested(&self) -> bool {
+        super::interrupt_requested(self.resident.poll_source.flag())
+    }
+
+    #[inline]
+    pub(super) fn refresh_gc_watermark(&mut self) {
+        let watermark = match self.threshold {
+            GcThreshold::Automatic(threshold) => threshold
+                .saturating_sub(self.allocation_count())
+                .saturating_mul(tuning::GC_RESIDENT_BYTES_PER_UNIT),
+            GcThreshold::Manual(_) | GcThreshold::Disabled => usize::MAX,
+        };
+        self.resident.refresh_watermark(watermark);
+    }
+
+    pub(super) fn automatic_gc_due(&self) -> bool {
+        matches!(self.threshold, GcThreshold::Automatic(threshold) if self.pacing_score() >= threshold)
+    }
 
     /// Check whether the configured threshold has been reached.
     #[must_use]
@@ -770,7 +868,7 @@ impl GcHeap {
     #[inline]
     pub(super) fn pacing_score(&self) -> usize {
         self.allocation_count()
-            .saturating_add(self.resident.0 / tuning::GC_RESIDENT_BYTES_PER_UNIT)
+            .saturating_add(self.resident.bytes / tuning::GC_RESIDENT_BYTES_PER_UNIT)
     }
 
     /// Mark an object as reachable. Call this for all root objects.
@@ -908,6 +1006,7 @@ impl GcHeap {
                     .max(live.saturating_add(1)),
             );
         }
+        self.refresh_gc_watermark();
     }
 
     /// Count one collection toward the runtime-cache prune, and report
@@ -1018,6 +1117,7 @@ impl GcHeap {
     /// Set the GC threshold.
     pub(super) fn set_threshold(&mut self, threshold: usize) {
         self.threshold = GcThreshold::manual(threshold);
+        self.refresh_gc_watermark();
     }
 
     /// Replace the automatic collection policy and restart at its initial
@@ -1025,16 +1125,19 @@ impl GcHeap {
     pub(super) fn set_policy(&mut self, policy: GcPolicy) {
         self.policy = policy;
         self.threshold = GcThreshold::from_initial(policy.initial_threshold);
+        self.refresh_gc_watermark();
     }
 
     /// Resume automatic collection at the configured initial threshold.
     pub(super) fn reset_auto_threshold(&mut self) {
         self.threshold = GcThreshold::from_initial(self.policy.initial_threshold);
+        self.refresh_gc_watermark();
     }
 
     /// Disable automatic collection while preserving explicit collection.
     pub(super) fn disable_auto_gc(&mut self) {
         self.threshold = GcThreshold::Disabled;
+        self.refresh_gc_watermark();
     }
 }
 
@@ -1542,7 +1645,7 @@ mod tests {
         }
         assert_eq!(pool.find_by_hash(b"s1", 1), None);
         assert_eq!(
-            resident.0,
+            resident.bytes,
             survivors
                 .iter()
                 .map(|(_, bytes, _)| bytes.len())
@@ -1590,7 +1693,7 @@ mod tests {
         pool.mark(collided);
         pool.collect(&mut resident);
         assert_eq!(pool.len(), 1);
-        assert_eq!(resident.0, b"keep collision".len());
+        assert_eq!(resident.bytes, b"keep collision".len());
         assert_eq!(pool.find_by_hash(b"keep", 2), None);
         assert_eq!(pool.find_by_hash(b"replacement", 1), None);
         assert_eq!(pool.find_by_hash(b"keep collision", 3), Some(collided));

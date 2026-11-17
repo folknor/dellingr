@@ -199,7 +199,9 @@ that saved it would have.
 Collections fire when the allocation count (host-set threshold) or the
 pacing score of objects, strings and resident table and string bytes
 (automatic mode, [the GC policy](limits.md#garbage-collection-policy)) reaches
-the threshold. Resident bytes follow table capacity growth, so their timing is
+the threshold at an allocation check. Automatic mode also checks at taken
+Lua back edges, Lua call admission, and `table.move` copy boundaries.
+Resident bytes follow table capacity growth, so their timing is
 deterministic for a given build and anchor release history, subject to the
 cross-thread drop requirement above. It is not a cross-version contract: a release
 may move allocation points or collection thresholds, which can change `%p` ids

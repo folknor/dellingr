@@ -147,7 +147,9 @@ length of interned strings; a table's inline entries count only as the object.
 `State::gc_score` reports the score. A host-set threshold
 (`gc_set_threshold`) counts objects plus distinct strings only, as
 `State::heap_size` does. The heap checks the active measure before each heap
-allocation and collects when it is at least the current threshold. Counting
+allocation and collects when it is at least the current threshold. Automatic
+mode also checks at taken backward jumps, Lua call admission (including tail
+calls), and between copies in `table.move`. Counting
 payload keeps a large live table from being rescanned at every handful of
 unrelated allocations, and lets large dead payload bring a collection forward.
 The default automatic policy uses
@@ -161,7 +163,7 @@ After a collection while automatic mode is active, the next threshold is
 saturating arithmetic. The `live_score + 1` term gives growth factors 0 and 1
 one unit of headroom, so an unchanged heap does not collect again at the next
 allocation check; it promises no more than that one unit. A calculated `usize::MAX` remains an automatic threshold and
-later collections recompute it. Allocation-triggered collection is disabled
+later collections recompute it. Automatic collection is disabled
 by an initial or host-set threshold of `usize::MAX`, or by `gc_disable_auto`.
 
 Embedders can provide per-State values with
@@ -186,6 +188,11 @@ affect rendered identities and snapshot contents. Keep the policy consistent
 across replay runs.
 
 ## State-local growth
+
+Automatic collection services resident payload pressure even in loops that
+only grow existing tables. The score can overshoot its threshold by the
+growth between checkpoints. One sparse write can reserve a large gap, and a
+host callback can grow backing repeatedly before it returns.
 
 Beyond the limits above, these per-State structures have no per-State
 configurable quota, and no charge tracks their size. Their slot and map storage
