@@ -639,11 +639,16 @@ fn remove_through_metamethods(state: &mut State) -> Result<u8> {
 
 /// `table.sort` for a table with sequence metamethods, following Lua 5.4's
 /// `sort`: length via `__len`, elements read through `__index` and written
-/// back through `__newindex`. The elements are sorted in a scratch table
-/// rooted on the stack, so a comparator can force a collection. Both paths
-/// use the same heap sort and comparison routine, so equal inputs have the
-/// same order and comparator call sequence. The charge is the original
-/// length, at least 1, paid before any read beyond `__len` or comparator call.
+/// back through `__newindex`. The elements are sorted in a segment of the
+/// State's rooted buffer (`State::with_sort_segment`), which stays rooted as
+/// a whole through the reads, the sort and the writeback, so handlers and a
+/// comparator can force a collection. Both paths use the same heap sort and
+/// comparison routine, so equal inputs have the same order and comparator
+/// call sequence. The charge is the original length, at least 1, paid before
+/// any read beyond `__len` or comparator call.
+///
+/// While `__index` runs, the stack holds the arguments and the key; while
+/// `__newindex` runs, the arguments, the key and the value.
 fn sort_through_metamethods(state: &mut State, has_comp: bool) -> Result<u8> {
     let len = crate::native_call!(
         "sort_through_metamethods->sequence_len",
@@ -656,35 +661,33 @@ fn sort_through_metamethods(state: &mut State, has_comp: bool) -> Result<u8> {
         return Ok(0);
     }
     state.set_top(if has_comp { 2 } else { 1 })?;
-    state.new_table()?;
-    let s = state.get_top() as isize;
-
-    for i in 1..=len {
-        // `__len` chose the count, and table handlers call no Lua.
-        state.poll_interrupt()?;
-        state.push_number(i as f64)?;
-        state.push_number(i as f64)?;
+    state.with_sort_segment(|state, base| {
+        for i in 1..=len {
+            // `__len` chose the count, and table handlers call no Lua.
+            state.poll_interrupt()?;
+            state.push_number(i as f64)?;
+            crate::native_call!(
+                "sort_through_metamethods->get_table_unguarded",
+                state.get_table_unguarded(1)
+            )?;
+            state.pop_into_sort_segment()?;
+        }
         crate::native_call!(
-            "sort_through_metamethods->get_table_unguarded",
-            state.get_table_unguarded(1)
+            "sort_through_metamethods->table_sort_rooted",
+            state.table_sort_rooted(base, n, has_comp)
         )?;
-        state.set_table_raw(s)?;
-    }
-    crate::native_call!(
-        "sort_through_metamethods->table_sort_scratch",
-        state.table_sort_scratch(s, n, has_comp)
-    )?;
 
-    for i in 1..=len {
-        state.poll_interrupt()?;
-        state.push_number(i as f64)?;
-        state.push_number(i as f64)?;
-        state.get_table_raw(s)?;
-        crate::native_call!(
-            "sort_through_metamethods->set_table_unguarded",
-            state.set_table_unguarded(1)
-        )?;
-    }
+        for index in 0..n {
+            state.poll_interrupt()?;
+            state.push_number((index + 1) as f64)?;
+            state.push_sort_segment_value(base, index)?;
+            crate::native_call!(
+                "sort_through_metamethods->set_table_unguarded",
+                state.set_table_unguarded(1)
+            )?;
+        }
+        Ok(())
+    })?;
     state.set_top(0)?;
     Ok(0)
 }

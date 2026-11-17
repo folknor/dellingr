@@ -98,6 +98,7 @@ examples! {
     tables_queue: "examples/tables/queue.lua",
     tables_sequence_len: "examples/tables/sequence_len.lua",
     tables_sort: "examples/tables/sort.lua",
+    tables_sort_proxy: "examples/tables/sort_proxy.lua",
     tail_calls: "examples/tail_calls.lua",
     test_local_function: "examples/test_local_function.lua",
     unpack_global: "examples/unpack_global.lua",

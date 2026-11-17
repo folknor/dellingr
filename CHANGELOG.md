@@ -60,6 +60,16 @@ tick budgets and re-record replays.
   one borrow of its arguments and reads the replacement in place instead of
   compiling a template, so `InternalFault::GsubReplacementTemplateMissing` is
   removed. Results, costs, error order and collection points are unchanged.
+- **Replay-visible:** `table.sort` on a table with `__len`, `__index` or
+  `__newindex` sorts its values in a VM-owned rooted buffer instead of a
+  scratch Lua table: one fewer table allocation per sort, so collection
+  timing, `%p` ids and object counts can move. While a handler runs, the
+  sort now holds no scratch table and no spare key on the stack, so a
+  handler or comparator near the stack cap can succeed where it was refused.
+  A range whose reads return nil takes memory for every position (see
+  docs/compatibility.md). Handler and comparator call order, results and
+  costs are unchanged. A comparator sort on a plain table copies its values
+  once instead of three times.
 
 ### Fixed
 
@@ -136,6 +146,10 @@ tick budgets and re-record replays.
   called value's function-table entry, so aliases such as
   `local floor = math.floor` are covered. Results, costs, errors, interrupt
   safepoints, stack-cap refusals and the random stream are unchanged.
+- `table.sort` through `__len`, `__index` and `__newindex` heap-sorts a
+  plain value buffer instead of a scratch table: the new `sort_proxy`
+  workload (2000 elements, Lua handlers, default comparison) went from 9.7 s
+  to 4.8 s on bygg.
 
 ## [0.7.1] - 2026-11-06
 

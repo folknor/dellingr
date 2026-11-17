@@ -45,13 +45,6 @@ trait TableSortAccess {
     ) -> std::result::Result<(), TableError>;
 }
 
-fn reserve_sort_values(values: &mut Vec<Val>, additional: usize) -> Result<()> {
-    values
-        .try_reserve_exact(additional)
-        .map_err(|_| Error::without_location(ErrorKind::TableGrowthFailed))?;
-    Ok(())
-}
-
 struct VecSortAccess<'a> {
     values: &'a mut [Val],
 }
@@ -72,20 +65,18 @@ impl TableSortAccess for VecSortAccess<'_> {
     }
 }
 
-struct ScratchTableSortAccess {
-    table_idx: usize,
+/// A sort's segment of `in_flight.rooted_values`, from the fixed `base` the
+/// sort recorded when it opened the segment (`State::with_sort_segment`).
+/// Every access indexes the shared Vec afresh, so no slice borrow survives a
+/// comparator call: a nested sort may grow (and reallocate) the Vec above
+/// this segment, and truncates back to its own base before returning.
+struct RootedSortAccess {
+    base: usize,
 }
 
-impl TableSortAccess for ScratchTableSortAccess {
+impl TableSortAccess for RootedSortAccess {
     fn get(&mut self, state: &mut State, index: usize) -> Result<Val> {
-        let ptr = state.stack[self.table_idx]
-            .as_object_ptr()
-            .expect("scratch sort stack slot holds a table");
-        let table = state
-            .heap
-            .as_table_ref(ptr)
-            .expect("scratch sort object is a table");
-        Ok(table.get(&Val::Num((index + 1) as f64)))
+        Ok(state.in_flight.rooted_values[self.base + index])
     }
 
     fn set(
@@ -94,14 +85,8 @@ impl TableSortAccess for ScratchTableSortAccess {
         index: usize,
         value: Val,
     ) -> std::result::Result<(), TableError> {
-        let ptr = state.stack[self.table_idx]
-            .as_object_ptr()
-            .expect("scratch sort stack slot holds a table");
-        let table = state
-            .heap
-            .as_table(ptr)
-            .expect("scratch sort object is a table");
-        table.insert(Val::Num((index + 1) as f64), value)
+        state.in_flight.rooted_values[self.base + index] = value;
+        Ok(())
     }
 }
 
@@ -1058,109 +1043,158 @@ impl State {
         // The array part is bounded far below i64::MAX; saturate rather than panic.
         let len: i64 = crate::saturate::saturating_cast(array_len);
         let n = self.checked_table_sort_len(len)?;
+
+        // Heap sort remains bounded and deterministic even when a Lua
+        // comparator is inconsistent. Unlike reference quicksort, it does not
+        // diagnose that incidental invalid-order case.
+        if has_comp {
+            // A comparator can re-enter Lua and force a collection, so the
+            // values sort in a segment of the rooted buffer, copied there
+            // once, rooted as a whole for the entire sort (not just the pair
+            // being compared) and written back from there. `src/vm/tests.rs`
+            // covers a comparator that clears the source table before
+            // collecting.
+            //
+            // Each comparison is a nested invocation through
+            // `call_unguarded`. Running the comparator on the calling
+            // dispatch loop's frame stack instead (a resumable heap sort, or
+            // a private bytecode driver looping CALL over a sort step) was
+            // considered and not pursued: on bygg, sorting 2000 numbers with
+            // `function(x, y) return x < y end` measured within about 20
+            // percent of the same number of plain Lua-to-Lua calls of that
+            // comparator, heap work included, so the nested invocation
+            // leaves little to win against a new frame kind in the dispatch
+            // loop's return path.
+            return self.with_sort_segment(|state, base| {
+                state
+                    .heap
+                    .as_table_ref(table_ptr)
+                    .expect("validated object pointer is a table")
+                    .append_array_to(&mut state.in_flight.rooted_values)?;
+                // Charged after the copy, as the default path charges after
+                // its detached copy, and before the comparator runs or the
+                // table is mutated, so an exhausted budget blocks the sort.
+                state.charge(Charge::TableSort, n.max(1) as u64)?;
+                if n == 0 {
+                    return Ok(0);
+                }
+                crate::native_call!(
+                    "table_sort->table_sort_rooted",
+                    state.table_sort_rooted(base, n, true)
+                )?;
+                // Look the table up again: the comparator may have replaced
+                // the argument slot's contents.
+                let obj_ptr = state.stack[idx].as_object_ptr();
+                let sorted = &state.in_flight.rooted_values[base..base + n];
+                match obj_ptr.and_then(|ptr| state.heap.as_table(ptr)) {
+                    Some(t) => {
+                        t.set_array(sorted)?;
+                        Ok(n)
+                    }
+                    None => Err(state.type_error(TypeError::TableIndex(typ))),
+                }
+            });
+        }
+
         let mut arr = self
             .heap
             .as_table_ref(table_ptr)
             .expect("validated object pointer is a table")
             .get_array()?;
 
-        // Charge cost BEFORE running the comparator or mutating the table, so an
-        // exhausted budget blocks the sort rather than letting it complete and
-        // only then failing the charge. `arr` is a detached copy here, so
-        // nothing has been mutated yet. Empty sorts still cost 1.
+        // Charge cost BEFORE mutating the table, so an exhausted budget
+        // blocks the sort rather than letting it complete and only then
+        // failing the charge. `arr` is a detached copy here, so nothing has
+        // been mutated yet. Empty sorts still cost 1.
         self.charge(Charge::TableSort, n.max(1) as u64)?;
 
-        if arr.is_empty() {
-            return Ok(0);
+        // The default comparison only reads numbers and already-interned
+        // string bytes: it cannot call Lua or trigger GC (its failure
+        // allocates only the Rust error, not VM objects), and the source
+        // table holds every element until writeback, so `arr` needs no root.
+        crate::native_call!(
+            "table_sort->table_sort_default",
+            self.table_sort_default(&mut arr)
+        )?;
+        // A successful default sort of two or more elements compared every
+        // one of them, so the range is all numbers or all strings in live
+        // window slots: the writeback permutes those slots and touches no
+        // storage metadata. A single element is already sorted.
+        if arr.len() >= 2 {
+            self.heap
+                .as_table(table_ptr)
+                .expect("the default sort cannot reshape the table")
+                .overwrite_live_prefix(&arr);
         }
-
-        let comp_idx = has_comp.then(|| self.convert_idx(2)).transpose()?;
-
-        // Heap sort remains bounded and deterministic even when a Lua
-        // comparator is inconsistent. Unlike reference quicksort, it does not
-        // diagnose that incidental invalid-order case.
-        match comp_idx {
-            // A comparator can re-enter Lua and force a collection, and `arr` is
-            // a detached `Vec<Val>` that GC cannot see, so the whole array has
-            // to stay rooted for the entire sort - not just the pair being
-            // compared. `src/vm/tests.rs` covers a comparator that clears the
-            // source table before collecting.
-            Some(_) => {
-                // Both copies can be as large as the sorted array. Make their
-                // growth fallible before copying or entering the comparator.
-                let mut roots = Vec::new();
-                reserve_sort_values(&mut roots, arr.len())?;
-                roots.extend_from_slice(&arr);
-                reserve_sort_values(&mut self.in_flight.rooted_values, roots.len())?;
-                self.with_rooted_values(&roots, |state| {
-                    crate::native_call!(
-                        "table_sort->table_sort_values:comparator",
-                        state.table_sort_values(&mut arr, comp_idx)
-                    )
-                })?;
-            }
-            // The default comparison only reads numbers and already-interned
-            // string bytes: it cannot call Lua or trigger GC (its failure
-            // allocates only the Rust error, not VM objects), and the
-            // source table holds every element until writeback. Rooting here
-            // would just copy the array twice more for nothing.
-            None => {
-                crate::native_call!(
-                    "table_sort->table_sort_default",
-                    self.table_sort_default(&mut arr)
-                )?;
-                // A successful default sort of two or more elements compared
-                // every one of them, so the range is all numbers or all
-                // strings in live window slots: the writeback permutes those
-                // slots and touches no storage metadata. A single element is
-                // already sorted.
-                if arr.len() >= 2 {
-                    self.heap
-                        .as_table(table_ptr)
-                        .expect("the default sort cannot reshape the table")
-                        .overwrite_live_prefix(&arr);
-                }
-                return Ok(n);
-            }
-        }
-
-        // Put sorted array back - need to look up the table again since we may have
-        // mutated self during comparator calls
-        let obj_ptr = self.stack[idx].as_object_ptr();
-        match obj_ptr.and_then(|ptr| self.heap.as_table(ptr)) {
-            Some(t) => {
-                t.set_array(arr)?;
-                Ok(n)
-            }
-            None => Err(self.type_error(TypeError::TableIndex(typ))),
-        }
+        Ok(n)
     }
 
-    pub(crate) fn table_sort_scratch(
+    /// Run `f` with a sort segment open: `f` receives the segment's base,
+    /// the current length of `in_flight.rooted_values`, and appends the
+    /// values to sort from there. Everything from the base is dropped when
+    /// `f` returns, on success, error or panic (which poisons, as in
+    /// `with_rooted_values`), so nested sorts nest their segments LIFO.
+    pub(crate) fn with_sort_segment<R>(
         &mut self,
-        table_idx: isize,
+        f: impl FnOnce(&mut Self, usize) -> Result<R>,
+    ) -> Result<R> {
+        self.with_rooted_values(&[], |state| {
+            let base = state.in_flight.rooted_values.len();
+            f(state, base)
+        })
+    }
+
+    /// Append the value on top of the stack to the open sort segment and pop
+    /// it. The value stays on the stack, rooted, until it is in the
+    /// segment. Growth is amortized and fallible (`TableGrowthFailed`).
+    pub(crate) fn pop_into_sort_segment(&mut self) -> Result<()> {
+        let value = *self.stack.last().expect("a value to move into the segment");
+        self.in_flight
+            .rooted_values
+            .try_reserve(1)
+            .map_err(|_| Error::without_location(ErrorKind::TableGrowthFailed))?;
+        self.in_flight.rooted_values.push(value);
+        self.pop_val();
+        Ok(())
+    }
+
+    /// Push element `index` of the sort segment at `base` onto the stack.
+    pub(crate) fn push_sort_segment_value(&mut self, base: usize, index: usize) -> Result<()> {
+        let value = self.in_flight.rooted_values[base + index];
+        self.check_stack_slot()?;
+        self.push_unchecked(value);
+        Ok(())
+    }
+
+    /// Heap-sort the `n` values of the sort segment at `base`, through the
+    /// comparator at frame index 2 when `has_comp`, the default comparison
+    /// otherwise.
+    pub(crate) fn table_sort_rooted(
+        &mut self,
+        base: usize,
         n: usize,
         has_comp: bool,
     ) -> Result<()> {
-        let table_idx = self.convert_idx(table_idx)?;
         let comp_idx = has_comp.then(|| self.convert_idx(2)).transpose()?;
         let mut ops = LuaSortOps {
             state: self,
-            access: ScratchTableSortAccess { table_idx },
+            access: RootedSortAccess { base },
             comp_idx,
         };
         crate::native_call!(
-            "table_sort_scratch->table_sort_heap",
+            "table_sort_rooted->table_sort_heap",
             table_sort_heap(&mut ops, n)
         )
     }
 
-    fn table_sort_values(&mut self, values: &mut [Val], comp_idx: Option<usize>) -> Result<()> {
+    /// The generic default sort of a detached range that is neither all
+    /// numbers nor all strings: no comparator, so it cannot re-enter Lua.
+    fn table_sort_values(&mut self, values: &mut [Val]) -> Result<()> {
         let n = values.len();
         let mut ops = LuaSortOps {
             state: self,
             access: VecSortAccess { values },
-            comp_idx,
+            comp_idx: None,
         };
         crate::native_call!(
             "table_sort_values->table_sort_heap",
@@ -1231,7 +1265,7 @@ impl State {
         }
         crate::native_call!(
             "table_sort_default->table_sort_values",
-            self.table_sort_values(values, None)
+            self.table_sort_values(values)
         )
     }
 
@@ -1536,10 +1570,7 @@ impl State {
 
 #[cfg(test)]
 mod sort_root_tests {
-    use super::{
-        ErrorKind, LuaSortOps, NumSortOps, StrSortOps, Val, VecSortAccess, reserve_sort_values,
-        table_sort_heap,
-    };
+    use super::{LuaSortOps, NumSortOps, StrSortOps, Val, VecSortAccess, table_sort_heap};
     use crate::vm::State;
 
     /// The permutation the generic backend's default comparison produces.
@@ -1628,14 +1659,5 @@ mod sort_root_tests {
             let got: Vec<Val> = keys.into_iter().map(|(_, v)| v).collect();
             assert_eq!(got, expected, "strings, n = {n}");
         }
-    }
-
-    #[test]
-    fn sort_root_reservation_reports_capacity_overflow() {
-        let mut roots = Vec::<Val>::new();
-        let error = reserve_sort_values(&mut roots, usize::MAX)
-            .expect_err("an unrepresentable sort root list must be rejected");
-        assert!(matches!(error.kind(), ErrorKind::TableGrowthFailed));
-        assert!(roots.is_empty());
     }
 }

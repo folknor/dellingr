@@ -227,8 +227,8 @@ marker, which is the quickest way to see what a change touched.
 The recurring native stack of each scenario's cycle, as printed by the
 on-demand probe `brokkr test native_bytes_per_level`, which covers dev and
 release through the sweeps configured in `brokkr.toml`. Measured on the tree
-of the commit that executes library leaves in the dispatch loop (parent
-5e7a743), on bygg (x86-64 Linux),
+of the commit that sorts `table.sort`'s Lua-reaching paths in a rooted
+value buffer (parent de2a001), on bygg (x86-64 Linux),
 `rustc 1.101.0-nightly (249c1e4e3 2026-11-05)`, with that host's global
 cargo configuration. Release is Cargo's default release profile (the
 repository sets no overrides). Dev default and dev snapshot agree in every
@@ -270,18 +270,18 @@ separately.
 | `host_to_string_with_meta` | 12784 | 1248 | 1248 |
 | `tostring` | 11840 | 1024 | 1024 |
 | `print` | 12336 | 1184 | 1200 |
-| `format` | 13584 | 1472 | 1456 |
+| `format` | 13584 | 1456 | 1456 |
 | `error_tostring` | 12512 | 1312 | 1312 |
-| `sort_comparator` | 13424 | 1520 | 1520 |
-| `sort_comparator_right` | 13424 | 1520 | 1520 |
-| `sort_comparator_sortdown` | 13424 | 1520 | 1520 |
-| `callable_rust` | 13600 | 1584 | 1584 |
+| `sort_comparator` | 13472 | 1408 | 1408 |
+| `sort_comparator_right` | 13472 | 1408 | 1408 |
+| `sort_comparator_sortdown` | 13472 | 1408 | 1408 |
+| `callable_rust` | 13648 | 1472 | 1472 |
 | `tail_rust` | 11792 | 832 | 832 |
 | `tail_callable_rust` | 11968 | 896 | 896 |
-| `sort_metamethods_comparator` | 12720 | 1424 | 1424 |
-| `sort_metamethods_length` | 11872 | 1088 | 1088 |
-| `sort_metamethods_read` | 12176 | 1056 | 1056 |
-| `sort_metamethods_write` | 12272 | 1040 | 1040 |
+| `sort_metamethods_comparator` | 13280 | 1520 | 1520 |
+| `sort_metamethods_length` | 11584 | 1056 | 1056 |
+| `sort_metamethods_read` | 12752 | 1200 | 1200 |
+| `sort_metamethods_write` | 12848 | 1184 | 1184 |
 | `insert_length` | 11840 | 1088 | 1088 |
 | `insert_shift_read` | 12144 | 1056 | 1056 |
 | `insert_shift_write` | 12256 | 1040 | 1040 |

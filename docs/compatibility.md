@@ -229,10 +229,14 @@ does.
   `move` honour `__len`, `__index` and `__newindex` as in Lua 5.4. Library
   writes share the VM's metamethod depth limit.
 - `table.sort` also honours them, but reads every element first, sorts a
-  scratch copy, then writes everything back. Reference Lua interleaves
+  copy, then writes everything back. Reference Lua interleaves
   handler reads and writes during its quicksort, so a handler that observes
   call order sees a different sequence. Stable handlers and a consistent
-  comparator give the same sorted values. Tie order is unspecified.
+  comparator give the same sorted values. Tie order is unspecified. The
+  copy holds one value per position of the `__len` range, nils included, so
+  a huge range whose reads return nil still needs memory for every
+  position, and a range too large to hold fails with `TableGrowthFailed`
+  during the reads.
 - The heap sort does not detect an inconsistent comparator or raise "invalid
   order function for sorting"; reference Lua's quicksort can diagnose it.
 - On the raw path, comparator writes to the array can be overwritten by the

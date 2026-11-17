@@ -346,42 +346,6 @@ proven removable.
 
 **Classification:** rewrite, high conviction.
 
-## PERF-013 - table.sort ownership and comparator execution
-
-Raised by the table-and-math-libraries hunter (its second rewrite) and noted
-by the calls hunter.
-
-**Bottleneck:** `table_sort` (`table_ops.rs`) with a comparator holds the
-detached sorting array, a temporary roots vector and a copy appended to
-`in_flight.rooted_values`, because the mutable buffer is outside the
-collector's ownership. Every comparison pushes a call window and enters
-`call_unguarded`, a full nested invocation per comparison over `O(n log n)`
-comparisons. The metamethod path (`sort_through_metamethods`, `table.rs` in
-`lua_std`) materializes a scratch Lua table and runs heap sort through table
-lookup and insertion on what is a private indexed buffer.
-
-**Redesign:** a sort activation owns one GC-traced mutable value buffer and an
-explicit heap-sort continuation. Raw input is copied once; metamethod input is
-read, in today's order, straight into the buffer; a Lua comparator suspends
-the activation and is pushed on the current dispatch loop's frame stack; its
-return resumes the saved sift decision; completion does today's raw or
-metamethod writeback. Removes the scratch table, the duplicate root copies and
-the nested invocations. Afterwards, if this works, other library callbacks can
-share the continuation mechanism (see the continuations bullet in
-`optimizations.md` "Call path after the frame-stack flattening").
-
-**Risks:** preserve the heap-sort decision sequence exactly: argument order,
-comparator truthiness, read phase, write phase (comparators can print, mutate,
-draw RNG, fail or answer inconsistently). Raw sorts keep detached semantics:
-comparator writes to the source may be overwritten at writeback, and entries
-past the range survive. GC rooting through nested callbacks, unwinding,
-traceback attribution, partial metamethod writes, stack admission, and the
-script-visible native-depth refusal (keep equivalent logical accounting).
-Nested sorts need separate buffers; no Rust slice borrow survives a comparator
-call.
-
-**Classification:** rewrite, high conviction.
-
 ## PERF-014 - Whole-function optimizing compiler
 
 Raised by the codegen hunter (its lead rewrite).
@@ -718,8 +682,7 @@ checks, evaluation order and both charge points.
 **Risks:** new bounds and certification work; cannot be justified by visual
 accuracy or small ULP error. Payoff depends on input distributions.
 
-**Classification:** numerical rewrite, lower conviction; after PERF-009 and
-PERF-013.
+**Classification:** numerical rewrite, lower conviction; after PERF-009.
 
 ## PERF-031 - Host calls into Lua assembled from independent stack operations
 

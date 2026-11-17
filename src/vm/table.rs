@@ -2538,23 +2538,33 @@ impl Table {
     /// Returns the sequence `t[1..=#t]` as a Vec for sorting.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(super) fn get_array(&self) -> std::result::Result<Vec<Val>, TableError> {
+        let mut out = Vec::new();
+        self.append_array_to(&mut out)?;
+        Ok(out)
+    }
+
+    /// Appends the sequence `t[1..=#t]` to `out`, reserving its room
+    /// fallibly first; on failure `out` is unchanged.
+    pub(super) fn append_array_to(
+        &self,
+        out: &mut Vec<Val>,
+    ) -> std::result::Result<(), TableError> {
         let len = self.array_len();
         // Key `len` (when nonzero) is live, so `1..=len` ends inside the window.
         let below = self.base.min(len);
-        let mut out = Vec::new();
         out.try_reserve_exact(len)
             .map_err(|_| TableError::GrowthFailed)?;
-        out.resize(below, Val::Nil);
+        out.resize(out.len() + below, Val::Nil);
         out.extend_from_slice(&self.array[..len - below]);
-        Ok(out)
+        Ok(())
     }
 
     /// Writes sorted values back to keys `1..=values.len()`. Entries beyond
     /// the original sort range survive even if a comparator added them.
     /// Each write is O(1), so the writeback is linear in the sorted range.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    pub(super) fn set_array(&mut self, values: Vec<Val>) -> std::result::Result<(), TableError> {
-        for (i, v) in values.into_iter().enumerate() {
+    pub(super) fn set_array(&mut self, values: &[Val]) -> std::result::Result<(), TableError> {
+        for (i, &v) in values.iter().enumerate() {
             self.insert(Val::Num((i + 1) as f64), v)?;
         }
         #[cfg(debug_assertions)]
@@ -3528,7 +3538,7 @@ mod tests {
         }
         let mut values = t.get_array().unwrap();
         values.reverse();
-        t.set_array(values).unwrap();
+        t.set_array(&values).unwrap();
         assert_eq!(t.get(&n(1)), Val::Num(1.0));
         assert_eq!(t.get(&n(5)), Val::Num(5.0));
         assert_eq!(t.dead_count, 0);

@@ -91,6 +91,7 @@ examples/tables/numeric_index.lua|91aec619d8cfcd8dbc1c564b6ffc2b57|2520001
 examples/tables/queue.lua|0a3e2b4117a7ba5dfbb360c72feba99f|443874
 examples/tables/sequence_len.lua|52dfdaed38435144b82ffd50ee11342e|963216
 examples/tables/sort.lua|bf77465635b1c608fdd83f7614de9bff|186065
+examples/tables/sort_proxy.lua|34176cec2f93760877315c58426f0a6a|50043
 examples/tail_calls.lua|85d1445bbad36a50eba7414aff7eec8a|1052026
 examples/test_local_function.lua|58efc49b9065ebb487bb1b590f94ef8b|265
 examples/unpack_global.lua|8d7a943784d57e18fc51251229a3e20d|11

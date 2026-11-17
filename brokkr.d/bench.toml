@@ -103,6 +103,10 @@ xxhash = "b02dfb55c808e62f08a1311046988351"
 file = "bench/sort.lua"
 xxhash = "3186097866519fa8829611bd9b74512b"
 
+[data.workloads.bench.sort_proxy]
+file = "bench/sort_proxy.lua"
+xxhash = "d9c160bc3fb6d23ccc8049334a3f5af3"
+
 [data.workloads.bench.mixed]
 file = "bench/mixed.lua"
 xxhash = "4193f315750f157ff7fb2b1ec6f30165"
@@ -234,6 +238,10 @@ xxhash = "0a3e2b4117a7ba5dfbb360c72feba99f"
 [data.workloads.hotpath.sort]
 file = "examples/tables/sort.lua"
 xxhash = "bf77465635b1c608fdd83f7614de9bff"
+
+[data.workloads.hotpath.sort_proxy]
+file = "examples/tables/sort_proxy.lua"
+xxhash = "34176cec2f93760877315c58426f0a6a"
 
 [data.workloads.hotpath.mixed]
 file = "examples/strings/mixed.lua"

@@ -360,7 +360,13 @@ since 27ee714. What B-O1 listed and is still open:
   located and reported; interrupt polls in resumable loops and at admissions.
   Arbitrary host Rust functions still need a real boundary. The codegen and
   table-and-math-libraries hunters raised the iterator and sort halves
-  independently.
+  independently. Measured against the claim "the nested invocation is the
+  cost" on bygg (de2a001, release): a 2000-element comparator sort, 37746
+  comparisons, cost about 1.5 s per probe run where the same number of plain
+  Lua-to-Lua calls of the same comparator cost about 1.2 s beyond the loop.
+  The re-entry plus all the native heap work is at most ~20 percent of a
+  comparison, so the sort half was not pursued (reasoning at `table_sort`);
+  measure a handler or iterator the same way before converting it.
 
 Measurement lesson worth keeping: on plantasjen (Zen 3) the first flattened
 version moved frames and records by value and lost 14-22% to store-forwarding

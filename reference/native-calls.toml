@@ -173,7 +173,7 @@ name = "table_sort"
 owner = "State"
 
 [[function]]
-name = "table_sort_scratch"
+name = "table_sort_rooted"
 owner = "State"
 
 [[function]]
@@ -440,7 +440,7 @@ id = "set_table->set_table_unguarded"
 id = "set_table_unguarded->call_unguarded"
 
 [[edge]]
-id = "table_sort->table_sort_values:comparator"
+id = "table_sort->table_sort_rooted"
 
 [[edge]]
 id = "table_sort->table_sort_default"
@@ -460,9 +460,10 @@ excluded = "the string backend compares borrowed bytes and cannot re-enter Lua"
 
 [[edge]]
 id = "table_sort_values->table_sort_heap"
+excluded = "no comparator: the generic backend's default comparison cannot re-enter Lua"
 
 [[edge]]
-id = "table_sort_scratch->table_sort_heap"
+id = "table_sort_rooted->table_sort_heap"
 
 [[edge]]
 id = "table_sort_heap->table_sort_sift_down:heapify"
@@ -649,7 +650,7 @@ id = "sort_through_metamethods->sequence_len"
 id = "sort_through_metamethods->get_table_unguarded"
 
 [[edge]]
-id = "sort_through_metamethods->table_sort_scratch"
+id = "sort_through_metamethods->table_sort_rooted"
 
 [[edge]]
 id = "sort_through_metamethods->set_table_unguarded"
@@ -857,8 +858,8 @@ name = "sort_comparator"
 path = [
     "@lua", "@rust",
     "lib:table.sort->table_sort",
-    "table_sort->table_sort_values:comparator",
-    "table_sort_values->table_sort_heap",
+    "table_sort->table_sort_rooted",
+    "table_sort_rooted->table_sort_heap",
     "table_sort_heap->table_sort_sift_down:heapify",
     "table_sort_sift_down->heap_less:left",
     "heap_less->table_sort_less",
@@ -870,8 +871,8 @@ name = "sort_comparator_right"
 path = [
     "@lua", "@rust",
     "lib:table.sort->table_sort",
-    "table_sort->table_sort_values:comparator",
-    "table_sort_values->table_sort_heap",
+    "table_sort->table_sort_rooted",
+    "table_sort_rooted->table_sort_heap",
     "table_sort_heap->table_sort_sift_down:heapify",
     "table_sort_sift_down->heap_less:right",
     "heap_less->table_sort_less",
@@ -883,8 +884,8 @@ name = "sort_comparator_sortdown"
 path = [
     "@lua", "@rust",
     "lib:table.sort->table_sort",
-    "table_sort->table_sort_values:comparator",
-    "table_sort_values->table_sort_heap",
+    "table_sort->table_sort_rooted",
+    "table_sort_rooted->table_sort_heap",
     "table_sort_heap->table_sort_sift_down:sortdown",
     "table_sort_sift_down->heap_less:left",
     "heap_less->table_sort_less",
@@ -900,8 +901,8 @@ path = [
     "begin_call->begin_callable_call",
     "begin_callable_call->invoke_rust_fn",
     "lib:table.sort->table_sort",
-    "table_sort->table_sort_values:comparator",
-    "table_sort_values->table_sort_heap",
+    "table_sort->table_sort_rooted",
+    "table_sort_rooted->table_sort_heap",
     "table_sort_heap->table_sort_sift_down:heapify",
     "table_sort_sift_down->heap_less:left",
     "heap_less->table_sort_less",
@@ -934,8 +935,8 @@ name = "sort_metamethods_comparator"
 path = [
     "@lua", "@rust",
     "lib:table.sort->sort_through_metamethods",
-    "sort_through_metamethods->table_sort_scratch",
-    "table_sort_scratch->table_sort_heap",
+    "sort_through_metamethods->table_sort_rooted",
+    "table_sort_rooted->table_sort_heap",
     "table_sort_heap->table_sort_sift_down:heapify",
     "table_sort_sift_down->heap_less:left",
     "heap_less->table_sort_less",

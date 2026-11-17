@@ -49,7 +49,8 @@ pub(crate) struct InFlight {
     /// Identities being turned into closure shells, retained during a GC sweep.
     pub(crate) pending_bytecode_caches: Vec<usize>,
     /// Temporary VM values retained across allocation or re-entry (see
-    /// `State::with_rooted_values`).
+    /// `State::with_rooted_values`), including the value segments
+    /// `table.sort` sorts in (`State::with_sort_segment`).
     pub(crate) rooted_values: Vec<Val>,
     /// Depth of __index, __newindex and non-function __call chains.
     /// Prevents stack overflow from circular metamethod references.
