@@ -81,15 +81,12 @@ return to a compile charge would need back.
 
 ### Housekeeping left from the `string.format` literal-run change (2026-11-05)
 
-- AGENTS.md (Benchmarks, measurement sites) says to measure
-  `brokkr test native_bytes_per_level` "dev and `--release`". `--release`
-  forces release onto every sweep, so the debug-assertion-only sweeps
-  (`instrumentation-faults`, `inline-cache-differential`,
-  `cost-check-interval-differential`, `native-call-coverage`) fail to build
-  and the run exits 1, though the release rows still print. The plain
-  invocation already runs both profiles (`release-native-stack*` sweeps);
-  reference/native-calls.md now says so. The AGENTS.md line is the owner's
-  to reword.
+- reference/native-calls.md ("Current native bytes per level") still says
+  `--release` makes the debug-assertion-only sweeps fail to build. Remove
+  that obsolete parenthetical: commit 2ddf06b pinned all four sweeps to dev
+  with `profile_required`, so `--release` skips them instead. The AGENTS.md
+  instruction to measure dev and release is valid; the plain invocation
+  already covers both profiles.
 
 ### Housekeeping left from the `_G`-as-real-table change (2026-10-23)
 
