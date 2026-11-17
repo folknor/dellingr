@@ -164,6 +164,7 @@ pub use vm::StateBuilder;
 #[cfg(feature = "fault-injection")]
 #[doc(hidden)]
 pub use vm::{FaultEvent, FaultSite};
+pub use vm::{InvokeArg, InvokeArgs, InvokeResult, InvokeResults};
 #[cfg(feature = "snapshot")]
 pub use vm::{LoadError, SaveDiagnostics, SaveError, SaveState, SnapshotError, TableLoadLocation};
 

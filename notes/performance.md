@@ -311,8 +311,7 @@ metadata beats the bulk writes.
 
 ## PERF-012 - Calls with independent callee, argument and result locations, then inlining
 
-Raised by the codegen hunter (its second rewrite); the host-boundary hunter
-asks the calls scope for the same explicit operands.
+Raised by the codegen hunter (its second rewrite).
 
 **Bottleneck:** call generation (`codegen.rs`) puts callee and arguments in a
 fresh consecutive block and the result starts at the same base, so
@@ -333,8 +332,9 @@ lists are explicit ranges. Rewrite admission, return continuations and the
 open-results protocol together. Then exploit known callees (immutable local
 function bindings) and inline small proven helpers (`local function add(a, b)
 return a + b end`), which exposes the body to the caller's type and allocation
-analysis. The host boundary wants the same: no materialized
-`[callee, arguments...]` that the next stage removes or rearranges.
+analysis. The host boundary does not need these operands: `State::invoke`
+pushes the callee below its arguments, which already is a Lua callee's final
+window (reason at `vm/invoke.rs`).
 
 **Risks:** inlined calls keep logical call metadata: depth and stack-cap
 refusal where the original call would refuse, function-entry interruption,
@@ -574,76 +574,6 @@ checks, evaluation order and both charge points.
 accuracy or small ULP error. Payoff depends on input distributions.
 
 **Classification:** numerical rewrite, lower conviction; after PERF-009.
-
-## PERF-031 - Host calls into Lua assembled from independent stack operations
-
-Raised by the host-boundary hunter (the invocation half of its lead rewrite;
-the callback half is PERF-008).
-
-**Bottleneck:** each numeric argument push checks usability and stack space;
-calling an anchor looks up the value, inserts it below the arguments and enters
-the general call machinery; results are normalized onto the stack
-(`collect_returns`), read through another public operation each, then popped
-(`stack.rs`, `anchor.rs`, `eval.rs`). Pushing two numbers, calling, reading one
-number and popping makes five public usability checks, and on x86-64 the
-floating-point environment check is an out-of-line control-register read
-(`check_usable` in `vm.rs`, `read_control` in `fp_env.rs`).
-
-**Redesign:** an invocation interface owning the whole transfer: a state-bound
-entry identifies the callee, a built-in argument encoder writes into the final
-call window, execution returns a result span or decodes into the requested Rust
-result, and one owner handles operand cleanup, result normalization, errors and
-panic poisoning (conceptually `state.invoke(&mut tick_context, &entry,
-(entity_id, dt))`). An outermost invocation decodes from the returned span
-before the frame is destroyed. A tuple wrapper over `push_number`,
-`call_anchor`, `to_number` and `pop` would keep most of the cost. Needs the
-explicit callee, argument-span and result-destination operands of PERF-012.
-
-**Risks:** result views stay rooted until decoding ends and block
-incompatible mutation or re-entry; upvalues close before their source slots
-are destroyed or moved; typed decoding keeps accepted inputs and exact errors
-(no automatic exact-arity enforcement); FP checks consolidate only over
-VM-controlled marshalling; charges and callback-visible cost settle at today's
-boundaries, and batching several entity invocations keeps individual failure
-behaviour.
-
-**Classification:** rewrite, high conviction; greatest for short scripts and
-frequent small callbacks.
-
-## PERF-032 - Borrowed per-tick game context for host callbacks
-
-Raised by the host-boundary hunter.
-
-**Bottleneck:** user data is `Option<Box<dyn Any + Send>>` with `'static`
-accessors (`vm.rs`) and registered functions are plain function pointers, so a
-callback cannot receive a temporary borrow of the world's tick state. An
-engine where the world owns execution is pushed toward shared ownership,
-interior mutability, moving context in and out, command collection or copying
-tick data into Lua (integration consequences, not costs proven in a host).
-Even with data inside `State`, borrowing Lua string bytes through `to_bytes`
-borrows `State` and blocks `user_data_mut`, forcing a copy; `raw_field`
-conversions (`raw_field.rs`) return owned `Vec<u8>`/`String`. The downcast
-itself is not the prize.
-
-**Redesign:** durable `State` plus a borrowed tick context passed at
-invocation; callback entries keep identity, diagnostic name and thunk; an
-argument view borrows the VM heap while the callback mutates the context. A
-typed registration layer adapts at the thunk, so the interpreter need not be
-generic over the world type. `with_string_args` (`string_arg.rs`) already
-splits strings, cost accounting and interruption this way.
-
-**Payoff:** removes copying and synchronization at every host query, possibly
-more than PERF-031; lets many States run sequentially against one world
-borrow.
-
-**Risks:** re-entry: an exclusive world borrow must be suspended and
-reborrowed explicitly across Lua re-entry; borrowed Lua data cannot outlive
-arbitrary VM mutation; world changes keep their order and visibility
-(deferred commands are not transparent). Implement with PERF-031.
-
-**Classification:** rewrite, high architectural value; payoff depends on host
-integration. Related to `todo.md` "Typed `State<U>` for user-data", which
-addresses only the downcast.
 
 ## PERF-033 - Host global and field access resolves names and tables afresh
 

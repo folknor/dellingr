@@ -218,6 +218,14 @@ const SCENARIOS: &[Scenario] = &[
         raises: false,
     },
     Scenario {
+        name: "host_invoke",
+        setup: "",
+        step: "invoke_callthrough(function(x) DESCEND return x end)",
+        native: 1,
+        meta: 0,
+        raises: false,
+    },
+    Scenario {
         name: "host_tostring_bytes",
         setup: "",
         step: "local v = setmetatable({}, {__tostring = function() DESCEND return 'r' end})
@@ -990,6 +998,16 @@ fn anchor_callthrough(state: &mut State) -> dellingr::Result<u8> {
     Ok(0)
 }
 
+/// `invoke_callthrough(f)` anchors `f` and calls it through `invoke` with
+/// one number argument and one number result.
+fn invoke_callthrough(state: &mut State) -> dellingr::Result<u8> {
+    let anchor = state.anchor_function_at(1)?;
+    let result: dellingr::Result<(f64,)> = state.invoke(&anchor, (1.0,));
+    state.release_anchor(anchor);
+    result?;
+    Ok(0)
+}
+
 /// `host_index(t, k)` reads `t[k]` through `State::get_table`.
 fn host_index(state: &mut State) -> dellingr::Result<u8> {
     state.set_top(2)?;
@@ -1038,6 +1056,7 @@ const CALLBACKS: &[(&str, dellingr::RustFunc)] = &[
     ("callthrough", callthrough),
     ("call_handler", call_handler),
     ("anchor_callthrough", anchor_callthrough),
+    ("invoke_callthrough", invoke_callthrough),
     ("host_index", host_index),
     ("host_newindex", host_newindex),
     ("host_tostring", host_tostring),
@@ -1412,6 +1431,7 @@ scenario_tests!(
     host_set_table,
     host_call,
     host_anchor,
+    host_invoke,
     host_tostring_bytes,
     host_to_string_with_meta,
     tostring,

@@ -10,6 +10,7 @@ mod host_frame_isolation;
 mod host_set_table;
 mod host_table_api_atomicity;
 mod interrupt;
+mod invoke;
 mod panic_poison;
 mod raw_field;
 mod restricted_env_open_libs;

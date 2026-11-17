@@ -85,6 +85,12 @@ name = "call_anchor_unguarded"
 owner = "State"
 
 [[function]]
+name = "invoke"
+owner = "State"
+root = "host-api"
+evidence = "State::invoke, a host calling an anchored function with typed arguments and results"
+
+[[function]]
 name = "get_table"
 owner = "State"
 root = "host-api"
@@ -425,6 +431,10 @@ id = "call_anchor->call_anchor_unguarded"
 
 [[edge]]
 id = "call_anchor_unguarded->call_unguarded"
+
+# src/vm/invoke.rs
+[[edge]]
+id = "invoke->call_unguarded"
 
 # src/vm/table_ops.rs
 [[edge]]
@@ -814,6 +824,10 @@ path = [
     "call_anchor->call_anchor_unguarded",
     "call_anchor_unguarded->call_unguarded",
 ]
+
+[[scenario]]
+name = "host_invoke"
+path = ["@lua", "@rust", "invoke->call_unguarded"]
 
 [[scenario]]
 name = "host_tostring_bytes"

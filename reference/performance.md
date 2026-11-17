@@ -311,6 +311,23 @@ host and compiler, so its row does not compare with the one above it); the
 | bygg, same `rustc`: unchanged string results returned as values, on top of 380266b | 15840 | 3184 | 3184 |
 | bygg, same `rustc`: string-replacement `gsub` in one borrow, on top of c4d8fe1 (the table measured 16816 / 3184 / 3200 there) | 16528 | 3040 | 2992 |
 | bygg, same `rustc`: library leaves in call dispatch, on top of 5e7a743 | 16576 | 3040 | 2992 |
+| bygg, same `rustc`: typed `State::invoke`, on top of b6da85b (b6da85b itself measured 3008 / 3056 in release; dev not re-measured) | 16576 | 3024 | 3072 |
+
+### 2026-11-17: typed host invocation
+
+`State::invoke` (`vm/invoke.rs`) adds one host-api path into
+`call_unguarded`'s existing `ArgCount` instance. Its own cycle,
+`host_invoke`, is 896 bytes in release against `host_anchor`'s 1024: the
+callee is pushed before the arguments, so nothing is inserted and there is
+no unguarded wrapper frame. The CLI binary, which never instantiates
+`invoke`, still changed: `invoke_rust_fn::<()>` went from 136 to 152 bytes
+(`scripts/frame_sizes.py`), a register-allocation change that spills the
+callback's returned error pointer, and every release row whose cycle runs a
+Rust callback grew 16 bytes with it (`host_call` 848 to 864, `index_rust`
+1008 to 1024). The only codegen input that binary sees from the change is
+the new `ErrorKind::ResultConversion` variant and its `Display` arm; moving
+the variant to the end of the enum did not change the frame. Accepted: the envelope tests pass with it, and the growth is not
+in code the change touches.
 
 ### 2026-11-17: library leaves in call dispatch
 

@@ -48,7 +48,7 @@ pub trait HostCallbacks: Send {
     ///
     /// Each execution error is reported exactly once, before any host code
     /// can see it: before it is returned from `call()`, `call_anchor()`,
-    /// `get_table()`, `set_table()`, `tostring_bytes()` or
+    /// `invoke()`, `get_table()`, `set_table()`, `tostring_bytes()` or
     /// `to_string_with_meta()`. That holds
     /// at every depth: when a Rust callback makes one of these calls and
     /// handles the error instead of returning it, `on_error` has already
@@ -74,7 +74,10 @@ pub trait HostCallbacks: Send {
     /// `ArgCount::Dynamic`, insufficient stack values for a call, an invalid
     /// stack index, a missing `get_table` key or `set_table` key and value, a
     /// wrong-State anchor, or no
-    /// stack room to insert the anchored callee. Nor for a refusal of a
+    /// stack room to insert the anchored callee (or, for `invoke()`, to place
+    /// it and the arguments). Nor for an `invoke()` result that does not
+    /// convert to the requested type (`ResultConversion`), raised after the
+    /// call succeeded. Nor for a refusal of a
     /// poisoned State (`StatePoisoned`) or of an unsupported floating-point
     /// environment at an entry point (`UnsupportedFloatEnvironment`; raised
     /// at a callback's return instead, it is that callback's error and is

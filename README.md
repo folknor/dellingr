@@ -280,7 +280,9 @@ point.
 - `Anchor` (`Send + Sync + 'static`) - owned handle that retains a Lua value
   (function, table, etc.) across host calls without using globals. Dropping it
   releases the value. State-scoped; cross-state misuse surfaces as an error,
-  not silent corruption.
+  not silent corruption. `State::invoke(&anchor, (id, dt))` calls an anchored
+  function with scalar arguments and converts its results to a Rust tuple,
+  leaving the stack as it was.
 - `HostCallbacks` trait (`: Send`) - embedders redirect `print` (the script's
   exact bytes), hook errors, etc.
 - `RustFunc` - expose Rust functions to Lua scripts. `State::add_rust_fn(name,
@@ -327,7 +329,8 @@ point.
   `is_poisoned()` reports it, and every fallible operation afterwards returns
   `ErrorKind::StatePoisoned`. Drop the State and build a new one.
 - Per-state user-data (`Send + 'static`) for hanging embedder context off the
-  VM.
+  VM. A context the host only borrows per tick belongs in a host-scoped
+  thread-local instead (`State::set_user_data` docs).
 
 ## Standalone CLI
 

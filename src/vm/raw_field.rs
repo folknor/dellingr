@@ -11,8 +11,9 @@ use crate::error::{ArgDetail, ArgError, ErrorKind};
 use sealed::{FieldFailure, FieldValue};
 
 // Public items in a private module: nameable only inside this crate, which
-// is what seals the trait.
-mod sealed {
+// is what seals the trait. `State::invoke` reuses the conversions for its
+// results (`vm/invoke.rs`).
+pub(super) mod sealed {
     use super::super::LuaType;
     use super::super::lua_val::Val;
     use super::super::object::GcHeap;

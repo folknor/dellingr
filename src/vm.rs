@@ -15,6 +15,7 @@ mod frame;
 mod global_env;
 mod interrupt;
 mod inventory;
+mod invoke;
 mod leaf;
 mod lua_val;
 mod meta_name;
@@ -36,6 +37,7 @@ pub use anchor::Anchor;
 pub use fault_injection::{FaultEvent, FaultSite};
 pub use interrupt::Interrupt;
 pub(crate) use interrupt::requested as interrupt_requested;
+pub use invoke::{InvokeArg, InvokeArgs, InvokeResult, InvokeResults};
 pub(crate) use leaf::Leaf;
 pub use lua_val::LuaType;
 pub use lua_val::RustFunc;
@@ -817,6 +819,30 @@ impl State {
     /// assert_eq!(collector.turns, [0.5, -0.25]);
     /// # Ok::<(), dellingr::error::Error>(())
     /// ```
+    ///
+    /// User data lives inside the State, so a callback holding
+    /// `user_data_mut` cannot read its arguments at the same time, and the
+    /// data must be `'static`. A per-tick context the host only borrows (a
+    /// `&mut World` handed down for one tick, shared by every State that runs
+    /// in it) belongs outside the State instead: install it in a host-owned
+    /// thread-local for the duration of the call, through a closure-scoped
+    /// helper that restores the previous value on every exit, unwinding
+    /// included. A callback then takes the world from that slot and reads its
+    /// arguments (`to_bytes`, `raw_field` as `&str`) while mutating it, since
+    /// the two borrows are independent. The slot is a loan: a callback takes
+    /// it out while it uses the world and puts it back before it calls into
+    /// any State, so a nested callback sees it empty rather than aliasing
+    /// it, and a host running several States decides which of them see which
+    /// world.
+    //
+    // A VM-held borrowed context was weighed and not added: a context
+    // parameter on `RustFunc` would change every library function's ABI, and
+    // a State-held pointer needs `unsafe` and can escape (a callback can
+    // `mem::replace` the State out of its `&mut` and send it to another
+    // thread), so it would end up in a thread-local anyway, enforcing no loan
+    // rule the host's own scoped thread-local cannot. Host functions stay
+    // plain function pointers, as ruled for closures (they also cannot be
+    // saved, since a Rust function is saved as its id and rebound on load).
     pub fn set_user_data<T: Send + 'static>(&mut self, data: T) {
         self.user_data = Some(Box::new(data));
     }

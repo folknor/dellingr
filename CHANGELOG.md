@@ -195,6 +195,19 @@ is replay-visible.
   budget staying spent until `set_cost_budget`, swallowed nested errors, and
   exposing `cost_remaining()` to scripts through a host function). Behaviour
   is unchanged.
+- `State::invoke(&anchor, args) -> Result<R>`: a typed host call. `args` is
+  `()` or a tuple of up to eight `f64`, `bool`, `i32` or `u32`; `R` is `()`
+  or a tuple of up to eight owned result types (the `raw_field` conversions:
+  numbers, integers, `bool`, `String`, `Vec<u8>`, one `Option` layer). The
+  call behaves like `call_anchor` with fixed counts, but checks the State
+  once instead of per stack operation, places the callee without inserting
+  it below the arguments, and leaves the stack at its entry height on every
+  ordinary exit, including a result that fails to convert. That failure is
+  the new `ErrorKind::ResultConversion { index, detail, expected, received }`,
+  rendered `result #2: number expected, got string` and not reported to
+  `on_error`. A NaN result leaves as the canonical NaN. The `set_user_data`
+  docs now describe keeping a borrowed per-tick context in a host-scoped
+  thread-local instead of in the State.
 
 ## [0.7.0] - 2026-11-05
 

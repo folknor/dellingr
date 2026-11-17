@@ -171,6 +171,8 @@ const EXISTING_OVER_REPORT_EDGES: &[&str] = &[
     "instr_tfor_call_rust_fn->invoke_rust_fn",
     // The anchored host entry added below.
     "call_anchor_unguarded->call_unguarded",
+    // The typed anchored host entry added below.
+    "invoke->call_unguarded",
 ];
 
 fn native_call_inventory() -> toml::Value {
@@ -324,6 +326,23 @@ fn call_anchor_rejects_over_report() {
         .call_anchor(&anchor, ArgCount::Fixed(0), RetCount::Fixed(0))
         .expect_err("the anchored callback over-reports");
     assert_max_over_report(error.kind(), 1);
+    assert_eq!(recorder.error_count(), 1);
+    assert_eq!(state.get_top(), 0);
+}
+
+#[test]
+fn invoke_rejects_over_report() {
+    let (mut state, recorder) = Recorder::state();
+    state
+        .push_new_rust_fn(over_report_max)
+        .expect("the callback should fit");
+    let anchor = state
+        .anchor_function()
+        .expect("the callback can be anchored");
+    let error = state
+        .invoke::<_, (f64,)>(&anchor, (1.0,))
+        .expect_err("the anchored callback over-reports");
+    assert_max_over_report(error.kind(), 2);
     assert_eq!(recorder.error_count(), 1);
     assert_eq!(state.get_top(), 0);
 }

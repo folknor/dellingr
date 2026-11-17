@@ -253,9 +253,12 @@ Also open (2026-11-17 performance hunt, host-boundary scope): the harness's
 warm path (`run_warm_block`, `src/bin/dellingr-bench.rs`) reuses a function
 already rooted on the stack and calls it with zero arguments and zero
 expected results, so no registered workload exercises argument pushing,
-result reading, record exchange or host callbacks against game data. A host
-boundary rewrite would need a representative entity-tick bench to be kept or
-reverted on; compute-heavy Lua workloads would largely miss its effect.
+result reading, record exchange or host callbacks against game data.
+`State::invoke` (one usability check per call instead of one per stack
+operation, no callee insert) landed on that theoretical saving alone; an
+entity-tick bench driving it and the push/`call_anchor`/`to_number`/`pop`
+sequence side by side, with host callbacks reading option tables, would
+measure it and the field-lookup residue in `performance.md` together.
 
 Why deferred: the registry is live with the curated workloads;
 porting the rest before those have proven the recipe would be
@@ -274,7 +277,7 @@ on every access.
 Sketch: `pub struct State<U = ()> { ..., user_data: U, ... }`.
 `RustFunc<U> = fn(&mut State<U>) -> Result<u8>`. Stdlib functions
 become generic (or stay tied to `State<()>`, with embedders writing
-their own bridges). `Engine<U>` parameterized to match.
+their own bridges).
 
 Why deferred: it infects every signature that touches `&mut State`,
 including `RustFunc`, the host-callback trait, and every stdlib
@@ -284,4 +287,6 @@ generic churn pre-1.0 unless a concrete embedder pushes on it.
 
 Signal that would promote it: a profile showing user-data downcasts
 on the hot path, or a 1.0 API pass that lands a coherent generic
-story across `State` / `Engine` / `RustFunc` / stdlib.
+story across `State` / `RustFunc` / stdlib. A borrowed per-tick
+context is a different question, answered at `State::set_user_data`
+(a host-scoped thread-local, not a VM feature).

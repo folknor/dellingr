@@ -654,6 +654,23 @@ pub enum ErrorKind {
     /// context via [`Error::vm_fault`] without widening `Error` on the
     /// recursive evaluation path.
     InternalError(InternalError),
+    /// A result of [`State::invoke`](crate::State::invoke) could not be
+    /// converted to the Rust type the host asked for. Raised after the call
+    /// completed, with the results already dropped; the call's effects stand.
+    /// Not reported to `on_error`: it is a host-side conversion of a
+    /// successful call, like `raw_field`'s.
+    ResultConversion {
+        /// One-based position of the result.
+        index: u8,
+        /// Why the conversion failed: a type mismatch, a number with no
+        /// integer form, an integer out of the target's range, or invalid
+        /// UTF-8.
+        detail: ArgDetail,
+        /// The Lua type the conversion required.
+        expected: LuaType,
+        /// The Lua type of the result.
+        received: LuaType,
+    },
 }
 
 /// The host call API named by [`ErrorKind::DynamicArgumentsUnsupported`].
@@ -1907,6 +1924,15 @@ impl fmt::Display for ErrorKind {
             AnchorNil => {
                 write!(f, "cannot anchor nil")
             }
+            ResultConversion {
+                index,
+                detail,
+                expected,
+                received,
+            } => match detail.rendered_detail() {
+                Some(detail) => write!(f, "result #{index}: {detail}"),
+                None => write!(f, "result #{index}: {expected} expected, got {received}"),
+            },
             // A script's `error()` value and a library error render the same
             // way, exactly as reference does. The variants are distinct so
             // hosts can tell deliberate script termination from a VM-detected
