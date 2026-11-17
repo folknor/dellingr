@@ -629,7 +629,11 @@ closure gets a `Box`; the box occupies a table-sized slotmap slot; the closure
 owns separate `Arc`s for bytecode and runtime. Collection gathers active chunk
 identities into a fresh `BTreeSet`, recursively retains prototype trees, flags
 runtimes while tracing closures, then scans the runtime map to reconcile
-(`LiveChunks` in `collector.rs`, `sweep_bytecode_caches` in `vm.rs`).
+(`LiveChunks` in `collector.rs`, `sweep_bytecode_caches` in `vm.rs`). Both
+halves are allocated fresh per collection; reusing them would keep only the
+`pending` `Vec`'s capacity, since a cleared `BTreeSet` frees its nodes, so the
+scratch cost goes with this restructure rather than with a reuse patch. Any
+replacement keeps the one-collection grace for a dropped runtime's literals.
 
 **Redesign:** a closure is a compact arena record holding an executable-record
 ID and its capture references, filled in final storage, with size classes for
@@ -673,38 +677,6 @@ strong edges.
 
 **Classification:** architectural collector change, medium conviction,
 workload-dependent.
-
-## PERF-022 - Local heap and collector changes
-
-Raised by the heap hunter.
-
-- **Fuse interner lookup and insertion.** Creation does `find_by_hash` then
-  `insert_unique`, probing twice on a miss; `HashTable::entry` exists.
-- **Sweep strings through their content index.** Collection allocates a
-  removed-key vector, sweeps slots, then rehashes each removed entry back into
-  the index; `HashTable::retain` or `extract_if` can coordinate removal.
-- **Trace each shared upvalue's contents once.** `mark_slot` does not report
-  whether a cell was already marked, so every closure sharing it re-marks its
-  closed value.
-- **Reuse collection scratch.** The object worklist is reused; chunk-retention
-  bookkeeping and the string removal vector are freshly allocated.
-- **Keep the anchor release buffer's capacity.** `Registry::drain_released`
-  takes and consumes the queued `Vec`. Matters only with anchor churn.
-
-The hunter puts anchor locking low: values are `Copy` and normal instructions
-do not take that mutex. Constraints it records for any heap change: an intern
-hit can trigger collection today, because `State::allocator` (`collector.rs`)
-checks the threshold before searching the pool, so a lookup-first hit could
-keep a dead string and its `%p` identity alive; a nursery that leaves
-unreachable strings in the interner can resurrect identities; roots include
-all retained register values and cached runtime literals; `for_each_gc_root`
-(`inventory.rs`) is a generic visitor and not the bottleneck. It does not
-recommend a generational or incremental collector under this contract.
-
-(The `optimizations.md` micro item "String-pool index shape" is the same
-interner and can be done alongside.)
-
-**Classification:** local.
 
 ## PERF-023 - Pattern matcher interprets every subject byte
 

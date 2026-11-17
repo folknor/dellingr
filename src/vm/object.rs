@@ -116,21 +116,33 @@ impl UpvaluePool {
         UpvalueRef::new(idx)
     }
 
-    /// Mark one slot reachable during the GC mark phase.
-    pub(super) fn mark_slot(&self, uv_ref: UpvalueRef) {
+    /// Mark one slot reachable during the GC mark phase, and on its first
+    /// mark submit the value a closed slot holds. `Reachable` therefore
+    /// means the slot's outgoing edge is already marked, so every further
+    /// closure sharing the cell stops at the colour check. An open slot's
+    /// referent is a stack slot, which the stack root covers. This is the
+    /// only way a slot is marked, closures and open-upvalue roots alike, so
+    /// no path can colour a closed cell without tracing its value.
+    pub(super) fn mark(&self, uv_ref: UpvalueRef, heap: &GcHeap, worklist: &mut Vec<ObjectPtr>) {
         let color = &self.colors[uv_ref.index()];
-        assert!(
-            color.get() != UpvalueSlotColor::Free,
-            "a reachable closure or open-upvalue entry holds an UpvalueRef \
-             whose slot was swept; the pool root set is incomplete, and \
-             marking it could let sweep add the same free slot twice"
-        );
+        match color.get() {
+            UpvalueSlotColor::Reachable => return,
+            UpvalueSlotColor::Unmarked => {}
+            UpvalueSlotColor::Free => panic!(
+                "a reachable closure or open-upvalue entry holds an UpvalueRef \
+                 whose slot was swept; the pool root set is incomplete, and \
+                 marking it could let sweep add the same free slot twice"
+            ),
+        }
         color.set(UpvalueSlotColor::Reachable);
+        if let Upvalue::Closed(val) = &self.slots[uv_ref.index()] {
+            val.mark_reachable(heap, worklist);
+        }
     }
 
     /// Sweep unmarked slots onto the free list. Call after the heap mark
     /// phase, once every reachable closure and open upvalue has passed
-    /// through `mark_slot`.
+    /// through `mark`.
     pub(super) fn sweep(&mut self) {
         for (idx, color) in self.colors.iter().enumerate() {
             match color.get() {
@@ -640,11 +652,8 @@ impl GcHeap {
     /// Allocate or intern a string.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn alloc_string_raw(&mut self, bytes: &[u8]) -> StringPtr {
-        let hash = crate::det_hash::hash_bytes(bytes);
-        if let Some(ptr) = self.strings.find_by_hash(bytes, hash) {
-            return ptr;
-        }
-        self.strings.insert_with_hash(bytes.into(), hash)
+        self.strings
+            .intern(bytes, crate::det_hash::hash_bytes(bytes))
     }
 
     /// Intern `range` of the pooled string `source`, reading the bytes in
@@ -655,13 +664,7 @@ impl GcHeap {
         source: StringPtr,
         range: std::ops::Range<usize>,
     ) -> Option<StringPtr> {
-        let bytes = self.strings.get(source).get(range)?;
-        let hash = crate::det_hash::hash_bytes(bytes);
-        if let Some(ptr) = self.strings.find_by_hash(bytes, hash) {
-            return Some(ptr);
-        }
-        let boxed: Box<[u8]> = bytes.into();
-        Some(self.strings.insert_with_hash(boxed, hash))
+        self.strings.intern_range(source, range)
     }
 
     // ========================================================================
@@ -753,10 +756,7 @@ impl GcHeap {
                 // Mark the upvalue slots themselves (so the pool sweep keeps
                 // them) and the values stored in closed ones.
                 for uv_ref in closure.upvalues.iter() {
-                    upvalue_pool.mark_slot(*uv_ref);
-                    if let Upvalue::Closed(val) = upvalue_pool.get(*uv_ref) {
-                        val.mark_reachable(self, worklist);
-                    }
+                    upvalue_pool.mark(*uv_ref, self, worklist);
                 }
             }
             RawObject::Table(tbl) => {
@@ -1025,8 +1025,13 @@ impl StringPool {
     /// Get a string's content by its pointer.
     /// Panics if the string was freed (use-after-free detection).
     pub(super) fn get(&self, ptr: StringPtr) -> &[u8] {
-        &self
-            .strings
+        Self::data(&self.strings, ptr)
+    }
+
+    /// `get` over the slotmap alone, so a caller can keep the borrow while
+    /// it mutates the index.
+    fn data(strings: &SlotMap<StringKey, StringEntry>, ptr: StringPtr) -> &[u8] {
+        &strings
             .get(ptr.0)
             .expect("Invalid StringPtr: string was freed (use-after-free detected)")
             .data
@@ -1045,19 +1050,60 @@ impl StringPool {
             .map(|key| StringPtr(*key))
     }
 
-    /// Insert a new string with precomputed hash. Updates the hash index.
+    /// Intern `bytes` under `hash` (the caller's `det_hash::hash_bytes` of
+    /// them; tests force collisions through it). One index probe serves
+    /// both the hit and the miss: `entry` does any reserve, and so every
+    /// rehash, before the new key exists, and the vacant entry's insert
+    /// writes the prepared bucket without rehashing. At exhausted capacity
+    /// a hit can take that reserve; it is the one the next miss would take.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    pub(super) fn insert_with_hash(&mut self, bytes: Box<[u8]>, hash: u64) -> StringPtr {
-        let entry = StringEntry {
-            data: bytes,
+    pub(super) fn intern(&mut self, bytes: &[u8], hash: u64) -> StringPtr {
+        let strings = &self.strings;
+        let vacant = match self.index.entry(
+            hash,
+            |key| strings.get(*key).is_some_and(|e| e.data.as_ref() == bytes),
+            |key| Self::entry_hash(strings, *key),
+        ) {
+            hashbrown::hash_table::Entry::Occupied(found) => return StringPtr(*found.get()),
+            hashbrown::hash_table::Entry::Vacant(vacant) => vacant,
+        };
+        let key = self.strings.insert(StringEntry {
+            data: bytes.into(),
             hash,
             color: Cell::new(Color::Unmarked),
-        };
-        let key = self.strings.insert(entry);
-        let strings = &self.strings;
-        self.index
-            .insert_unique(hash, key, |key| Self::entry_hash(strings, *key));
+        });
+        vacant.insert(key);
         StringPtr(key)
+    }
+
+    /// Intern `range` of the pooled string `source`, reading the bytes in
+    /// place: a hit copies nothing, a miss boxes the range once. `None` when
+    /// the range lies outside the source. Same single probe as `intern`.
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    pub(super) fn intern_range(
+        &mut self,
+        source: StringPtr,
+        range: std::ops::Range<usize>,
+    ) -> Option<StringPtr> {
+        let strings = &self.strings;
+        let bytes = Self::data(strings, source).get(range)?;
+        let hash = crate::det_hash::hash_bytes(bytes);
+        let vacant = match self.index.entry(
+            hash,
+            |key| strings.get(*key).is_some_and(|e| e.data.as_ref() == bytes),
+            |key| Self::entry_hash(strings, *key),
+        ) {
+            hashbrown::hash_table::Entry::Occupied(found) => return Some(StringPtr(*found.get())),
+            hashbrown::hash_table::Entry::Vacant(vacant) => vacant,
+        };
+        let data: Box<[u8]> = bytes.into();
+        let key = self.strings.insert(StringEntry {
+            data,
+            hash,
+            color: Cell::new(Color::Unmarked),
+        });
+        vacant.insert(key);
+        Some(StringPtr(key))
     }
 
     /// Mark a string as reachable.
@@ -1084,29 +1130,33 @@ impl StringPool {
         feature = "hotpath",
         hotpath::measure(label = "object::string_pool_collect")
     )]
+    ///
+    /// One pass over the slots in slot order (so freed slots join the
+    /// slotmap's free list in the same order as before), removing each dead
+    /// key from the index while its entry still exists: `find_entry`
+    /// matches by key and neither reserves nor rehashes, so no index key is
+    /// ever left unresolvable. Driving the sweep from the index instead
+    /// (`HashTable::retain`) was weighed: it reads every live entry in hash
+    /// order rather than sequentially to save the per-dead probes, which
+    /// wins only after a large share of the pool dies, so neither order
+    /// dominates and this one keeps the free-list order unchanged.
     pub(super) fn collect(&mut self) {
-        let mut removed: Vec<(StringKey, u64)> = Vec::new();
+        let index = &mut self.index;
         self.strings.retain(|key, entry| match entry.color.get() {
             Color::Reachable => {
                 entry.color.set(Color::Unmarked);
                 true
             }
             Color::Unmarked => {
-                removed.push((key, entry.hash));
+                match index.find_entry(entry.hash, |k| *k == key) {
+                    Ok(found) => {
+                        found.remove();
+                    }
+                    Err(_) => unreachable!("every interned string has one index entry"),
+                }
                 false
             }
         });
-        // The freed keys are still in the index and no longer resolve, so
-        // nothing between the retain above and this loop may rehash it (no
-        // insert or reserve). Removal matches by key, never dereferencing.
-        for (key, hash) in removed {
-            match self.index.find_entry(hash, |k| *k == key) {
-                Ok(entry) => {
-                    entry.remove();
-                }
-                Err(_) => unreachable!("every interned string has one index entry"),
-            }
-        }
     }
 }
 
@@ -1144,7 +1194,7 @@ mod tests {
     #[should_panic(expected = "GC marked a vacant string key")]
     fn marking_a_swept_string_reports_the_stale_root() {
         let mut pool = StringPool::new();
-        let ptr = pool.insert_with_hash(Box::from(&b"unrooted"[..]), 1);
+        let ptr = pool.intern(b"unrooted", 1);
         pool.collect();
         pool.mark(ptr);
     }
@@ -1229,7 +1279,26 @@ mod tests {
         let uv_ref = pool.alloc(Upvalue::Closed(Val::Nil));
         pool.sweep();
 
-        pool.mark_slot(uv_ref);
+        pool.mark(uv_ref, &GcHeap::with_threshold(100), &mut Vec::new());
+    }
+
+    #[test]
+    fn a_shared_closed_upvalue_is_traced_on_its_first_mark_only() {
+        let mut heap = GcHeap::with_threshold(100);
+        let captured = heap.no_gc_allocator().alloc_table();
+        let mut pool = UpvaluePool::new();
+        let uv_ref = pool.alloc(Upvalue::Closed(Val::Obj(captured)));
+        let mut worklist = Vec::new();
+        pool.mark(uv_ref, &heap, &mut worklist);
+        assert_eq!(worklist, vec![captured]);
+        heap.drain_mark_worklist(&mut worklist, &pool);
+        // A second closure sharing the cell: the slot is already Reachable,
+        // and the captured table stays marked from the first visit.
+        pool.mark(uv_ref, &heap, &mut worklist);
+        assert!(worklist.is_empty());
+        heap.collect();
+        pool.sweep();
+        assert!(heap.as_table_ref(captured).is_some());
     }
 
     #[test]
@@ -1313,11 +1382,7 @@ mod tests {
             let bytes = format!("s{i}").into_bytes();
             // Every fourth string shares a forced hash with its neighbours.
             let hash = if i % 4 == 0 { 7 } else { u64::from(i) };
-            live.push((
-                pool.insert_with_hash(bytes.clone().into(), hash),
-                bytes,
-                hash,
-            ));
+            live.push((pool.intern(&bytes, hash), bytes, hash));
         }
         for (index, (ptr, _, _)) in live.iter().enumerate() {
             if index % 3 == 0 {
@@ -1335,16 +1400,14 @@ mod tests {
         for i in 0..400u32 {
             let bytes = format!("t{i}").into_bytes();
             let hash = if i % 2 == 0 { 7 } else { 1000 + u64::from(i) };
-            survivors.push((
-                pool.insert_with_hash(bytes.clone().into(), hash),
-                bytes,
-                hash,
-            ));
+            survivors.push((pool.intern(&bytes, hash), bytes, hash));
         }
         pool.reserve(1000);
         for (ptr, bytes, hash) in &survivors {
             assert_eq!(pool.find_by_hash(bytes, *hash), Some(*ptr));
             assert_eq!(pool.get(*ptr), bytes.as_slice());
+            // A hit through the fused probe returns the live pointer.
+            assert_eq!(pool.intern(bytes, *hash), *ptr);
         }
         assert_eq!(pool.find_by_hash(b"s1", 1), None);
     }
@@ -1369,10 +1432,10 @@ mod tests {
         let mut pool = StringPool::new();
         // Control the hashes to exercise a partially collected collision
         // bucket and live buckets moved by removal of an earlier bucket.
-        pool.insert_with_hash(Box::from(&b"dead first"[..]), 1);
-        let kept = pool.insert_with_hash(Box::from(&b"keep"[..]), 2);
-        let collided = pool.insert_with_hash(Box::from(&b"keep collision"[..]), 3);
-        pool.insert_with_hash(Box::from(&b"dead collision"[..]), 3);
+        pool.intern(b"dead first", 1);
+        let kept = pool.intern(b"keep", 2);
+        let collided = pool.intern(b"keep collision", 3);
+        pool.intern(b"dead collision", 3);
         pool.mark(kept);
         pool.mark(collided);
         pool.collect();
@@ -1383,7 +1446,7 @@ mod tests {
         assert_eq!(pool.find_by_hash(b"keep", 2), Some(kept));
         assert_eq!(pool.find_by_hash(b"keep collision", 3), Some(collided));
 
-        let replacement = pool.insert_with_hash(Box::from(&b"replacement"[..]), 1);
+        let replacement = pool.intern(b"replacement", 1);
         assert_eq!(pool.find_by_hash(b"replacement", 1), Some(replacement));
         pool.mark(collided);
         pool.collect();

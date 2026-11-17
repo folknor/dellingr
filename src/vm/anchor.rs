@@ -162,6 +162,9 @@ pub(crate) struct Registry {
     state_id: NonZeroU64,
     slots: SlotMap<AnchorKey, Val>,
     released: Arc<ReleaseQueue>,
+    /// The other half of the release queue's double buffer, empty between
+    /// `drain_released` calls (see there).
+    spare: Vec<AnchorKey>,
 }
 
 impl Registry {
@@ -170,6 +173,7 @@ impl Registry {
             state_id,
             slots: SlotMap::with_key(),
             released: Arc::default(),
+            spare: Vec::new(),
         }
     }
 
@@ -199,9 +203,18 @@ impl Registry {
     /// drops values inside one long invocation would then keep all of them
     /// rooted until it returns, same-thread deterministic drops included
     /// (`docs/determinism.md`).
+    ///
+    /// One batch per call: the queue swaps with `spare` under the lock, which
+    /// is held for the swap only, and the slots are removed outside it. Both
+    /// buffers keep their capacity, so anchor churn does not reallocate the
+    /// queue after every drain. `spare` is empty between calls, so nothing
+    /// already removed can be swapped back into the queue.
     pub(crate) fn drain_released(&mut self) {
-        let released = std::mem::take(&mut *self.released.lock());
-        for key in released {
+        {
+            let mut queue = self.released.lock();
+            std::mem::swap(&mut *queue, &mut self.spare);
+        }
+        for key in self.spare.drain(..) {
             let removed = self.slots.remove(key);
             debug_assert!(removed.is_some(), "a queued anchor key names a live slot");
         }

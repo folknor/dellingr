@@ -81,6 +81,10 @@ pub(in crate::vm) struct LiveChunks {
 impl State {
     /// Check the State policy exactly once before the next heap allocation.
     /// The caller's current roots must already reach everything it holds.
+    /// A string intern takes this check before its pool lookup, so a hit can
+    /// collect first; looking up first and returning on a hit would keep an
+    /// otherwise dead string and its `%p` identity alive, a replay-visible
+    /// change to collection results.
     pub(in crate::vm) fn allocator(&mut self) -> NoGcAllocator<'_> {
         self.maybe_collect();
         self.heap.no_gc_allocator()
@@ -133,7 +137,7 @@ impl State {
                 GcRoot::StringMetatable(ptr) => heap.mark(ptr, worklist),
                 GcRoot::Anchors(registry) => registry.mark_reachable(heap, worklist),
                 GcRoot::SuspendedEnv(env) => env.mark_reachable(heap, worklist),
-                GcRoot::OpenUpvalue(uv_ref) => self.upvalue_pool.mark_slot(uv_ref),
+                GcRoot::OpenUpvalue(uv_ref) => self.upvalue_pool.mark(uv_ref, heap, worklist),
                 GcRoot::ActiveChunk(bytecode) => {
                     State::retain_bytecode_tree(&mut live_chunks.trees, bytecode);
                 }
