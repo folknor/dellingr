@@ -614,30 +614,25 @@ hashbrown bucket positions.
 
 Raised by the table-representation hunter.
 
-- **Count live hash keys that could migrate.** `append` (`table.rs`) takes its
-  slow path whenever any hash entry is live, so one string field forces every
-  append through migration checks: `append_growth` and `migrate_from_hash` each
-  do an unsuccessful numeric lookup. A counter of eligible positive integral
-  hash keys, maintained through insert, delete, initialization, migration and
-  snapshot load, lets mixed tables append directly. `list_hash_cannot_migrate`
-  substitutes a bounded scan that also rejects bulk extension when the hash
-  slot count exceeds the remaining batch. The hunter's strongest local change.
-- **Answer nil for logical array keys outside the window.** `get` and
-  `get_with_index` fall through to the hash part when `array_slot` fails; for
-  an integer in `1..=vlen` outside the physical window no live hash entry can
-  exist. Keep the classification off the successful array path.
-- **Reserve fixed positional constructors across batches.** `set_list` already
-  bulk-extends and `reg_set_list` reads the stack directly; carry a fixed
-  constructor's total positional capacity to avoid repeated growth. Writes,
-  evaluation, logical growth and cost admission stay at their operations.
-- **Cache the computed border between occupancy changes.** Repeated `#t` on an
-  unchanged holey array repeats the binary search (`array_len`); a lazy cache
-  invalidated by nil/non-nil transitions and growth keeps the exact answer.
-  Secondary: dense-tail length is already constant time.
+The migratable-key counter (`hash_migratable`), the probe-free nil answer for
+array keys outside the window, and the all-dead `#t` shortcut landed; a border
+cache was declined at `array_len`. What remains:
 
-The hunter notes iteration is already better than it looks: generic-for has
-direct `next`/`ipairs` paths, the pairs cursor avoids re-resolving the previous
-key, and IndexMap forwards `nth` so `.skip(hash_start)` does not rescan.
+- **Reserve fixed positional constructors across batches.** Only constructors
+  with more than `MAX_TABLE_BATCH_SIZE` (255) positional fields have a second
+  `SET_LIST`; geometric growth then copies about N slots and over-allocates.
+  Carry the fixed total on the first `SET_LIST` (after that batch's fields are
+  evaluated, not at `NEW_TABLE`) as a capacity-only hint: never through
+  `prepare_list_append` (which moves the window and fills nil tails), separate
+  from `vlen`, and discarded on overflow or reservation failure so no visible
+  effect or error moves. Charging and admission stay per batch; migration and
+  computed keys may still outgrow it, and `reset_window` after an all-nil
+  first batch shrinks it away (keeping it is a separate decision).
+- **O(1) `#t` for stack-shaped tables.** Push/pop leaves a structural nil tail,
+  so every `#t` binary-searches `1..=vlen`. A maintained proof that the live
+  array keys are exactly `1..=array_live` would answer `array_live` (the only
+  border, so not replay-visible); tail push/pop keeps the proof, any other
+  mutation drops it to the search, and load recomputes it.
 
 **Classification:** local.
 

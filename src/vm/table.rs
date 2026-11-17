@@ -586,6 +586,13 @@ pub(super) struct Table {
     version: Cell<u64>,
     /// Number of occupied hash slots whose nil value makes them logically absent.
     dead_count: usize,
+    /// Exact number of live hash entries whose key could ever migrate into
+    /// the array part (`may_migrate`). While it is zero no append can pull a
+    /// key in, so appends to a table with named fields push directly and a
+    /// positional batch extends in one step instead of probing the hash for
+    /// `vlen + 2`. Maintained wherever a hash entry turns live or dead:
+    /// `hash_remove` owns the decrement migration relies on.
+    hash_migratable: usize,
     /// The last shape `debug_assert_invariants` observed, against which it
     /// checks the version rule; `None` when the last check was skipped.
     #[cfg(debug_assertions)]
@@ -604,10 +611,20 @@ impl Default for Table {
             metatable: None,
             version: Cell::new(0),
             dead_count: 0,
+            hash_migratable: 0,
             #[cfg(debug_assertions)]
             shape_witness: Cell::new(None),
         }
     }
+}
+
+/// Whether a live hash entry under `key` could ever migrate into the array
+/// part: a positive integer no larger than `MAX_ARRAY_LEN + 1`. The bound
+/// includes `MAX_ARRAY_LEN + 1` because a live key there is what makes
+/// `append_growth` refuse the append that would reach `MAX_ARRAY_LEN`.
+#[inline]
+fn may_migrate(key: &Val) -> bool {
+    matches!(*key, Val::Num(n) if n >= 1.0 && integer_index(n, MAX_ARRAY_LEN + 1).is_some())
 }
 
 impl Table {
@@ -741,6 +758,11 @@ impl Table {
             );
         };
 
+        let mut migratable = 0;
+        let mut count_live = |key: &Val| {
+            assert_hash_key_outside_array(key);
+            migratable += usize::from(may_migrate(key));
+        };
         let dead_count = match &self.storage {
             TableStorage::Inline { entries, len } => {
                 debug_assert!((*len as usize) <= INLINE_CAPACITY);
@@ -755,7 +777,7 @@ impl Table {
                     if matches!(value, Val::Nil) {
                         dead_count += 1;
                     } else {
-                        assert_hash_key_outside_array(key);
+                        count_live(key);
                     }
                 }
                 dead_count
@@ -766,8 +788,9 @@ impl Table {
                 // a shape from before an interval nobody observed.
                 if map.len() > crate::limits::tuning::TABLE_DEBUG_FULL_WALK_LIMIT {
                     debug_assert!(
-                        self.dead_count <= map.len(),
-                        "dead_count must not exceed the number of hash slots"
+                        self.dead_count <= map.len()
+                            && self.hash_migratable <= map.len() - self.dead_count,
+                        "dead_count and hash_migratable must fit the hash slots"
                     );
                     self.shape_witness.set(None);
                     return;
@@ -781,9 +804,7 @@ impl Table {
                         dead_count += 1;
                     } else {
                         match key.0 {
-                            TableKeyKind::Live(key) => {
-                                assert_hash_key_outside_array(&key);
-                            }
+                            TableKeyKind::Live(key) => count_live(&key),
                             TableKeyKind::Vacant(_) => {
                                 debug_assert!(false, "a vacant hash key cannot hold a live value");
                             }
@@ -797,6 +818,10 @@ impl Table {
         debug_assert_eq!(
             self.dead_count, dead_count,
             "dead_count must equal the number of nil-valued hash slots"
+        );
+        debug_assert_eq!(
+            self.hash_migratable, migratable,
+            "hash_migratable must equal the number of live hash keys that may migrate"
         );
         self.check_shape_witness();
     }
@@ -864,8 +889,10 @@ impl Table {
 
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(super) fn get(&self, key: &Val) -> Val {
-        if let Some(slot) = self.array_slot(key) {
-            return self.array[slot];
+        // An array key outside the window is nil: the hash part can hold at
+        // most a dead tombstone for it, so it is answered without a probe.
+        if let Some(key) = self.array_key(key) {
+            return self.array_value(key);
         }
         self.hash_get(key)
     }
@@ -892,10 +919,13 @@ impl Table {
 
     #[inline]
     pub(super) fn get_with_index(&self, key: &Val) -> Option<(usize, Val)> {
-        if let Some(slot) = self.array_slot(key) {
-            let value = self.array[slot];
-            return (!matches!(value, Val::Nil))
-                .then_some((ARRAY_SLOT_TAG | (self.base + slot), value));
+        // As in `get`, an array key outside the window is absent without a
+        // hash probe.
+        if let Some(key) = self.array_key(key) {
+            let slot = key - 1;
+            let position = self.window_position(slot)?;
+            let value = self.array[position];
+            return (!matches!(value, Val::Nil)).then_some((ARRAY_SLOT_TAG | slot, value));
         }
         if !is_valid_table_key(key) {
             return None;
@@ -1015,13 +1045,17 @@ impl Table {
             matches!(&self.storage, TableStorage::Map(_, policy) if policy.revive_in_place),
             "only a table that revives keys in place writes slots directly"
         );
-        let slot = match &mut self.storage {
+        let (key, slot) = match &mut self.storage {
             TableStorage::Inline { entries, len } if index < usize::from(*len) => {
-                &mut entries[index].1
+                let (key, value) = &mut entries[index];
+                (*key, value)
             }
             TableStorage::Map(map, _) => match map.get_index_mut(index) {
-                Some((key, slot)) if key.as_live().is_some() => slot,
-                _ => return false,
+                Some((key, slot)) => match key.as_live() {
+                    Some(key) => (key, slot),
+                    None => return false,
+                },
+                None => return false,
             },
             TableStorage::Inline { .. } => return false,
         };
@@ -1029,6 +1063,13 @@ impl Table {
         let now_dead = matches!(value, Val::Nil);
         *slot = value;
         self.dead_count = self.dead_count + usize::from(now_dead) - usize::from(was_dead);
+        if was_dead != now_dead && may_migrate(&key) {
+            if now_dead {
+                self.hash_migratable -= 1;
+            } else {
+                self.hash_migratable += 1;
+            }
+        }
         #[cfg(debug_assertions)]
         self.debug_assert_invariants();
         true
@@ -1405,6 +1446,7 @@ impl Table {
                 }
             }
             rebuilt.dead_count += usize::from(dead);
+            rebuilt.hash_migratable += usize::from(!dead && may_migrate(&key));
         }
         rebuilt.version.set(next_version);
         #[cfg(debug_assertions)]
@@ -1482,18 +1524,19 @@ impl Table {
             }
             self.write_window(position, Val::Nil);
         } else {
-            let slot = match &mut self.storage {
+            let (key, slot) = match &mut self.storage {
                 TableStorage::Inline { entries, len } => {
                     if index >= usize::from(*len) {
                         return false;
                     }
-                    &mut entries[index].1
+                    let (key, value) = &mut entries[index];
+                    (Some(*key), value)
                 }
                 TableStorage::Map(map, _) => {
-                    let Some((_, value)) = map.get_index_mut(index) else {
+                    let Some((key, value)) = map.get_index_mut(index) else {
                         return false;
                     };
-                    value
+                    (key.as_live(), value)
                 }
             };
             if matches!(*slot, Val::Nil) {
@@ -1501,6 +1544,7 @@ impl Table {
             }
             *slot = Val::Nil;
             self.dead_count += 1;
+            self.hash_migratable -= usize::from(key.is_some_and(|key| may_migrate(&key)));
         }
         #[cfg(debug_assertions)]
         self.debug_assert_invariants();
@@ -1541,9 +1585,16 @@ impl Table {
             }
             TableStorage::Inline { .. } => return false,
         };
+        let migratable = usize::from(may_migrate(&key));
         match (was_live, now_live) {
-            (false, true) => self.dead_count -= 1,
-            (true, false) => self.dead_count += 1,
+            (false, true) => {
+                self.dead_count -= 1;
+                self.hash_migratable += migratable;
+            }
+            (true, false) => {
+                self.dead_count += 1;
+                self.hash_migratable -= migratable;
+            }
             _ => {}
         }
         #[cfg(debug_assertions)]
@@ -1568,6 +1619,18 @@ impl Table {
             && matches!(self.array.last(), Some(last) if !matches!(last, Val::Nil))
         {
             return self.vlen;
+        }
+        // An all-dead array has the single border 0, which the search below
+        // would also reach after O(log vlen) steps over a long history.
+        //
+        // A cache of the last search result was declined: it would be
+        // invalidated by every nil/live transition and growth on the hot
+        // array write path, and push/pop stacks, the workload that reaches
+        // this search most, change occupancy on every operation, so it would
+        // never hit there. Any shortcut must return the border the search
+        // picks, which is replay-visible on holey tables.
+        if self.array_live == 0 {
+            return 0;
         }
         // Invariant: lo == 0 or t[lo] is non-nil; t[hi] is nil (or hi == 0).
         let mut lo = 0;
@@ -1666,6 +1729,7 @@ impl Table {
                 if (*len as usize) < INLINE_CAPACITY {
                     entries[*len as usize] = (key, value);
                     *len += 1;
+                    self.hash_migratable += usize::from(may_migrate(&key));
                 } else {
                     self.promote_to_map(table_key, value);
                 }
@@ -1748,9 +1812,9 @@ impl Table {
     /// would need staging storage or rollback to preserve failure atomicity.
     fn append_growth(&self) -> std::result::Result<usize, TableError> {
         self.check_vlen_growth(1)?;
-        if self.hash_live_len() == 0 {
-            // With no live hash entries there is no migration run to count.
-            // In particular, positional constructors need no keyed probes.
+        if self.hash_migratable == 0 {
+            // With no live hash key that could migrate there is no run to
+            // count, so named fields cost an append no keyed probes.
             return Ok(1);
         }
         let mut end = self.vlen + 1;
@@ -1783,7 +1847,7 @@ impl Table {
     fn appends_are_plain(&self) -> bool {
         matches!(self.array.first(), Some(first) if !matches!(first, Val::Nil))
             && self.base + self.array.len() == self.vlen
-            && self.hash_live_len() == 0
+            && self.hash_migratable == 0
     }
 
     /// Append `value` at key `vlen + 1`, then migrate the following keys from
@@ -1799,7 +1863,7 @@ impl Table {
             || self.lead * 2 >= len
             || self.base + len < self.vlen
             || len == self.array.capacity()
-            || self.hash_live_len() != 0
+            || self.hash_migratable != 0
         {
             return self.append_slow(value);
         }
@@ -1950,7 +2014,7 @@ impl Table {
     /// so no cached hash index moves; the tombstones are compacted once they
     /// outnumber the live entries.
     fn migrate_from_hash(&mut self) {
-        if self.hash_live_len() == 0 {
+        if self.hash_migratable == 0 {
             #[cfg(debug_assertions)]
             self.debug_assert_invariants();
             return;
@@ -1958,7 +2022,9 @@ impl Table {
         // The caller has just appended, so the window ends at `vlen`.
         debug_assert_eq!(self.base + self.array.len(), self.vlen);
         let mut migrated = false;
-        loop {
+        // `hash_remove` decrements the counter for each migrated key, so the
+        // run ends without a probe once the last migratable key has moved.
+        while self.hash_migratable != 0 {
             let next = Val::Num((self.vlen + 1) as f64);
             match self.hash_remove(&next) {
                 Some(value) => {
@@ -1983,32 +2049,6 @@ impl Table {
             TableStorage::Map(map, _) => map.len(),
         };
         occupied - self.dead_count
-    }
-
-    /// A short constructor hash with no live numeric key cannot migrate into
-    /// a positional batch. Bound the scan by the batch size; larger hashes,
-    /// or ones holding a live numeric key, keep the per-key append path.
-    /// Dead slots cannot migrate, and a map's vacated slots carry a
-    /// `Vacant` key that has no value to inspect, so both are skipped by
-    /// their nil value.
-    fn list_hash_cannot_migrate(&self, count: usize) -> bool {
-        if self.hash_live_len() == 0 {
-            return true;
-        }
-        match &self.storage {
-            TableStorage::Inline { entries, len } => {
-                usize::from(*len) <= count
-                    && entries[..usize::from(*len)].iter().all(|(key, value)| {
-                        matches!(value, Val::Nil) || !matches!(key, Val::Num(_))
-                    })
-            }
-            TableStorage::Map(map, _) => {
-                map.len() <= count
-                    && map.iter().all(|(key, value)| {
-                        matches!(value, Val::Nil) || !matches!(key.as_live(), Some(Val::Num(_)))
-                    })
-            }
-        }
     }
 
     fn insert_into_map_with_tombstones(&mut self, key: TableKey, value: Val) {
@@ -2037,6 +2077,7 @@ impl Table {
                 let (_, slot) = map.get_index_mut(index).expect("the index was just found");
                 *slot = value;
                 self.dead_count -= 1;
+                self.hash_migratable += usize::from(may_migrate(&key.value()));
                 #[cfg(debug_assertions)]
                 self.debug_assert_invariants();
                 return;
@@ -2060,6 +2101,7 @@ impl Table {
         if self.dead_count >= live_count {
             self.compact_dead();
         }
+        self.hash_migratable += usize::from(may_migrate(&key.value()));
         if let TableStorage::Map(map, _) = &mut self.storage {
             map.insert(key, value);
         }
@@ -2080,12 +2122,17 @@ impl Table {
                 } else if (*len as usize) < INLINE_CAPACITY {
                     entries[*len as usize] = (key_value, value);
                     *len += 1;
+                    self.hash_migratable += usize::from(may_migrate(&key_value));
                 } else {
                     self.promote_to_map(key, value);
                 }
             }
             TableStorage::Map(map, _) => {
-                map.insert(key, value);
+                // With no tombstones an existing slot is live, so only a
+                // new slot adds a live key.
+                if map.insert(key, value).is_none() {
+                    self.hash_migratable += usize::from(may_migrate(&key_value));
+                }
             }
         }
         #[cfg(debug_assertions)]
@@ -2107,6 +2154,8 @@ impl Table {
                 let key = TableKey::from_prevalidated(k);
                 map.insert(key, v);
             }
+            // The moved entries keep their count; only the new key adds one.
+            self.hash_migratable += usize::from(may_migrate(&new_key.value()));
             map.insert(new_key, new_value);
             self.storage = TableStorage::Map(map, SlotPolicy::default());
         }
@@ -2184,6 +2233,9 @@ impl Table {
                 }
             }
         };
+        if removed.is_some() {
+            self.hash_migratable -= usize::from(may_migrate(key));
+        }
         #[cfg(debug_assertions)]
         self.debug_assert_invariants();
         removed
@@ -2256,11 +2308,6 @@ impl Table {
     ) -> std::result::Result<(), TableError> {
         let mut key = first;
         let mut reserved = false;
-        // Set once the hash scan has refused: the per-key loop must not
-        // rescan the hash for every remaining value, which would make a
-        // large open batch quadratic in uncharged host work. An emptied hash
-        // still qualifies.
-        let mut hash_may_migrate = false;
         while let Some(value) = values.next() {
             if key == self.vlen + 1
                 && (matches!(self.array.first(), Some(first) if !matches!(first, Val::Nil))
@@ -2268,30 +2315,27 @@ impl Table {
                     || self.array.is_empty()
                         && self.base == self.vlen
                         && !matches!(value, Val::Nil))
-                && (!hash_may_migrate || self.hash_live_len() == 0)
+                && self.hash_migratable == 0
             {
-                if self.list_hash_cannot_migrate(1 + values.len()) {
-                    // Every remaining key is an append whose window
-                    // preparation and hash migration would do nothing, so
-                    // the rest of the batch lands in one extend with the
-                    // same end state.
-                    let count = 1 + values.len();
-                    self.check_vlen_growth(count)?;
-                    self.reserve_array(self.array.len().saturating_add(count))?;
-                    self.vlen += count;
-                    let mut live = usize::from(!matches!(value, Val::Nil));
-                    self.array.push(value);
-                    // The complete batch was reserved fallibly above. Extend
-                    // can fill that storage without a capacity check for
-                    // every push; accumulate locally rather than writing
-                    // table metadata for every element.
-                    self.array.extend(values.inspect(|value| {
-                        live += usize::from(!matches!(value, Val::Nil));
-                    }));
-                    self.array_live += live;
-                    break;
-                }
-                hash_may_migrate = true;
+                // Every remaining key is an append whose window
+                // preparation and hash migration would do nothing, so
+                // the rest of the batch lands in one extend with the
+                // same end state.
+                let count = 1 + values.len();
+                self.check_vlen_growth(count)?;
+                self.reserve_array(self.array.len().saturating_add(count))?;
+                self.vlen += count;
+                let mut live = usize::from(!matches!(value, Val::Nil));
+                self.array.push(value);
+                // The complete batch was reserved fallibly above. Extend
+                // can fill that storage without a capacity check for
+                // every push; accumulate locally rather than writing
+                // table metadata for every element.
+                self.array.extend(values.inspect(|value| {
+                    live += usize::from(!matches!(value, Val::Nil));
+                }));
+                self.array_live += live;
+                break;
             }
             if key == self.vlen + 1 && !reserved {
                 // The bulk path above needs no window maintenance. Other
@@ -3062,6 +3106,60 @@ mod tests {
         // hash entries the part was compacted, which moves hash indices.
         assert_eq!(t.dead_count, 0);
         assert_eq!(t.version(), 1);
+        assert_eq!(t.hash_migratable, 1);
+    }
+
+    #[test]
+    fn only_live_integral_hash_keys_hold_appends_off_the_fast_path() {
+        let mut t = Table::default();
+        for key in [
+            Val::Bool(true),
+            Val::Num(0.0),
+            Val::Num(-3.0),
+            Val::Num(2.5),
+        ] {
+            t.insert(key, Val::Bool(true)).unwrap();
+        }
+        // Keys that can never join the array do not count.
+        assert_eq!(t.hash_migratable, 0);
+        t.insert(n(4), Val::Bool(true)).unwrap();
+        assert_eq!(t.hash_migratable, 1);
+        t.insert(n(4), Val::Nil).unwrap();
+        assert_eq!(t.hash_migratable, 0);
+        t.insert(n(4), Val::Bool(true)).unwrap();
+        // Too large to ever join the array.
+        t.insert(Val::Num(1e300), Val::Bool(true)).unwrap();
+        for key in 0..INLINE_CAPACITY {
+            t.insert(Val::Num(key as f64 + 0.5), Val::Bool(true))
+                .unwrap();
+        }
+        // Promotion to map storage moves the count with the entries.
+        assert!(matches!(t.storage, TableStorage::Map(..)));
+        assert_eq!(t.hash_migratable, 1);
+        fill(&mut t, 1..=3);
+        // Appending 3 migrated key 4 through `hash_remove`.
+        assert_eq!((t.vlen, t.hash_migratable), (4, 0));
+        t.set_list(5, [Val::Num(5.0), Val::Num(6.0)].into_iter())
+            .unwrap();
+        assert_eq!(t.array_len(), 6);
+    }
+
+    #[test]
+    fn array_keys_outside_the_window_read_nil_without_the_hash() {
+        let mut t = Table::default();
+        fill(&mut t, 1..=40);
+        for key in 1..=30 {
+            t.insert(n(key), Val::Nil).unwrap();
+        }
+        t.insert(n(41), Val::Num(41.0)).unwrap();
+        assert!(t.base > 0);
+        assert!(matches!(t.get(&n(1)), Val::Nil));
+        assert!(t.get_with_index(&n(1)).is_none());
+        assert!(matches!(t.get(&n(41)), Val::Num(_)));
+        assert_eq!(
+            t.get_with_index(&n(31)).map(|(index, _)| index),
+            Some(ARRAY_SLOT_TAG | 30)
+        );
     }
 
     #[test]
