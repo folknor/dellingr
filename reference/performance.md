@@ -145,6 +145,31 @@ cycle shrank (release 1520 to 1472, 1488 with snapshot; dev 12912 to
 unchanged. The cause of the gsub move is unproven; marking the appender
 `#[inline(never)]` did not change it, so it was left inlinable.
 
+## Sequence library reads off the stack, 2026-11-17
+
+`table.concat` and `unpack` read each element straight from the table
+when the raw value is non-nil or the metatable has no `__index`, and
+`table.concat` appends string bytes from the pool and numbers through
+`number_to_text` with no per-element owned copy (`sequence_raw_get`,
+`concat_append_raw` and `push_sequence_raw` in `vm/table_ops.rs`). Only a
+raw miss with an `__index` handler takes the key push and
+`get_table_unguarded`. `table.pack` stores its arguments into the table
+directly, and raw `table.insert`/`table.remove` compute the border once.
+The change against its parent e0441d3 on bygg, `brokkr bench wall` (best of
+3), base and change interleaved:
+
+| Workload | e0441d3 | Change |
+|---|---|---|
+| `mixed` | 2.7 s, 2.7 s | 2.2 s |
+| `sequence_len` | 3.6 s, 3.6 s | 2.7 s |
+
+`mixed` joins a 500-string table once per kernel call; `sequence_len` is
+short insert, remove, unpack and concat calls on plain tables and on tables
+with an unrelated metatable or a `__len` handler. Native bytes per level
+(`native_bytes_per_level`): release `remove_*` rows grew 16 bytes, the other
+release rows are unchanged; in the dev profile the `concat_*` rows shrank
+128 bytes and the `unpack_*` rows grew 48.
+
 ## Native stack frames and cycles
 
 The log behind reference/native-calls.md's current table: the frame-size

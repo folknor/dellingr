@@ -2405,13 +2405,17 @@ impl Table {
     /// the border is `vlen` the array grows by one key, nil included, exactly
     /// like an append. No slot moves to another key's index, so the version
     /// is untouched.
+    ///
+    /// `len` is `array_len()`, which the caller has already computed to
+    /// validate `pos`; nothing may change the table in between.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    pub(super) fn array_insert(
+    pub(super) fn array_insert_at_len(
         &mut self,
         pos: usize,
+        len: usize,
         value: Val,
     ) -> std::result::Result<(), TableError> {
-        let len = self.array_len();
+        debug_assert_eq!(len, self.array_len(), "stale border passed to array_insert");
         debug_assert!(
             (1..=len + 1).contains(&pos),
             "insert position {pos} outside 1..={len}+1"
@@ -2469,10 +2473,15 @@ impl Table {
     /// Removes and returns the value at the given position, shifting later
     /// elements down, with reference Lua's `tremove` semantics: for a
     /// position outside `1..=array_len()` (only 0 for an empty sequence, or
-    /// `array_len() + 1`) it returns `t[pos]` and clears it.
+    /// `array_len() + 1`) it returns `t[pos]` and clears it. `len` is
+    /// `array_len()`, already computed by the caller to validate `pos`.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    pub(super) fn array_remove(&mut self, pos: usize) -> std::result::Result<Val, TableError> {
-        let len = self.array_len();
+    pub(super) fn array_remove_at_len(
+        &mut self,
+        pos: usize,
+        len: usize,
+    ) -> std::result::Result<Val, TableError> {
+        debug_assert_eq!(len, self.array_len(), "stale border passed to array_remove");
         if (1..=len).contains(&pos) {
             // Key `len` is live, so it lies inside the window.
             if pos <= self.base && !matches!(self.array[0], Val::Nil) {
@@ -2510,6 +2519,20 @@ impl Table {
         #[cfg(debug_assertions)]
         self.debug_assert_invariants();
         Ok(removed)
+    }
+
+    #[cfg(test)]
+    pub(super) fn array_insert(
+        &mut self,
+        pos: usize,
+        value: Val,
+    ) -> std::result::Result<(), TableError> {
+        self.array_insert_at_len(pos, self.array_len(), value)
+    }
+
+    #[cfg(test)]
+    pub(super) fn array_remove(&mut self, pos: usize) -> std::result::Result<Val, TableError> {
+        self.array_remove_at_len(pos, self.array_len())
     }
 
     /// Returns the sequence `t[1..=#t]` as a Vec for sorting.

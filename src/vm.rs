@@ -49,7 +49,7 @@ pub use save_state::{
     TableRestoreFailure,
 };
 pub(crate) use string_arg::StringArg;
-pub(crate) use table_ops::TostringRendering;
+pub(crate) use table_ops::{ConcatRead, TostringRendering};
 
 use crate::det_hash::IndexMap;
 use std::collections::BTreeSet;

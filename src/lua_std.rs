@@ -505,11 +505,15 @@ pub(super) fn unpack_values(state: &mut State) -> Result<u8> {
     // like `select`. Do not add a per-element charge.
     // bounded: at most MAX_RESULTS elements, checked above.
     for index in i..=j {
-        state.push_number(index as f64)?;
-        crate::native_call!(
-            "unpack_values->get_table_unguarded",
-            state.get_table_unguarded(1)
-        )?;
+        // A raw hit, or a miss with no `__index`, is pushed straight from the
+        // table; either way one slot is checked per element, at the element.
+        if !state.push_sequence_raw(1, index)? {
+            state.push_number(index as f64)?;
+            crate::native_call!(
+                "unpack_values->get_table_unguarded",
+                state.get_table_unguarded(1)
+            )?;
+        }
     }
     state.remove(1)?;
     // span is nonnegative and below MAX_RESULTS here, so the conversion cannot fail.

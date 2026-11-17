@@ -8,6 +8,7 @@ use crate::cost_model::Charge;
 use crate::error::{ArgDetail, LibraryError, LibraryFunction};
 use crate::instr::{ArgCount, RetCount};
 use crate::numeral::{MAX_EXACT_INTEGER, exact_i64, parse_lua_numeral};
+use crate::vm::ConcatRead;
 
 // `table.unpack` and global `unpack` are separate catalog entries, so they are
 // distinct values with their own save ids whatever this wrapper compiles to
@@ -89,19 +90,21 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
             );
         }
 
+        // The border is computed once here and handed to the storage shift.
         if num_args == 2 {
             // table.insert(t, value) - append at end
             let len = state.table_len(1)?;
-            state.table_insert_at(1, len + 1)?;
+            state.sequence_insert(1, len + 1, len)?;
         } else if num_args == 3 {
             // table.insert(t, pos, value)
             let pos = arg_integer(state, 2, "insert")?;
-            let len = i64::try_from(state.table_len(1)?).expect("table length fits in i64");
-            if !(1..=len + 1).contains(&pos) {
+            let len = state.table_len(1)?;
+            let len_i = i64::try_from(len).expect("table length fits in i64");
+            if !(1..=len_i + 1).contains(&pos) {
                 return Err(position_out_of_bounds(state, "insert"));
             }
             let pos = usize::try_from(pos).expect("validated insertion position is positive");
-            state.table_insert_at(1, pos)?;
+            state.sequence_insert(1, pos, len)?;
         } else {
             return Err(state.library_error(LibraryError::WrongNumberOfArguments {
                 function: LibraryFunction::Insert,
@@ -143,7 +146,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
 
         state.set_top(1)?;
         // Stack: [t]
-        state.table_remove_at(1, pos)?;
+        state.sequence_remove(1, pos, len)?;
         // Stack: [t, removed_value]
         state.remove(1)?; // Remove table, leave value
         Ok(1)
@@ -195,23 +198,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     ("table.pack", |state| {
         state.charge(Charge::TablePack, 1)?;
         let num_args = state.top_isize();
-
-        // Create new table
-        state.new_table()?;
-        let table_idx = num_args + 1;
-
-        // Insert all arguments into the table
-        // bounded: one step per argument, at most MAX_ARGUMENTS.
-        for i in 1..=num_args {
-            state.push_number(i as f64)?; // push the index (key)
-            state.push_value(i)?; // push the argument (value)
-            state.set_table_raw(table_idx)?;
-        }
-
-        // Add the "n" field
-        state.push_string("n")?;
-        state.push_number(num_args as f64)?;
-        state.set_table_raw(table_idx)?;
+        state.pack_arguments()?;
 
         // Move the table into slot 1 and drop the arguments in one truncate,
         // instead of O(n^2) remove-from-bottom shuffling.
@@ -275,30 +262,28 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
                 result.reserve(next - result.len());
                 result.extend_from_slice(&sep);
             }
-            state.push_number(idx as f64)?;
-            crate::native_call!(
-                "lib:table.concat->get_table_unguarded",
-                state.get_table_unguarded(1)
-            )?;
-            let typ = state.typ(-1);
-            match typ {
-                LuaType::String | LuaType::Number => {
-                    let bytes = state.bytes_with_default_string_coercion(-1)?;
-                    let next = crate::limits::checked_string_growth(result.len(), bytes.len())?;
-                    result.reserve(next - result.len());
-                    result.extend_from_slice(&bytes);
-                }
-                // Reference wording (5.4.7, and the installed 5.2 agrees):
-                // the element's type and its index, not the generic
-                // concatenation TypeError, which loses the index.
-                _ => {
-                    return Err(state.library_error(LibraryError::InvalidConcatValue {
-                        value_type: typ,
-                        index: idx,
-                    }));
-                }
+            // A raw hit, or a miss with no `__index`, appends straight from
+            // the table; only a miss that needs the handler goes through the
+            // stack, its result rooted there while its bytes are appended.
+            let mut read = state.concat_append_raw(1, idx, &mut result)?;
+            if matches!(read, ConcatRead::NeedsIndex) {
+                state.push_number(idx as f64)?;
+                crate::native_call!(
+                    "lib:table.concat->get_table_unguarded",
+                    state.get_table_unguarded(1)
+                )?;
+                read = state.concat_append_top(&mut result)?;
+                state.pop(1)?;
             }
-            state.pop(1)?;
+            // Reference wording (5.4.7, and the installed 5.2 agrees): the
+            // element's type and its index, not the generic concatenation
+            // TypeError, which loses the index.
+            if let ConcatRead::Invalid(value_type) = read {
+                return Err(state.library_error(LibraryError::InvalidConcatValue {
+                    value_type,
+                    index: idx,
+                }));
+            }
         }
 
         state.set_top(0)?;

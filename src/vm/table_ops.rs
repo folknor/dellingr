@@ -24,6 +24,17 @@ pub(crate) enum TostringRendering {
     Bytes(Vec<u8>),
 }
 
+/// What one `table.concat` element read did; see `State::concat_append_raw`.
+pub(crate) enum ConcatRead {
+    /// The element was a string or number and its bytes are in the output.
+    Appended,
+    /// The element has this type, which `table.concat` rejects.
+    Invalid(super::LuaType),
+    /// The raw value is nil and the metatable has `__index`: read through
+    /// the handler path.
+    NeedsIndex,
+}
+
 trait TableSortAccess {
     fn get(&mut self, state: &mut State, index: usize) -> Result<Val>;
     fn set(
@@ -636,6 +647,143 @@ impl State {
             .any(|name| !matches!(self.metatable_field(mt, name), Val::Nil)))
     }
 
+    /// The raw value of `t[key]` for the table at `idx`, or `None` when that
+    /// value is nil and the table's metatable has an `__index` at this moment:
+    /// only then does Lua 5.4's `lua_geti` consult a handler. The sequence
+    /// readers (`table.concat`, `unpack`) take the stack-borne
+    /// `get_table_unguarded` path only for `None`, so an ordinary element
+    /// costs one table read and no key push. The metatable is looked up per
+    /// call, so a handler that sets or clears one mid-loop is seen by the
+    /// next element. A heap read: it neither pushes, allocates nor collects.
+    fn sequence_raw_get(&self, idx: isize, key: i64) -> Result<Option<Val>> {
+        let (val, mt) = self.sequence_operand(idx)?;
+        let table = val
+            .as_object_ptr()
+            .and_then(|ptr| self.heap.as_table_ref(ptr))
+            .expect("sequence_operand validated the table");
+        // The key is the f64 the stack-borne path would push.
+        let value = table.get(&Val::Num(key as f64));
+        if matches!(value, Val::Nil)
+            && !matches!(self.metatable_field(mt, super::MetaName::Index), Val::Nil)
+        {
+            return Ok(None);
+        }
+        Ok(Some(value))
+    }
+
+    /// `table.pack`'s body: pushes a new table holding the callback's
+    /// arguments at keys `1..=n` and `n` at `"n"`, leaving the arguments in
+    /// place below it. Each argument is stored straight into the table, in
+    /// key order, as raw stores of key/value pushes did, so a nil argument
+    /// occupies no slot and the table's shape is unchanged (a `set_list`
+    /// build would keep nil positional slots and move `#` on tables with
+    /// holes). The elided pushes keep their effect on failure: the first
+    /// key/value pair's two slot checks run before any store (later pairs
+    /// reuse the same slots), and `"n"` is interned between its key's and
+    /// value's checks, so a refusal at the stack cap and the collection point
+    /// of that intern fall where the pushes put them.
+    pub(crate) fn pack_arguments(&mut self) -> Result<()> {
+        let count = self.get_top();
+        let first = self.stack.len() - count;
+        self.new_table()?;
+        let len = self.stack.len();
+        let ptr = self.stack[len - 1]
+            .as_object_ptr()
+            .expect("new_table pushed a table");
+        if count > 0 {
+            self.check_stack_slot_at(len)?;
+            self.check_stack_slot_at(len + 1)?;
+            // bounded: one step per argument, at most MAX_ARGUMENTS.
+            for (slot, key) in (first..first + count).zip(1_u32..) {
+                let value = self.stack[slot];
+                self.heap
+                    .as_table(ptr)
+                    .expect("new_table pushed a table")
+                    .insert(Val::Num(f64::from(key)), value)?;
+            }
+        }
+        self.check_stack_slot_at(len)?;
+        let key = self.alloc_string(b"n")?;
+        self.check_stack_slot_at(len + 1)?;
+        self.heap
+            .as_table(ptr)
+            .expect("new_table pushed a table")
+            .insert(key, Val::Num(count as f64))?;
+        Ok(())
+    }
+
+    /// `table.concat`'s read of element `key` of the table at `idx` into
+    /// `out`, when no `__index` handler is needed (see `sequence_raw_get`).
+    /// [`ConcatRead::NeedsIndex`] appends nothing: the caller reads the
+    /// element through `get_table_unguarded` and appends it with
+    /// [`State::concat_append_top`].
+    pub(crate) fn concat_append_raw(
+        &self,
+        idx: isize,
+        key: i64,
+        out: &mut Vec<u8>,
+    ) -> Result<ConcatRead> {
+        let Some(val) = self.sequence_raw_get(idx, key)? else {
+            return Ok(ConcatRead::NeedsIndex);
+        };
+        Ok(match self.append_concat_value(val, out)? {
+            Ok(()) => ConcatRead::Appended,
+            Err(typ) => ConcatRead::Invalid(typ),
+        })
+    }
+
+    /// Appends the value on top of the stack (a handler's result, rooted
+    /// there while its bytes are copied) as [`State::concat_append_raw`]
+    /// would. The stack is unchanged.
+    pub(crate) fn concat_append_top(&self, out: &mut Vec<u8>) -> Result<ConcatRead> {
+        let val = self.at_index(-1)?;
+        Ok(match self.append_concat_value(val, out)? {
+            Ok(()) => ConcatRead::Appended,
+            Err(typ) => ConcatRead::Invalid(typ),
+        })
+    }
+
+    /// Pushes element `key` of the table at `idx` for `unpack` and returns
+    /// true, or returns false with nothing pushed when the element needs an
+    /// `__index` handler (see `sequence_raw_get`). The push makes the same
+    /// one-slot check the key push of the handler path makes, so a refusal
+    /// at the stack cap comes at the same element on both paths.
+    pub(crate) fn push_sequence_raw(&mut self, idx: isize, key: i64) -> Result<bool> {
+        match self.sequence_raw_get(idx, key)? {
+            Some(val) => {
+                self.push_val(val)?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Appends `table.concat`'s rendering of `val` to `out`: a string's bytes
+    /// straight from the pool, a number through `number_to_text`, with no
+    /// owned copy in between. Any other type comes back as `Err(type)` for
+    /// the caller's invalid-value error; the output-size limit is checked
+    /// before anything is appended. Neither allocates on the heap nor
+    /// collects, so a raw-read element needs no rooting.
+    fn append_concat_value(
+        &self,
+        val: Val,
+        out: &mut Vec<u8>,
+    ) -> Result<std::result::Result<(), super::LuaType>> {
+        let text;
+        let bytes: &[u8] = match val {
+            Val::Str(s) => self.heap.get_string(s),
+            Val::Num(n) => {
+                text = crate::number_text::number_to_text(n);
+                text.as_bytes()
+            }
+            other => return Ok(Err(other.typ(&self.heap))),
+        };
+        let next = crate::limits::checked_string_growth(out.len(), bytes.len())?;
+        out.reserve(next - out.len());
+        out.extend_from_slice(bytes);
+        Ok(Ok(()))
+    }
+
     /// Push the `__len` call window `[handler, val, val]` after one
     /// preflight of all three slots, so a refusal pushes nothing.
     pub(super) fn push_len_window(&mut self, handler: Val, val: Val) -> Result<()> {
@@ -734,16 +882,37 @@ impl State {
         // This keeps negative indices relative to the caller's visible top and
         // validates the table before mutating the stack.
         let idx = self.table_operand_below_top(table_idx, 1)?;
-        if !(1..=self.table_array_len_at(idx) + 1).contains(&pos) {
+        let len = self.table_array_len_at(idx);
+        if !(1..=len + 1).contains(&pos) {
             return Err(self.library_error(LibraryError::PositionOutOfBounds));
         }
+        self.insert_top_at_len(idx, pos, len)?;
+        self.pop_val();
+        Ok(())
+    }
+
+    /// `table.insert`'s raw store: inserts the top value at `pos` of the
+    /// table at stack index `table_idx`, leaving the value on the stack. The
+    /// library has type-checked the table and validated `pos` against `len`,
+    /// the border it computed with `table_len`, so the border is computed
+    /// once per call rather than again here and in the storage shift.
+    pub(crate) fn sequence_insert(
+        &mut self,
+        table_idx: isize,
+        pos: usize,
+        len: usize,
+    ) -> Result<()> {
+        let idx = self.convert_idx(table_idx)?;
+        self.insert_top_at_len(idx, pos, len)
+    }
+
+    fn insert_top_at_len(&mut self, idx: usize, pos: usize, len: usize) -> Result<()> {
         let value = self.stack[self.stack.len() - 1];
         self.stack[idx]
             .as_object_ptr()
             .and_then(|ptr| self.heap.as_table(ptr))
-            .expect("table_operand_below_top validated the table")
-            .array_insert(pos, value)?;
-        self.pop_val();
+            .expect("the caller validated the table")
+            .array_insert_at_len(pos, len, value)?;
         Ok(())
     }
 
@@ -765,15 +934,32 @@ impl State {
         if !valid {
             return Err(self.library_error(LibraryError::PositionOutOfBounds));
         }
+        self.remove_push_at_len(idx, pos, len)
+    }
 
+    /// `table.remove`'s raw removal: removes `pos` of the table at stack
+    /// index `table_idx` and pushes the removed value. The library has
+    /// type-checked the table and validated `pos` against `len`, the border
+    /// it computed with `table_len`.
+    pub(crate) fn sequence_remove(
+        &mut self,
+        table_idx: isize,
+        pos: usize,
+        len: usize,
+    ) -> Result<()> {
+        let idx = self.convert_idx(table_idx)?;
+        self.remove_push_at_len(idx, pos, len)
+    }
+
+    fn remove_push_at_len(&mut self, idx: usize, pos: usize, len: usize) -> Result<()> {
         // Reserve the result slot *before* mutating the table: failing after
-        // `array_remove` would discard the value with no way to return it.
+        // the removal would discard the value with no way to return it.
         self.check_stack_space(1)?;
         let removed = self.stack[idx]
             .as_object_ptr()
             .and_then(|ptr| self.heap.as_table(ptr))
-            .expect("table_operand_below_top validated the table")
-            .array_remove(pos)?;
+            .expect("the caller validated the table")
+            .array_remove_at_len(pos, len)?;
         self.push_unchecked(removed);
         Ok(())
     }

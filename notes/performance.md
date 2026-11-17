@@ -737,40 +737,6 @@ leaves storage untouched until writeback.
 **Classification:** targeted structural change, high conviction; needs table
 scope cooperation, not new storage.
 
-## PERF-028 - Sequence library functions go through stack choreography
-
-Raised by the table-and-math-libraries hunter.
-
-**Bottleneck:** `table.concat` (`lua_std/table.rs`) takes each element
-through numeric key, stack, general index resolution, stack value, owned byte
-vector, output vector; string elements are copied to temporary vectors, then
-into the result, which `push_bytes` copies again on an intern miss. Unpack
-pushes a key and runs general lookup per result; pack pushes key/value pairs
-and does raw stores per argument; append `insert` computes the border in the
-library, validates again in the host-facing method and computes it again in
-`array_insert`.
-
-**Redesign:** concat as a sequence reader feeding an output builder: ordinary
-tables read values directly; string bytes appended from the pool (the
-borrowing in `string_arg.rs` is the precedent); numbers rendered into the
-destination (`number_text.rs` renders into an inline `NumberText` or any
-byte sink); the finished buffer interned by ownership transfer
-(appended to `optimizations.md` "Owned result buffers are copied again when
-interned"); metamethod reads keep their sequential order and append returned
-values without an owned copy. Unpack reads into return slots; pack uses
-`Table::set_list` keeping positional nils and `"n"`; insert/remove validate
-table, length and position once and do the storage operation once.
-
-**Risks:** no bulk-prefetch of metamethod results and no sizing pass:
-`__len`, `__index`, invalid-element and output-size errors have observable
-order; concat still evaluates length when an explicit end is given and admits
-its charge at the current point. Stack-cap error ordering, metatable mutation
-during handlers, GC rooting, partial effects. Fast paths use event-specific
-conditions (`__newindex` need not disqualify a read).
-
-**Classification:** coherent subsystem rewrite; high conviction about the
-waste, workload-dependent payoff.
-
 ## PERF-029 - Certified fast phase for transcendental math
 
 Raised by the table-and-math-libraries hunter.
@@ -792,8 +758,8 @@ checks, evaluation order and both charge points.
 **Risks:** new bounds and certification work; cannot be justified by visual
 accuracy or small ULP error. Payoff depends on input distributions.
 
-**Classification:** numerical rewrite, lower conviction; after PERF-009,
-PERF-013 and PERF-028.
+**Classification:** numerical rewrite, lower conviction; after PERF-009 and
+PERF-013.
 
 ## PERF-031 - Host calls into Lua assembled from independent stack operations
 

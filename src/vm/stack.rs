@@ -516,14 +516,23 @@ impl State {
     }
 
     #[inline(always)]
-    fn check_stack_slot(&self) -> Result<()> {
+    pub(super) fn check_stack_slot(&self) -> Result<()> {
+        self.check_stack_slot_at(self.stack.len())
+    }
+
+    /// The check a one-value push makes when the stack holds `len` values.
+    /// A caller that elides temporary pushes runs it for each push it
+    /// replaces, so a refusal comes at the same point, with the same size
+    /// and the same fault-injection site, as the pushes it stands for.
+    #[inline(always)]
+    pub(super) fn check_stack_slot_at(&self, len: usize) -> Result<()> {
         #[cfg(not(feature = "fault-injection"))]
         let injected = false;
         #[cfg(feature = "fault-injection")]
-        let injected = self.inject_fault(crate::FaultSite::StackSlot, self.stack.len(), true);
-        if injected || self.stack.len() >= MAX_STACK_SIZE {
+        let injected = self.inject_fault(crate::FaultSite::StackSlot, len, true);
+        if injected || len >= MAX_STACK_SIZE {
             return Err(self.error(ErrorKind::StackOverflow {
-                size: self.stack.len().saturating_add(1),
+                size: len.saturating_add(1),
                 limit: MAX_STACK_SIZE,
             }));
         }
