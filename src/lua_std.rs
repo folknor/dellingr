@@ -71,7 +71,7 @@
 #![deny(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 
 mod basic;
-mod math;
+pub(crate) mod math;
 mod string;
 mod string_format;
 mod table;
@@ -85,7 +85,7 @@ use crate::Result;
 use crate::State;
 use crate::error::{Error, ErrorKind};
 use crate::numeral::exact_i64;
-use crate::vm::RustFnId;
+use crate::vm::{Leaf, RustFnId};
 
 /// Capacity reservations for the standard-library setup path.
 ///
@@ -329,6 +329,76 @@ const GMATCH_EMPTY_ITER: RustFnId = RustFnId::catalog(2);
 /// Global `next`, which `pairs` also returns.
 pub(crate) const NEXT: RustFnId =
     RustFnId::catalog(segment_offset(BASE_SEGMENT) + position_in(basic::BASE_FUNCTIONS, "next"));
+
+/// The catalog position of the entry with id `id`, found at compile time.
+const fn catalog_position(id: &str) -> usize {
+    let mut segment = 0;
+    // bounded: segment is an index into the fixed library catalog.
+    while segment < CATALOG.len() {
+        let functions = CATALOG[segment].functions;
+        let mut index = 0;
+        // bounded: each library segment is a fixed catalog list.
+        while index < functions.len() {
+            if same_str(functions[index].0, id) {
+                return segment_offset(segment) + index;
+            }
+            index += 1;
+        }
+        segment += 1;
+    }
+    panic!("the catalog lists every library leaf")
+}
+
+/// The catalog entries the dispatch loop executes directly when Lua calls
+/// them (`vm/leaf.rs`), by id.
+const LEAF_IDS: &[(&str, Leaf)] = &[
+    ("math.floor", Leaf::Floor),
+    ("math.ceil", Leaf::Ceil),
+    ("math.sqrt", Leaf::Sqrt),
+    ("math.abs", Leaf::Abs),
+    ("math.deg", Leaf::Deg),
+    ("math.rad", Leaf::Rad),
+    ("math.sin", Leaf::Sin),
+    ("math.cos", Leaf::Cos),
+    ("math.tan", Leaf::Tan),
+    ("math.asin", Leaf::Asin),
+    ("math.acos", Leaf::Acos),
+    ("math.exp", Leaf::Exp),
+    ("math.atan", Leaf::Atan),
+    ("math.log", Leaf::Log),
+    ("math.atan2", Leaf::Atan2),
+    ("math.fmod", Leaf::Fmod),
+    ("math.min", Leaf::Min),
+    ("math.max", Leaf::Max),
+    ("math.modf", Leaf::Modf),
+    ("math.random", Leaf::Random),
+    ("type", Leaf::Type),
+    ("rawequal", Leaf::RawEqual),
+    ("rawlen", Leaf::RawLen),
+    ("tonumber", Leaf::ToNumber),
+    ("rawget", Leaf::RawGet),
+];
+
+/// Each catalog entry's leaf, if it is one, indexed by catalog position.
+const LEAVES: [Option<Leaf>; CATALOG_LEN] = {
+    let mut leaves = [None; CATALOG_LEN];
+    let mut index = 0;
+    // bounded: the fixed leaf list.
+    while index < LEAF_IDS.len() {
+        let position = catalog_position(LEAF_IDS[index].0);
+        assert!(leaves[position].is_none(), "a leaf is listed once");
+        leaves[position] = Some(LEAF_IDS[index].1);
+        index += 1;
+    }
+    leaves
+};
+
+/// The leaf a Rust function is, if it is a catalog entry the dispatch loop
+/// executes directly. Host entries never are, whatever function they call.
+#[inline(always)]
+pub(crate) fn leaf_of(function: RustFnId) -> Option<Leaf> {
+    LEAVES.get(function.position()).copied().flatten()
+}
 
 /// The handle of a segment's `index`th function.
 fn library_fn(segment: usize, index: usize) -> RustFnId {

@@ -24,6 +24,8 @@
 //!   return pairs with a call that polled;
 //! - entry to every Rust callback, before its bookkeeping is changed or its
 //!   body runs, including library functions and Rust metamethod handlers.
+//!   A library leaf the dispatch loop executes directly (`vm/leaf.rs`) takes
+//!   the same poll once it commits, before its charge;
 //!   The generic `for` fast paths for `next` and the `ipairs` iterator run
 //!   without entering a callback and skip this poll; the loop's back edge
 //!   polls instead when the iteration continues. A step that ends the loop

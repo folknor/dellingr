@@ -287,6 +287,13 @@ impl State {
         method: bool,
     ) -> Result<bool> {
         let idx = self.call_base(num_args)?;
+        // A library leaf runs here without a callback (`vm/leaf.rs`).
+        if matches!(self.stack[idx], Val::RustFn(_))
+            && let Some(n) = self.call_leaf(idx, num_args)?
+        {
+            self.drop_surplus_results(num_ret_expected, n);
+            return Ok(false);
+        }
         let old_stack_bottom = self.in_flight.stack_bottom;
         match crate::native_call!(
             "call_from_lua->begin_call",
@@ -363,6 +370,13 @@ impl State {
         caller.chain = caller.chain.with_units(0);
         self.release_chain_charges(units);
         self.in_flight.stack_bottom = destination;
+        // A library leaf runs here, once the caller is retired, with its
+        // results at the destination like a Rust callee's (`vm/leaf.rs`).
+        if matches!(self.stack[destination], Val::RustFn(_))
+            && let Some(n) = self.call_leaf(destination, num_args)?
+        {
+            return Ok(Some(n));
+        }
         let method = inst.call_is_method();
         crate::native_call!(
             "tail_call_from_lua->begin_call",
@@ -713,7 +727,8 @@ impl State {
         entered: impl CallEntry,
     ) -> Result<u8> {
         // Every Rust callee passes here, including library functions and
-        // metamethods. Poll before changing callback bookkeeping so a pending
+        // metamethods; a library leaf the dispatch loop executes directly is
+        // not a callback and takes the same poll in `call_leaf`. Poll before changing callback bookkeeping so a pending
         // interrupt refuses entry and the enclosing boundary owns cleanup.
         // Straight-line Lua can otherwise chain expensive native calls
         // without reaching a backward jump or another Lua admission.

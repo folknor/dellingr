@@ -128,6 +128,15 @@ tick budgets and re-record replays.
   iterator handle with another table, or an edited save, reaches it without
   any dellingr bug.
 
+### Performance
+
+- Lua calls of the standard library's leaf functions (every `math` function,
+  `type`, `rawequal`, `rawlen`, one-argument `tonumber` and `rawget`) run in
+  the dispatch loop without entering a Rust callback, recognised by the
+  called value's function-table entry, so aliases such as
+  `local floor = math.floor` are covered. Results, costs, errors, interrupt
+  safepoints, stack-cap refusals and the random stream are unchanged.
+
 ## [0.7.1] - 2026-11-06
 
 Saves from 0.7.0 load: snapshot `FORMAT_VERSION` is 14 (unchanged).

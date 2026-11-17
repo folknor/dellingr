@@ -218,7 +218,9 @@ let mut state = State::builder().interrupt(stop.clone()).build();
 - **Safepoints.** Every backward jump, every Lua function call admission
   (from Lua or from Rust, tail calls included, so tail recursion, which runs
   at constant depth, still stops), entry to every Rust callback (including library
-  functions and Rust metamethod handlers), and the library work that could
+  functions and Rust metamethod handlers, and the library functions the
+  dispatch loop executes directly without a callback, such as `math.floor` or
+  `type`), and the library work that could
   otherwise run without bound: pattern-matcher steps, plain substring search
   candidates, heap-sort steps, `string.format` directives and `%%` escapes,
   and the iterations of `table.concat`, `table.move`, the metamethod paths of `table.insert`,

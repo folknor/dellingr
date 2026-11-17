@@ -208,6 +208,19 @@ host and compiler, so its row does not compare with the one above it); the
 | bygg, `rustc` of 2026-11-05: `__call` resolution out of line on top of ef5f81a | 15904 | 3136 | 3136 |
 | bygg, same `rustc`: unchanged string results returned as values, on top of 380266b | 15840 | 3184 | 3184 |
 | bygg, same `rustc`: string-replacement `gsub` in one borrow, on top of c4d8fe1 (the table measured 16816 / 3184 / 3200 there) | 16528 | 3040 | 2992 |
+| bygg, same `rustc`: library leaves in call dispatch, on top of 5e7a743 | 16576 | 3040 | 2992 |
+
+### 2026-11-17: library leaves in call dispatch
+
+`call_from_lua` and `tail_call_from_lua` test the callee's tag inline and
+hand a Rust callee to the out-of-line `State::call_leaf` (`vm/leaf.rs`),
+which runs the pure library functions without entering a callback. Release
+rows are unchanged; every dev row on a path that calls a Rust function from
+Lua grew 48 bytes. Moving the tag test out of line too grew dev by only 32
+bytes but cost about 3 percent on `closure` (every Lua callee then paid an
+extra call), so the tag test stays inline. `bench wall`, bygg, best of 3 against 5e7a743 with the same
+workload files: `library_leaves` 6.5, 6.3 s -> 3.5, 3.4 s; `closure` 3.5,
+3.5 s -> 3.5, 3.5 s.
 
 ### 2026-11-17: string-replacement `gsub` in one borrow
 

@@ -254,37 +254,28 @@ marshalling but not hoisted across host code.
 
 **Classification:** rewrite.
 
-## PERF-009 - Hot library functions executed as interpreter operations
+## PERF-009 - Heap-writing library functions still enter as callbacks
 
-Raised by the table-and-math-libraries hunter (its lead rewrite).
+Raised by the table-and-math-libraries hunter. Narrowed: every `math`
+function, `type`, `rawequal`, `rawlen`, one-argument `tonumber` and `rawget`
+are now library leaves executed in call dispatch by function identity
+(`vm/leaf.rs`; `library_leaves` workload 6.3 s to 3.4 s on bygg).
 
-**Bottleneck:** `math.floor` (`math.rs`) does `x.floor()` inside cost charging,
-an auxiliary type check, a checked read, a stack clear and a checked push,
-wrapped in `begin_call`/`invoke_rust_fn` bookkeeping, panic containment, FP
-validation and result processing, with a local-cost flush before calling out.
-The same disproportion holds for `ceil`, `sqrt`, `abs`, `type`, `rawequal`,
-numeric `tonumber`, `math.random` and append `table.insert`.
+**Residue:** `rawset`, append `table.insert`, `table.remove` and `select`
+still pay the callback ABI. They write the heap (growth, allocation, write
+barriers, metatable checks) or produce open results, so a leaf must reproduce
+more mid-operation refusal points than the pure set did; the leaf contract in
+`vm/leaf.rs` (decline before any side effect, then the callback's order of
+poll, charge, work, slot checks and writes) applies unchanged.
+`pairs`/`ipairs` loops are already special-cased in generic `for`.
 
-**Redesign:** identify the actual library function value at call execution and
-run its operation directly against the register window, keeping cost
-accounting in the interpreter. Start with identity-based handling inside call
-dispatch (covers `local floor = math.floor`), then dedicated guarded
-instructions at suitable sites. Initial set: `floor`, `ceil`, `sqrt`, `abs`,
-`deg`, `rad`; `fmod`, `modf`, common `min`/`max`; `random`; `type`,
-`rawequal`, numeric `tonumber`, `rawlen`, `rawget`, `rawset`; append
-`table.insert`, then `remove`, `select`, `pairs`/`ipairs` construction. Crosses
-into dispatch, codegen, verification and static cost analysis; does not need
-the generic ABI redesign (PERF-008).
+**Not pursued:** dedicated guarded opcodes (Luau FASTCALL style). Over the
+identity path they would only skip the call-site record, the call window and
+one out-of-line call; the cost flush must stay (folding the library charge
+into batched opcode cost would move a budget failure), and they would change
+persisted opcode encodings.
 
-**Risks:** identity is checked after evaluating callee and arguments (the
-spelling `math.floor` proves nothing; argument evaluation can rebind it).
-Exact error construction and attribution, method argument numbering,
-extra/missing arguments, variable result counts, tail calls, stack-cap
-failures and charge ordering (math wrappers charge before validating). Removing
-temporary slots must preserve the corresponding stack-cap refusal. Keep
-interrupt admission checks, function identities and snapshot encoding.
-
-**Classification:** rewrite, high conviction.
+**Classification:** rewrite, medium conviction.
 
 ## PERF-010 - Register window nil-filled on every call and return
 

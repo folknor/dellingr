@@ -199,12 +199,13 @@ only = [
     "failures::error_boundary::error_boundary_fault_sweep",
     "library::string_bytes::gmatch_refused_push_preserves_the_next_match",
     "vm::fault_injection::tests::",
+    "vm::leaf::tests::leaves_refuse_where_their_callbacks_do",
     "vm::registers::tests::",
 ]
 curated = true
 
 # Inline-cache differential. Under `disable-inline-caches` every cache read
-# misses; the library's unit-test build alone can turn hits back on per
+# misses and every library leaf runs as its callback (`src/vm/leaf.rs`); the library's unit-test build alone can turn hits back on per
 # thread (`HitMode` in `src/vm/caches.rs`). This dev build runs the whole
 # library suite with hits forced off unless a test holds
 # `HitMode::required()` (the cache-hit tests do), so every other library test

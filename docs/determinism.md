@@ -110,7 +110,10 @@ refuses to compute in such an environment instead.
   returns `Ok` with the environment changed fails with this error instead,
   so Lua never resumes under it. A host function's own calls into the State
   are checked; a standard-library function's are not, since it only runs
-  after a check that followed the last host code. Creating a State is not
+  after a check that followed the last host code. The library functions the
+  dispatch loop executes directly when Lua calls them (`math.floor`, `type`,
+  `rawget`, ...) enter no callback and run no host code, so nothing is
+  checked at their return. Creating a State is not
   checked: it computes nothing that depends on the environment, and a State
   may be created on one thread and run on another.
 - Not checked: the infallible observations (`to_boolean`, `raw_equal`,

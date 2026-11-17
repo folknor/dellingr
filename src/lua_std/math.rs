@@ -96,10 +96,7 @@ pub(super) const MATH_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         // bounded: one step per argument, at most MAX_ARGUMENTS.
         for i in 2..=n {
             check_type_named(state, i, LuaType::Number, "min")?;
-            let v = state.to_number(i)?;
-            if v < result {
-                result = v;
-            }
+            result = min_step(result, state.to_number(i)?);
         }
         state.set_top(0)?;
         state.push_number(result)?;
@@ -114,10 +111,7 @@ pub(super) const MATH_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         // bounded: one step per argument, at most MAX_ARGUMENTS.
         for i in 2..=n {
             check_type_named(state, i, LuaType::Number, "max")?;
-            let v = state.to_number(i)?;
-            if v > result {
-                result = v;
-            }
+            result = max_step(result, state.to_number(i)?);
         }
         state.set_top(0)?;
         state.push_number(result)?;
@@ -161,11 +155,7 @@ pub(super) const MATH_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
                         ArgDetail::IntervalEmpty,
                     )));
                 }
-                let flag = state.interrupt.flag();
-                match state.rng.random_range_i64(1, n, flag) {
-                    Some(v) => v as f64,
-                    None => return Err(state.interrupted_error()),
-                }
+                draw_range(state, 1, n)?
             }
             2 => {
                 // math.random(m, n) - returns integer in [m, n]
@@ -192,11 +182,7 @@ pub(super) const MATH_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
                 // unbiased (rejection sampling in `VmRng::random_range_i64`).
                 // Each rejected draw is an interrupt safepoint; see
                 // `VmRng::random_range_i64`.
-                let flag = state.interrupt.flag();
-                match state.rng.random_range_i64(m, n, flag) {
-                    Some(v) => v as f64,
-                    None => return Err(state.interrupted_error()),
-                }
+                draw_range(state, m, n)?
             }
             _ => {
                 return Err(state.library_error(LibraryError::WrongNumberOfArguments {
@@ -243,12 +229,12 @@ pub(super) const MATH_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         state.charge(Charge::MathAtan, 1)?;
         check_type_named(state, 1, LuaType::Number, "atan")?;
         let y = state.to_number(1)?;
-        let result = if check_optional_type_named(state, 2, LuaType::Number, "atan")? {
-            let x = state.to_number(2)?;
-            crmath::atan2(y, x)
+        let x = if check_optional_type_named(state, 2, LuaType::Number, "atan")? {
+            Some(state.to_number(2)?)
         } else {
-            crmath::atan(y)
+            None
         };
+        let result = atan_of(y, x);
         state.set_top(0)?;
         state.push_number(result)?;
         Ok(1)
@@ -285,28 +271,12 @@ pub(super) const MATH_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         state.charge(Charge::MathLog, 1)?;
         check_type_named(state, 1, LuaType::Number, "log")?;
         let x = state.to_number(1)?;
-        let result = if check_optional_type_named(state, 2, LuaType::Number, "log")? {
-            let base = state.to_number(2)?;
-            // Like Lua 5.2, this special-cases base 10 with log10, which makes
-            // math.log(1000, 10) exactly 3 rather than 2.9999999999999996.
-            // Lua 5.4 also special-cases base 2 with log2; this VM deliberately
-            // uses the quotient of natural logs for every other base.
-            // Any other base is the quotient of two correctly rounded natural
-            // logarithms, rounded once more: deterministic, but not a
-            // correctly rounded log_base.
-            #[expect(
-                clippy::float_cmp,
-                reason = "Only the exact base 10 takes the log10 special case."
-            )]
-            let is_base_ten = base == 10.0;
-            if is_base_ten {
-                crmath::log10(x)
-            } else {
-                crmath::ln(x) / crmath::ln(base)
-            }
+        let base = if check_optional_type_named(state, 2, LuaType::Number, "log")? {
+            Some(state.to_number(2)?)
         } else {
-            crmath::ln(x)
+            None
         };
+        let result = log_of(x, base);
         state.set_top(0)?;
         state.push_number(result)?;
         Ok(1)
@@ -327,18 +297,83 @@ pub(super) const MATH_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         state.charge(Charge::MathModf, 1)?;
         check_type_named(state, 1, LuaType::Number, "modf")?;
         let x = state.to_number(1)?;
-        let integral = x.trunc();
-        let fractional = if matches!(x.partial_cmp(&integral), Some(std::cmp::Ordering::Equal)) {
-            0.0
-        } else {
-            x - integral
-        };
+        let (integral, fractional) = modf_of(x);
         state.set_top(0)?;
         state.push_number(integral)?;
         state.push_number(fractional)?;
         Ok(2)
     }),
 ];
+
+// The computations below are shared by the callbacks above and by the
+// dispatch loop's direct execution of library leaves (`vm/leaf.rs`), so the
+// two paths cannot drift apart.
+
+/// One step of `math.min`: the running minimum after seeing `v`.
+pub(crate) fn min_step(result: f64, v: f64) -> f64 {
+    if v < result { v } else { result }
+}
+
+/// One step of `math.max`: the running maximum after seeing `v`.
+pub(crate) fn max_step(result: f64, v: f64) -> f64 {
+    if v > result { v } else { result }
+}
+
+/// `math.atan(y [, x])`.
+pub(crate) fn atan_of(y: f64, x: Option<f64>) -> f64 {
+    match x {
+        Some(x) => crmath::atan2(y, x),
+        None => crmath::atan(y),
+    }
+}
+
+/// `math.log(x [, base])`.
+pub(crate) fn log_of(x: f64, base: Option<f64>) -> f64 {
+    let Some(base) = base else {
+        return crmath::ln(x);
+    };
+    // Like Lua 5.2, this special-cases base 10 with log10, which makes
+    // math.log(1000, 10) exactly 3 rather than 2.9999999999999996.
+    // Lua 5.4 also special-cases base 2 with log2; this VM deliberately
+    // uses the quotient of natural logs for every other base.
+    // Any other base is the quotient of two correctly rounded natural
+    // logarithms, rounded once more: deterministic, but not a
+    // correctly rounded log_base.
+    #[expect(
+        clippy::float_cmp,
+        reason = "Only the exact base 10 takes the log10 special case."
+    )]
+    let is_base_ten = base == 10.0;
+    if is_base_ten {
+        crmath::log10(x)
+    } else {
+        crmath::ln(x) / crmath::ln(base)
+    }
+}
+
+/// `math.modf(x)`: the integral part and the fraction, 0 when they are equal
+/// (so an infinity has a zero fraction).
+pub(crate) fn modf_of(x: f64) -> (f64, f64) {
+    let integral = x.trunc();
+    let fractional = if matches!(x.partial_cmp(&integral), Some(std::cmp::Ordering::Equal)) {
+        0.0
+    } else {
+        x - integral
+    };
+    (integral, fractional)
+}
+
+/// An integer `math.random` draw in `[m, n]` (`m <= n`). Each rejected draw
+/// is an interrupt safepoint; an interrupted draw leaves the stream unmoved
+/// (`VmRng::random_range_i64`).
+pub(crate) fn draw_range(state: &mut State, m: i64, n: i64) -> Result<f64> {
+    let flag = state.interrupt.flag();
+    match state.rng.random_range_i64(m, n, flag) {
+        // Dellingr numbers are f64, so draws outside +-2^53 can round.
+        Some(v) => Ok(v as f64),
+        None => Err(state.interrupted_error()),
+    }
+}
 
 pub(crate) fn open_math(state: &mut State) -> Result<()> {
     // Create the math table

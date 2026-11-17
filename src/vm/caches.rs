@@ -9,7 +9,7 @@ use super::object::{GcHeap, ObjectPtr};
 use super::table::{HashProbe, KeyedIndex, SlotRef};
 
 // Under `disable-inline-caches` every cache read misses (the builtin mirror
-// included). Only this crate's unit tests can turn hits back on, per thread,
+// included), and every library leaf declines to its callback (`vm/leaf.rs`). Only this crate's unit tests can turn hits back on, per thread,
 // through `HitMode`.
 #[cfg(all(feature = "disable-inline-caches", test))]
 std::thread_local! {

@@ -14,8 +14,9 @@
 //! The table is append-only and holds no heap values, so the collector never
 //! visits it and no entry is ever invalidated. The standard library's
 //! functions occupy fixed positions at the front of every State's table
-//! (`lua_std::catalog_functions`), so the VM can recognise `next` and the
-//! `ipairs` iterator by handle.
+//! (`lua_std::catalog_functions`), so the VM can recognise `next`, the
+//! `ipairs` iterator and the library leaves it executes directly
+//! (`vm/leaf.rs`) by handle.
 //!
 //! A catalog entry's name and id are compile-time strings (the catalog's
 //! `&'static str` ids), which the table borrows; only host entries own their
@@ -46,6 +47,13 @@ impl RustFnId {
 
     fn index(self) -> usize {
         self.0 as usize
+    }
+
+    /// The entry's position in its State's table; below
+    /// `lua_std::CATALOG_LEN` it is the catalog position.
+    #[inline(always)]
+    pub(crate) fn position(self) -> usize {
+        self.index()
     }
 
     /// Whether this is a standard-library catalog entry: dellingr's own
