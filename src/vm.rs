@@ -672,9 +672,12 @@ impl State {
         self.cost.charge_meter(charge)
     }
 
-    /// Flush before batching would hide exhaustion of a configured budget.
-    pub(super) fn cost_batch_needs_flush(&self, pending: u64) -> bool {
-        self.cost.batch_needs_flush(pending)
+    /// The pending opcode cost at which dispatch settles its batch: the
+    /// batching interval, lowered to what a configured budget has left so
+    /// batching never hides its exhaustion.
+    #[inline(always)]
+    pub(super) fn cost_flush_at(&self) -> u64 {
+        self.cost.flush_at()
     }
 
     /// The compiled program for the interned pattern string at stack slot `idx`,

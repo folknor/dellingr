@@ -249,23 +249,24 @@ mod tests {
     fn assert_exact_finite_cost(pattern: &[u8], subject: &[u8], cost: u64) {
         let mut matcher = LuaPattern::new(pattern);
         let cost_i64 = i64::try_from(cost).expect("test cost must fit in i64");
-        let mut remaining = cost_i64;
+        // A spent budget leaves the flush threshold at 0.
+        let mut flush_at = u64::MAX;
         let mut used = 0;
-        let mut meter = CostMeter::finite_budget(&mut remaining, &mut used);
+        let mut meter = CostMeter::finite_budget(cost_i64, &mut used, &mut flush_at);
         assert!(matcher.matches_bytes(subject, &mut meter).unwrap());
         assert_eq!(used, cost);
-        assert_eq!(remaining, 0);
+        assert_eq!(flush_at, 0);
 
         let mut matcher = LuaPattern::new(pattern);
-        let mut remaining = cost_i64 - 1;
+        let mut flush_at = u64::MAX;
         let mut used = 0;
-        let mut meter = CostMeter::finite_budget(&mut remaining, &mut used);
+        let mut meter = CostMeter::finite_budget(cost_i64 - 1, &mut used, &mut flush_at);
         assert!(matches!(
             matcher.matches_bytes(subject, &mut meter),
             Err(MatchError::BudgetExceeded)
         ));
         assert_eq!(used, cost - 1);
-        assert_eq!(remaining, 0);
+        assert_eq!(flush_at, 0);
     }
 
     #[test]
@@ -845,14 +846,14 @@ mod tests {
     #[test]
     fn finite_budget_stops_pathological_nested_greedies() {
         let mut matcher = LuaPattern::new(b"^a*a*a*b");
-        let mut remaining = 20;
+        let mut flush_at = u64::MAX;
         let mut used = 0;
-        let mut meter = CostMeter::finite_budget(&mut remaining, &mut used);
+        let mut meter = CostMeter::finite_budget(20, &mut used, &mut flush_at);
         assert!(matches!(
             matcher.matches_bytes(b"aaaa", &mut meter),
             Err(MatchError::BudgetExceeded)
         ));
         assert_eq!(used, 20);
-        assert_eq!(remaining, 0);
+        assert_eq!(flush_at, 0);
     }
 }

@@ -223,12 +223,12 @@ marker, which is the quickest way to see what a change touched.
 The recurring native stack of each scenario's cycle, as printed by the
 on-demand probe `brokkr test native_bytes_per_level`, which covers dev and
 release through the sweeps configured in `brokkr.toml`. Measured on the tree
-of the commit that returns unchanged string-library results as the values
-they are (parent 380266b), on bygg (x86-64 Linux),
+of the commit that settles batched opcode cost against one stored flush
+threshold (parent 158493a), on bygg (x86-64 Linux),
 `rustc 1.101.0-nightly (249c1e4e3 2026-11-05)`, with that host's global
 cargo configuration. Release is Cargo's default release profile (the
 repository sets no overrides). Dev default and dev snapshot agree in every
-row, and so do release and release with snapshot.
+row; release and release with snapshot differ by 16 bytes in a few rows.
 
 These are compiler-dependent measurements of one build, not limits and not
 assertions of headroom for another build; a different compiler version or
@@ -245,64 +245,64 @@ separately.
 
 | Scenario | Dev, also snapshot | Release | Release + snapshot |
 |---|---|---|---|
-| `index_field` | 9552 | 560 | 560 |
-| `index_method` | 9552 | 560 | 560 |
-| `index_key` | 9520 | 656 | 656 |
-| `index_rust` | 11536 | 992 | 992 |
-| `newindex_field` | 9792 | 688 | 688 |
-| `newindex_key` | 9568 | 672 | 672 |
-| `newindex_rust` | 11776 | 1120 | 1120 |
-| `length` | 9424 | 464 | 464 |
-| `string_index_field` | 9552 | 560 | 560 |
-| `string_index_key` | 9520 | 656 | 656 |
-| `index_string_handler` | 9552 | 560 | 560 |
-| `string_library_index` | 9552 | 560 | 560 |
-| `host_get_table` | 10896 | 896 | 896 |
-| `host_get_table_string` | 10896 | 896 | 896 |
-| `host_set_table` | 10992 | 880 | 880 |
-| `host_call` | 10560 | 832 | 832 |
-| `host_anchor` | 11104 | 992 | 992 |
-| `host_tostring_bytes` | 11584 | 1184 | 1184 |
-| `host_to_string_with_meta` | 11728 | 1200 | 1200 |
-| `tostring` | 10816 | 1008 | 1008 |
-| `print` | 11312 | 1168 | 1168 |
-| `format` | 12560 | 1504 | 1504 |
-| `error_tostring` | 11488 | 1296 | 1296 |
-| `sort_comparator` | 12480 | 1488 | 1488 |
-| `sort_comparator_right` | 12480 | 1488 | 1488 |
-| `sort_comparator_sortdown` | 12480 | 1488 | 1488 |
-| `callable_rust` | 12656 | 1552 | 1552 |
-| `tail_rust` | 10784 | 816 | 816 |
-| `tail_callable_rust` | 10960 | 880 | 880 |
-| `sort_metamethods_comparator` | 11840 | 1440 | 1440 |
-| `sort_metamethods_length` | 10848 | 1072 | 1072 |
-| `sort_metamethods_read` | 11152 | 1040 | 1040 |
-| `sort_metamethods_write` | 11248 | 1024 | 1024 |
-| `insert_length` | 10800 | 1072 | 1072 |
-| `insert_shift_read` | 11104 | 1040 | 1040 |
-| `insert_shift_write` | 11216 | 1024 | 1024 |
-| `insert_value` | 11216 | 1024 | 1024 |
-| `remove_length` | 10768 | 1008 | 1008 |
-| `remove_read` | 11072 | 976 | 976 |
-| `remove_shift_read` | 11072 | 976 | 976 |
-| `remove_shift_write` | 11184 | 960 | 960 |
-| `remove_clear` | 11184 | 960 | 960 |
-| `concat_length` | 11440 | 1056 | 1056 |
-| `concat_read` | 11744 | 1024 | 1024 |
-| `move_read` | 11376 | 1024 | 1024 |
-| `move_write` | 11488 | 960 | 960 |
-| `unpack_length` | 10720 | 976 | 976 |
-| `unpack_read` | 11024 | 944 | 944 |
-| `gsub_empty_function` | 12608 | 1520 | 1520 |
-| `gsub_plain_function` | 12496 | 1520 | 1520 |
-| `gsub_pattern_function` | 15840 | 3184 | 3184 |
-| `gsub_pattern_captures` | 15840 | 3184 | 3184 |
-| `gsub_empty_table` | 12496 | 1456 | 1456 |
-| `gsub_plain_table` | 12384 | 1456 | 1456 |
-| `gsub_pattern_table` | 15728 | 3120 | 3120 |
-| `tfor_lua` | 9584 | 704 | 704 |
-| `tfor_ipairs` | 11264 | 1040 | 1040 |
-| `tfor_host_iterator` | 11056 | 944 | 944 |
+| `index_field` | 9616 | 560 | 560 |
+| `index_method` | 9616 | 560 | 560 |
+| `index_key` | 9584 | 656 | 656 |
+| `index_rust` | 11600 | 992 | 992 |
+| `newindex_field` | 9856 | 688 | 688 |
+| `newindex_key` | 9632 | 672 | 672 |
+| `newindex_rust` | 11840 | 1120 | 1120 |
+| `length` | 9488 | 464 | 464 |
+| `string_index_field` | 9616 | 560 | 560 |
+| `string_index_key` | 9584 | 656 | 656 |
+| `index_string_handler` | 9616 | 560 | 560 |
+| `string_library_index` | 9616 | 560 | 560 |
+| `host_get_table` | 10960 | 896 | 896 |
+| `host_get_table_string` | 10960 | 896 | 896 |
+| `host_set_table` | 11056 | 880 | 880 |
+| `host_call` | 10624 | 832 | 832 |
+| `host_anchor` | 11168 | 992 | 992 |
+| `host_tostring_bytes` | 11648 | 1184 | 1184 |
+| `host_to_string_with_meta` | 11824 | 1232 | 1232 |
+| `tostring` | 10880 | 1008 | 1008 |
+| `print` | 11376 | 1184 | 1168 |
+| `format` | 12624 | 1504 | 1504 |
+| `error_tostring` | 11552 | 1296 | 1296 |
+| `sort_comparator` | 12544 | 1488 | 1488 |
+| `sort_comparator_right` | 12544 | 1488 | 1488 |
+| `sort_comparator_sortdown` | 12544 | 1488 | 1488 |
+| `callable_rust` | 12720 | 1552 | 1552 |
+| `tail_rust` | 10848 | 816 | 816 |
+| `tail_callable_rust` | 11024 | 880 | 880 |
+| `sort_metamethods_comparator` | 11904 | 1440 | 1440 |
+| `sort_metamethods_length` | 10912 | 1072 | 1072 |
+| `sort_metamethods_read` | 11216 | 1040 | 1040 |
+| `sort_metamethods_write` | 11312 | 1024 | 1024 |
+| `insert_length` | 10864 | 1072 | 1072 |
+| `insert_shift_read` | 11168 | 1040 | 1040 |
+| `insert_shift_write` | 11280 | 1024 | 1024 |
+| `insert_value` | 11280 | 1024 | 1024 |
+| `remove_length` | 10832 | 1008 | 1008 |
+| `remove_read` | 11136 | 976 | 976 |
+| `remove_shift_read` | 11136 | 976 | 976 |
+| `remove_shift_write` | 11248 | 960 | 960 |
+| `remove_clear` | 11248 | 960 | 960 |
+| `concat_length` | 11504 | 1056 | 1056 |
+| `concat_read` | 11808 | 1024 | 1024 |
+| `move_read` | 11456 | 1040 | 1040 |
+| `move_write` | 11568 | 976 | 976 |
+| `unpack_length` | 10784 | 976 | 976 |
+| `unpack_read` | 11088 | 944 | 944 |
+| `gsub_empty_function` | 12672 | 1520 | 1520 |
+| `gsub_plain_function` | 12560 | 1520 | 1520 |
+| `gsub_pattern_function` | 15904 | 3168 | 3184 |
+| `gsub_pattern_captures` | 15904 | 3168 | 3184 |
+| `gsub_empty_table` | 12560 | 1456 | 1456 |
+| `gsub_plain_table` | 12448 | 1456 | 1456 |
+| `gsub_pattern_table` | 15792 | 3104 | 3120 |
+| `tfor_lua` | 9648 | 704 | 704 |
+| `tfor_ipairs` | 11328 | 1040 | 1040 |
+| `tfor_host_iterator` | 11120 | 944 | 944 |
 | `chain_index` | 0 | 0 | 0 |
 | `chain_newindex` | 0 | 0 | 0 |
 

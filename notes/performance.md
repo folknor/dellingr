@@ -216,35 +216,6 @@ stack and stack-cap admission.
 **Classification:** rewrite, complementary to region accounting (appended to
 `optimizations.md` "Cost accounting on every arithmetic op").
 
-## PERF-007 - Cheaper per-charge settlement test and one authoritative counter
-
-Raised by the cost-charging hunter.
-
-**Bottleneck:** for every positively weighted opcode the loop reads the
-weight, zero-checks it, saturating-adds pending, compares with the batching
-interval, and unless that succeeds consults the optional finite budget and
-computes whether pending reaches it (`batch_needs_flush`, `cost_meter.rs`).
-Settlement then updates `used` and, for a finite budget, `remaining`, although
-snapshot validation already enforces `remaining = limit.saturating_sub_unsigned(used)`.
-`Costing::Off` works by supplying zero weights, so charged handlers still take
-the weight/zero decision.
-
-**Redesign:** after settlement or a native return compute one threshold
-(count-only: interval; finite: `min(interval, max(remaining, 0))`), so each
-charge accumulates and compares once; threshold zero routes the next positive
-charge to refusal. Pending stays below 64 between settlements and charges are
-bounded, so its addition needs no u64 saturation (persistent totals still do).
-Separately, admit with `limit > 0 && used < limit as u64`, update only `used`,
-and derive `remaining` for the API and snapshot encoder, keeping the
-configured-budget flag (a finite `i64::MAX` budget differs from count-only)
-and the snapshot fields.
-
-**Risks:** one accumulator dependency per charged instruction remains; load
-hoisting and register placement need compiled-code inspection before any
-estimate.
-
-**Classification:** local changes; not a substitute for region accounting.
-
 ## PERF-008 - Rust library calls go through the host stack protocol
 
 Raised by the calls hunter (its third rewrite) and the host-boundary hunter

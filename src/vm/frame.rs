@@ -15,8 +15,6 @@ use super::Val;
 use super::object::UpvalueRef;
 use crate::cost_model::Charge;
 use crate::instr::{ArgCount, CompareOp, RetCount};
-#[cfg(not(feature = "cost-check-interval"))]
-use crate::limits::tuning;
 
 /// A `Frame` represents a single stack-frame of a Lua function.
 ///
@@ -250,30 +248,39 @@ impl Frame {
     ) -> Result<Leave> {
         let code: &[Instr] = &frame.bytecode.code;
         let base = frame.stack_bottom;
+        // A fixed charge is one weight, at most `u32::MAX`, and pending cost
+        // stays below the flush threshold, at most `COST_CHECK_INTERVAL`, so
+        // the production sum cannot overflow. The debug interval override
+        // accepts any positive interval, so that build saturates.
         #[cfg(not(feature = "cost-check-interval"))]
-        macro_rules! check_interval {
-            () => {
-                tuning::COST_CHECK_INTERVAL
+        macro_rules! add_weight {
+            ($pending:expr, $weight:expr) => {
+                $pending + $weight
             };
         }
         #[cfg(feature = "cost-check-interval")]
-        macro_rules! check_interval {
-            () => {
-                crate::cost_meter::interval_test::interval()
+        macro_rules! add_weight {
+            ($pending:expr, $weight:expr) => {
+                ($pending).saturating_add($weight)
             };
         }
 
-        /// Macro to accumulate cost and flush when threshold is reached
+        /// Macro to accumulate cost and flush when threshold is reached.
+        /// `$cost` is a fixed weight; `@unbounded $cost` is a charge of any
+        /// size (a SET_LIST element count times its weight).
         macro_rules! add_cost {
-            ($cost:expr) => {{
-                let next = (*local_cost).saturating_add($cost);
+            (@next $next:expr, $cost:expr) => {{
+                let next = $next;
                 // This decides when to flush, not whether to accept a charge.
-                // consume_cost owns the runtime meter's admission rule. A
-                // finite budget also flushes before pending cost would exhaust
-                // it, so the interval does not change the charged prefix or
-                // `cost_used` at `BudgetExceeded`; any other error settles the
-                // pending batch in `Frame::run`.
-                if next >= check_interval!() || state.cost_batch_needs_flush(next) {
+                // consume_cost owns the runtime meter's admission rule. The
+                // threshold is the batching interval, lowered for a finite
+                // budget to what it has left, so pending cost is settled
+                // before it would exhaust the budget: the interval does not
+                // change the charged prefix or `cost_used` at
+                // `BudgetExceeded`, and a spent budget (threshold 0) sends the
+                // next positive charge straight to admission. Any other error
+                // settles the pending batch in `Frame::run`.
+                if next >= state.cost_flush_at() {
                     Self::settle_cost(state, local_cost, next)?;
                 } else {
                     *local_cost = next;
@@ -281,6 +288,12 @@ impl Frame {
                 #[cfg(feature = "cost-check-interval")]
                 crate::cost_meter::interval_test::record(*ip, $cost);
             }};
+            (@unbounded $cost:expr) => {
+                add_cost!(@next (*local_cost).saturating_add($cost), $cost)
+            };
+            ($cost:expr) => {
+                add_cost!(@next add_weight!(*local_cost, $cost), $cost)
+            };
         }
 
         // Which charge an arm makes is a compile-time constant; its weight is
@@ -519,7 +532,7 @@ impl Frame {
                         .cost
                         .cost(Instr::SET_LIST_ELEMENT_CHARGE, count as u64);
                     if units != 0 {
-                        add_cost!(units);
+                        add_cost!(@unbounded units);
                     }
                     state.reg_set_list(ra, count, inst.c())?;
                     if inst.set_list_count().is_none() {

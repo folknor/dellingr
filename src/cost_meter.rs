@@ -107,24 +107,63 @@ pub(crate) mod interval_test {
     }
 }
 
+/// The opcode batching interval: the production constant, or under the
+/// debug `cost-check-interval` feature the current scope's override, read
+/// when a [`CostState`] recomputes its flush threshold.
+#[inline(always)]
+fn batch_interval() -> u64 {
+    #[cfg(not(feature = "cost-check-interval"))]
+    {
+        crate::limits::tuning::COST_CHECK_INTERVAL
+    }
+    #[cfg(feature = "cost-check-interval")]
+    {
+        interval_test::interval()
+    }
+}
+
+/// What a finite budget still admits: `limit - used`, clamped at 0. A
+/// positive charge is admitted exactly when this is above 0.
+#[inline(always)]
+fn room(limit: i64, used: u64) -> u64 {
+    u64::try_from(limit).map_or(0, |limit| limit.saturating_sub(used))
+}
+
+/// The pending opcode cost at which dispatch settles its batch: the interval,
+/// or for a finite budget the room left if that is smaller, so the batch is
+/// settled before it would reach the budget edge. Zero once the budget is
+/// spent, so the next positive charge goes straight to admission and fails.
+#[inline(always)]
+fn flush_threshold(limit: Option<i64>, used: u64) -> u64 {
+    let interval = batch_interval();
+    limit.map_or(interval, |limit| interval.min(room(limit, used)))
+}
+
 /// Owned runtime accounting: the State's fixed costing, and its counters with
 /// one representation of an optional budget.
+///
+/// `used` is the one authoritative counter. A finite budget stores only its
+/// limit; what remains is derived as `limit - used` (saturating), which is
+/// exactly what a separately decremented remainder would hold, saturation at
+/// `u64::MAX` used and `i64::MIN` remaining included.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CostState {
     costing: Costing,
     /// The weights charge sites read: the metered model's, or every weight 0
     /// when costing is off, so a dispatch arm skips its charge either way.
     effective: CostModel,
-    /// Always `None` when costing is off.
-    budget: Option<Budget>,
+    /// The finite budget's limit. Always `None` when costing is off.
+    limit: Option<i64>,
     /// Always 0 when costing is off.
     used: u64,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Budget {
-    limit: i64,
-    remaining: i64,
+    /// The dispatch loop's one settlement test reads this (`pending >=
+    /// flush_at`), so every change to `limit` or `used` recomputes it:
+    /// construction, `set_budget`, snapshot load and every finite
+    /// [`CostMeter`] charge. Count-only and off thresholds do not depend on
+    /// `used`, so counting charges leave it alone. Under the debug
+    /// `cost-check-interval` feature it captures the interval in scope when
+    /// it was computed, so a test builds and runs its State inside one scope.
+    flush_at: u64,
 }
 
 impl Default for CostState {
@@ -143,8 +182,9 @@ impl CostState {
         Self {
             costing,
             effective,
-            budget: None,
+            limit: None,
             used: 0,
+            flush_at: flush_threshold(None, 0),
         }
     }
 
@@ -164,6 +204,12 @@ impl CostState {
         self.effective.cost(charge, units)
     }
 
+    /// The pending opcode cost at which dispatch must settle its batch.
+    #[inline(always)]
+    pub(crate) fn flush_at(&self) -> u64 {
+        self.flush_at
+    }
+
     /// A meter whose unit costs the weight of `charge`.
     pub(crate) fn charge_meter(&mut self, charge: Charge) -> CostMeter<'_> {
         let unit = self.weight(charge);
@@ -176,11 +222,9 @@ impl CostState {
         if matches!(self.costing, Costing::Off) {
             return false;
         }
-        self.budget = Some(Budget {
-            limit,
-            remaining: limit,
-        });
+        self.limit = Some(limit);
         self.used = 0;
+        self.flush_at = flush_threshold(self.limit, self.used);
         true
     }
 
@@ -189,16 +233,12 @@ impl CostState {
     }
 
     pub(crate) fn remaining(&self) -> i64 {
-        self.budget.map_or(i64::MAX, |budget| budget.remaining)
+        self.limit
+            .map_or(i64::MAX, |limit| limit.saturating_sub_unsigned(self.used))
     }
 
     pub(crate) fn limit(&self) -> i64 {
-        self.budget.map_or(i64::MAX, |budget| budget.limit)
-    }
-
-    pub(crate) fn batch_needs_flush(&self, pending: u64) -> bool {
-        self.budget
-            .is_some_and(|budget| budget.remaining.saturating_sub_unsigned(pending) <= 0)
+        self.limit.unwrap_or(i64::MAX)
     }
 
     /// A meter charging raw cost (unit cost 1).
@@ -206,8 +246,8 @@ impl CostState {
         if matches!(self.costing, Costing::Off) {
             return CostMeter::Off;
         }
-        match &mut self.budget {
-            Some(budget) => CostMeter::finite_budget(&mut budget.remaining, &mut self.used),
+        match self.limit {
+            Some(limit) => CostMeter::finite_budget(limit, &mut self.used, &mut self.flush_at),
             None => CostMeter::count_only(&mut self.used),
         }
     }
@@ -218,7 +258,7 @@ impl CostState {
         (
             self.remaining(),
             self.limit(),
-            self.budget.is_some(),
+            self.limit.is_some(),
             self.used,
         )
     }
@@ -228,7 +268,8 @@ impl CostState {
     /// unbounded sentinels, a configured one must satisfy
     /// `remaining == limit - used` (saturating) with no use against a budget
     /// that started exhausted, and costing that is off has neither a budget
-    /// nor any use.
+    /// nor any use. The saved `remaining` is validated, then dropped: it is
+    /// derived from `limit` and `used`.
     #[cfg(feature = "snapshot")]
     pub(crate) fn from_snapshot(
         costing: Costing,
@@ -237,23 +278,24 @@ impl CostState {
         configured: bool,
         used: u64,
     ) -> Option<Self> {
-        let budget = if configured {
+        let limit = if configured {
             if (limit <= 0 && used != 0) || remaining != limit.saturating_sub_unsigned(used) {
                 return None;
             }
-            Some(Budget { limit, remaining })
+            Some(limit)
         } else {
             if remaining != i64::MAX || limit != i64::MAX {
                 return None;
             }
             None
         };
-        if matches!(costing, Costing::Off) && (budget.is_some() || used != 0) {
+        if matches!(costing, Costing::Off) && (limit.is_some() || used != 0) {
             return None;
         }
         let mut state = Self::new(costing);
-        state.budget = budget;
+        state.limit = limit;
         state.used = used;
+        state.flush_at = flush_threshold(limit, used);
         Some(state)
     }
 }
@@ -272,10 +314,12 @@ pub(crate) enum CostMeter<'a> {
     Off,
     /// Counts work while no budget has been configured.
     CountOnly { used: &'a mut u64, unit: u64 },
-    /// Counts work and checks it against a configured budget.
+    /// Counts work and checks it against a configured budget, keeping the
+    /// dispatch flush threshold in step with `used`.
     FiniteBudget {
-        remaining: &'a mut i64,
+        limit: i64,
         used: &'a mut u64,
+        flush_at: &'a mut u64,
         unit: u64,
     },
 }
@@ -287,11 +331,12 @@ impl<'a> CostMeter<'a> {
     }
 
     /// Creates a meter for an explicitly configured finite budget, with unit
-    /// cost 1.
-    pub(crate) fn finite_budget(remaining: &'a mut i64, used: &'a mut u64) -> Self {
+    /// cost 1. Every admitted charge rewrites `flush_at` for the new `used`.
+    pub(crate) fn finite_budget(limit: i64, used: &'a mut u64, flush_at: &'a mut u64) -> Self {
         Self::FiniteBudget {
-            remaining,
+            limit,
             used,
+            flush_at,
             unit: 1,
         }
     }
@@ -310,10 +355,9 @@ impl<'a> CostMeter<'a> {
     /// Charges `n` units with the exact outcome of `n` consecutive
     /// `consume(unit)` calls: on a finite budget the charge stops at the
     /// first unit that starts with nothing remaining and reports blocked,
-    /// leaving `used`/`remaining` exactly where the unit-at-a-time loop would
-    /// have left them. This lets scans that charge per comparison batch their
-    /// accounting without becoming observably different from the loop they
-    /// replaced.
+    /// leaving `used` exactly where the unit-at-a-time loop would have left
+    /// it. This lets scans that charge per comparison batch their accounting
+    /// without becoming observably different from the loop they replaced.
     #[inline]
     pub(crate) fn consume_units(&mut self, n: u64) -> bool {
         self.consume_units_admitted(n) == n
@@ -330,22 +374,22 @@ impl<'a> CostMeter<'a> {
                 n
             }
             Self::FiniteBudget {
-                remaining,
+                limit,
                 used,
+                flush_at,
                 unit,
             } => {
                 if n == 0 || *unit == 0 {
                     return n;
                 }
-                if **remaining <= 0 {
+                let room = room(*limit, **used);
+                if room == 0 {
                     return 0;
                 }
-                // Units that start with budget left: ceil(remaining / unit).
-                let startable = (**remaining as u64).div_ceil(*unit);
-                let allowed = n.min(startable);
-                let cost = allowed.saturating_mul(*unit);
-                **remaining = (**remaining).saturating_sub_unsigned(cost);
-                **used = (**used).saturating_add(cost);
+                // Units that start with budget left: ceil(room / unit).
+                let allowed = n.min(room.div_ceil(*unit));
+                **used = (**used).saturating_add(allowed.saturating_mul(*unit));
+                **flush_at = flush_threshold(Some(*limit), **used);
                 allowed
             }
         }
@@ -364,13 +408,16 @@ impl<'a> CostMeter<'a> {
                 true
             }
             Self::FiniteBudget {
-                remaining, used, ..
+                limit,
+                used,
+                flush_at,
+                ..
             } => {
-                if cost > 0 && **remaining <= 0 {
+                if cost > 0 && room(*limit, **used) == 0 {
                     return false;
                 }
-                **remaining = (**remaining).saturating_sub_unsigned(cost);
                 **used = (**used).saturating_add(cost);
+                **flush_at = flush_threshold(Some(*limit), **used);
                 true
             }
         }
@@ -484,9 +531,9 @@ mod tests {
     }
 
     /// Charge `n` units one at a time - the loop `consume_units` must match.
-    fn naive_units(remaining: &mut i64, used: &mut u64, n: u64, unit: u64) -> u64 {
+    fn naive_units(limit: i64, used: &mut u64, flush_at: &mut u64, n: u64, unit: u64) -> u64 {
         for admitted in 0..n {
-            if !CostMeter::finite_budget(remaining, used).consume(unit) {
+            if !CostMeter::finite_budget(limit, used, flush_at).consume(unit) {
                 return admitted;
             }
         }
@@ -498,16 +545,21 @@ mod tests {
         for unit in [0u64, 1, 2, 3, 7] {
             for start in [-3i64, 0, 1, 4, 5, 6, 100] {
                 for n in [0u64, 1, 4, 5, 6, 50] {
-                    let (mut rem_a, mut used_a) = (start, 7u64);
-                    let (mut rem_b, mut used_b) = (start, 7u64);
-                    let batched = CostMeter::finite_budget(&mut rem_a, &mut used_a)
+                    // `start` is what remains: `limit - used`.
+                    let limit = start + 7;
+                    // Both start from a consistent threshold, which a charge
+                    // that changes nothing may leave untouched.
+                    let flush = super::flush_threshold(Some(limit), 7);
+                    let (mut used_a, mut flush_a) = (7u64, flush);
+                    let (mut used_b, mut flush_b) = (7u64, flush);
+                    let batched = CostMeter::finite_budget(limit, &mut used_a, &mut flush_a)
                         .with_unit(unit)
                         .consume_units_admitted(n);
-                    let looped = naive_units(&mut rem_b, &mut used_b, n, unit);
+                    let looped = naive_units(limit, &mut used_b, &mut flush_b, n, unit);
                     let at = format!("unit={unit} start={start} n={n}");
                     assert_eq!(batched, looped, "admitted mismatch at {at}");
-                    assert_eq!(rem_a, rem_b, "remaining mismatch at {at}");
                     assert_eq!(used_a, used_b, "used mismatch at {at}");
+                    assert_eq!(flush_a, flush_b, "threshold mismatch at {at}");
                 }
             }
         }

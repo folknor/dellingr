@@ -131,10 +131,10 @@ for the same registers as handler temporaries.
 
 ### Cost accounting on every arithmetic op
 
-What: `add_cost!` runs on every costed op: a saturating add into the local
-batch plus a compare against `COST_CHECK_INTERVAL` and a
-`cost_batch_needs_flush` load from `State`. Arithmetic ops cost 1 each, so
-the bookkeeping is a large fraction of their work.
+What: `add_cost!` runs on every costed op: a weight load and zero check, an
+add into the local batch and one compare against the flush threshold
+`CostState` keeps in `State`. Arithmetic ops cost 1 each, so the bookkeeping
+is still a large fraction of their work.
 
 Sketch: charge straight-line runs of fixed-cost ops once per basic block
 (the compiler knows the block's static cost), or keep the batch in a
