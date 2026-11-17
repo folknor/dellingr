@@ -193,6 +193,9 @@ fn set_field_cache_handles_assigning_nil_as_delete() {
     assert_eq!(val, 2.0);
 }
 
+// The method tests below call through one `call` function, so the call after
+// the mutation reaches the SELF site the first call warmed; two textual
+// `t:f()` sites would each get their own slot and the second would be cold.
 #[test]
 fn method_cache_revalidates_index_table_method_update() {
     let val = support::eval_number(
@@ -203,13 +206,14 @@ fn method_cache_revalidates_index_table_method_update() {
         end
 
         local t = setmetatable({}, { __index = methods })
-        local first = t:f()
+        local function call() return t:f() end
+        local first = call()
 
         function methods:f()
             return 2
         end
 
-        local second = t:f()
+        local second = call()
         return first * 10 + second
     "#,
     );
@@ -231,9 +235,10 @@ fn method_cache_revalidates_index_table_reassignment() {
 
         local mt = { __index = methods_a }
         local t = setmetatable({}, mt)
-        local first = t:f()
+        local function call() return t:f() end
+        local first = call()
         mt.__index = methods_b
-        local second = t:f()
+        local second = call()
         return first * 10 + second
     "#,
     );
@@ -253,10 +258,12 @@ fn method_cache_does_not_cache_index_function_result() {
                 end
             end
         })
-        return t:f() + t:f()
+        local function call() return t:f() end
+        local first = call()
+        return first * 10 + call()
     "#,
     );
-    assert_eq!(val, 3.0);
+    assert_eq!(val, 12.0);
 }
 
 fn expect_ok(code: &str) {

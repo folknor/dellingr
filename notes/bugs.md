@@ -18,21 +18,6 @@ one hunter per scope). Unverified: the fix pass decides which are real.
 
 ---
 
-## BUG-006 - Method-cache mutation tests do not exercise a warmed entry
-
-Raised by the lookup hunter. The two method-cache mutation tests in
-`tests/integration/runtime/field_cache_mutation.rs` use separate `t:f()` sites
-before and after the mutation. They verify results, but do not exercise
-revalidation of an entry that was warmed at the same site. Other route tests
-give overlapping coverage.
-
-## BUG-007 - The cache differential compares less than the observable contract
-
-Raised by the lookup hunter. `src/vm/cache_differential.rs` compares printed
-output, total cost and rendered errors. It discards return values and does not
-compare snapshot bytes or subsequent state behaviour, so a cache that corrupts
-only those would pass it.
-
 ## BUG-008 - Anchor drops from another thread can change collection survival
 
 Raised by the host-boundary hunter. Anchor drops queue their key under a mutex

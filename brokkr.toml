@@ -209,14 +209,17 @@ curated = true
 # library suite with hits forced off unless a test holds
 # `HitMode::required()` (the cache-hit tests do), so every other library test
 # also passes on the miss path, plus the corpus differential, which runs each
-# example with hits on and off and compares prints, cost and errors. A cache
-# test that asserts a hit without the guard fails here. The feature is
-# debug-only (compile_error) and appears in no other shape.
+# example with hits on and off and compares, for the chunk and a continuation
+# call of its `_bench`, prints, cost, errors, returned values and the saved
+# bytes after each. `snapshot` is required for those saves (the differential's
+# save floors fail without it) and also runs the snapshot library tests on the
+# miss path. A cache test that asserts a hit without the guard fails here. The
+# feature is debug-only (compile_error) and appears in no other shape.
 [[check]]
 name = "inline-cache-differential"
 profile = "dev"
 profile_required = true
-features = ["disable-inline-caches"]
+features = ["disable-inline-caches", "snapshot"]
 lib_tests = true
 curated = true
 
