@@ -529,29 +529,25 @@ must not keep a dropped runtime alive or name a stale one.
 
 **Classification:** experiment.
 
-## PERF-021 - Marking scans scalar payload
+## PERF-021 - Collections are paced by object count, not resident payload
 
-Raised by the heap hunter.
+Raised by the heap hunter. Verified by reading the code. Not measured.
 
-**Bottleneck:** `Table::mark_values` (`table.rs`) scans every array value after
-the dead-prefix hint and every stored hash key/value; numeric and boolean
-arrays get a full scan with no heap edges. The collection threshold counts
-objects and distinct strings, not table payload, so a large scalar array can
-be rescanned whenever unrelated allocations trigger a collection.
+**Bottleneck:** the threshold counts objects plus distinct strings. A live
+table with N slots counts as 1, so `Table::mark_values` rescans all N slots
+every time unrelated allocations reach L, the number of live allocations.
+That puts mark work per allocation at about N/L, which has no bound.
 
-**Redesign:** exact reference summaries in table storage: a count that skips a
-reference-free region, plus reference bitmaps for large mixed arrays, so the
-collector visits only positions holding strings or objects. Needs every write
-route (cached stores, bulk construction, shifts, sort writeback, snapshot
-load); `write_window` is an integration point, but the paths are not unified
-enough for a collector-only patch.
+**Redesign:** pace collections in Automatic mode by objects + strings +
+resident_bytes / W. Charge resident bytes at table and string backing growth,
+and service the pressure at Lua back-edges and call admission. The settled
+rulings and the link plan are in `notes/PERF-021-design.md`. Reference
+summaries were refused, with the reasoning at `mark_values`.
 
-**Risks:** bookkeeping is paid on mutation, so mutable reference-rich tables
-may lose; a missed update is a collection correctness bug; tombstone keys stay
-strong edges.
+**Risks:** collection timing becomes replay-visible. A missed charge mistimes
+collections but is never unsound.
 
-**Classification:** architectural collector change, medium conviction,
-workload-dependent.
+**Classification:** architectural collector change, chained.
 
 ## PERF-025 - Callback gsub replacements copy the returned value and captures
 

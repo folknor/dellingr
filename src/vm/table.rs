@@ -2703,6 +2703,17 @@ impl Table {
     /// Called by the GC during the mark phase.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(super) fn mark_values(&self, heap: &GcHeap, worklist: &mut Vec<ObjectPtr>) {
+        // Scalar slots are scanned on purpose. Reference summaries (a
+        // count or bitmap of string and object slots, so that this loop
+        // could skip regions with no references) were weighed and refused.
+        // Every array write route would have to keep them exact, and one
+        // missed update frees a live object. They would add cost to the
+        // array write paths, and they help only scalar arrays: a large
+        // array of references would still be rescanned on every
+        // collection. The real problem is how often collections run. The
+        // threshold counts objects and strings, not table storage, so the
+        // fix belongs in collection pacing: count resident table and string
+        // bytes toward the threshold.
         for value in &self.array[self.lead..] {
             value.mark_reachable(heap, worklist);
         }
