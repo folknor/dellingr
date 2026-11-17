@@ -90,19 +90,39 @@ impl VmRng {
             u128::from(self.next_u64())
         } else {
             let span = span as u64;
-            // 2^64 mod span, computed without overflowing u64.
-            let threshold = span.wrapping_neg() % span;
             let mut state = self.state;
-            loop {
-                let raw = Self::step(&mut state);
-                if raw >= threshold {
-                    self.state = state;
-                    break u128::from(raw % span);
+            let mut raw = Self::step(&mut state);
+            // The threshold `2^64 mod span` is below `span`, so a raw draw at
+            // or above `span` is accepted without computing it: the predicate
+            // `raw >= threshold` is unchanged, it is only evaluated lazily.
+            // For small game ranges that skips one of the two u64 divisions
+            // on nearly every call. Below `span` the threshold is computed
+            // once per call, and an accepted raw below `span` is its own
+            // remainder.
+            //
+            // Not done: caching span metadata or a reciprocal across calls.
+            // An exact remainder by reciprocal needs only a 64x64
+            // multiply-high and one correction, but its setup is a division,
+            // so it saves the remaining division only when a cached span
+            // repeats, at the price of a cache field and a hit check on every
+            // call; that saving competes with `math.random`'s argument
+            // validation, charge, stack push and f64 conversion. Unmeasured,
+            // not ruled out: a benchmark-backed attempt remains open.
+            let offset = if raw >= span {
+                raw % span
+            } else {
+                // 2^64 mod span, computed without overflowing u64.
+                let threshold = span.wrapping_neg() % span;
+                while raw < threshold {
+                    if crate::vm::interrupt_requested(interrupt) {
+                        return None;
+                    }
+                    raw = Self::step(&mut state);
                 }
-                if crate::vm::interrupt_requested(interrupt) {
-                    return None;
-                }
-            }
+                if raw < span { raw } else { raw % span }
+            };
+            self.state = state;
+            u128::from(offset)
         };
         Some((i128::from(start) + draw as i128) as i64)
     }
@@ -228,5 +248,83 @@ mod tests {
             first.random_range_i64(1, 6, &set),
             Some(1 + (0xE220_A839_7B1D_CDAF_u64 % 6) as i64)
         );
+    }
+
+    /// The eager mapping the lazy one must reproduce draw for draw.
+    fn eager(rng: &mut VmRng, span: u64) -> u64 {
+        let threshold = span.wrapping_neg() % span;
+        loop {
+            let raw = rng.next_u64();
+            if raw >= threshold {
+                break raw % span;
+            }
+        }
+    }
+
+    /// Offset into `[i64::MIN, i64::MIN + span - 1]` drawn by the VM path.
+    fn lazy(rng: &mut VmRng, span: u64) -> u64 {
+        let clear = AtomicBool::new(false);
+        let end = (i128::from(i64::MIN) + i128::from(span) - 1) as i64;
+        let v = rng
+            .random_range_i64(i64::MIN, end, &clear)
+            .expect("a clear flag never interrupts");
+        (i128::from(v) - i128::from(i64::MIN)) as u64
+    }
+
+    /// State after `n` raw draws from seed 0.
+    fn after(n: usize) -> VmRng {
+        let mut rng = VmRng::seed_from_u64(VmRng::DEFAULT_SEED);
+        for _ in 0..n {
+            rng.next_u64();
+        }
+        rng
+    }
+
+    const R1: u64 = 0xE220_A839_7B1D_CDAF;
+    const R3: u64 = 0x06C4_5D18_8009_454F;
+    const R4: u64 = 0xF88B_B8A8_724C_81EC;
+
+    #[test]
+    fn lazy_threshold_matches_the_eager_mapping_at_its_boundaries() {
+        // raw == span: accepted on the fast path, offset 0.
+        let mut rng = after(0);
+        assert_eq!(lazy(&mut rng, R1), 0);
+        assert_eq!(rng, after(1));
+
+        // raw == threshold: span = 2^64 - R3 (> 2^63) has threshold R3, so
+        // the third draw is accepted at the boundary and is its own offset.
+        let mut rng = after(2);
+        assert_eq!(lazy(&mut rng, R3.wrapping_neg()), R3);
+        assert_eq!(rng, after(3));
+
+        // Multiple rejections then acceptance above span: span 2^63 + 1 has
+        // threshold 2^63 - 1, which rejects draws two and three; draw four
+        // is above span and maps to R4 - span.
+        let span = (1_u64 << 63) + 1;
+        let mut rng = after(1);
+        assert_eq!(lazy(&mut rng, span), R4 - span);
+        assert_eq!(rng, after(4));
+
+        // Draw for draw against the eager mapping across span shapes,
+        // power-of-two spans (threshold 0) included.
+        for span in [
+            2,
+            3,
+            6,
+            1 << 20,
+            1 << 63,
+            (1 << 63) + 1,
+            0xF900_0000_0000_0000,
+            u64::MAX,
+            R1,
+            R1 + 1,
+        ] {
+            let mut a = VmRng::seed_from_u64(span);
+            let mut b = VmRng::seed_from_u64(span);
+            for _ in 0..256 {
+                assert_eq!(lazy(&mut a, span), eager(&mut b, span), "span {span:#x}");
+                assert_eq!(a, b);
+            }
+        }
     }
 }

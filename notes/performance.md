@@ -856,24 +856,6 @@ accuracy or small ULP error. Payoff depends on input distributions.
 **Classification:** numerical rewrite, lower conviction; after PERF-009,
 PERF-013 and PERF-028.
 
-## PERF-030 - RNG range mapping recomputed per draw
-
-Raised by the table-and-math-libraries hunter.
-
-**Bottleneck:** `random_range_i64` (`rng.rs`) recomputes `2^64 mod span` for
-every nondegenerate range, then maps accepted draws with `raw % span`.
-
-**Redesign:** cached span metadata or an exact reciprocal-based remainder for
-repeated game ranges.
-
-**Risks:** keep the exact rejection predicate and exact remainder; a
-multiply-high mapper changes which draws are accepted and what they produce.
-Singleton ranges consume no draw today. Not a reason to redesign SplitMix64 or
-batch draws. Keep the interrupt poll after each rejection and the
-commit-on-accept state copy.
-
-**Classification:** local.
-
 ## PERF-031 - Host calls into Lua assembled from independent stack operations
 
 Raised by the host-boundary hunter (the invocation half of its lead rewrite;
