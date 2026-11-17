@@ -711,32 +711,6 @@ template errors.
 
 **Classification:** rewrite, high conviction, narrower coverage.
 
-## PERF-027 - Default sort runs through clone-out and generic insert
-
-Raised by the table-and-math-libraries hunter.
-
-**Bottleneck:** the no-comparator path cannot call Lua or collect during
-comparisons, yet it clones through `get_array` (`table.rs`) and writes every
-element back through general `Table::insert` in `set_array`.
-
-**Redesign:** for a homogeneous range of numbers or strings, split the
-table-storage and string-pool borrows, establish that the range sorts without
-a comparison error, and run a specialized version of the same heap sort on the
-storage, keeping structural metadata, iteration behaviour and snapshot shape.
-Mixed or fallible ranges keep detached sorting, since today a failed
-comparison leaves the raw source unchanged.
-
-**Risks:** "no comparator" does not license any algorithm: `0` and `-0`
-compare equal but render differently, NaN makes `<` partial and its position
-is observable, and mixed-type errors depend on which operands meet first.
-Changing algorithm is defensible only for a range proven to have a unique
-observable result (distinct non-NaN numbers), and proving that costs.
-Interrupted in-place sorts need deliberate treatment, since the detached path
-leaves storage untouched until writeback.
-
-**Classification:** targeted structural change, high conviction; needs table
-scope cooperation, not new storage.
-
 ## PERF-029 - Certified fast phase for transcendental math
 
 Raised by the table-and-math-libraries hunter.

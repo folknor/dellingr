@@ -181,8 +181,16 @@ name = "table_sort_values"
 owner = "State"
 
 [[function]]
+name = "table_sort_default"
+owner = "State"
+
+[[function]]
 name = "table_sort_less"
 owner = "State"
+
+[[function]]
+name = "heap_less"
+owner = "LuaSortOps"
 
 [[function]]
 name = "table_sort_heap"
@@ -435,8 +443,20 @@ id = "set_table_unguarded->call_unguarded"
 id = "table_sort->table_sort_values:comparator"
 
 [[edge]]
-id = "table_sort->table_sort_values:default"
+id = "table_sort->table_sort_default"
 excluded = "no comparator: the default comparison only reads numbers and strings and cannot re-enter Lua"
+
+[[edge]]
+id = "table_sort_default->table_sort_values"
+excluded = "no comparator: the generic backend's default comparison cannot re-enter Lua"
+
+[[edge]]
+id = "table_sort_default->table_sort_heap:numbers"
+excluded = "the number backend compares f64 keys and cannot re-enter Lua"
+
+[[edge]]
+id = "table_sort_default->table_sort_heap:strings"
+excluded = "the string backend compares borrowed bytes and cannot re-enter Lua"
 
 [[edge]]
 id = "table_sort_values->table_sort_heap"
@@ -451,10 +471,13 @@ id = "table_sort_heap->table_sort_sift_down:heapify"
 id = "table_sort_heap->table_sort_sift_down:sortdown"
 
 [[edge]]
-id = "table_sort_sift_down->table_sort_less:left"
+id = "table_sort_sift_down->heap_less:left"
 
 [[edge]]
-id = "table_sort_sift_down->table_sort_less:right"
+id = "table_sort_sift_down->heap_less:right"
+
+[[edge]]
+id = "heap_less->table_sort_less"
 
 [[edge]]
 id = "table_sort_less->call_unguarded"
@@ -837,7 +860,8 @@ path = [
     "table_sort->table_sort_values:comparator",
     "table_sort_values->table_sort_heap",
     "table_sort_heap->table_sort_sift_down:heapify",
-    "table_sort_sift_down->table_sort_less:left",
+    "table_sort_sift_down->heap_less:left",
+    "heap_less->table_sort_less",
     "@sort_comparator",
 ]
 
@@ -849,7 +873,8 @@ path = [
     "table_sort->table_sort_values:comparator",
     "table_sort_values->table_sort_heap",
     "table_sort_heap->table_sort_sift_down:heapify",
-    "table_sort_sift_down->table_sort_less:right",
+    "table_sort_sift_down->heap_less:right",
+    "heap_less->table_sort_less",
     "@sort_comparator",
 ]
 
@@ -861,7 +886,8 @@ path = [
     "table_sort->table_sort_values:comparator",
     "table_sort_values->table_sort_heap",
     "table_sort_heap->table_sort_sift_down:sortdown",
-    "table_sort_sift_down->table_sort_less:left",
+    "table_sort_sift_down->heap_less:left",
+    "heap_less->table_sort_less",
     "@sort_comparator",
 ]
 
@@ -877,7 +903,8 @@ path = [
     "table_sort->table_sort_values:comparator",
     "table_sort_values->table_sort_heap",
     "table_sort_heap->table_sort_sift_down:heapify",
-    "table_sort_sift_down->table_sort_less:left",
+    "table_sort_sift_down->heap_less:left",
+    "heap_less->table_sort_less",
     "@sort_comparator",
 ]
 
@@ -910,7 +937,8 @@ path = [
     "sort_through_metamethods->table_sort_scratch",
     "table_sort_scratch->table_sort_heap",
     "table_sort_heap->table_sort_sift_down:heapify",
-    "table_sort_sift_down->table_sort_less:left",
+    "table_sort_sift_down->heap_less:left",
+    "heap_less->table_sort_less",
     "@sort_comparator",
 ]
 

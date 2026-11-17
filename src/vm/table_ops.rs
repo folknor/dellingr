@@ -105,12 +105,100 @@ impl TableSortAccess for ScratchTableSortAccess {
     }
 }
 
-fn table_sort_heap<A: TableSortAccess>(
-    state: &mut State,
-    access: &mut A,
-    n: usize,
+/// What the one heap sort needs from the thing it sorts: a safepoint, the
+/// ordering of two positions, and a swap. Every `table.sort` runs the same
+/// `table_sort_heap` over one of these, so equal inputs see the same
+/// comparisons in the same order whichever backend holds them; a backend
+/// only changes how a position is read and compared, never which positions
+/// are compared.
+trait HeapSortOps {
+    fn heap_poll(&mut self) -> Result<()>;
+    /// Whether position `a` sorts before position `b`.
+    fn heap_less(&mut self, a: usize, b: usize) -> Result<bool>;
+    fn heap_swap(&mut self, a: usize, b: usize) -> Result<()>;
+}
+
+/// The backend that can run Lua: values read raw through a
+/// `TableSortAccess` and ordered by `State::table_sort_less`, the comparator
+/// when there is one, the default comparison (and its error) otherwise.
+struct LuaSortOps<'s, A> {
+    state: &'s mut State,
+    access: A,
     comp_idx: Option<usize>,
-) -> Result<()> {
+}
+
+impl<A: TableSortAccess> HeapSortOps for LuaSortOps<'_, A> {
+    fn heap_poll(&mut self) -> Result<()> {
+        self.state.poll_interrupt()
+    }
+
+    fn heap_less(&mut self, a: usize, b: usize) -> Result<bool> {
+        let a_value = self.access.get(self.state, a)?;
+        let b_value = self.access.get(self.state, b)?;
+        crate::native_call!(
+            "heap_less->table_sort_less",
+            self.state.table_sort_less(a_value, b_value, self.comp_idx)
+        )
+    }
+
+    fn heap_swap(&mut self, a: usize, b: usize) -> Result<()> {
+        let a_value = self.access.get(self.state, a)?;
+        let b_value = self.access.get(self.state, b)?;
+        self.access.set(self.state, a, b_value)?;
+        self.access.set(self.state, b, a_value)?;
+        Ok(())
+    }
+}
+
+/// Default sort of a range that is all numbers: plain `f64 <`, exactly the
+/// default comparison's number case, so NaN and `-0` land where the generic
+/// path puts them. Holds the State shared, for the safepoint only.
+struct NumSortOps<'s> {
+    state: &'s State,
+    keys: &'s mut [f64],
+}
+
+impl HeapSortOps for NumSortOps<'_> {
+    fn heap_poll(&mut self) -> Result<()> {
+        self.state.poll_interrupt()
+    }
+
+    fn heap_less(&mut self, a: usize, b: usize) -> Result<bool> {
+        Ok(self.keys[a] < self.keys[b])
+    }
+
+    fn heap_swap(&mut self, a: usize, b: usize) -> Result<()> {
+        self.keys.swap(a, b);
+        Ok(())
+    }
+}
+
+/// Default sort of a range that is all strings: each element's bytes are
+/// resolved from the string pool once, then compared as byte slices, the
+/// default comparison's string case. The default sort cannot run Lua or
+/// collect, and the source table holds every string, so the borrowed bytes
+/// stay valid for the whole sort.
+struct StrSortOps<'k, 's> {
+    state: &'s State,
+    keys: &'k mut [(&'s [u8], Val)],
+}
+
+impl HeapSortOps for StrSortOps<'_, '_> {
+    fn heap_poll(&mut self) -> Result<()> {
+        self.state.poll_interrupt()
+    }
+
+    fn heap_less(&mut self, a: usize, b: usize) -> Result<bool> {
+        Ok(self.keys[a].0 < self.keys[b].0)
+    }
+
+    fn heap_swap(&mut self, a: usize, b: usize) -> Result<()> {
+        self.keys.swap(a, b);
+        Ok(())
+    }
+}
+
+fn table_sort_heap<O: HeapSortOps>(ops: &mut O, n: usize) -> Result<()> {
     // Interrupt safepoints: every heapify root, sortdown step, sift level
     // and reversal swap. The default comparator calls no Lua, so without
     // them the O(n log n) comparisons would run uninterruptible.
@@ -118,79 +206,57 @@ fn table_sort_heap<A: TableSortAccess>(
     for root in (0..n / 2).rev() {
         crate::native_call!(
             "table_sort_heap->table_sort_sift_down:heapify",
-            table_sort_sift_down(state, access, root, n, comp_idx)
+            table_sort_sift_down(ops, root, n)
         )?;
     }
+    // safepoint: `heap_poll` (every backend's is `State::poll_interrupt`).
     for end in (1..n).rev() {
-        state.poll_interrupt()?;
-        table_sort_swap(state, access, 0, end)?;
+        ops.heap_poll()?;
+        ops.heap_swap(0, end)?;
         crate::native_call!(
             "table_sort_heap->table_sort_sift_down:sortdown",
-            table_sort_sift_down(state, access, 0, end, comp_idx)
+            table_sort_sift_down(ops, 0, end)
         )?;
     }
+    // safepoint: `heap_poll`, as above.
     for index in 0..n / 2 {
-        state.poll_interrupt()?;
-        table_sort_swap(state, access, index, n - 1 - index)?;
+        // Distinct positions: `index < n / 2` puts `n - 1 - index` past it.
+        ops.heap_poll()?;
+        ops.heap_swap(index, n - 1 - index)?;
     }
     Ok(())
 }
 
-fn table_sort_sift_down<A: TableSortAccess>(
-    state: &mut State,
-    access: &mut A,
-    mut root: usize,
-    end: usize,
-    comp_idx: Option<usize>,
-) -> Result<()> {
+fn table_sort_sift_down<O: HeapSortOps>(ops: &mut O, mut root: usize, end: usize) -> Result<()> {
+    // safepoint: `heap_poll` per level (`State::poll_interrupt` in every backend).
     loop {
-        state.poll_interrupt()?;
+        ops.heap_poll()?;
         let left = root * 2 + 1;
         if left >= end {
             return Ok(());
         }
         let mut smallest = root;
-        let left_value = access.get(state, left)?;
-        let smallest_value = access.get(state, smallest)?;
         if crate::native_call!(
-            "table_sort_sift_down->table_sort_less:left",
-            state.table_sort_less(left_value, smallest_value, comp_idx)
+            "table_sort_sift_down->heap_less:left",
+            ops.heap_less(left, smallest)
         )? {
             smallest = left;
         }
         let right = left + 1;
-        if right < end {
-            let right_value = access.get(state, right)?;
-            let smallest_value = access.get(state, smallest)?;
-            if crate::native_call!(
-                "table_sort_sift_down->table_sort_less:right",
-                state.table_sort_less(right_value, smallest_value, comp_idx)
-            )? {
-                smallest = right;
-            }
+        if right < end
+            && crate::native_call!(
+                "table_sort_sift_down->heap_less:right",
+                ops.heap_less(right, smallest)
+            )?
+        {
+            smallest = right;
         }
         if smallest == root {
             return Ok(());
         }
-        table_sort_swap(state, access, root, smallest)?;
+        ops.heap_swap(root, smallest)?;
         root = smallest;
     }
-}
-
-fn table_sort_swap<A: TableSortAccess>(
-    state: &mut State,
-    access: &mut A,
-    a: usize,
-    b: usize,
-) -> Result<()> {
-    if a == b {
-        return Ok(());
-    }
-    let a_value = access.get(state, a)?;
-    let b_value = access.get(state, b)?;
-    access.set(state, a, b_value)?;
-    access.set(state, b, a_value)?;
-    Ok(())
 }
 
 impl State {
@@ -1038,10 +1104,24 @@ impl State {
             // allocates only the Rust error, not VM objects), and the
             // source table holds every element until writeback. Rooting here
             // would just copy the array twice more for nothing.
-            None => crate::native_call!(
-                "table_sort->table_sort_values:default",
-                self.table_sort_values(&mut arr, comp_idx)
-            )?,
+            None => {
+                crate::native_call!(
+                    "table_sort->table_sort_default",
+                    self.table_sort_default(&mut arr)
+                )?;
+                // A successful default sort of two or more elements compared
+                // every one of them, so the range is all numbers or all
+                // strings in live window slots: the writeback permutes those
+                // slots and touches no storage metadata. A single element is
+                // already sorted.
+                if arr.len() >= 2 {
+                    self.heap
+                        .as_table(table_ptr)
+                        .expect("the default sort cannot reshape the table")
+                        .overwrite_live_prefix(&arr);
+                }
+                return Ok(n);
+            }
         }
 
         // Put sorted array back - need to look up the table again since we may have
@@ -1064,18 +1144,94 @@ impl State {
     ) -> Result<()> {
         let table_idx = self.convert_idx(table_idx)?;
         let comp_idx = has_comp.then(|| self.convert_idx(2)).transpose()?;
+        let mut ops = LuaSortOps {
+            state: self,
+            access: ScratchTableSortAccess { table_idx },
+            comp_idx,
+        };
         crate::native_call!(
             "table_sort_scratch->table_sort_heap",
-            table_sort_heap(self, &mut ScratchTableSortAccess { table_idx }, n, comp_idx)
+            table_sort_heap(&mut ops, n)
         )
     }
 
     fn table_sort_values(&mut self, values: &mut [Val], comp_idx: Option<usize>) -> Result<()> {
         let n = values.len();
-        let mut access = VecSortAccess { values };
+        let mut ops = LuaSortOps {
+            state: self,
+            access: VecSortAccess { values },
+            comp_idx,
+        };
         crate::native_call!(
             "table_sort_values->table_sort_heap",
-            table_sort_heap(self, &mut access, n, comp_idx)
+            table_sort_heap(&mut ops, n)
+        )
+    }
+
+    /// The raw sort with no comparator. A range that is all numbers or all
+    /// strings sorts on its keys alone (`NumSortOps`, `StrSortOps`); any
+    /// other range runs the generic backend, which raises the comparison
+    /// error for the first incomparable pair the heap meets, as before. All
+    /// three run the same heap sort with the same comparison results, so the
+    /// permutation does not depend on which one ran.
+    ///
+    /// The keys are sorted detached, not on the table's storage: an
+    /// interrupt or comparison error then leaves the table untouched, as on
+    /// every other sort path. Sorting the storage in place would save only
+    /// the linear copy, which is not where the time goes.
+    fn table_sort_default(&mut self, values: &mut [Val]) -> Result<()> {
+        let n = values.len();
+        if n >= 2 && values.iter().all(|v| matches!(v, Val::Num(_))) {
+            let mut keys = Vec::new();
+            keys.try_reserve_exact(n)
+                .map_err(|_| Error::without_location(ErrorKind::TableGrowthFailed))?;
+            keys.extend(values.iter().map(|v| match v {
+                Val::Num(x) => *x,
+                _ => unreachable!("the range was checked to hold only numbers"),
+            }));
+            crate::native_call!(
+                "table_sort_default->table_sort_heap:numbers",
+                table_sort_heap(
+                    &mut NumSortOps {
+                        state: self,
+                        keys: &mut keys
+                    },
+                    n
+                )
+            )?;
+            // bounded: one copy per element of a range below `TABLE_SORT_MAX_LEN`.
+            for (slot, key) in values.iter_mut().zip(keys) {
+                *slot = Val::Num(key);
+            }
+            return Ok(());
+        }
+        if n >= 2 && values.iter().all(|v| matches!(v, Val::Str(_))) {
+            let mut keys = Vec::new();
+            keys.try_reserve_exact(n)
+                .map_err(|_| Error::without_location(ErrorKind::TableGrowthFailed))?;
+            keys.extend(values.iter().map(|v| match v {
+                Val::Str(s) => (self.heap.get_string(*s), *v),
+                _ => unreachable!("the range was checked to hold only strings"),
+            }));
+            crate::native_call!(
+                "table_sort_default->table_sort_heap:strings",
+                table_sort_heap(
+                    &mut StrSortOps {
+                        state: self,
+                        keys: &mut keys
+                    },
+                    n
+                )
+            )?;
+            // bounded: one copy per element of a range below `TABLE_SORT_MAX_LEN`.
+            for (slot, (_, value)) in values.iter_mut().zip(keys) {
+                *slot = value;
+            }
+            return Ok(());
+        }
+        crate::native_call!(
+            "table_sort_default->table_sort_values",
+            self.table_sort_values(values, None)
         )
     }
 
@@ -1380,7 +1536,99 @@ impl State {
 
 #[cfg(test)]
 mod sort_root_tests {
-    use super::{ErrorKind, Val, reserve_sort_values};
+    use super::{
+        ErrorKind, LuaSortOps, NumSortOps, StrSortOps, Val, VecSortAccess, reserve_sort_values,
+        table_sort_heap,
+    };
+    use crate::vm::State;
+
+    /// The permutation the generic backend's default comparison produces.
+    fn generic_order(state: &mut State, values: &[Val]) -> Vec<Val> {
+        let mut out = values.to_vec();
+        let n = out.len();
+        let mut ops = LuaSortOps {
+            state,
+            access: VecSortAccess { values: &mut out },
+            comp_idx: None,
+        };
+        table_sort_heap(&mut ops, n).expect("homogeneous ranges sort");
+        out
+    }
+
+    /// Bits of a number range, so `-0` against `0` and NaN positions count.
+    fn bits(values: &[Val]) -> Vec<u64> {
+        values
+            .iter()
+            .map(|v| match v {
+                Val::Num(x) => x.to_bits(),
+                _ => panic!("expected a number"),
+            })
+            .collect()
+    }
+
+    // The number and string backends must reach the generic backend's exact
+    // permutation, including where NaN, `0` and `-0` and equal keys land:
+    // the order is replay-visible.
+    #[test]
+    fn specialized_default_sorts_match_the_generic_permutation() {
+        let mut state = State::new();
+        let mut seed: u64 = 7;
+        let mut next = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            seed >> 33
+        };
+        for n in 0..70 {
+            let numbers: Vec<Val> = (0..n)
+                .map(|_| {
+                    Val::Num(match next() % 6 {
+                        0 => f64::NAN,
+                        1 => 0.0,
+                        2 => -0.0,
+                        _ => (next() % 9) as f64,
+                    })
+                })
+                .collect();
+            let expected = generic_order(&mut state, &numbers);
+            let mut keys: Vec<f64> = bits(&numbers).into_iter().map(f64::from_bits).collect();
+            table_sort_heap(
+                &mut NumSortOps {
+                    state: &state,
+                    keys: &mut keys,
+                },
+                n,
+            )
+            .expect("number sort");
+            let got: Vec<u64> = keys.iter().map(|k| k.to_bits()).collect();
+            assert_eq!(got, bits(&expected), "numbers, n = {n}");
+
+            let strings: Vec<Val> = (0..n)
+                .map(|_| {
+                    let text = ["", "a", "ab", "b", "\u{0}", "aa"][(next() % 6) as usize];
+                    state.alloc_string(text).expect("intern")
+                })
+                .collect();
+            let expected = generic_order(&mut state, &strings);
+            let mut keys: Vec<(&[u8], Val)> = strings
+                .iter()
+                .map(|v| match v {
+                    Val::Str(s) => (state.heap.get_string(*s), *v),
+                    _ => panic!("expected a string"),
+                })
+                .collect();
+            table_sort_heap(
+                &mut StrSortOps {
+                    state: &state,
+                    keys: &mut keys,
+                },
+                n,
+            )
+            .expect("string sort");
+            let got: Vec<Val> = keys.into_iter().map(|(_, v)| v).collect();
+            assert_eq!(got, expected, "strings, n = {n}");
+        }
+    }
 
     #[test]
     fn sort_root_reservation_reports_capacity_overflow() {

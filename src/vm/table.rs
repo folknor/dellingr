@@ -2562,6 +2562,22 @@ impl Table {
         Ok(())
     }
 
+    /// Overwrites keys `1..=values.len()` with a permutation of the values
+    /// they already hold, as a successful default `table.sort` produces.
+    /// That sort compares every element of a range of two or more, and the
+    /// default comparison rejects nil, so the range is a run of live slots at
+    /// the start of the window: permuting it moves no key and changes no
+    /// storage metadata (`array_live`, `lead`, `version`, the hash part).
+    pub(super) fn overwrite_live_prefix(&mut self, values: &[Val]) {
+        debug_assert!(self.base == 0 || values.is_empty());
+        let slots = &mut self.array[..values.len()];
+        debug_assert!(slots.iter().all(|v| !matches!(v, Val::Nil)));
+        debug_assert!(values.iter().all(|v| !matches!(v, Val::Nil)));
+        slots.copy_from_slice(values);
+        #[cfg(debug_assertions)]
+        self.debug_assert_invariants();
+    }
+
     /// Returns the metatable of this table, if any.
     pub(super) fn get_metatable(&self) -> Option<ObjectPtr> {
         self.metatable
