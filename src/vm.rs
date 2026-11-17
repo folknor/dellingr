@@ -37,7 +37,6 @@ pub use interrupt::Interrupt;
 pub(crate) use interrupt::requested as interrupt_requested;
 pub use lua_val::LuaType;
 pub use lua_val::RustFunc;
-pub(crate) use lua_val::number_to_string;
 pub use raw_field::RawField;
 pub use rust_fn::RustFnHandle;
 pub(crate) use rust_fn::RustFnId;

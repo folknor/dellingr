@@ -819,38 +819,41 @@ impl State {
     pub(super) fn concat_values(&mut self, idx: usize, n: usize) -> Result<Val> {
         let operands = idx..idx + n;
 
-        // First pass: type-check and compute the EXACT total byte length.
-        //
-        // Numbers are rendered here rather than estimated. A fixed estimate can
-        // be wrong in both directions: over-counting short spellings could
-        // reject a legal result - which would also change what the script costs,
-        // since the next costed operation never runs - while under-counting
-        // long spellings could let the buffer grow past the cap unchecked.
-        let mut total_len = 0;
-        let mut rendered_numbers = Vec::new();
+        // Capacity hint only: exact string lengths plus the longest number
+        // spelling, clamped to the cap. It rejects nothing (an operand of
+        // another type contributes 0), and it is at least the length of any
+        // accepted result, so the buffer never grows.
+        let mut hint = 0usize;
         for val in &self.stack[operands.clone()] {
             if let Some(s) = val.as_string(&self.heap) {
-                total_len = crate::limits::checked_string_growth(total_len, s.len())?;
-            } else if let Some(num) = val.as_num() {
-                // Use the same spelling as tostring and default coercion.
-                let rendered = super::lua_val::number_to_string(num);
-                total_len = crate::limits::checked_string_growth(total_len, rendered.len())?;
-                rendered_numbers.push(rendered);
-            } else {
-                return Err(self.type_error(TypeError::Concat(val.typ(&self.heap))));
+                hint = hint.saturating_add(s.len());
+            } else if val.as_num().is_some() {
+                hint = hint.saturating_add(crate::number_text::MAX_NUMBER_TEXT);
             }
         }
+        let mut buffer = Vec::with_capacity(hint.min(crate::limits::MAX_STRING_BYTES));
 
-        let mut buffer = Vec::with_capacity(total_len);
-        let mut rendered = rendered_numbers.iter();
+        // One ordered pass decides the outcome: each operand is type-checked,
+        // numbers are rendered (into inline storage), and the EXACT grown
+        // length is checked against the cap before its bytes are copied. So
+        // the first offending operand wins, whether by type or by size, and
+        // the reported size is the real prefix plus that operand. Numbers are
+        // rendered rather than estimated because a fixed estimate is wrong in
+        // both directions: over-counting short spellings could reject a legal
+        // result - which would also change what the script costs, since the
+        // next costed operation never runs - while under-counting long
+        // spellings could let the buffer grow past the cap unchecked.
         for val in &self.stack[operands] {
             if let Some(s) = val.as_string(&self.heap) {
+                crate::limits::checked_string_growth(buffer.len(), s.len())?;
                 buffer.extend_from_slice(s);
-            } else if val.as_num().is_some() {
-                let text = rendered
-                    .next()
-                    .expect("one rendering was produced per numeric operand above");
+            } else if let Some(num) = val.as_num() {
+                // The same spelling as tostring and default coercion.
+                let text = crate::number_text::number_to_text(num);
+                crate::limits::checked_string_growth(buffer.len(), text.as_bytes().len())?;
                 buffer.extend_from_slice(text.as_bytes());
+            } else {
+                return Err(self.type_error(TypeError::Concat(val.typ(&self.heap))));
             }
         }
 

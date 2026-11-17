@@ -104,6 +104,7 @@ mod host;
 mod instr;
 pub mod limits;
 mod lua_std;
+mod number_text;
 mod numeral;
 mod patterns;
 mod saturate;

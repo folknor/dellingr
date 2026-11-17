@@ -683,36 +683,6 @@ backtracking bill could eat the savings.
 
 **Classification:** rewrite, highest ceiling in the scope.
 
-## PERF-024 - Number rendering formats twice
-
-Raised by the strings hunter and the table-and-math-libraries hunter.
-
-**Bottleneck:** `format_g14` (`lua_val.rs`) and `format_general`
-(`string_format.rs`) format scientific text to discover the rounded exponent,
-parse that exponent back, then build the final representation, often
-formatting again in fixed notation and allocating intermediate strings;
-`format_general` can do another scientific conversion after its probe. The
-small-integral fast path in `number_to_string` still allocates a `String`.
-Concat keeps separately allocated numeric renderings before copying them into
-its output (`concat_values`, `eval.rs`).
-
-**Redesign:** a decimal conversion yielding rounded digits and an exponent,
-rendered into fixed or scientific notation in a bounded buffer or the final
-sink, with exact `%.14g` selection and trimming. Keep the integral fast path's
-semantics but write into inline storage. Precision-directed conversion: a
-shortest-round-trip formatter is not a substitute.
-
-**Payoff:** reaches `tostring`, numeric string arguments, concat and `format`;
-concentrated in nonintegral values.
-
-**Risks:** decimal rounding boundaries, negative zero, rounding carries,
-exponent thresholds and spelling, NaN normalization, alternate form,
-precision behaviour.
-
-**Classification:** rewrite within the format work (strings hunter); local
-(table-and-math hunter). The format pipeline itself is appended to
-`optimizations.md` "Stdlib micro (E)".
-
 ## PERF-025 - Pure gsub replacement crosses a callback-capable interface per match
 
 Raised by the strings hunter.
@@ -783,7 +753,8 @@ library, validates again in the host-facing method and computes it again in
 **Redesign:** concat as a sequence reader feeding an output builder: ordinary
 tables read values directly; string bytes appended from the pool (the
 borrowing in `string_arg.rs` is the precedent); numbers rendered into the
-destination (PERF-024); the finished buffer interned by ownership transfer
+destination (`number_text.rs` renders into an inline `NumberText` or any
+byte sink); the finished buffer interned by ownership transfer
 (appended to `optimizations.md` "Owned result buffers are copied again when
 interned"); metamethod reads keep their sequential order and append returned
 values without an owned copy. Unpack reads into return slots; pack uses

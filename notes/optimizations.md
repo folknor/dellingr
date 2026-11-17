@@ -399,7 +399,7 @@ in, because it needs no user migration (below).
 
 Observable surface (the 2026-10-23 survey; re-check before starting):
 - **Invisible to scripts, replays, saves and the public API.** NaN never
-  renders with a sign or payload (`number_to_string`, `string.format`
+  renders with a sign or payload (`number_to_text`, `string.format`
   including `%a` and `%q`), NaN is not a valid table key, and saves write
   every NaN as `CANONICAL_NAN_BITS` (`saved_num_bits`). `tostring`/`%p` ids
   for tables, functions and Rust functions come from the counter in
@@ -807,8 +807,7 @@ subject, `mixed` and `patterns` on short ones.
 
 The 2026-11-17 performance hunt raised it from the heap, strings and
 table-library scopes; `concat_values` (`eval.rs`) has the same pattern (a `Vec`
-filled, then passed as a slice to `alloc_string`, plus separately allocated
-number renderings). The heap hunter's version goes further: producers keep
+filled, then passed as a slice to `alloc_string`). The heap hunter's version goes further: producers keep
 ownership through interning and on a miss their buffer becomes the backing
 storage; short strings live in pooled storage with bytes adjacent to their
 header, so a distinct short string is not one allocator allocation; large or

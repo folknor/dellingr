@@ -730,7 +730,9 @@ impl fmt::Display for ErrorValue {
         match self {
             Self::Nil => f.write_str("nil"),
             Self::Boolean(value) => write!(f, "{value}"),
-            Self::Number(number) => f.write_str(&crate::vm::number_to_string(*number)),
+            Self::Number(number) => {
+                f.write_str(crate::number_text::number_to_text(*number).as_str())
+            }
             Self::String(bytes)
             | Self::Object {
                 rendering: bytes, ..

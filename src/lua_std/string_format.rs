@@ -550,13 +550,16 @@ fn format_integer_parts(
     output
 }
 
+// Outlined: the decimal conversion's scratch stays off `format_argument`,
+// whose frame is live across a `%s` argument's `__tostring` call.
+#[inline(never)]
 fn format_float(number: f64, directive: &Directive, kind: FloatKind) -> Vec<u8> {
     // NaN is canonicalised here, at output, rather than in the arithmetic.
     // The sign of a hardware-generated NaN is platform-specific (x86-64's
     // default NaN has the sign bit set, aarch64's does not), and NaNs reach
     // the VM from many producers: runtime `/` and `%`, `sqrt`, the
-    // `crmath` functions behind `math.*` and `^`, and host `push_number`. Dropping the sign here makes formatted NaNs identical
-    // on every host. `tostring` also prints unsigned `nan`, `%q` prints
+    // `crmath` functions behind `math.*` and `^`, and host `push_number`.
+    // Dropping the sign here makes formatted NaNs identical on every host. `tostring` also prints unsigned `nan`, `%q` prints
     // `(0/0)`, NaN never compares equal and cannot be a table key, and
     // snapshots canonicalise its bits. Reference C Lua prints
     // `-nan` for `0/0` on x86-64; dellingr always prints `nan`.
@@ -602,19 +605,7 @@ fn format_scientific(number: f64, precision: usize, uppercase: bool, alternate: 
     if !number.is_finite() {
         return special_float(number, uppercase);
     }
-    let text = format!("{number:.precision$e}");
-    let (mantissa, exponent) = text
-        .split_once('e')
-        .expect("Rust scientific formatting always contains an exponent");
-    let mut mantissa = mantissa.to_string();
-    if alternate && precision == 0 {
-        mantissa.push('.');
-    }
-    let exponent = exponent
-        .parse::<i32>()
-        .expect("Rust scientific formatting emits a decimal exponent");
-    let marker = if uppercase { 'E' } else { 'e' };
-    format!("{mantissa}{marker}{exponent:+03}").into_bytes()
+    crate::number_text::scientific(number, precision, alternate)
 }
 
 fn format_fixed(number: f64, precision: usize, alternate: bool) -> Vec<u8> {
@@ -632,49 +623,7 @@ fn format_general(number: f64, precision: usize, uppercase: bool, alternate: boo
     if !number.is_finite() {
         return special_float(number, uppercase);
     }
-    let significant = precision.max(1);
-    let significant_i32 =
-        i32::try_from(significant).expect("format precision is bounded by u8::MAX");
-    let probe = format_scientific(number, significant - 1, false, true);
-    let marker = probe
-        .iter()
-        .position(|byte| *byte == b'e')
-        .expect("finite scientific formatting contains an exponent");
-    let exponent = std::str::from_utf8(&probe[marker + 1..])
-        .expect("scientific exponent is ASCII")
-        .parse::<i32>()
-        .expect("scientific exponent is a decimal integer");
-
-    let mut output = if exponent < -4 || exponent >= significant_i32 {
-        format_scientific(number, significant - 1, uppercase, alternate)
-    } else {
-        let fractional = usize::try_from((significant_i32 - exponent - 1).max(0))
-            .expect("fractional precision is nonnegative");
-        format_fixed(number, fractional, alternate)
-    };
-    if !alternate {
-        strip_trailing_fraction_zeros(&mut output);
-    }
-    output
-}
-
-fn strip_trailing_fraction_zeros(bytes: &mut Vec<u8>) {
-    let exponent = bytes
-        .iter()
-        .position(|byte| matches!(byte, b'e' | b'E'))
-        .unwrap_or(bytes.len());
-    let Some(dot) = bytes[..exponent].iter().position(|byte| *byte == b'.') else {
-        return;
-    };
-    let mut end = exponent;
-    // bounded: one pass over one rendered number.
-    while end > dot + 1 && bytes[end - 1] == b'0' {
-        end -= 1;
-    }
-    if end == dot + 1 {
-        end = dot;
-    }
-    bytes.drain(end..exponent);
+    crate::number_text::general(number, precision, alternate)
 }
 
 fn special_float(number: f64, uppercase: bool) -> Vec<u8> {
