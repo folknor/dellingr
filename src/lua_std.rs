@@ -460,9 +460,10 @@ pub(super) fn opt_integer(
     }
 }
 
-// The callback ABI accepts 255 results. RetCount's 255 byte is an encoding
-// sentinel for All, not a 254-result runtime cap; keep count validation here
-// independent of the bytecode encoding.
+// The callback ABI accepts MAX_RESULTS (255) results. RetCount encodes All as
+// OPEN_COUNT (u16::MAX), leaving 255 as an ordinary fixed count. Validate
+// against the runtime ceiling here, not the narrower MAX_FIXED_RESULTS cap
+// for fixed call results.
 /// Implements both global `unpack` and `table.unpack`. Free of charge by
 /// design (see the charge comment below).
 ///

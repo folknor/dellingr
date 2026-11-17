@@ -45,13 +45,6 @@ allocation failure into `TableError::GrowthFailed`, while hash creation and
 growth use infallible IndexMap allocation APIs, so the fallible table-growth
 boundary covers only the array part.
 
-## BUG-004 - Stale comment above `unpack_values`
-
-Raised by the calls hunter. The comment above `unpack_values`
-(`src/lua_std.rs`) still describes 255 as `RetCount`'s All sentinel. The
-encoding (`src/instr.rs`) uses the 16-bit `OPEN_COUNT` sentinel and permits a
-fixed 255. No runtime defect established.
-
 ## BUG-005 - NaN payload bits are not pinned at the host boundary
 
 Raised by the heap hunter, echoed by the dispatch hunter. Arithmetic returns
