@@ -674,6 +674,60 @@ impl Frame {
                         Self::branch(state, ip, inst.sj())?;
                     }
                 }
+                // Against a number literal: a number operand compares
+                // here with IEEE semantics (every ordering false on NaN,
+                // which is what `compare_vals` answers); anything else takes
+                // the shared helper for its equality or type error.
+                Instr::OP_BR_LT_RK..=Instr::OP_BR_NE_RK => {
+                    fixed_cost!(Instr::OP_BR_LT_RK, Instr::OP_BR_NE_RK);
+                    let op = CompareOp::from_branch_number_opcode(inst.opcode())
+                        .expect("the range holds the number-literal branches");
+                    let lhs = state.stack[ra];
+                    let k = frame.get_number_constant(inst.b());
+                    #[expect(
+                        clippy::float_cmp,
+                        reason = "Lua `==` on numbers is exact IEEE equality"
+                    )]
+                    let holds = match lhs {
+                        Val::Num(x) => match op {
+                            CompareOp::Lt => x < k,
+                            CompareOp::Le => x <= k,
+                            CompareOp::Gt => x > k,
+                            CompareOp::Ge => x >= k,
+                            CompareOp::Eq => x == k,
+                            CompareOp::Ne => x != k,
+                        },
+                        _ => state.compare_vals(op, lhs, Val::Num(k))?,
+                    };
+                    if !holds {
+                        Self::branch(state, ip, inst.sj())?;
+                    }
+                }
+                // Raw equality with an interned literal is handle equality.
+                Instr::OP_BR_EQ_RS => {
+                    fixed_cost!(Instr::OP_BR_EQ_RS);
+                    if state.stack[ra] != frame.literal(inst.b()) {
+                        Self::branch(state, ip, inst.sj())?;
+                    }
+                }
+                Instr::OP_BR_NE_RS => {
+                    fixed_cost!(Instr::OP_BR_NE_RS);
+                    if state.stack[ra] == frame.literal(inst.b()) {
+                        Self::branch(state, ip, inst.sj())?;
+                    }
+                }
+                Instr::OP_BR_EQ_NIL => {
+                    fixed_cost!(Instr::OP_BR_EQ_NIL);
+                    if !matches!(state.stack[ra], Val::Nil) {
+                        Self::branch(state, ip, inst.sj())?;
+                    }
+                }
+                Instr::OP_BR_NE_NIL => {
+                    fixed_cost!(Instr::OP_BR_NE_NIL);
+                    if matches!(state.stack[ra], Val::Nil) {
+                        Self::branch(state, ip, inst.sj())?;
+                    }
+                }
                 Instr::OP_TEST_FALSE => {
                     fixed_cost!(Instr::OP_TEST_FALSE);
                     if !state.stack[ra].truthy() {
@@ -721,7 +775,11 @@ impl Frame {
                 }
                 Instr::OP_TFOR_LOOP => {
                     fixed_cost!(Instr::OP_TFOR_LOOP);
-                    state.instr_tfor_loop(ra, ip, inst.sj());
+                    if !matches!(state.stack[ra + 3], Val::Nil) {
+                        // Poll before the control moves, as FOR_LOOP does.
+                        Self::branch(state, ip, inst.sj())?;
+                        state.stack[ra + 2] = state.stack[ra + 3];
+                    }
                 }
 
                 // Functions (calls and returns)
@@ -900,24 +958,31 @@ mod tests {
     }
 
     /// Dispatch polls the interrupt only on jumps that may go backward, so
-    /// admission refuses the loop exits that must not.
+    /// admission refuses the loop exit that must not. `TFOR_LOOP` is a back
+    /// edge whose taken jump polls, so it is admitted backward.
     #[test]
     fn verifier_rejects_backward_loop_exits() {
-        for exit in [Instr::for_prep(0, -1), Instr::tfor_loop(0, -1)] {
-            let bytecode = Bytecode {
-                code: vec![exit, Instr::ret(0, RetCount::Fixed(0))],
-                line_info: vec![1, 1],
-                max_stack: 4,
-                ..Bytecode::default()
-            };
-            let error = crate::compiler::verify::validate_bytecode(&bytecode)
-                .expect_err("a backward loop exit must be rejected before dispatch");
-            assert_eq!(error.instruction, Some(0));
-            assert_eq!(
-                error.reason,
-                crate::compiler::verify::ValidationReason::BackwardLoopExit
-            );
-        }
+        let back_edge = Bytecode {
+            code: vec![Instr::tfor_loop(0, -1), Instr::ret(0, RetCount::Fixed(0))],
+            line_info: vec![1, 1],
+            max_stack: 4,
+            ..Bytecode::default()
+        };
+        crate::compiler::verify::validate_bytecode(&back_edge)
+            .expect("a backward TFOR_LOOP is a polled back edge");
+        let bytecode = Bytecode {
+            code: vec![Instr::for_prep(0, -1), Instr::ret(0, RetCount::Fixed(0))],
+            line_info: vec![1, 1],
+            max_stack: 4,
+            ..Bytecode::default()
+        };
+        let error = crate::compiler::verify::validate_bytecode(&bytecode)
+            .expect_err("a backward loop exit must be rejected before dispatch");
+        assert_eq!(error.instruction, Some(0));
+        assert_eq!(
+            error.reason,
+            crate::compiler::verify::ValidationReason::BackwardLoopExit
+        );
     }
 
     #[test]

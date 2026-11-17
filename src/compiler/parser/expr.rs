@@ -391,9 +391,13 @@ impl Parser<'_> {
                 self.input.next()?;
                 let key = self.parse_expr()?;
                 self.expect(TokenKind::RSquare)?;
-                Suffix::Index {
-                    key,
-                    line: self.input.last_line(),
+                let line = self.input.last_line();
+                // `t["k"]` is `t.k`: a string literal key takes the field
+                // path and its lookup cache. Both spellings resolve through
+                // the same route (docs/limits.md), so only speed differs.
+                match key.kind {
+                    ExprKind::Str(name) => Suffix::Field { name, line },
+                    _ => Suffix::Index { key, line },
                 }
             }
             TokenKind::LParen | TokenKind::LiteralString | TokenKind::LCurly => {

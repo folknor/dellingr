@@ -36,6 +36,22 @@ tick budgets and re-record replays.
   range straight from the source, which now stays rooted across that
   intern's collection point. Results and costs are unchanged; collection
   timing, and with it `%p` ids and object counts, can move.
+- **Replay-visible:** conditions, literal-key indexing and generic `for`
+  compile to fewer instructions. `and`, `or` and `not` in a condition
+  become jumps that test their operands in place, with no result register;
+  a comparison against a number literal, or an equality against a string
+  literal or `nil`, branches on the literal without loading it (opcodes
+  70-79); `t["k"]` reads and stores like `t.k`, through the field cache;
+  and the generic `for` step sits below its body, so `TFOR_LOOP` is now the
+  loop's polled back edge and a continuing iteration dispatches two loop
+  instructions instead of three. Costs and results are unchanged. Frames
+  can be smaller, so stack-cap refusals, register reuse and with it
+  collection timing can move, and save bytes change. Bracket literal keys
+  now take field-cache slots, which can leave a later field site past the
+  per-function cache capacity uncached. An interrupt pending when a `next`
+  or `ipairs` loop ends is now observed at the next safepoint after the
+  loop rather than before the final step. Old binaries reject saves
+  containing the new opcodes as invalid bytecode.
 - `string.gmatch` iterator state no longer carries the `compile_charged`
   flag, so `GmatchStateFault::CompileFlagKeyMissing` and `CompileFlagInvalid`
   are removed. A `string.format` literal run that crosses the string size cap

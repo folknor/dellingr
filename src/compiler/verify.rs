@@ -37,7 +37,7 @@ pub enum ValidationReason {
     OpenResultsWithoutProducer,
     /// jump target is out of range
     JumpTargetOutOfRange,
-    /// a FOR_PREP or TFOR_LOOP loop exit jumps backward
+    /// a FOR_PREP loop exit jumps backward
     BackwardLoopExit,
     /// code is empty
     EmptyCode,
@@ -697,7 +697,11 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
                 reg(pc, c)?;
             }
             // One register.
-            Instr::OP_NEW_TABLE | Instr::OP_TEST_FALSE | Instr::OP_TEST_TRUE => reg(pc, a)?,
+            Instr::OP_NEW_TABLE
+            | Instr::OP_TEST_FALSE
+            | Instr::OP_TEST_TRUE
+            | Instr::OP_BR_EQ_NIL
+            | Instr::OP_BR_NE_NIL => reg(pc, a)?,
             Instr::OP_LOAD_NIL => {
                 if b == 0 {
                     return Err(err(Some(pc), ValidationReason::CountOperandInvalid));
@@ -715,7 +719,16 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
             | Instr::OP_GET_UPVAL
             | Instr::OP_SET_UPVAL
             | Instr::OP_NEW_TABLE_TEMPLATE
-            | Instr::OP_CLOSURE => {
+            | Instr::OP_CLOSURE
+            // Compare-and-branch against a literal.
+            | Instr::OP_BR_LT_RK
+            | Instr::OP_BR_LE_RK
+            | Instr::OP_BR_GT_RK
+            | Instr::OP_BR_GE_RK
+            | Instr::OP_BR_EQ_RK
+            | Instr::OP_BR_NE_RK
+            | Instr::OP_BR_EQ_RS
+            | Instr::OP_BR_NE_RS => {
                 reg(pc, a)?;
                 pool(pc, inst)?;
             }
@@ -823,16 +836,18 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
                 check_registers(pc, b, usize::from(c), frame)?;
             }
             Instr::OP_JMP => {}
-            Instr::OP_FOR_PREP | Instr::OP_TFOR_LOOP => {
-                // Loop exits: compiled code always skips forward past the
-                // loop. Dispatch does not poll the interrupt on these jumps,
+            Instr::OP_FOR_PREP => {
+                // A loop exit: compiled code always skips forward past the
+                // loop. Dispatch does not poll the interrupt on this jump,
                 // so a backward one would be a cycle with no safepoint.
                 if inst.sj() < 0 {
                     return Err(err(Some(pc), ValidationReason::BackwardLoopExit));
                 }
                 check_registers(pc, a, 4, frame)?;
             }
-            Instr::OP_FOR_LOOP => {
+            // Back edges: their taken jumps poll when backward, so either
+            // direction is admitted.
+            Instr::OP_FOR_LOOP | Instr::OP_TFOR_LOOP => {
                 // No setup-dominance or hidden-control write proof here:
                 // dispatch must reject nonnumeric controls fallibly.
                 check_registers(pc, a, 4, frame)?;
@@ -955,6 +970,10 @@ mod tree_tests {
             Instr::OP_INIT_FIELD_PINNED,
             Instr::OP_ADD_RK,
             Instr::OP_ADD_KR,
+            Instr::OP_BR_LT_RK,
+            Instr::OP_BR_NE_RK,
+            Instr::OP_BR_EQ_RS,
+            Instr::OP_BR_NE_RS,
         ] {
             let inst = Instr::from_raw(u64::from(opcode) << 56);
             assert!(

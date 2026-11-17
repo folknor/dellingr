@@ -9,11 +9,12 @@
 //!
 //! The safepoints, chosen so that no unbounded execution can avoid one:
 //!
-//! - every taken backward jump, before the cursor moves (and, for a numeric
-//!   `for`, before the loop counters are written). `JMP`, the
-//!   compare-and-branch and test opcodes and `FOR_LOOP` poll; admission
-//!   refuses a backward `FOR_PREP` or `TFOR_LOOP`, so bytecode of any
-//!   provenance has no unpolled cycle;
+//! - every taken backward jump, before the cursor moves (and, for a `for`
+//!   loop, before the loop counters or the generic-for control are
+//!   written). `JMP`, the compare-and-branch and test opcodes, `FOR_LOOP`
+//!   and `TFOR_LOOP` (the generic `for`'s back edge) poll; admission refuses
+//!   a backward `FOR_PREP`, so bytecode of any provenance has no unpolled
+//!   cycle;
 //! - the admission of every Lua function call, from Lua or from Rust (a host
 //!   call, a metamethod handler, an iterator, a library callback), after the
 //!   call-depth check and before anything is pushed, so an interruption there
@@ -24,8 +25,10 @@
 //! - entry to every Rust callback, before its bookkeeping is changed or its
 //!   body runs, including library functions and Rust metamethod handlers.
 //!   The generic `for` fast paths for `next` and the `ipairs` iterator run
-//!   without entering a callback and skip this poll; the loop's backward
-//!   jump polls instead;
+//!   without entering a callback and skip this poll; the loop's back edge
+//!   polls instead when the iteration continues. A step that ends the loop
+//!   falls through without a poll, so a pending interrupt is observed at the
+//!   next safepoint after the loop;
 //! - native library work that can repeat a bounded pass without bound: each
 //!   pattern-matcher step, each candidate of a plain substring search, each
 //!   heap-sort step, each iteration of the library loops whose trip count

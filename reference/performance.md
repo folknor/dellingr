@@ -251,8 +251,10 @@ live across every native re-entry. Release `index_field` per cycle, against
 | the above plus `FOR_LOOP` (in its helper or in its arm) | 560 |
 
 The shipped shape polls at admission, in `JMP`, the branch and test arms and
-`FOR_LOOP`. Admission refuses backward `FOR_PREP` and `TFOR_LOOP` exits
-instead of polling them. `FOR_LOOP` costs 16 bytes per release cycle
+`FOR_LOOP`. Admission refuses backward `FOR_PREP` exits instead of polling
+them. (Since then the generic `for` was rotated so that `TFOR_LOOP` is its
+back edge and polls like `FOR_LOOP`; the table above predates that and was
+not re-measured for it.) `FOR_LOOP` costs 16 bytes per release cycle
 wherever its poll sits; it is accepted (2.4 KB at `MAX_NATIVE_CALL_DEPTH`).
 Dev grew 160 to 208 bytes per cycle.
 

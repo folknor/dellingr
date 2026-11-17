@@ -125,41 +125,38 @@ limit (`limits.rs`) and literal indices exceed eight bits, `MAX_FRAME_SLOTS`
 does not bound temporaries, and a universal 32-bit word would lose programs or
 move complexity into extensions.
 
-## PERF-004 - Constant operands, predicate lowering and fused loop steps in codegen
+## PERF-004 - Remaining constant operand and loop-step forms
 
-Raised by the codegen hunter, with the dispatch hunter (constant comparison
-forms, opcode-specific comparisons) and the lookup hunter (`t["k"]`).
+Raised by the codegen, dispatch and lookup hunters. Predicate lowering,
+number/string/nil literal compare-and-branch forms, `t["k"]` routed to the
+field path and the rotated generic `for` (TFOR_LOOP as the polled back edge)
+have landed; this is what was left.
 
 **Bottleneck:**
-- Comparison codegen (`codegen.rs`) materializes both operands in registers:
-  `if n < 2` needs a constant load before the fused compare-branch.
-- Condition generation recognizes a comparison only as the outermost
-  expression. `and`/`or`/`not` fall through value generation, which reserves a
-  result register and materializes operands: `if a and b then` on locals takes
-  two moves and three tests; `if a < 0 and b < 0 then` takes two constant
-  loads, two boolean-producing comparisons and two tests.
-- `t["health"]` compiles to register-key `GET_TABLE` with no lookup cache;
-  `t.health` uses `GET_FIELD`. A stable runtime string key cannot use the
-  field cache either.
-- Generic-for emits `TFOR_CALL`, `TFOR_LOOP`, the body and a backward `JMP`.
-- The comparison helper (`registers.rs`) takes a runtime `CompareOp` and goes
-  through `partial_cmp`, target ordering and negation.
+- A dynamic string key (`t[name]`) uses uncached `GET_TABLE` even when the
+  site sees one interned key every time.
+- Numeric-literal indexing (`t[1]`), literal values in field stores
+  (`t.k = 0`) and value-form comparisons (`local b = x < 2`) still load the
+  literal into a register.
+- An ordering comparison that must jump when true (`or`'s left operand, a
+  `not` in a condition) is a compare-branch over a `JMP`: two dispatches.
+- A comparison with a literal on the left (`2 < n`) still loads it; it is
+  not swapped, because the type error names the operands in source order.
+- `TFOR_CALL` and `TFOR_LOOP` are still two dispatches per iteration.
+  Fusing them touches the `TFOR_CALL` arm, whose frame is live across native
+  re-entry (reference/performance.md "Shared vararg arena").
+- The register-register comparison arm still goes through `compare_vals`;
+  only the number-literal arm has an inline IEEE fast path.
 
-**Redesign:** recursive true/false continuation lowering for predicates (keep
-value lowering where operand-valued `and`/`or` is needed; `not` swaps
-destinations); constant forms for numeric/string comparisons, nil tests,
-literal and numeric-constant indexing and literal field stores; normalize
-proven constant string keys to the field path, and let dynamic string-key
-sites guard their interned key and reuse a field plan; a combined
-iterator-step-and-branch for generic-for reusing the `next`/`ipairs` fast
-paths; direct numeric comparison handlers with string/error fallbacks.
+**Redesign:** a guarded per-site key cache for dynamic string keys reusing a
+field plan; literal operand forms for the remaining sites where a workload
+shows them; a fused generic-for step only with `native_bytes_per_level`
+measured before and after.
 
-**Risks:** branch polarity must be independent of comparison identity
-(negated `<` is not `>=` under NaN). The fused generic-for must keep the
-control update and poll every unbounded cycle. Preserve source locations and
-error behaviour. Numeric array access keeps its direct path.
+**Risks:** cache slots are per family and capped at 255 per function; the
+frame-size history of the `TFOR_CALL` arm.
 
-**Classification:** local changes, high confidence, smaller ceiling.
+**Classification:** local changes, smaller ceiling.
 
 ## PERF-005 - Numeric-for controls rechecked every iteration
 
@@ -525,8 +522,8 @@ PERF-018's table-owned index better than today's IndexMap. Unmeasured.
 
 (The 255-per-family cache cap was weighed and kept; the reasoning sits at
 `assign_cache_slots`. Key-checked position reuse across receivers is in
-`optimizations.md` "Shape-based polymorphic field IC"; constant string
-indexing is in PERF-004.)
+`optimizations.md` "Shape-based polymorphic field IC"; literal string keys
+already take the field path; dynamic string-key sites are in PERF-004.)
 
 **Classification:** local.
 

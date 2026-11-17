@@ -293,17 +293,205 @@ fn only_a_lone_unparenthesised_returned_call_is_a_tail_call() {
 #[test]
 fn conditions_ending_in_a_comparison_branch_in_one_instruction() {
     for (source, op) in [
-        ("local n = 0 while n < 3 do n = n + 1 end", CompareOp::Lt),
         (
-            "local a = 1 if a >= 2 then return 1 end return 0",
+            "local n, m = 0, 3 while n < m do n = n + 1 end",
+            CompareOp::Lt,
+        ),
+        (
+            "local a, b = 1, 2 if a >= b then return 1 end return 0",
             CompareOp::Ge,
         ),
-        ("local n = 0 repeat n = n + 1 until n ~= 1", CompareOp::Ne),
+        (
+            "local n, m = 0, 1 repeat n = n + 1 until n ~= m",
+            CompareOp::Ne,
+        ),
     ] {
         let chunk = parse_unfinalized(source).expect("compiles");
         assert_eq!(opcodes(&chunk, op.branch_opcode()).len(), 1, "{source}");
         assert!(opcodes(&chunk, op.value_opcode()).is_empty(), "{source}");
     }
+}
+
+/// The opcodes of a chunk's code, in order.
+fn listing(source: &str) -> Vec<u8> {
+    let chunk = parse_unfinalized(source).expect("compiles");
+    chunk.code.iter().map(|inst| inst.opcode()).collect()
+}
+
+#[test]
+fn literal_right_operands_branch_without_a_load() {
+    for (source, branch) in [
+        (
+            "local n = 0 while n < 3 do n = n + 1 end",
+            Instr::OP_BR_LT_RK,
+        ),
+        ("local n = 0 if n >= 3 then return end", Instr::OP_BR_GE_RK),
+        ("local n = 0 if n == 3 then return end", Instr::OP_BR_EQ_RK),
+        (
+            "local s = 'a' if s == 'a' then return end",
+            Instr::OP_BR_EQ_RS,
+        ),
+        (
+            "local s = 'a' if s ~= 'a' then return end",
+            Instr::OP_BR_NE_RS,
+        ),
+        ("local x if x == nil then return end", Instr::OP_BR_EQ_NIL),
+        ("local x if x ~= nil then return end", Instr::OP_BR_NE_NIL),
+    ] {
+        let ops = listing(source);
+        assert_eq!(
+            ops.iter().filter(|&&op| op == branch).count(),
+            1,
+            "{source}"
+        );
+        let loads = ops
+            .iter()
+            .filter(|&&op| matches!(op, Instr::OP_LOAD_NUM | Instr::OP_LOAD_STR))
+            .count();
+        // The initializer's load stays; the comparison adds none.
+        assert!(loads <= 1, "{source}: {ops:?}");
+    }
+    // A string literal is ordered through registers, and a literal on the
+    // left stays a register operand so a type error names the operands in
+    // source order.
+    for source in [
+        "local s = 'a' if s < 'b' then return end",
+        "local n = 0 if 3 < n then return end",
+    ] {
+        assert!(listing(source).contains(&Instr::OP_BR_LT), "{source}");
+    }
+}
+
+#[test]
+fn logical_conditions_test_their_operands_in_place() {
+    // `and` / `or` / `not` in a condition produce no value: no move, no
+    // value comparison, no NOT.
+    for source in [
+        "local a, b if a and b then return end",
+        "local a, b if a or b then return end",
+        "local a, b if not a then return end",
+        "local a, b if a and not b then return end",
+        "local a, b if a < 0 and b < 0 then return end",
+        "local a, b if a < 0 or b < 0 then return end",
+        "local a, b while not (a == b) and (a or b) do return end",
+    ] {
+        let ops = listing(source);
+        for op in [Instr::OP_MOVE, Instr::OP_NOT, Instr::OP_LOAD_NUM] {
+            assert!(!ops.contains(&op), "{source}: {ops:?}");
+        }
+        for value in Instr::OP_LT..=Instr::OP_NE {
+            assert!(!ops.contains(&value), "{source}: {ops:?}");
+        }
+    }
+    // `not` flips which outcome jumps, never the ordering: `not (a < b)`
+    // branches on `<` over a jump, it does not become `>=`.
+    let ops = listing("local a, b if not (a < b) then a = 1 end");
+    assert!(ops.contains(&Instr::OP_BR_LT), "{ops:?}");
+    assert!(!ops.contains(&Instr::OP_BR_GE), "{ops:?}");
+    // Equality has an exact complement.
+    let ops = listing("local a, b if not (a == b) then a = 1 end");
+    assert!(ops.contains(&Instr::OP_BR_NE), "{ops:?}");
+    assert!(!ops.contains(&Instr::OP_BR_EQ), "{ops:?}");
+}
+
+#[test]
+fn lowered_conditions_keep_their_semantics() {
+    for (source, expected) in [
+        // NaN: every ordering is false and stays false under `not`.
+        (
+            "local x = 0/0 if not (x < 1) then return 1 end return 2",
+            1.0,
+        ),
+        (
+            "local x = 0/0 if not (x >= 1) then return 1 end return 2",
+            1.0,
+        ),
+        (
+            "local x = 0/0 if x < 1 or x >= 1 then return 1 end return 2",
+            2.0,
+        ),
+        ("local x = 0/0 if x ~= x then return 1 end return 2", 1.0),
+        ("local x = 0/0 if x == 0/0 then return 1 end return 2", 2.0),
+        (
+            "local x = 0/0 if not (x == x) then return 1 end return 2",
+            1.0,
+        ),
+        // Literal forms against other types: unequal, no error.
+        ("local x = '1' if x == 1 then return 1 end return 2", 2.0),
+        ("local x = 1 if x == '1' then return 1 end return 2", 2.0),
+        (
+            "local x = false if x == nil then return 1 end return 2",
+            2.0,
+        ),
+        ("local x if x ~= nil then return 1 end return 2", 2.0),
+        (
+            "local x = 'a' .. 'b' if x == 'ab' then return 1 end return 2",
+            1.0,
+        ),
+        // Short circuits: the right operand runs only when needed.
+        (
+            "local n = 0 local function f() n = n + 1 return true end \
+             if f() or f() then end if false and f() then end \
+             if not (f() and false) then end return n",
+            2.0,
+        ),
+        // A truthy `or` operand enters the body without testing the rest.
+        (
+            "local a, b = 1, nil if a or b then return 1 end return 2",
+            1.0,
+        ),
+        (
+            "local a, b = nil, nil if a or b then return 1 end return 2",
+            2.0,
+        ),
+        (
+            "local a, b = 1, nil if a and b then return 1 end return 2",
+            2.0,
+        ),
+        (
+            "local a, b = 1, 0 if a and b then return 1 end return 2",
+            1.0,
+        ),
+        // Constant leaves still evaluate the operands before them.
+        (
+            "local n = 0 local function f() n = n + 1 end if f() and false then end return n",
+            1.0,
+        ),
+        // A comparison chain is a left fold, not a conjunction.
+        (
+            "local n = 0 local function f() n = n + 1 return true end \
+             if 1 > 2 == f() then end return n",
+            1.0,
+        ),
+        // A captured local compared with a call that writes it keeps the
+        // value read first.
+        (
+            "local x = 1 local function f() x = 9 return 2 end \
+             if x < f() then return 1 end return 2",
+            1.0,
+        ),
+        (
+            "local n = 0 repeat n = n + 1 until not (n < 5) and n ~= nil return n",
+            5.0,
+        ),
+    ] {
+        assert_eq!(eval_number(source), expected, "{source}");
+    }
+    // The literal form keeps the operand order of the type error.
+    let mut state = State::new();
+    crate::Program::compile("local s = 'x' if s < 1 then return 1 end return 0", None)
+        .and_then(|program| state.load(&program))
+        .expect("type-error fixture compiles");
+    let error = state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(1))
+        .expect_err("string/number comparison errors");
+    assert!(
+        matches!(
+            error.kind(),
+            ErrorKind::TypeError(TypeError::Comparison(LuaType::String, LuaType::Number))
+        ),
+        "unexpected comparison error kind: {error}"
+    );
 }
 
 #[test]

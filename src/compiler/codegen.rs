@@ -534,8 +534,13 @@ impl Generator<'_> {
                 self.explist_to_regs(exprs, 3)?;
                 self.reserve(u16::from(*vars))?;
                 self.nactive = self.freereg;
-                let call = self.emit_at(Instr::tfor_call(base, *vars, None), *call_line);
-                let test = self.emit_at(Instr::tfor_loop(base, 0), *call_line);
+                // The iterator step sits below the body, as in Lua 5.4: an
+                // entry jump reaches it, and TFOR_LOOP is the back edge, so
+                // a continuing iteration dispatches two instructions of loop
+                // structure rather than three. The body's CLOSE runs before
+                // the next call overwrites the visible variables.
+                let entry = self.emit_at(Instr::jump(0), *call_line);
+                let body_start = self.code.len();
                 self.loops.push(LoopGen {
                     breaks: Vec::new(),
                     break_close: *break_close,
@@ -544,9 +549,10 @@ impl Generator<'_> {
                 if *body_close {
                     self.emit(Instr::close(base + 3));
                 }
-                let back = self.jump();
-                self.patch(back, call)?;
-                self.patch_here(&[test])?;
+                self.patch_here(&[entry])?;
+                self.emit_at(Instr::tfor_call(base, *vars, None), *call_line);
+                let back = self.emit_at(Instr::tfor_loop(base, 0), *call_line);
+                self.patch(back, body_start)?;
                 self.finish_loop()?;
                 self.close_scope(*scope_close, saved);
             }
@@ -850,17 +856,44 @@ impl Generator<'_> {
 
     /// Generate a condition and return the jumps taken when it is false.
     fn cond_false(&mut self, cond: &Expr) -> Result<Vec<usize>> {
+        self.cond_jump(cond, false)
+    }
+
+    /// Generate a condition that is evaluated once and returns the jumps
+    /// taken when its truth value is `jump_if`; otherwise control falls
+    /// through. No result register is produced: `and`, `or` and `not` are
+    /// lowered to jumps, so the operands are tested where they are, and a
+    /// `not` swaps which outcome jumps, never the comparison it wraps
+    /// (`not (a < b)` is not `a >= b` when either side is NaN).
+    fn cond_jump(&mut self, cond: &Expr, jump_if: bool) -> Result<Vec<usize>> {
         if cond.line != 0 {
             self.error_line = cond.line;
         }
         match &cond.kind {
-            ExprKind::True | ExprKind::Num(_) | ExprKind::Str(_) => Ok(Vec::new()),
-            ExprKind::Nil | ExprKind::False => Ok(vec![self.jump()]),
+            ExprKind::True | ExprKind::Num(_) | ExprKind::Str(_) => Ok(if jump_if {
+                vec![self.jump()]
+            } else {
+                Vec::new()
+            }),
+            ExprKind::Nil | ExprKind::False => Ok(if jump_if {
+                Vec::new()
+            } else {
+                vec![self.jump()]
+            }),
+            ExprKind::Paren(inner) => self.cond_jump(inner, jump_if),
+            ExprKind::Not { operand, .. } => self.cond_jump(operand, !jump_if),
+            // `and` jumps out false from any operand; `or` jumps out true.
+            // For the other outcome only the last operand decides, and an
+            // earlier operand's short circuit lands after the whole test.
+            ExprKind::And(operands) => self.cond_logical(operands, false, jump_if),
+            ExprKind::Or(operands) => self.cond_logical(operands, true, jump_if),
             ExprKind::Compare(chain) => {
                 let (last, init) = chain
                     .rest
                     .split_last()
                     .ok_or_else(|| Self::internal(ParserFault::EmptyComparisonChain))?;
+                // Every link but the last is a value: `a < b < c` compares
+                // the boolean `a < b` with `c`.
                 let mut acc = self.expr(&chain.first)?;
                 for link in init {
                     acc = self.compare_value(link.op, acc, &link.rhs, link.line)?;
@@ -868,22 +901,78 @@ impl Generator<'_> {
                 self.error_line = last.line;
                 let lhs = self.operand_before(acc, last.rhs.may_execute)?;
                 let (lhs_reg, lhs) = self.operand_reg(lhs)?;
-                let rhs = self.expr(&last.rhs)?;
-                let rhs_reg = self.any_reg(rhs)?;
-                let pc = self.emit_at(
-                    Instr::branch_compare(last.op, lhs_reg, rhs_reg, 0),
-                    last.line,
-                );
-                self.free_two(lhs, Val::Reg(rhs_reg));
-                Ok(vec![pc])
+                // The branch jumps when the comparison is false; jumping on
+                // true takes the complementary equality, or for an ordering
+                // a branch over an unconditional jump.
+                let (op, over) = match (jump_if, last.op.complement()) {
+                    (false, _) => (last.op, false),
+                    (true, Some(complement)) => (complement, false),
+                    (true, None) => (last.op, true),
+                };
+                let branch = match (&last.rhs.kind, op) {
+                    (ExprKind::Num(idx), _) => {
+                        self.free_val(lhs);
+                        Instr::branch_compare_number(op, lhs_reg, *idx, 0)
+                    }
+                    (ExprKind::Str(idx), CompareOp::Eq | CompareOp::Ne) => {
+                        self.free_val(lhs);
+                        Instr::branch_equal_string(op == CompareOp::Eq, lhs_reg, *idx, 0)
+                    }
+                    (ExprKind::Nil, CompareOp::Eq | CompareOp::Ne) => {
+                        self.free_val(lhs);
+                        Instr::branch_equal_nil(op == CompareOp::Eq, lhs_reg, 0)
+                    }
+                    _ => {
+                        let rhs = self.expr(&last.rhs)?;
+                        let rhs_reg = self.any_reg(rhs)?;
+                        self.free_two(lhs, Val::Reg(rhs_reg));
+                        Instr::branch_compare(op, lhs_reg, rhs_reg, 0)
+                    }
+                };
+                let pc = self.emit_at(branch, last.line);
+                if over {
+                    let jump = self.jump();
+                    self.patch(pc, jump + 1)?;
+                    Ok(vec![jump])
+                } else {
+                    Ok(vec![pc])
+                }
             }
             _ => {
                 let val = self.expr(cond)?;
                 let reg = self.any_reg(val)?;
                 self.free_reg(reg);
-                Ok(vec![self.emit(Instr::test_false(reg, 0))])
+                Ok(vec![self.emit(if jump_if {
+                    Instr::test_true(reg, 0)
+                } else {
+                    Instr::test_false(reg, 0)
+                })])
             }
         }
+    }
+
+    /// `a and b and ...` (`or` when `or` is set) as a condition jumping
+    /// when its truth value is `jump_if`.
+    fn cond_logical(&mut self, operands: &[Expr], or: bool, jump_if: bool) -> Result<Vec<usize>> {
+        // The outcome any operand decides alone: false for `and`, true for
+        // `or`. The last operand decides the other one.
+        let short = or;
+        let mut out = Vec::new();
+        let mut join = Vec::new();
+        for (index, operand) in operands.iter().enumerate() {
+            if index + 1 == operands.len() {
+                out.extend(self.cond_jump(operand, jump_if)?);
+                break;
+            }
+            let jumps = self.cond_jump(operand, short)?;
+            if jump_if == short {
+                out.extend(jumps);
+            } else {
+                join.extend(jumps);
+            }
+        }
+        self.patch_here(&join)?;
+        Ok(out)
     }
 
     // Expressions
@@ -1417,7 +1506,9 @@ mod tests {
                 first: number(0),
                 rest: vec![CompareLink {
                     op: CompareOp::Eq,
-                    rhs: number(0),
+                    // A literal right operand takes no register, so the
+                    // second register comes from an upvalue read.
+                    rhs: expression(ExprKind::Upval(0), 0),
                     line: 61,
                 }],
             })),

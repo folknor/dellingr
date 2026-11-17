@@ -73,7 +73,8 @@ fn assigning_index_redirects_warm_and_cold_sites() {
         if ("y").len ~= nil then error("old library still visible") end
         mt.__index = function(s, k) return s .. ":" .. k end
         if ("a").b ~= "a:b" then error("function __index") end
-        if ("q")["upper"] ~= "q:upper" then error("function __index via GET_TABLE") end
+        local key = "upper"
+        if ("q")[key] ~= "q:upper" then error("function __index via GET_TABLE") end
         mt.__index = lib
         if f("z") ~= "Z" then error("restoring the library") end
         "#,

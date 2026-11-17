@@ -423,6 +423,16 @@ macro_rules! opcode_rows {
             OP_VARARG = 67, Ab, Free;
             OP_CLOSURE = 68, Ab, Free {Nested, B};
             OP_TAILCALL = 69, Abd, Free;
+            OP_BR_LT_RK = 70, Abj, Free {Number, B};
+            OP_BR_LE_RK = 71, Abj, Free {Number, B};
+            OP_BR_GT_RK = 72, Abj, Free {Number, B};
+            OP_BR_GE_RK = 73, Abj, Free {Number, B};
+            OP_BR_EQ_RK = 74, Abj, Free {Number, B};
+            OP_BR_NE_RK = 75, Abj, Free {Number, B};
+            OP_BR_EQ_RS = 76, Abj, Free {String, B};
+            OP_BR_NE_RS = 77, Abj, Free {String, B};
+            OP_BR_EQ_NIL = 78, Aj, Free;
+            OP_BR_NE_NIL = 79, Aj, Free;
         }
     };
 }
@@ -674,6 +684,27 @@ impl CompareOp {
         Instr::OP_BR_LT + self as u8
     }
 
+    /// The branch-if-false opcode against a number literal on the right.
+    pub(crate) const fn branch_number_opcode(self) -> u8 {
+        Instr::OP_BR_LT_RK + self as u8
+    }
+
+    /// Decode a branch-against-number-literal opcode.
+    pub(crate) const fn from_branch_number_opcode(opcode: u8) -> Option<Self> {
+        Self::from_index(opcode.wrapping_sub(Instr::OP_BR_LT_RK))
+    }
+
+    /// The comparison with the opposite truth value on every operand pair,
+    /// NaN included. Only equality has one: `not (a < b)` is not `a >= b`
+    /// when either side is NaN, so the orderings answer `None`.
+    pub(crate) const fn complement(self) -> Option<Self> {
+        match self {
+            Self::Eq => Some(Self::Ne),
+            Self::Ne => Some(Self::Eq),
+            Self::Lt | Self::Le | Self::Gt | Self::Ge => None,
+        }
+    }
+
     /// Decode a value comparison opcode.
     pub(crate) const fn from_value_opcode(opcode: u8) -> Option<Self> {
         Self::from_index(opcode.wrapping_sub(Instr::OP_LT))
@@ -713,6 +744,10 @@ impl CompareOp {
 const _: () = {
     assert!(Instr::OP_LE == Instr::OP_LT + 1 && Instr::OP_NE == Instr::OP_LT + 5);
     assert!(Instr::OP_BR_LE == Instr::OP_BR_LT + 1 && Instr::OP_BR_NE == Instr::OP_BR_LT + 5);
+    assert!(
+        Instr::OP_BR_LE_RK == Instr::OP_BR_LT_RK + 1
+            && Instr::OP_BR_NE_RK == Instr::OP_BR_LT_RK + 5
+    );
     assert!(Instr::OP_POW_KR == Instr::OP_ADD_RR + 17);
 };
 
@@ -1003,6 +1038,41 @@ impl Instr {
     pub(crate) const fn branch_compare(op: CompareOp, lhs: u16, rhs: u16, offset: i32) -> Self {
         Self::pack_jump(op.branch_opcode(), lhs, rhs, offset)
     }
+    /// Jump by `offset` when `R[lhs] op K[number]` is false, `K` being the
+    /// number literal pool.
+    pub(crate) const fn branch_compare_number(
+        op: CompareOp,
+        lhs: u16,
+        number: u16,
+        offset: i32,
+    ) -> Self {
+        Self::pack_jump(op.branch_number_opcode(), lhs, number, offset)
+    }
+    /// Jump by `offset` when `R[lhs] == K[string]` is false (`equal`) or
+    /// true (not `equal`), `K` being the string literal pool.
+    pub(crate) const fn branch_equal_string(
+        equal: bool,
+        lhs: u16,
+        string: u16,
+        offset: i32,
+    ) -> Self {
+        let op = if equal {
+            Self::OP_BR_EQ_RS
+        } else {
+            Self::OP_BR_NE_RS
+        };
+        Self::pack_jump(op, lhs, string, offset)
+    }
+    /// Jump by `offset` when `R[lhs] == nil` is false (`equal`) or true
+    /// (not `equal`).
+    pub(crate) const fn branch_equal_nil(equal: bool, lhs: u16, offset: i32) -> Self {
+        let op = if equal {
+            Self::OP_BR_EQ_NIL
+        } else {
+            Self::OP_BR_NE_NIL
+        };
+        Self::pack_jump(op, lhs, 0, offset)
+    }
     /// Jump by `offset` when `R[reg]` is falsy.
     pub(crate) const fn test_false(reg: u16, offset: i32) -> Self {
         Self::pack_jump(Self::OP_TEST_FALSE, reg, 0, offset)
@@ -1030,6 +1100,10 @@ impl Instr {
             encode_cache_slot(cursor_slot),
         )
     }
+    /// The generic-for back edge: when `R[base + 3]` is not nil, copy it to
+    /// the control `R[base + 2]` and jump by `offset` to the body (a taken
+    /// backward jump polls like any other); on nil fall through, out of the
+    /// loop.
     pub(crate) const fn tfor_loop(base: u16, offset: i32) -> Self {
         Self::pack_jump(Self::OP_TFOR_LOOP, base, 0, offset)
     }

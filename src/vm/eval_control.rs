@@ -262,22 +262,6 @@ impl State {
         self.take_tfor_results(base, num_vars, call_base, usize::from(num_ret_reported));
         Ok(())
     }
-
-    /// TForLoop: if the first loop variable is nil, move the dispatch cursor
-    /// `ip` out of the loop. Otherwise update the control variable.
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    pub(super) fn instr_tfor_loop(&mut self, base: usize, ip: &mut usize, offset: i32) {
-        let first_var = &self.stack[base + 3];
-
-        if matches!(first_var, Val::Nil) {
-            // Exit loop. Admission requires a forward offset here, so this
-            // jump is never an interrupt safepoint.
-            *ip = Frame::jumped(*ip, offset);
-        } else {
-            // Update control variable with first loop variable
-            self.stack[base + 2] = self.stack[base + 3];
-        }
-    }
 }
 
 fn check_numeric_for_condition(var: f64, limit: f64, step: f64) -> bool {
