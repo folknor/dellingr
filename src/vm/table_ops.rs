@@ -16,6 +16,10 @@ pub(crate) enum TostringRendering {
     /// A string with no `__tostring` handler: the value is its own rendering,
     /// so a caller can return the original stack value without re-interning.
     Itself,
+    /// A `__tostring` handler returned a string, left rooted on top of the
+    /// stack: it is its own rendering, read or returned without a copy or a
+    /// re-intern. The caller consumes (pops or moves) that slot.
+    OnTop,
     /// The rendered bytes.
     Bytes(Vec<u8>),
 }
@@ -1000,6 +1004,11 @@ impl State {
         )? {
             // No handler ran, so `idx` still names the same string.
             TostringRendering::Itself => Ok(self.to_bytes(idx)?.to_vec()),
+            TostringRendering::OnTop => {
+                let bytes = self.to_bytes(-1)?.to_vec();
+                self.pop(1)?;
+                Ok(bytes)
+            }
             TostringRendering::Bytes(bytes) => Ok(bytes),
         }
     }
@@ -1009,7 +1018,9 @@ impl State {
     /// metatable's, nil by default), so **a string bypasses `__tostring`
     /// unless the shared string metatable has one**; a string without a
     /// handler renders as itself, and any other value by its default
-    /// coercion. The handler must return a string or a number.
+    /// coercion. The handler must return a string or a number. A string
+    /// result stays rooted on top of the stack (`TostringRendering::OnTop`)
+    /// for the caller to consume; a number is popped and rendered.
     ///
     /// `error_value` applies the opposite rule to strings on purpose.
     ///
@@ -1032,11 +1043,12 @@ impl State {
                 "tostring_rendering->call_unguarded",
                 self.call_unguarded(ArgCount::Fixed(1), RetCount::Fixed(1))
             )?;
+            if self.typ(-1) == super::LuaType::String {
+                return Ok(TostringRendering::OnTop);
+            }
             let result = self.pop_val();
-            if matches!(
-                result.typ(&self.heap),
-                super::LuaType::String | super::LuaType::Number
-            ) && let Some(bytes) = result.to_bytes_with_heap(&self.heap)
+            if result.typ(&self.heap) == super::LuaType::Number
+                && let Some(bytes) = result.to_bytes_with_heap(&self.heap)
             {
                 return Ok(TostringRendering::Bytes(bytes));
             }

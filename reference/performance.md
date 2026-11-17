@@ -181,6 +181,7 @@ host and compiler, so its row does not compare with the one above it); the
 | matcher capture state per search on top of 58e2808 | 16096 | 3168 | 3216 |
 | `string.format` literal runs batched on top of d98e154 | 16096 | 3184 | 3216 |
 | bygg, `rustc` of 2026-11-05: `__call` resolution out of line on top of ef5f81a | 15904 | 3136 | 3136 |
+| bygg, same `rustc`: unchanged string results returned as values, on top of 380266b | 15840 | 3184 | 3184 |
 
 ### 2026-11-05: proper tail calls
 

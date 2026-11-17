@@ -120,6 +120,17 @@ fn find_subslice(
         .map_err(|err| match_error(state, StringPatternFunction::Find, err))
 }
 
+/// The bill is the naive scan's comparison count: per candidate, its shared
+/// prefix with the needle plus one, or the needle's length on a match. A
+/// needle sharing a long prefix with many candidates recompares that prefix
+/// per candidate, and each prefix is compared in full before its bill is
+/// admitted, so a nearly spent budget can stop after a long comparison. A
+/// linear-time kernel (a Z-function or KMP table yields every candidate's
+/// prefix length exactly) could keep this bill and only cut host time on
+/// such inputs; it was considered and not taken, since the common case
+/// already skips to first-byte candidates and the pathological case is
+/// billed per compared byte when costing is on. It stays open as pure host
+/// work, never as a cost change.
 fn scan_subslice(
     meter: &mut CostMeter<'_>,
     interrupt: &AtomicBool,
@@ -215,14 +226,41 @@ fn lua_end_index(len: usize, idx: i64) -> usize {
     }
 }
 
-fn lua_sub_bytes(subject: &[u8], start_idx: i64, end_idx: i64) -> Vec<u8> {
-    let start = lua_start_index(subject.len(), start_idx);
-    let end = lua_end_index(subject.len(), end_idx);
-    if start >= end || start >= subject.len() {
-        Vec::new()
+/// The byte range `string.sub(s, i, j)` returns from a subject of `len`
+/// bytes, always a valid range of the subject: every empty result is `0..0`.
+fn lua_sub_range(len: usize, start_idx: i64, end_idx: i64) -> std::ops::Range<usize> {
+    let start = lua_start_index(len, start_idx);
+    let end = lua_end_index(len, end_idx);
+    if start >= end || start >= len {
+        0..0
     } else {
-        subject[start..end].to_vec()
+        start..end
     }
+}
+
+/// `string.upper` and `string.lower`: a string with no byte the mapping
+/// changes is returned as the argument value itself, with no copy and no
+/// intern (so no collection point); any other string, and every number's
+/// rendering, is copied, mapped and interned.
+fn map_ascii_case(
+    state: &mut State,
+    function_name: &str,
+    charge: Charge,
+    changes: fn(&u8) -> bool,
+    map: fn(&mut [u8]),
+) -> Result<u8> {
+    check_string_or_number(state, 1, function_name)?;
+    if state.typ(1) == LuaType::String && !state.to_bytes(1)?.iter().any(changes) {
+        charge_call(state, charge)?;
+        state.set_top(1)?;
+        return Ok(1);
+    }
+    let mut s = string_or_number_bytes(state, 1, function_name)?;
+    charge_call(state, charge)?;
+    map(&mut s);
+    state.set_top(0)?;
+    state.push_bytes(s)?;
+    Ok(1)
 }
 
 /// Lua's string-library arguments accept strings and numbers, but no other
@@ -621,17 +659,22 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         check_string_or_number(state, 1, "sub")?;
         let i = arg_integer(state, 2, "sub")?;
         let j = opt_integer(state, 3, "sub")?.unwrap_or(-1);
-        let bytes = if state.typ(1) == LuaType::String {
-            lua_sub_bytes(state.to_bytes(1)?, i, j)
+        if state.typ(1) == LuaType::String {
+            // Interned straight from the source, which stays rooted in slot
+            // 1 across the intern's collection point. Dropping `i` and `j`
+            // first frees the slot the push needs (`i` is required).
+            let range = lua_sub_range(state.to_bytes(1)?.len(), i, j);
+            charge_call(state, Charge::StringSub)?;
+            state.set_top(1)?;
+            state.push_bytes_from_stack_range(1, range)?;
+            state.replace(1)?;
         } else {
             let subject = string_or_number_bytes(state, 1, "sub")?;
-            lua_sub_bytes(&subject, i, j)
-        };
-
-        charge_call(state, Charge::StringSub)?;
-
-        state.set_top(0)?;
-        state.push_bytes(bytes)?;
+            let range = lua_sub_range(subject.len(), i, j);
+            charge_call(state, Charge::StringSub)?;
+            state.set_top(0)?;
+            state.push_bytes(&subject[range])?;
+        }
         Ok(1)
     }),
     // string.find(s, pattern [, init [, plain]])
@@ -741,21 +784,27 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     }),
     // string.upper(s)
     ("string.upper", |state| {
-        let mut s = string_or_number_bytes(state, 1, "upper")?;
-        charge_call(state, Charge::StringUpper)?;
-        s.make_ascii_uppercase();
-        state.set_top(0)?;
-        state.push_bytes(s)?;
-        Ok(1)
+        map_ascii_case(
+            state,
+            "upper",
+            Charge::StringUpper,
+            u8::is_ascii_lowercase,
+            |s| {
+                s.make_ascii_uppercase();
+            },
+        )
     }),
     // string.lower(s)
     ("string.lower", |state| {
-        let mut s = string_or_number_bytes(state, 1, "lower")?;
-        charge_call(state, Charge::StringLower)?;
-        s.make_ascii_lowercase();
-        state.set_top(0)?;
-        state.push_bytes(s)?;
-        Ok(1)
+        map_ascii_case(
+            state,
+            "lower",
+            Charge::StringLower,
+            u8::is_ascii_uppercase,
+            |s| {
+                s.make_ascii_lowercase();
+            },
+        )
     }),
     // string.reverse(s)
     ("string.reverse", |state| {
@@ -952,7 +1001,8 @@ fn gsub_plain_pattern(
     let mut template = None;
     let s_len = string_arg_len(state, s)?;
     let pattern_len = string_arg_len(state, pattern)?;
-    let mut result = Vec::with_capacity(s_len);
+    // Sized at the first match: a call with no match returns the subject.
+    let mut result = Vec::new();
     let mut pos = 0usize;
     let mut count = 0usize;
 
@@ -969,6 +1019,9 @@ fn gsub_plain_pattern(
 
         let start = pos + match_start;
         let end = start + pattern_len;
+        if count == 0 {
+            result.reserve(s_len);
+        }
         append_subject_range(state, &mut result, s, pos..start)?;
 
         let captures = [LuaCapture::Bytes { start, end }];
@@ -981,9 +1034,29 @@ fn gsub_plain_pattern(
         count += 1;
     }
 
-    append_subject_range(state, &mut result, s, pos..s_len)?;
-    state.set_top(0)?;
-    state.push_bytes(result)?;
+    finish_gsub(state, s, result, pos, count)
+}
+
+/// Push `gsub`'s two results: the output (`result` plus the subject from
+/// `copied` on), and the replacement count. With no replacement the output
+/// is the subject itself, returned as the value it already is (a number's
+/// rendering interned), so the call copies, interns and collects nothing.
+fn finish_gsub(
+    state: &mut State,
+    s: &StringArg,
+    mut result: Vec<u8>,
+    copied: usize,
+    count: usize,
+) -> Result<u8> {
+    if count == 0 {
+        state.set_top(subject_floor(s))?;
+        state.push_string_arg(s)?;
+    } else {
+        let s_len = string_arg_len(state, s)?;
+        append_subject_range(state, &mut result, s, copied..s_len)?;
+        state.set_top(0)?;
+        state.push_bytes(result)?;
+    }
     state.push_number(count as f64)?;
     Ok(2)
 }
@@ -999,9 +1072,13 @@ fn gsub_lua_pattern(
     let mut template = None;
     let mut matcher = pattern_matcher(state, pattern)?;
     let s_len = string_arg_len(state, s)?;
-    let mut result = Vec::with_capacity(s_len);
+    // Sized at the first match: a call with no match returns the subject.
+    let mut result = Vec::new();
     let mut captures = Vec::new();
     let mut pos = 0usize;
+    // The subject before `copied` is in `result`; the bytes from `copied` to
+    // `pos` are pending, appended at the next match or at the end.
+    let mut copied = 0usize;
     let mut count = 0usize;
     let anchored = matcher.is_anchored();
     // Lua 5.4 empty-match semantics (`lastmatch`): a match is rejected
@@ -1034,11 +1111,17 @@ fn gsub_lua_pattern(
             if pos == s_len {
                 break;
             }
-            append_subject_range(state, &mut result, s, pos..pos + 1)?;
+            // The skipped byte stays pending, but the size cap is checked
+            // here as if it were appended, so a refusal still comes before
+            // the next matcher run.
+            crate::limits::checked_string_growth(result.len(), pos + 1 - copied)?;
             pos += 1;
             continue;
         }
-        append_subject_range(state, &mut result, s, pos..range.start)?;
+        if count == 0 {
+            result.reserve(s_len);
+        }
+        append_subject_range(state, &mut result, s, copied..range.start)?;
         captures.clear();
         captures.extend((0..matcher.num_matches()).map(|i| matcher.capture(i)));
         crate::native_call!(
@@ -1047,18 +1130,14 @@ fn gsub_lua_pattern(
         )?;
         count += 1;
         pos = range.end;
+        copied = range.end;
         lastmatch = Some(range.end);
         if anchored {
             break;
         }
     }
 
-    append_subject_range(state, &mut result, s, pos..s_len)?;
-
-    state.set_top(0)?;
-    state.push_bytes(result)?;
-    state.push_number(count as f64)?;
-    Ok(2)
+    finish_gsub(state, s, result, copied, count)
 }
 
 /// The matcher for argument 2 of `find`, `match` or `gsub`.
@@ -1252,7 +1331,7 @@ pub(super) fn gmatch_iter(state: &mut State) -> Result<u8> {
         return Ok(0);
     }
 
-    let (matched, range, captures) =
+    let (matched, matcher) =
         state.with_gmatch_matcher(2, 3, |subject, matcher, mut meter, interrupt| {
             // Lua 5.4 semantics: an empty match ending where the previous accepted
             // match ended is rejected and the scan resumes one byte later, so
@@ -1262,7 +1341,7 @@ pub(super) fn gmatch_iter(state: &mut State) -> Result<u8> {
             let mut search = pos;
             // bounded: at most two matcher runs (one retry), each of which
             // polls per step.
-            let matched = loop {
+            loop {
                 match matcher.matches_bytes_from(subject, search, &mut meter, interrupt) {
                     Ok(true) => {
                         let found = matcher.range();
@@ -1277,36 +1356,25 @@ pub(super) fn gmatch_iter(state: &mut State) -> Result<u8> {
                     }
                     other => break other,
                 }
-            };
-            let (range, captures) = if matches!(&matched, Ok(true)) {
-                (
-                    matcher.range(),
-                    (0..matcher.num_matches())
-                        .map(|i| matcher.capture(i))
-                        .collect(),
-                )
-            } else {
-                (0..0, Vec::new())
-            };
-            (matched, range, captures)
+            }
         })?;
     let matched = matched.map_err(|err| match_error(state, StringPatternFunction::Gmatch, err))?;
     if matched {
-        let returned = if captures.len() > 1 {
-            &captures[1..]
-        } else {
-            &captures[..1]
-        };
+        // Captures are read off the matcher in place: the returned ones are
+        // 1.. when the pattern has captures, else the whole match.
+        let range = matcher.range();
+        let n = matcher.num_matches();
+        let returned = if n > 1 { 1..n } else { 0..1 };
         check_captures_finished(
             state,
-            returned.iter().copied(),
+            returned.clone().map(|i| matcher.capture(i)),
             StringPatternFunction::Gmatch,
         )?;
         let num_returns =
             crate::error::results_count(returned.len()).map_err(|kind| state.error(kind))?;
         // bounded: one step per capture, at most LUA_MAXCAPTURES.
-        for capture in returned {
-            push_gmatch_capture(state, *capture)?;
+        for i in returned {
+            push_gmatch_capture(state, matcher.capture(i))?;
         }
 
         // Stage both writes before committing either. Each push can refuse

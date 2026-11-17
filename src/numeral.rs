@@ -118,6 +118,24 @@ pub(crate) const fn is_newline_pair(first: u8, second: u8) -> bool {
 }
 
 fn parse_decimal(bytes: &[u8]) -> Option<f64> {
+    // Exact fast path for short digit runs: at most 15 digits is below
+    // 10^15 < 2^53, so the integer converts to f64 exactly and agrees with
+    // `str::parse`. Everything else takes the validating path below; a
+    // fused hand-written correctly-rounded parser was considered and not
+    // taken, since `str::parse` already borrows the input and rounds
+    // correctly, and the remaining passes are short scans of a numeral.
+    if (1..=15).contains(&bytes.len()) && bytes.iter().all(u8::is_ascii_digit) {
+        let mut value = 0u64;
+        // bounded: at most 15 digits.
+        for byte in bytes {
+            value = value * 10 + u64::from(byte - b'0');
+        }
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "at most 15 decimal digits, below 2^53, so the conversion is exact"
+        )]
+        return Some(value as f64);
+    }
     let (mantissa, exponent) = split_exponent(bytes, b'e', b'E')?;
     let digits = validate_mantissa(mantissa, |byte| byte.is_ascii_digit())?;
     if digits == 0 {
@@ -380,6 +398,30 @@ mod tests {
             parsed.to_bits(),
             oracle.to_bits()
         );
+    }
+
+    /// The short-integer fast path and the general path agree bit for bit,
+    /// across the fast path's length boundary and with signs and padding.
+    #[test]
+    fn short_decimal_integers_match_the_general_parse() {
+        let cases = [
+            "0",
+            "-0",
+            "007",
+            "1",
+            " 42 ",
+            "999999999999999",
+            "1000000000000000",
+            "9007199254740993",
+            "123456789012345678901234567890",
+            "-999999999999999",
+        ];
+        for input in cases {
+            let parsed = parse_lua_numeral(input.as_bytes()).expect("a valid decimal numeral");
+            let trimmed = input.trim();
+            let expected: f64 = trimmed.parse().expect("std parses a plain decimal integer");
+            assert_eq!(parsed.to_bits(), expected.to_bits(), "numeral {input}");
+        }
     }
 
     #[test]

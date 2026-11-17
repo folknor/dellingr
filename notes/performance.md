@@ -773,33 +773,6 @@ template errors.
 
 **Classification:** rewrite, high conviction, narrower coverage.
 
-## PERF-026 - Local string-library changes
-
-Raised by the strings hunter, with the `__tostring` item also from the
-table-and-math-libraries hunter.
-
-- **`sub` through `push_bytes_from_stack_range`.** That API already interns
-  from rooted source bytes; `sub` allocates a vector first. Keep argument and
-  charge order.
-- **Return unchanged results directly.** `gsub` allocates subject-sized output
-  even with no match; `upper`/`lower` can reuse the input when no byte
-  changes. Keep scan costs, errors and interrupt observation.
-- **No temporary copy of a `__tostring` result.** `tostring_rendering`
-  (`table_ops.rs`) pops the returned string, copies it to bytes and
-  re-interns; return the rooted value, or append its bytes while rooted.
-- **Bounded capture storage.** `gmatch` allocates a vector per yield and
-  `gsub` materializes capture descriptions per match; captures have a fixed
-  maximum.
-- **Fuse numeral validation and recognition.** `numeral.rs` scans decimal
-  syntax, validates it, validates UTF-8, then calls Rust parsing; a byte parser
-  with an exact small-integer path cuts passes. Explicit-base `tonumber` must
-  keep its successive floating-point accumulation.
-- **Literal-search kernels.** `scan_subslice` (`string.rs`) skips first-byte
-  mismatches but recompares long shared prefixes. A faster algorithm must
-  reconstruct today's naive comparison bill.
-
-**Classification:** local.
-
 ## PERF-027 - Default sort runs through clone-out and generic insert
 
 Raised by the table-and-math-libraries hunter.

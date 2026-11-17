@@ -737,7 +737,9 @@ impl State {
     }
 
     /// Run a gmatch search with the cached matcher for its pattern, in which
-    /// a leading `^` is a literal byte, as in reference `gmatch`.
+    /// a leading `^` is a literal byte, as in reference `gmatch`. The matcher
+    /// is returned with the result, so the caller reads its captures in place
+    /// rather than collecting them.
     pub(crate) fn with_gmatch_matcher<T>(
         &mut self,
         subject_idx: isize,
@@ -748,18 +750,19 @@ impl State {
             CostMeter<'_>,
             &std::sync::atomic::AtomicBool,
         ) -> T,
-    ) -> Result<T> {
+    ) -> Result<(T, LuaPattern)> {
         // Preserve the argument-type contract before touching the cache.
         self.expect_string_at(subject_idx)?;
         let pattern_idx = self.expect_string_at(pattern_idx)?;
         let mut matcher = self
             .cached_pattern_at(pattern_idx, AnchorMode::Literal)
             .matcher();
-        self.with_string_arg(
+        let result = self.with_string_arg(
             &StringArg::Slot(subject_idx),
             Charge::StringGmatch,
             |subject, meter, interrupt| operation(subject, &mut matcher, meter, interrupt),
-        )
+        )?;
+        Ok((result, matcher))
     }
 
     pub(crate) fn budget_exceeded_error(&self) -> Error {

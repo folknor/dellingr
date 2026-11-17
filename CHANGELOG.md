@@ -28,6 +28,14 @@ tick budgets and re-record replays.
   admitted before its argument is rendered, so a refused directive runs no
   `__tostring`. Charges named in a `CostModel` are unchanged; only their units
   and admission are.
+- **Replay-visible:** string results that are already a string value are
+  returned as that value instead of being copied and interned again, which
+  removes a collection point from each: `string.gsub` with no match, `upper`
+  and `lower` of a string with no byte to change, and `tostring` of a value
+  whose `__tostring` returns a string. `string.sub` of a string interns its
+  range straight from the source, which now stays rooted across that
+  intern's collection point. Results and costs are unchanged; collection
+  timing, and with it `%p` ids and object counts, can move.
 - `string.gmatch` iterator state no longer carries the `compile_charged`
   flag, so `GmatchStateFault::CompileFlagKeyMissing` and `CompileFlagInvalid`
   are removed. A `string.format` literal run that crosses the string size cap

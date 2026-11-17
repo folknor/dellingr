@@ -329,6 +329,11 @@ pub(super) const BASE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         )? {
             // Argument 1 is its own rendering: return it without re-interning.
             TostringRendering::Itself => state.set_top(1)?,
+            // The handler's string result is returned as the value it is.
+            TostringRendering::OnTop => {
+                state.replace(1)?;
+                state.set_top(1)?;
+            }
             // Byte-exact: a `__tostring` result may hold non-UTF-8 bytes,
             // which reference Lua returns unchanged.
             TostringRendering::Bytes(bytes) => {

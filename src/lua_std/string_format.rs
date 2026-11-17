@@ -369,6 +369,11 @@ fn format_argument(state: &mut State, argument: usize, directive: &Directive) ->
                 TostringRendering::Itself => {
                     format_string_rendering(state.to_bytes(idx)?, directive)
                 }
+                TostringRendering::OnTop => {
+                    let formatted = format_string_rendering(state.to_bytes(-1)?, directive);
+                    state.pop(1)?;
+                    formatted
+                }
                 TostringRendering::Bytes(bytes) => format_string_rendering(&bytes, directive),
             };
             formatted.map_err(|detail| format_arg_error(state, argument, detail))

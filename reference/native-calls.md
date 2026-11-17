@@ -223,8 +223,8 @@ marker, which is the quickest way to see what a change touched.
 The recurring native stack of each scenario's cycle, as printed by the
 on-demand probe `brokkr test native_bytes_per_level`, which covers dev and
 release through the sweeps configured in `brokkr.toml`. Measured on the tree
-of the commit that resolves `__call` chains out of line and admits tail
-callees in place (parent ef5f81a), on bygg (x86-64 Linux),
+of the commit that returns unchanged string-library results as the values
+they are (parent 380266b), on bygg (x86-64 Linux),
 `rustc 1.101.0-nightly (249c1e4e3 2026-11-05)`, with that host's global
 cargo configuration. Release is Cargo's default release profile (the
 repository sets no overrides). Dev default and dev snapshot agree in every
@@ -259,15 +259,15 @@ separately.
 | `string_library_index` | 9552 | 560 | 560 |
 | `host_get_table` | 10896 | 896 | 896 |
 | `host_get_table_string` | 10896 | 896 | 896 |
-| `host_set_table` | 10992 | 896 | 896 |
+| `host_set_table` | 10992 | 880 | 880 |
 | `host_call` | 10560 | 832 | 832 |
 | `host_anchor` | 11104 | 992 | 992 |
-| `host_tostring_bytes` | 11424 | 1184 | 1184 |
-| `host_to_string_with_meta` | 11568 | 1200 | 1200 |
-| `tostring` | 10768 | 1008 | 1008 |
-| `print` | 11152 | 1168 | 1168 |
-| `format` | 12448 | 1504 | 1504 |
-| `error_tostring` | 11328 | 1296 | 1296 |
+| `host_tostring_bytes` | 11584 | 1184 | 1184 |
+| `host_to_string_with_meta` | 11728 | 1200 | 1200 |
+| `tostring` | 10816 | 1008 | 1008 |
+| `print` | 11312 | 1168 | 1168 |
+| `format` | 12560 | 1504 | 1504 |
+| `error_tostring` | 11488 | 1296 | 1296 |
 | `sort_comparator` | 12480 | 1488 | 1488 |
 | `sort_comparator_right` | 12480 | 1488 | 1488 |
 | `sort_comparator_sortdown` | 12480 | 1488 | 1488 |
@@ -277,29 +277,29 @@ separately.
 | `sort_metamethods_comparator` | 11840 | 1440 | 1440 |
 | `sort_metamethods_length` | 10848 | 1072 | 1072 |
 | `sort_metamethods_read` | 11152 | 1040 | 1040 |
-| `sort_metamethods_write` | 11248 | 1040 | 1040 |
+| `sort_metamethods_write` | 11248 | 1024 | 1024 |
 | `insert_length` | 10800 | 1072 | 1072 |
 | `insert_shift_read` | 11104 | 1040 | 1040 |
-| `insert_shift_write` | 11216 | 1040 | 1040 |
-| `insert_value` | 11216 | 1040 | 1040 |
+| `insert_shift_write` | 11216 | 1024 | 1024 |
+| `insert_value` | 11216 | 1024 | 1024 |
 | `remove_length` | 10768 | 1008 | 1008 |
 | `remove_read` | 11072 | 976 | 976 |
 | `remove_shift_read` | 11072 | 976 | 976 |
-| `remove_shift_write` | 11184 | 976 | 976 |
-| `remove_clear` | 11184 | 976 | 976 |
+| `remove_shift_write` | 11184 | 960 | 960 |
+| `remove_clear` | 11184 | 960 | 960 |
 | `concat_length` | 11440 | 1056 | 1056 |
 | `concat_read` | 11744 | 1024 | 1024 |
 | `move_read` | 11376 | 1024 | 1024 |
-| `move_write` | 11488 | 976 | 976 |
+| `move_write` | 11488 | 960 | 960 |
 | `unpack_length` | 10720 | 976 | 976 |
 | `unpack_read` | 11024 | 944 | 944 |
 | `gsub_empty_function` | 12608 | 1520 | 1520 |
-| `gsub_plain_function` | 12576 | 1520 | 1520 |
-| `gsub_pattern_function` | 15904 | 3136 | 3136 |
-| `gsub_pattern_captures` | 15904 | 3136 | 3136 |
+| `gsub_plain_function` | 12496 | 1520 | 1520 |
+| `gsub_pattern_function` | 15840 | 3184 | 3184 |
+| `gsub_pattern_captures` | 15840 | 3184 | 3184 |
 | `gsub_empty_table` | 12496 | 1456 | 1456 |
-| `gsub_plain_table` | 12464 | 1456 | 1456 |
-| `gsub_pattern_table` | 15792 | 3072 | 3072 |
+| `gsub_plain_table` | 12384 | 1456 | 1456 |
+| `gsub_pattern_table` | 15728 | 3120 | 3120 |
 | `tfor_lua` | 9584 | 704 | 704 |
 | `tfor_ipairs` | 11264 | 1040 | 1040 |
 | `tfor_host_iterator` | 11056 | 944 | 944 |

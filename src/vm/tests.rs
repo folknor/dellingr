@@ -1579,7 +1579,8 @@ fn gmatch_string_checks_preserve_relative_indexes_in_nested_frames() {
                 assert_argument(
                     &state
                         .with_gmatch_matcher(1, 1, |_, _, _, _| ())
-                        .unwrap_err(),
+                        .err()
+                        .expect("non-string subject fails"),
                     1,
                 );
                 assert_argument(&state.to_bytes(1).unwrap_err(), 1);
@@ -1589,7 +1590,8 @@ fn gmatch_string_checks_preserve_relative_indexes_in_nested_frames() {
                 assert_argument(
                     &state
                         .with_gmatch_matcher(2, 1, |_, _, _, _| ())
-                        .unwrap_err(),
+                        .err()
+                        .expect("non-string pattern fails"),
                     1,
                 );
                 Ok(0)
