@@ -320,11 +320,16 @@ impl State {
     }
 
     /// Attempts to convert the value at the given index to a number.
+    ///
+    /// A NaN is returned as the one canonical quiet NaN, whatever sign and
+    /// payload the computation that produced it left (those differ by host),
+    /// so the returned bits are the same on every host.
     pub fn to_number(&self, idx: isize) -> Result<f64> {
         self.check_usable()?;
         let i = self.convert_idx(idx)?;
         let val = &self.stack[i];
         val.as_num()
+            .map(crate::numeral::canonical_nan)
             .ok_or_else(|| self.type_error(super::TypeError::Arithmetic(val.typ(&self.heap))))
     }
 

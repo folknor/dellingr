@@ -35,6 +35,12 @@ tick budgets and re-record replays.
 
 ### Fixed
 
+- **Replay-visible to hosts:** a NaN reaches the host as one canonical quiet
+  NaN (`0x7ff8_0000_0000_0000`) through `State::to_number`,
+  `State::raw_field` as `f64` or `Option<f64>`, and the numeric
+  `ErrorValue` of `error(x)`. Before, its sign and payload were whatever the
+  hardware produced (sign set on x86-64, clear on aarch64) or the host
+  pushed. Scripts and snapshots are unchanged.
 - An integer `math.random` polls the host interrupt after each rejected
   draw, so the rejection loop is no longer an unpolled native loop. An
   interrupted call leaves the random stream unmoved; uninterrupted streams

@@ -32,7 +32,7 @@
 //! (i586 and older without SSE2) evaluate with excess range; `src/lib.rs`
 //! refuses to compile for them. NaN sign and payload bits are not part of the
 //! contract: they never affect a non-NaN result, and the VM never lets a
-//! script observe them.
+//! script or the host observe them.
 //!
 //! This stays a module of the crate rather than a workspace crate of its own.
 //! A split was proposed so its tables would compile once across VM edits and

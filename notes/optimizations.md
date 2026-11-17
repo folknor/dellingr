@@ -407,9 +407,10 @@ Observable surface (the 2026-10-23 survey; re-check before starting):
   `FORMAT_VERSION` bump; `tests/integration/snapshot/save_golden.rs` compares saves byte for byte
   and is the oracle. No charge depends on representation, so no
   `COST_MODEL_VERSION` bump. `Val` is `pub(crate)`.
-- **The one host-visible edge:** a host that pushes a NaN with a nonzero
-  payload would get the canonical NaN back from `to_number`. Not replay
-  visible.
+- **No host-visible edge:** every exit that hands the host an `f64`
+  (`to_number`, `raw_field`, a numeric `ErrorValue`) already returns the
+  canonical NaN (`numeral::canonical_nan`), so canonicalizing on entry
+  changes nothing the host sees.
 
 Requirements the rewrite must meet:
 - **Canonicalize NaN where arbitrary bits enter:** `push_number`, and the

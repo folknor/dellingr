@@ -92,7 +92,9 @@ x86 without SSE2) evaluate with excess range and are not supported; `src/lib.rs`
 refuses to compile for them. NaN sign and payload bits
 are not part of the guarantee: they never affect a non-NaN result, every NaN is
 treated as quiet (so `pow(NaN, 0)` and `pow(1, NaN)` are 1 whatever the
-NaN's bits), and the VM never lets a script observe them.
+NaN's bits), and the VM never lets a script or the host observe them (the
+host reads every NaN as one canonical NaN; `docs/determinism.md`, "Number
+rendering").
 
 ## Porting conventions
 

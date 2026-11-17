@@ -67,9 +67,9 @@ fn stock_library_pairs_order_is_pinned() {
     );
 }
 
-/// A NaN result is pinned only as "some NaN": its sign and payload are not
-/// part of the determinism guarantee (reference/deterministic-math.md).
-const ANY_NAN: u64 = 0x7FF8_0000_0000_0000;
+/// Every NaN reaches the host as this one canonical quiet NaN, whatever bits
+/// the host's hardware produced (docs/determinism.md, "Number rendering").
+const NAN: u64 = 0x7FF8_0000_0000_0000;
 const INF: u64 = 0x7FF0_0000_0000_0000;
 const NEG_INF: u64 = 0xFFF0_0000_0000_0000;
 const NEG_ZERO: u64 = 0x8000_0000_0000_0000;
@@ -86,20 +86,12 @@ fn bits(x: f64) -> u64 {
 }
 
 fn assert_bits(label: &str, got: f64, expected: u64) {
-    if expected == ANY_NAN {
-        assert!(
-            got.is_nan(),
-            "{label}: expected NaN, got {:#018x}",
-            got.to_bits()
-        );
-    } else {
-        assert_eq!(
-            got.to_bits(),
-            expected,
-            "{label}: got {:#018x}, expected {expected:#018x}",
-            got.to_bits()
-        );
-    }
+    assert_eq!(
+        got.to_bits(),
+        expected,
+        "{label}: got {:#018x}, expected {expected:#018x}",
+        got.to_bits()
+    );
 }
 
 /// `%` (floored, Lua 5.4) and `math.fmod` (truncated) on signed zeros,
@@ -134,14 +126,14 @@ fn remainder_edge_cases_are_pinned_bit_exact() {
         (bits(-5.0), INF, INF, bits(-5.0)),
         (bits(-5.0), NEG_INF, bits(-5.0), bits(-5.0)),
         // Invalid operations and NaN operands.
-        (INF, bits(3.0), ANY_NAN, ANY_NAN),
-        (NEG_INF, bits(3.0), ANY_NAN, ANY_NAN),
-        (INF, INF, ANY_NAN, ANY_NAN),
-        (bits(3.0), 0, ANY_NAN, ANY_NAN),
-        (bits(3.0), NEG_ZERO, ANY_NAN, ANY_NAN),
-        (0, 0, ANY_NAN, ANY_NAN),
-        (ANY_NAN, bits(3.0), ANY_NAN, ANY_NAN),
-        (bits(3.0), ANY_NAN, ANY_NAN, ANY_NAN),
+        (INF, bits(3.0), NAN, NAN),
+        (NEG_INF, bits(3.0), NAN, NAN),
+        (INF, INF, NAN, NAN),
+        (bits(3.0), 0, NAN, NAN),
+        (bits(3.0), NEG_ZERO, NAN, NAN),
+        (0, 0, NAN, NAN),
+        (NAN, bits(3.0), NAN, NAN),
+        (bits(3.0), NAN, NAN, NAN),
         // Subnormal divisors and dividends (exact, so no rounding anywhere).
         (bits(1.0), SUB, 0, 0),
         (3, 2, 1, 1),
@@ -189,8 +181,79 @@ fn remainder_edge_cases_are_pinned_bit_exact() {
     }
 }
 
+/// Reads field `v` of its table argument as `f64` and as `Option<f64>` and
+/// returns both bit patterns as hex strings.
+fn read_nan_field(state: &mut dellingr::State) -> dellingr::Result<u8> {
+    let plain: f64 = state.raw_field(1, "v")?;
+    let optional: Option<f64> = state.raw_field(1, "v")?;
+    state.push_string(format!("{:#018x}", plain.to_bits()))?;
+    state.push_string(format!("{:#018x}", optional.unwrap_or(0.0).to_bits()))?;
+    Ok(2)
+}
+
+/// Every exit through which the host reads a number as an `f64` returns the
+/// canonical NaN, whatever sign, payload or quiet bit the NaN carried inside
+/// the VM: a sign-set NaN, a payload-bearing one and a signaling one pushed by
+/// the host, and both signs of a NaN computed by the script.
+#[test]
+fn nan_reaches_the_host_with_canonical_bits() {
+    let pushed = [
+        0xFFF8_0000_0000_0000_u64,
+        0x7FF8_0000_DEAD_BEEF,
+        0x7FF0_0000_0000_0001,
+    ];
+    let cases = pushed
+        .iter()
+        .map(|&bits| (bits, "p"))
+        .chain([(0, "0/0"), (0, "-(0/0)")]);
+    let canonical = format!("{NAN:#018x}");
+    for (bits, expression) in cases {
+        let label = format!("{expression} with p = {bits:#018x}");
+        let (mut state, _recorder) = Recorder::state();
+        state
+            .push_number(f64::from_bits(bits))
+            .expect("a number fits");
+        state.set_global("p").expect("global is set");
+        let handle = state
+            .add_rust_fn("read_nan_field", read_nan_field)
+            .expect("function fits");
+        state.push_rust_fn(handle).expect("function fits");
+        state.set_global("read_nan_field").expect("global is set");
+
+        support::eval(&mut state, format!("return {expression}"), 1);
+        let got = state.to_number(-1).expect("a number");
+        assert_bits(&format!("to_number of {label}"), got, NAN);
+
+        support::eval(
+            &mut state,
+            format!("return read_nan_field{{v = {expression}}}"),
+            2,
+        );
+        for offset in [-2, -1] {
+            assert_eq!(
+                state.to_string(offset).expect("a string"),
+                canonical,
+                "raw_field of {label}"
+            );
+        }
+
+        support::load(&mut state, format!("error({expression})"));
+        let error = state
+            .call(dellingr::ArgCount::Fixed(0), dellingr::RetCount::Fixed(0))
+            .expect_err("error() raises");
+        let dellingr::error::ErrorKind::ScriptError {
+            value: dellingr::error::ErrorValue::Number(number),
+            ..
+        } = error.kind()
+        else {
+            panic!("{label}: expected a numeric script error, got {error:?}");
+        };
+        assert_bits(&format!("error value of {label}"), *number, NAN);
+    }
+}
+
 /// The constant folder shares `lua_modulo` with the VM, so folded `%` must
-/// agree bit for bit with the runtime cases above.
+/// agree bit for bit with the runtime remainder cases.
 #[test]
 fn folded_remainder_matches_the_runtime_edge_cases() {
     let (mut state, _recorder) = Recorder::state();

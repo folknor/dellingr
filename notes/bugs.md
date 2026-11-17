@@ -18,18 +18,6 @@ one hunter per scope). Unverified: the fix pass decides which are real.
 
 ---
 
-## BUG-005 - NaN payload bits are not pinned at the host boundary
-
-Raised by the heap hunter, echoed by the dispatch hunter. Arithmetic returns
-native `f64` results and `to_number` (`src/vm/stack.rs`) exposes them
-directly, so a NaN's sign and payload reach the host as computed. Snapshots
-canonicalize NaNs (`save_state.rs` numeric encoder), while the replay tests
-(`tests/integration/library/replay_goldens.rs`) explicitly accept any NaN
-payload. The hunters measured this against the hunt brief, which stated
-"bit-identical results"; if that includes NaN sign and payload, the guarantee
-is not established. A value-representation rewrite (NaN boxing) has to decide
-this explicitly either way.
-
 ## BUG-006 - Method-cache mutation tests do not exercise a warmed entry
 
 Raised by the lookup hunter. The two method-cache mutation tests in

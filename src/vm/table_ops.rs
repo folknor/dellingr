@@ -1060,7 +1060,8 @@ impl State {
         Ok(match val {
             Val::Nil => ErrorValue::Nil,
             Val::Bool(value) => ErrorValue::Boolean(value),
-            Val::Num(number) => ErrorValue::Number(number),
+            // A NaN leaves as the canonical NaN, as from `State::to_number`.
+            Val::Num(number) => ErrorValue::Number(crate::numeral::canonical_nan(number)),
             Val::Str(string) => ErrorValue::String(self.heap.get_string(string).to_vec()),
             Val::RustFn(_) | Val::Obj(_) => {
                 // Read the type before any handler runs.

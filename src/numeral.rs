@@ -6,6 +6,22 @@
 /// (sign bit set on x86-64, clear on aarch64).
 pub(crate) const CANONICAL_NAN_BITS: u64 = 0x7ff8_0000_0000_0000;
 
+/// `n` with any NaN replaced by the canonical NaN; every other value,
+/// `-0.0` included, keeps its exact bits.
+///
+/// Applied wherever a number leaves the VM as an `f64` the host can inspect
+/// (`State::to_number`, `RawField` for `f64`, a numeric `ErrorValue`).
+/// Inside the VM a NaN keeps whatever bits arithmetic or the host gave it:
+/// nothing a script can do observes them, so only the exits need pinning.
+#[inline]
+pub(crate) fn canonical_nan(n: f64) -> f64 {
+    if n.is_nan() {
+        f64::from_bits(CANONICAL_NAN_BITS)
+    } else {
+        n
+    }
+}
+
 // The VM dispatch calls these named functions directly and the constant
 // folder reaches the same definitions through the opcode rows
 // (`ArithOp::function`), so a folded result is bit-identical to the runtime

@@ -78,7 +78,8 @@ fn integral(value: &FieldValue<'_>) -> std::result::Result<f64, FieldFailure> {
 
 impl sealed::Convert for f64 {
     fn convert(value: FieldValue<'_>) -> std::result::Result<Self, FieldFailure> {
-        number(&value)
+        // A NaN leaves as the canonical NaN, as from `State::to_number`.
+        number(&value).map(crate::numeral::canonical_nan)
     }
 }
 impl RawField for f64 {}
