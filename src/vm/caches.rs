@@ -525,8 +525,9 @@ trait CacheEntry {
 impl CacheEntry for GlobalLookupCacheEntry {
     fn for_each_handle(&self, _: &mut dyn FnMut(Val)) {
         // Indexes the global table, which lives as long as the State and is
-        // a GC root, so the entry names no handle that can die; its version
-        // advances across content swaps and never resets.
+        // a GC root, so the entry names no handle that can die; no two
+        // contents the table holds share a version (`RESTRICTED_STAMPS` in
+        // `global_env.rs`), and a version never resets.
         let Self {
             probe: _,
             builtin: _,

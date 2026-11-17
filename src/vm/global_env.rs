@@ -88,7 +88,36 @@ pub(super) struct GlobalEnv {
     /// The environment tables the last successful `open_libs` built, which
     /// follow this table's slot policy and seal (see `EnvTable`).
     env_tables: Vec<EnvTable>,
+    /// The next version a restricted environment's contents may take, in
+    /// the upper half of the version space (`restricted_stamp`). Kept for the
+    /// State's life, load setup included, and never saved: a token minted
+    /// inside any earlier restriction may still sit in a reachable cache.
+    next_restricted_stamp: u64,
 }
+
+/// The first version a restricted environment's contents take. The base
+/// environment's contents start at a low version and only ever move by one
+/// per shape change, so they stay below this for any feasible run, and every
+/// restricted contents is stamped above it, past every stamp issued before.
+/// So no two contents the global table ever holds share a version: the base
+/// contents keep their version (and every token minted against them) across
+/// a restriction, and a token minted inside one never names the base
+/// contents or a later restriction's. That is what lets `swap_contents`
+/// leave versions alone, so a probe minted against the base contents is
+/// current again after the restricted call instead of re-resolving once (a
+/// cache cell the callback itself overwrote still refills, the builtin
+/// mirror refreshes on the epoch, and a resumed nesting level is
+/// restamped). The bound counts every stamp issued, entries and nested
+/// resumes included, not only shape changes.
+///
+/// Deliberately not done: a prepared, reusable restricted backing per
+/// whitelist with invocation-local writes. Entry still builds the restricted
+/// contents (one name resolution and insert per whitelisted name, read at
+/// entry so outer changes and discarded writes stay exact); the only
+/// recorded use is a restricted event callback, not one per tick, and a
+/// shared backing would have to keep `next(_G, name)` refusing a whitelisted
+/// name whose outer value is nil, which a preinstalled tombstone breaks.
+const RESTRICTED_STAMPS: u64 = 1 << 63;
 
 /// What an environment table is to the standard library. The snapshot token
 /// each role saves under belongs to `save_state`.
@@ -198,6 +227,7 @@ impl GlobalEnv {
             #[cfg(feature = "snapshot")]
             pins: Vec::new(),
             env_tables: Vec::new(),
+            next_restricted_stamp: RESTRICTED_STAMPS,
         }
     }
 
@@ -513,6 +543,8 @@ impl GlobalEnv {
             }
         }
         restricted.set_metatable(outer.get_metatable());
+        let stamp = self.restricted_stamp(outer.version_stamp());
+        restricted.restamp(stamp);
         heap.charge_table_backing(&restricted);
         let contents = self.swap_contents(heap, restricted);
         let phase = std::mem::replace(&mut self.phase, Phase::Sealed);
@@ -520,15 +552,40 @@ impl GlobalEnv {
     }
 
     /// Resume a suspended environment, discarding the restricted one.
+    /// The base environment's contents come back with their own version, so
+    /// tokens minted against them before the restriction are current again;
+    /// a resumed restricted environment (an outer nesting level) is
+    /// restamped, because its later shape changes would otherwise walk into
+    /// stamps the inner level issued.
     pub(super) fn resume(&mut self, heap: &mut GcHeap, suspended: SuspendedEnv) {
-        let discarded = self.swap_contents(heap, suspended.contents);
+        let mut contents = suspended.contents;
+        let discarded_version = self.contents(heap).version_stamp();
+        self.next_restricted_stamp = self
+            .next_restricted_stamp
+            .max(discarded_version.wrapping_add(1));
+        if contents.version_stamp() >= RESTRICTED_STAMPS {
+            let stamp = self.restricted_stamp(0);
+            contents.restamp(stamp);
+        }
+        let discarded = self.swap_contents(heap, contents);
         heap.release_table_backing(&discarded);
         self.phase = suspended.phase;
     }
 
-    /// Put `incoming` into the global table and return what it held. The
-    /// version moves past both, so every cache entry naming the table (in any
-    /// cache family) misses or revalidates by key.
+    /// Issue a version for restricted contents: past every stamp issued
+    /// before and past `active`, the version of the contents in force (which
+    /// is itself a restricted stamp when restrictions nest). See
+    /// `RESTRICTED_STAMPS`.
+    fn restricted_stamp(&mut self, active: u64) -> u64 {
+        let stamp = self.next_restricted_stamp.max(active.wrapping_add(1));
+        self.next_restricted_stamp = stamp.wrapping_add(1);
+        stamp
+    }
+
+    /// Put `incoming` into the global table and return what it held, each
+    /// keeping its own version (`RESTRICTED_STAMPS` says why no token can
+    /// then name the wrong contents). The heap's mutation epoch for the
+    /// table still moves, so the builtin mirror refreshes.
     fn swap_contents(&self, heap: &mut GcHeap, incoming: Table) -> Table {
         self.contents_mut(heap).swap_contents(incoming)
     }
@@ -928,29 +985,109 @@ mod tests {
     }
 
     #[test]
-    fn global_caches_invalidate_on_both_environment_swaps() {
+    fn base_caches_survive_restrictions_and_restricted_tokens_never_cross() {
         let _hits = HitMode::required();
         let mut state = State::raw();
-        let optional = key(&mut state, "optional");
+        let a = key(&mut state, "a");
+        let b = key(&mut state, "b");
         state
             .global_env
-            .write(&mut state.heap, optional, Val::Num(6.0), None);
-        let cache = GlobalLookupCacheSlot::default();
-        let saved = state.global_env.restrict(&mut state.heap, &[]);
-        state.global_env.read(&state.heap, optional, Some(&cache));
+            .write(&mut state.heap, a, Val::Num(1.0), None);
+        state
+            .global_env
+            .write(&mut state.heap, b, Val::Num(2.0), None);
+        let base = GlobalLookupCacheSlot::default();
+        state.global_env.read(&state.heap, a, Some(&base));
+        let hit = |state: &State, cache: &GlobalLookupCacheSlot| {
+            state.global_env.read_cached(&state.heap, cache)
+        };
+
+        // One restriction: the base token misses inside and is warm after.
+        let saved = state.global_env.restrict(&mut state.heap, &["b"]);
+        assert_eq!(hit(&state, &base), None);
+        let first = GlobalLookupCacheSlot::default();
         assert_eq!(
-            state.global_env.read_cached(&state.heap, &cache),
-            Some(Val::Nil)
+            state.global_env.read(&state.heap, b, Some(&first)),
+            Val::Num(2.0)
         );
         state.global_env.resume(&mut state.heap, saved);
-        assert_eq!(state.global_env.read_cached(&state.heap, &cache), None);
-        assert_eq!(
-            state.global_env.read(&state.heap, optional, Some(&cache)),
-            Val::Num(6.0)
-        );
-        let saved = state.global_env.restrict(&mut state.heap, &[]);
-        assert_eq!(state.global_env.read_cached(&state.heap, &cache), None);
+        assert_eq!(hit(&state, &base), Some(Val::Num(1.0)));
+        assert_eq!(hit(&state, &first), None);
+
+        // A later restriction holds another key in the same slot: the earlier
+        // restriction's token must not name it.
+        let saved = state.global_env.restrict(&mut state.heap, &["a"]);
+        assert_eq!(hit(&state, &first), None);
+        assert_eq!(hit(&state, &base), None);
         state.global_env.resume(&mut state.heap, saved);
-        assert_eq!(state.global_env.read_cached(&state.heap, &cache), None);
+        assert_eq!(hit(&state, &base), Some(Val::Num(1.0)));
+
+        // Nested: the resumed middle level is restamped, so its own token
+        // misses (the cross-level cases are in the next test).
+        let outer = state.global_env.restrict(&mut state.heap, &["a"]);
+        let middle = GlobalLookupCacheSlot::default();
+        state.global_env.read(&state.heap, a, Some(&middle));
+        let inner = state.global_env.restrict(&mut state.heap, &[]);
+        state.global_env.resume(&mut state.heap, inner);
+        assert_eq!(hit(&state, &middle), None);
+        state.global_env.resume(&mut state.heap, outer);
+        assert_eq!(hit(&state, &base), Some(Val::Num(1.0)));
+    }
+
+    /// Shape changes inside restricted levels: a level that compacts before
+    /// a nested entry, or inside it before exit, must not share a version
+    /// with the other level, though both hold a live key at the same slot.
+    #[test]
+    fn nested_restrictions_that_compact_never_share_a_version() {
+        let _hits = HitMode::required();
+        let mut state = State::raw();
+        let [a, b, c, d] = ["a", "b", "c", "d"].map(|name| key(&mut state, name));
+        for (name, value) in [(a, 1.0), (b, 2.0)] {
+            state
+                .global_env
+                .write(&mut state.heap, name, Val::Num(value), None);
+        }
+        let hit = |state: &State, cache: &GlobalLookupCacheSlot| {
+            state.global_env.read_cached(&state.heap, cache)
+        };
+        let version = |state: &State| state.global_env.contents(&state.heap).version_stamp();
+        let write = |state: &mut State, name, value| {
+            state.global_env.write(&mut state.heap, name, value, None);
+        };
+
+        // The parent compacts: `a` dies and a new key sweeps it, leaving `b`
+        // in slot 0. A probe minted after that names slot 0 at the new version.
+        let outer = state.global_env.restrict(&mut state.heap, &["a", "b"]);
+        let before = version(&state);
+        write(&mut state, a, Val::Nil);
+        write(&mut state, d, Val::Num(4.0));
+        assert_ne!(version(&state), before, "the parent must have compacted");
+        let parent = GlobalLookupCacheSlot::default();
+        assert_eq!(
+            state.global_env.read(&state.heap, b, Some(&parent)),
+            Val::Num(2.0)
+        );
+
+        // The child holds `d` then `b`; the parent's probe must not read its
+        // slot 0. Then the child compacts too, leaving `b` in its slot 0 with
+        // a value the parent does not have.
+        let inner = state.global_env.restrict(&mut state.heap, &["d", "b"]);
+        assert_eq!(hit(&state, &parent), None);
+        let before = version(&state);
+        write(&mut state, d, Val::Nil);
+        write(&mut state, c, Val::Num(5.0));
+        assert_ne!(version(&state), before, "the child must have compacted");
+        write(&mut state, b, Val::Num(9.0));
+        let child = GlobalLookupCacheSlot::default();
+        assert_eq!(
+            state.global_env.read(&state.heap, b, Some(&child)),
+            Val::Num(9.0)
+        );
+        state.global_env.resume(&mut state.heap, inner);
+        assert_eq!(hit(&state, &child), None);
+        assert_eq!(state.global_env.read(&state.heap, b, None), Val::Num(2.0));
+        state.global_env.resume(&mut state.heap, outer);
+        assert_eq!(hit(&state, &child), None);
+        assert_eq!(hit(&state, &parent), None);
     }
 }

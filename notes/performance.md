@@ -601,27 +601,6 @@ saving is one short hash and two probes per field.
 
 **Classification:** micro, low conviction until measured.
 
-## PERF-034 - Restricted environment rebuilt on every entry
-
-Raised by the host-boundary hunter.
-
-**Bottleneck:** each `with_restricted_env` entry (`vm.rs`) builds a new
-`Table`, resolves the whitelist names, copies their values in and swaps it into
-the global table; exit swaps back. Both swaps advance the table version,
-invalidating global probes and other caches naming it (`restrict`/`resume`,
-`global_env.rs`).
-
-**Redesign:** restricted contents as a prepared ordered backing view with
-invocation-local writes, selected at entry and discarded at exit; unchanged
-visible bindings shared, not rebuilt; cache validation names the active
-backing view rather than going cold on entry and exit. It cannot be a second
-environment consulted only by global bytecodes: `_G`, retained aliases, raw
-operations and iteration all see the same active contents. Whitelist order,
-outer binding changes, nested restrictions and discarded writes stay exact.
-
-**Classification:** full representation rewrite, conditional: near the top if
-the game restricts around every tick, irrelevant if restriction is setup-only.
-
 ## PERF-038 - Sweep visits vacant slot-map slots up to the high-water mark
 
 Raised by the resident-payload pacing spar. Verified by reading the code. Not

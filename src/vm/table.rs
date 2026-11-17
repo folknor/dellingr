@@ -405,15 +405,19 @@ impl Default for TableStorage {
 // Slot tokens: what an inline cache holds to find a key again without a
 // keyed lookup. Their fields are private, so only `Table` mints them (from a
 // lookup by key) and only `Table` interprets them; no code outside this file
-// reads or compares a shape version. Every token rests on one rule, which
+// compares a shape version (the global environment reads and sets one only to
+// allocate stamps, `version_stamp`). Every token rests on one rule, which
 // the version-bump sites below keep and the debug shape witness checks:
 //
 //   While a table's shape version is unchanged, every existing hash slot
 //   keeps its key. A slot may die and revive in place, and new slots may be
 //   appended, but nothing is removed, reordered or renamed. Every operation
 //   that does one of those moves the version (`compact_dead`, the inline
-//   shift-out and the vacate-rename in `insert`, `rebuild_from_snapshot`,
-//   `swap_contents`).
+//   shift-out and the vacate-rename in `insert`, `rebuild_from_snapshot`).
+//   `swap_contents` replaces the whole contents, which carry their own
+//   version; it is sound because the global environment, its only caller,
+//   never installs two contents with the same version (`restricted_stamp`
+//   in `global_env.rs`).
 //
 // Array-part tokens carry tagged indices naming absolute keys, which survive
 // any window move, so the array part never moves the version.
@@ -692,7 +696,8 @@ impl Table {
     }
 
     /// The shape version. Private: outside this file a version is only ever
-    /// held inside a slot token.
+    /// held inside a slot token (bar the global environment's stamp
+    /// allocator, `version_stamp`).
     #[inline]
     fn version(&self) -> u64 {
         self.version.get()
@@ -1213,8 +1218,9 @@ impl Table {
     /// The number of occupied hash slots, tombstones and vacant slots
     /// included. A key with no slot at all can gain one only by appending a
     /// slot, which grows this; everything that removes or reorders slots
-    /// (compaction, a rebuild, a content swap) bumps the version. So the pair
-    /// (version, slot count) proves that a key which had no slot still has
+    /// (compaction, a rebuild) bumps the version, and a content swap installs
+    /// contents whose version no other contents of the table ever had. So the
+    /// pair (version, slot count) proves that a key which had no slot still has
     /// none.
     #[inline]
     pub(super) fn hash_slot_count(&self) -> usize {
@@ -1233,16 +1239,30 @@ impl Table {
         }
     }
 
-    /// Put `incoming` into this table and return what it held. The version
-    /// moves past both, so no token minted against either contents (in any
-    /// cache family) is current afterwards. The global table swaps its
-    /// contents with a restricted environment's this way, keeping its
-    /// identity.
+    /// Put `incoming` into this table and return what it held, each contents
+    /// keeping its own version (and debug shape witness). The global table
+    /// swaps its contents with a restricted environment's this way, keeping
+    /// its identity. Tokens minted against either contents stay true of that
+    /// contents, so the caller owns the one rule that makes this sound: no
+    /// two contents ever installed in the same table may share a version
+    /// (`GlobalEnv` partitions the version space, see `restricted_stamp`).
     fn swap_contents(&mut self, mut incoming: Table) -> Table {
         std::mem::swap(self, &mut incoming);
-        self.version
-            .set(self.version.get().max(incoming.version()).wrapping_add(1));
         incoming
+    }
+
+    /// The shape version, for the global environment's stamp allocator
+    /// only: everywhere else a version is held inside a slot token.
+    pub(super) fn version_stamp(&self) -> u64 {
+        self.version()
+    }
+
+    /// Give detached contents the version `stamp` before they are swapped
+    /// into the global table. Moving a version never makes a token current
+    /// that was not, as long as the stamp was never issued to other contents
+    /// of the same table.
+    pub(super) fn restamp(&mut self, stamp: u64) {
+        self.version.set(stamp);
     }
 
     /// Iterate live hash entries in insertion order with their physical slots.
@@ -1355,7 +1375,9 @@ impl Table {
         // its contents, version and metatable.
         //
         // The rebuild may move keys to new indices, so the version must move
-        // past every value an inline cache could have captured for this table
+        // past every value an inline cache could have captured for these
+        // contents (the global table's restricted contents use a disjoint
+        // range, `RESTRICTED_STAMPS` in `global_env.rs`)
         // (load setup can run Lua against environment tables before this).
         // Resetting it to 0 would let a cache warmed at version 0 return the
         // wrong slot. A per-table bump suffices: caches key on table identity,
