@@ -170,7 +170,7 @@ returns; the loaded State starts with an empty stack.
   array growth cannot be reserved, such as one an edited save's impossible
   gap demands, raises the ordinary `table growth failed` error, which kills
   the callback and leaves the table unchanged. A restore step that cannot
-  grow a table rejects the load as `InvalidTable` with
+  reserve a table's array storage rejects the load as `InvalidTable` with
   `TableRestoreFailure::GrowthFailed`.
 - A format version other than `FORMAT_VERSION` is rejected while reading the
   header, before payload decoding.

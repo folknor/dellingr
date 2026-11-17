@@ -1214,7 +1214,8 @@ impl Table {
     }
 
     /// Reserve room for `additional` more hash slots. Inline storage has its
-    /// fixed capacity and reserves nothing.
+    /// fixed capacity and reserves nothing. Infallible like all hash-part
+    /// allocation; `reserve_array` says why only array growth can fail.
     pub(super) fn reserve_hash(&mut self, additional: usize) {
         if let TableStorage::Map(map, _) = &mut self.storage {
             map.reserve(additional);
@@ -1713,6 +1714,14 @@ impl Table {
     /// legitimately omit an arbitrarily long nil tail, so neither rejecting
     /// that tail on load nor discarding live slots is safe; the gap's
     /// allocation is what has to be able to fail.
+    ///
+    /// The hash part has no counterpart on purpose. Its allocations follow
+    /// the physical slots already inserted or decoded, or an explicit
+    /// capacity bounded by bytecode, a library constant or host input, never
+    /// a numeric key or saved logical length, so no write can demand a
+    /// reservation out of proportion to what the table holds. An allocator
+    /// refusal there aborts like any other VM allocation (`docs/limits.md`,
+    /// "State-local growth").
     fn reserve_array(&mut self, len: usize) -> std::result::Result<(), TableError> {
         if len > self.array.capacity() {
             self.array

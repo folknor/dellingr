@@ -18,13 +18,6 @@ one hunter per scope). Unverified: the fix pass decides which are real.
 
 ---
 
-## BUG-003 - Table growth failure handling is asymmetric
-
-Raised by the table-representation hunter. Array reservations translate
-allocation failure into `TableError::GrowthFailed`, while hash creation and
-growth use infallible IndexMap allocation APIs, so the fallible table-growth
-boundary covers only the array part.
-
 ## BUG-005 - NaN payload bits are not pinned at the host boundary
 
 Raised by the heap hunter, echoed by the dispatch hunter. Arithmetic returns

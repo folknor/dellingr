@@ -219,8 +219,14 @@ entries it removes.
   impossible gap in an edited save and an allocator refusal while growing a
   legitimate table both return that ordinary error and terminate the callback.
   This does not impose a smaller logical-length limit or discard live values.
-  It does not make unrelated VM allocations fallible or protect against an
-  operating system killing the process after accepting an allocation.
+  Hash storage allocation stays infallible: its size follows the physical hash
+  slots already inserted or decoded, or an explicit capacity input (a
+  constructor's field count, a library's constant, a host's whitelist), never
+  a numeric key or a saved logical length, so no single write can demand an
+  outsized hash reservation. An allocator refusal there aborts like any other
+  VM allocation. Array fallibility does not make those unrelated VM
+  allocations fallible or protect against an operating system killing the
+  process after accepting an allocation.
 - Never reclaimed until `State::seal_globals`: the global table keeps a slot
   for every global written after it was set to nil, because a load's setup may
   reinstall that name and the saved nil is what keeps it deleted. A script
