@@ -199,6 +199,26 @@ mostly-dead prefix even past a live straggler.
 Signal: a game script holding a sparse long-lived id map, or a heap profile
 showing an array window far larger than its live count.
 
+The 2026-11-17 performance hunt (table-representation scope) reached the same
+pathology plus a second one, and proposed separating numeric payload storage
+from the logical array boundary. Fill `1..N` and clear `2..N-1`: two live
+entries pin an N-wide window that iteration and GC scan. And the append policy
+(`table.rs`) places by the historical `vlen`, so keys past the next append
+position go to the hash part even when dense: filling `2..N` before `1` builds
+a dictionary, then `append_growth` probes the run and `migrate_from_hash`
+probes it again while moving it. Keep `vlen` as semantic history; keep
+contiguous storage for dense runs and add segmented storage with occupancy
+metadata for sparse ranges; let integer entries live in numeric storage before
+they join the logical array, their iteration position staying in hash-order
+history until the append rules advance `vlen`; migration then changes logical
+membership and leaves tombstones without moving payloads; iteration and GC
+skip empty regions. Risks: physical placement must never decide `pairs`
+order; `#t` keeps `array_len`'s exact binary-search answer; snapshots
+reconstruct today's canonical array span including interior nils and the
+logical hash history; segmented access can slow dense reads, so the contiguous
+form stays. High confidence in the pathologies, medium in their weight on
+game throughput. (Performance, but filed here beside the matching entry.)
+
 ### Grow the brokkr workload registry to the full candidate surface
 
 What: `bench/` ports only the curated workloads registered in
@@ -240,6 +260,14 @@ made the function table borrow the catalog's static ids (instead of copying
 them per State) was read from interleaved single launches, not a stored
 verdict. A Rust-driven bench building many States would measure what a host
 building one State per script or per tick pays.
+
+Also open (2026-11-17 performance hunt, host-boundary scope): the harness's
+warm path (`run_warm_block`, `src/bin/dellingr-bench.rs`) reuses a function
+already rooted on the stack and calls it with zero arguments and zero
+expected results, so no registered workload exercises argument pushing,
+result reading, record exchange or host callbacks against game data. A host
+boundary rewrite would need a representative entity-tick bench to be kept or
+reverted on; compute-heavy Lua workloads would largely miss its effect.
 
 Why deferred: the registry is live with the curated workloads;
 porting the rest before those have proven the recipe would be

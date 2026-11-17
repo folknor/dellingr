@@ -106,6 +106,24 @@ The original sketch overpromised: a slice of length `max_stack` does not let
 LLVM drop checks on dynamic operands, since the verifier's proof is not
 visible to it; only `unsafe` or a per-instruction range proof removes them.
 
+The 2026-11-17 performance hunt (dispatch scope, source-only) proposed the
+structural version rather than unchecked indexing: split execution into a hot
+register executor and a boundary driver. Enter the executor with validated
+code, a frame-relative register window, constant bases and the narrow runtime
+pieces it needs; use admission-backed unchecked access inside it, with the
+verification capability covering every producer including snapshot loads; run
+non-growing ops and direct table fast paths (field probes and global-cache
+operations already neither collect nor re-enter) through narrow borrows;
+return an action to the driver before stack reshaping, allocation or re-entry;
+reacquire the window after. Its point is an enforceable lifetime for the
+addressing assumptions, and a home for fused handlers' native-local
+intermediates. Risks it named: a stack pointer cannot survive callbacks or
+vector growth; a long-lived register slice cannot overlap unrestricted `State`
+access; open-result producer/consumer pairs change the stack length mid-pair;
+the boundary driver must stay small, since it is live across native re-entry.
+It is the "split-borrow design" residue above, argued as half of one engine
+redesign with fused operations, not as a standalone bounds-check removal.
+
 Lateral: in every build measured, the dispatch head reloads the code slice's
 pointer and length from spill slots (`cmp 0x298(%rsp)` / `mov 0x2e8(%rsp)`)
 each instruction. Not shown to be recoverable: keeping them resident competes
@@ -123,6 +141,36 @@ Sketch: charge straight-line runs of fixed-cost ops once per basic block
 register and check the flush condition only at block boundaries. Must keep
 the charged prefix and `cost_used` at `BudgetExceeded` byte-identical
 (docs/budget.md, `tests/cost_*`), which is the hard part.
+
+The 2026-11-17 performance hunt (cost-charging scope, source-only) made this
+its lead rewrite: statically priced straight-line regions. The ingredients
+exist: `Instr::static_units` gives fixed charges and closed `SET_LIST` counts,
+the verifier finds control-flow targets, a State's cost model is immutable,
+`BytecodeRuntime` is a State-specific bundle shared by a chunk's closures and
+frames, and dispatch publishes an authoritative cursor on escape. Price an
+execution plan once per State: region boundaries, priced totals and ordered
+charge positions for prefix reconstruction. At region entry decide whether all
+its positive charges can begin (for charges `c1..cn` and positive remaining
+`R`, when `c1 + ... + c(n-1) < R`; the last may cross); if so run handlers with
+no per-op meter update or weight lookup and account once at completion, or for
+the executed prefix on early exit. An unaffordable region runs with exact
+per-charge checks, so charges `3, 5, 2` against budget 4 still execute two ops
+and charge 8. Never precharge and subtract (saturation loses information);
+keep the entry state and derive the prefix from the cursor on escape. A type
+failure in a charged op has already incurred its charge, a blocked charge adds
+nothing, an error in a free op keeps earlier charges, a metamethod call
+publishes only the prefix before the handler. Potential metamethod calls are
+side exits, not region splits. Open `SET_LIST` and native library charges stay
+outside fixed totals. It must change the execution structure: a region table
+beside `fixed_cost!`, or an "already admitted" flag tested in each handler,
+keeps the problem; generate the ordinary and exact-accounting paths from one
+source of opcode semantics. `Costing::Off` could then run genuinely
+accounting-free. Risks: tiny regions cost more at boundaries than they save,
+plan metadata takes cache, generated variants grow code, side exits and source
+attribution get harder. It wants codegen to expose region structure and charge
+provenance, with canonical saved instructions unchanged. The hunter rated
+whole-function or loop-trip precharging a weaker target than straight-line
+regions.
 
 ### `GET_UPVAL` indirection
 
@@ -272,6 +320,47 @@ since 27ee714. What B-O1 listed and is still open:
   and the caller record a Rust tail callee keeps for diagnostics would be its
   frame.
 
+- The 2026-11-17 performance hunt (calls scope, source-only) made both halves
+  its lead rewrites. One executor-owned activation stack whose activation holds
+  the execution descriptor, cursor, register base, vararg ownership, chain
+  accounting and return continuation; diagnostics and GC inspect the same
+  stack; an invocation is a stopping boundary within it. Resolve the closure
+  once and keep a non-owning execution view, relying on the function slot to
+  root it and on the boxed `Closure` for stable storage; separate execution
+  and control storage from the mutable VM services so execution can borrow
+  immutable descriptors while manipulating records by index. Merging the
+  structs but keeping the four `Arc` owners captures only part of it. Main
+  risk: a Rust tail callee can collect the retired caller's closure while its
+  diagnostic frame still exists (`tests/integration/runtime/tail_calls.rs`
+  exercises it), so executable state and diagnostic information need separate
+  lifetimes; rooting the old closure longer changes behaviour, and raw pointers
+  in place of the `Arc`s are unsafe. The heap hunter reached the same per-call
+  clone count from the closure side and proposed State-owned executable
+  records addressed by ID, so frames need no owned handles; the host hunter
+  counted the same clones on every root invocation and noted the frame stack is
+  already pooled.
+- Same hunt, continuations: `index_call`, `newindex_call` and `len_call`
+  (`registers.rs`), the generic-for Lua iterator fallback (`eval_control.rs`),
+  each custom sort comparison (`table_ops.rs`) and `gsub` function
+  replacements each run a whole nested invocation lifecycle (native-depth
+  accounting, boundary machinery, fresh dispatch, entry-result collection,
+  teardown), not an allocation, since `run_invocation` reuses its vectors.
+  `IndexOutcome::Call` (`metamethod.rs`) is already the seam. Suspend the
+  operation instead: an index continuation knows where the result goes and
+  which metamethod units to release; newindex releases units and resumes; an
+  iterator continuation projects results into loop registers; a sort
+  continuation keeps heap-sort phase, indices and operands. The handler is
+  then an ordinary activation on the same stack. Sort must become a resumable
+  driver: an adapter still calling `call_unguarded` per comparison keeps the
+  cost. Obligations: keep the logical native-depth limit for the eliminated
+  re-entry paths (letting formerly failing recursion succeed changes
+  script-visible errors); exact comparison order and sort writeback timing;
+  metamethod-depth ownership until the operation completes; where errors are
+  located and reported; interrupt polls in resumable loops and at admissions.
+  Arbitrary host Rust functions still need a real boundary. The codegen and
+  table-and-math-libraries hunters raised the iterator and sort halves
+  independently.
+
 Measurement lesson worth keeping: on plantasjen (Zen 3) the first flattened
 version moved frames and records by value and lost 14-22% to store-forwarding
 stalls although callgrind instruction counts were within 1-4% of the
@@ -360,6 +449,31 @@ Requirements the rewrite must meet:
 A cheaper intermediate, if the full version is judged too large, is denser
 `Table` storage entries alone; the full version is where the payoff is.
 
+The 2026-11-17 performance hunt (heap scope, its lead rewrite; dispatch scope,
+its third) argued for designing compact values, typed object arenas and
+collector metadata as one rewrite. Beyond value width: `Val::Obj` names
+neither a table nor a closure, so access resolves the slotmap key and examines
+`RawObject`, and even `Val::typ` dereferences the heap; `RawObject`
+(`object.rs`) reserves table-sized slots while closures live behind a separate
+`Box`, so every closure is a large slot plus its own allocation (the table
+hunter added that `TableStorage` embeds four full key/value pairs inline, so
+every table, and through `RawObject` every closure slot, pays for that
+variant). The proposed shape: eight-byte tagged values; distinct table,
+closure and string tags; separate typed arenas addressed by compact indices; a
+structural split between strong values and weak handles, with generation
+metadata only in weak caches, validated before producing a strong value;
+allocation and mark metadata in pages with occupancy bitmaps. Collection
+benefits directly: `sweep` calls `SlotMap::retain`, which visits every
+historical slot including vacant ones, and the upvalue sweep likewise, so a
+temporary allocation peak raises later collection work indefinitely; typed
+pages sweep `occupied & !marked` and skip empty pages, and marking tests a side
+bitmap before fetching the payload instead of one lookup to colour and another
+to drain. Both hunters warned against squeezing the 64-bit slotmap key into the
+payload or truncating generations (weak-cache and lifetime assumptions), and
+against a wrapper over the existing enum. The dispatch hunter suggested
+getting unboxed numeric intermediates in fused handlers first, then measuring
+what materialized-value cost remains.
+
 ---
 
 ## Architectural
@@ -447,6 +561,40 @@ slow path's hash lookup is expensive enough to amortize the extra
 work, or (b) a way to add the cross-receiver path without
 perturbing the same-ptr branch's codegen.
 
+The 2026-11-17 performance hunt raised this from two scopes. The lookup
+hunter's lead rewrite: own-field entries hold one `ObjectPtr` and one `SlotRef`
+and caches belong to the bytecode runtime, so every entity running the same
+method shares one entry, and `update(entities[i])` remembers only the previous
+entity; more cached objects only postpone the failure. Make the plan describe
+a layout and a slot: guard the receiver's shared layout identity, load or
+update the live slot, resolve generically only on a different layout or when
+the slot's nil status needs metamethod handling; a small polymorphic cache over
+layouts, with a shared lookup structure for megamorphic sites. Table `version`
+cannot serve: it starts equal on unrelated tables and ignores ordinary
+additions. Risks: layout proliferation, mutation overhead, nil handling (a
+reserved nil slot needs a live check unless presence changes the guarded
+identity), and cache metadata must stay weak. Its highest-value local
+fallback is the key-checked position reuse above, through `find_keyed` and
+`value_if_key` (`table.rs`), with a checked update for writes; it insists on
+the key check, since applying a `SlotRef` to another table on a matching
+version is unsound. The table hunter's lead rewrite is the storage side:
+materialize each constructor's layout once in State-local runtime data, an
+instance holding a shape identity and dense values, the shape owning ordered
+names and the lookup index; small records hold values inline without repeating
+keys; larger ones allocate a value block with no per-instance index;
+structural mutation converts to dictionary storage carrying its history; the
+table exposes a shape identity and a field-offset token valid across instances.
+That removes construction hashing and map population, per-instance key and
+index storage, repeated lookup across same-shape objects and repeated tracing
+of identical name lists (if shapes are marked once). Its main risk is history:
+large templates reserve nil-valued keys while small constructors do not
+reserve a key for a nil initializer, deletion and reinsertion change order, and
+snapshots distinguish storage kinds and save dead controls and vacant
+positions, so conversion must preserve the logical slot history, and shared
+names need GC ownership beyond the creating bytecode's literal roots. A general
+dynamic shape-transition system is a follow-up. The host hunter noted fresh
+option tables built by hosts get nothing from identity caches either.
+
 Both conditions may now hold (2026-10-23). For (b): since f92638c the
 register VM's `reg_get_field` inlines only the same-table hit, and every
 miss goes to the outlined `State::resolve_index`, so a key-at-index check
@@ -526,6 +674,23 @@ directly, closure marking / chunk rooting would need extension to keep
 those reachable. Storing only literal-id ints in the template avoids
 this entirely - the strings get interned at template-instantiation
 time using the existing literal-string path.
+
+The 2026-11-17 performance hunt (codegen scope) proposed compiling a
+constructor plan holding its key layout, initialization sequence and value
+sources, with larger records sharing an immutable key/index structure between
+instances and compiler-proven initialization writing known slots directly (the
+result is private until the expression completes). Today `with_template_keys`
+builds a fresh map inserting every key as nil and each pinned initialization
+(`registers.rs`) checks the constructor table, the indexed key, liveness
+bookkeeping and keeps a fallback insert. It must not evaluate every value and
+then charge all writes together: a later value may call code or fail, so
+evaluation and initialization interleave at today's points. Replay risks: nil
+entries and tombstones, pending positional batches in mixed constructors whose
+flush timing matters when keys overlap, duplicate-key overwrites, and
+snapshots serializing physical slots. Medium confidence in broad payoff,
+which depends on the table representation (see the shared-layout account in
+"Shape-based polymorphic field IC"). Escape analysis and scalar replacement of
+temporary records are follow-ups.
 
 **(b) Local-tracked shape inheritance (rewrite-the-analysis).**
 
@@ -638,6 +803,26 @@ reallocates only when capacity exceeds length; shrink or build with exact
 capacity). Unmeasured; `large_subject`'s `gsub` would show it on a large
 subject, `mixed` and `patterns` on short ones.
 
+The 2026-11-17 performance hunt raised it from the heap, strings and
+table-library scopes; `concat_values` (`eval.rs`) has the same pattern (a `Vec`
+filled, then passed as a slice to `alloc_string`, plus separately allocated
+number renderings). The heap hunter's version goes further: producers keep
+ownership through interning and on a miss their buffer becomes the backing
+storage; short strings live in pooled storage with bytes adjacent to their
+header, so a distinct short string is not one allocator allocation; large or
+growing results keep their allocation (capacity metadata where needed) rather
+than exact-sized `Box<[u8]>`; rendering writes into the destination builder;
+canonical identity is separate from backing-byte ownership. The strings hunter
+asked for the adoption path with today's interning, allocation policy, roots
+and refusal guarantees, and warned against a shrink-to-fit that silently
+restores the copy. Risks: keep the exact collection point and root set at
+commitment (some producers clear their arguments before interning, others
+keep them, and changing that changes identities); builders that survive
+callbacks must stay valid across nested execution. Keep canonical interning:
+uninterned long strings or ropes need an identity and accounting redesign,
+since equality uses handles and distinct-string counts set collection points.
+Afterwards, a common checked builder is a follow-up.
+
 ### gmatch: drop the Lua-side wrapper and table-backed iterator state (E-O2)
 
 Partially shipped as of 2026-07-25 - the per-iteration subject/pattern
@@ -677,6 +862,27 @@ shim, the identity hack, the field interning and most of the fault enum, and
 give snapshots one typed record. It changes the snapshot format and the
 error-frame rule, but no cost and no `pairs` order, since the table is
 unreachable from scripts.
+
+The 2026-11-17 performance hunt (strings scope) proposed it on speed grounds
+with a different persistence answer: keep the saved closure, upvalues, table
+fields, insertion order and values exactly as `gmatch_schema.rs` describes
+them as the persisted representation, and execute through a typed runtime
+record (compiled program, subject reference, field-slot references via the
+table's slot tokens, bounded capture storage), entered directly instead of
+through the wrapper and its nested callback, updating position fields after a
+successful result. That keeps snapshot bytes unchanged. Recognition must check
+the actual callable and captured values (the loader's wrapper recognition is a
+diagnostic heuristic, not authority), and registered iterator handles keep
+accepting arbitrary host tables with today's errors. Risks: closure identity
+and rendering, byte-identical snapshots, error attribution, result counts,
+iterator position after budget or stack refusal, and stack-cap refusals the
+removed wrapper frames produce. Two laterals from the same reading: a failed
+gmatch search does not record exhaustion, so repeated calls rescan the
+remaining suffix and recharge (an exhausted flag would change costs and saved
+state, so any memoization must keep both); and the pattern cache's byte limit
+counts source bytes, not compiled storage, so an oversized pattern bypasses
+the cache and is recompiled per iteration, which holding the program in the
+iterator would also fix.
 
 ---
 
@@ -871,6 +1077,17 @@ in todo.md's workload-registry entry).
   errors, then the aggregate cap check, then the bytes. Checking the
   aggregate cap inside `%q`'s own quoting, or before a rendering error such
   as `%.1s` of a string with a zero, changes which error is reported.
+  The 2026-11-17 performance hunt (strings scope) called this a rewrite:
+  compile an interned template into literal spans, escaped-percent
+  operations, typed directives and deferred error operations, cache the plan
+  by string identity, and execute it into one checked output buffer (padding
+  and signs written directly, digits in bounded scratch, `%s` ranges appended
+  borrowed; today even `%s` without a metamethod copies into `pad_bytes` and
+  then into the output). Cached parsing alone leaves most allocation in place.
+  The plan encodes today's event order rather than validating the template
+  eagerly, matching the exactness constraint above. The format argument can
+  stay rooted in its slot across `__tostring` with spans reacquired after
+  re-entry, so the template copy is unnecessary.
   The plain-pattern classifier treats `-` as magic even though a leading `-`
   with no preceding class item is literal; conservative is fine, just noting
   the fast path misses needles like `"-foo"`.

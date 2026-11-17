@@ -1,0 +1,1129 @@
+# performance.md
+
+1. An entry is removed entirely when completely resolved. No historical record
+   stays here.
+2. Stable IDs never change and are never reused; removal leaves a gap.
+3. An entry adjudicated against, verified incorrect, or whose outcome is that no
+   action is taken owes comments at the code sites it names - and, where the
+   claim touches a documented contract, the relevant `reference/` or `docs/`
+   page - before the entry is removed, so the finding is not hunted again.
+4. Once all findings are resolved, the file gets deleted.
+5. Finding IDs are never written into the code or other documents. They are
+   stable only until this document is drained; the next hunt writes new ones,
+   and they are never deduplicated through git history. Carry the context
+   inline instead.
+
+Findings of the 2026-11-17 performance hunt: ten codex hunters
+(`write-sol-high`), one per scope (dispatch, cost charging, calls, table
+representation, lookup paths, heap/GC, strings and patterns, table/math/basic
+libraries, codegen output, host boundary). Every account is source-only: no
+hunter built, ran or measured anything, and every payoff below is a
+hypothesis. Where a mechanism already had an entry in `optimizations.md` or
+`todo.md`, this hunt's account was added there instead of here; those entries
+are listed at the end.
+
+"Rewrite" and "local" are the hunters' own classifications.
+
+---
+
+## PERF-001 - Derived execution plan separate from canonical bytecode
+
+Raised as a constraint by the dispatch, cost-charging, lookup and codegen
+hunters; each of their rewrites needs it.
+
+**Bottleneck:** snapshots serialize raw instruction words, literal pools,
+templates, frame size, capture descriptors, cache counts and line
+information (`save_state.rs`, chunk serializer). Any in-place bytecode
+optimization (fusion, new operand forms, removed moves, region markers)
+changes snapshot bytes even when execution is equal, and changing emitted
+lookup instructions changes saved bytecode.
+
+**Redesign:** keep a canonical serialized program and derive a separate,
+unsaved optimized execution plan from it. Both freshly compiled programs and
+loaded snapshots enter the optimizer. `BytecodeRuntime` (`src/vm.rs`) is the
+lifecycle precedent, though immutable plans can be shared independently of
+State-local caches. Constants used only by optimized execution stay out of the
+canonical literal pools.
+
+**Constraints the plan must carry:** admission reserves the original frame
+footprint plus headroom against the global stack cap (`eval.rs` call
+admission), so a physically smaller frame must keep the logical reservation
+and refusal point. Stack slots are GC roots and rendered pointer identities
+are weak, so shortening a value's lifetime can change later identity
+rendering. Source-operation and logical-state information has to be carried
+through lowering rather than reconstructed after fusion.
+
+**Classification:** enabling rewrite; prerequisite for PERF-002, PERF-005,
+PERF-014 and the region accounting appended to `optimizations.md`.
+
+## PERF-002 - Fused execution ops with intermediates in native locals
+
+Raised by the dispatch hunter (its lead rewrite) and the codegen hunter
+(typed numeric execution inside its PERF-014 optimizer).
+
+**Bottleneck:** every arithmetic instruction independently fetches, selects a
+handler, addresses operands, checks types and writes a tagged result to
+`State.stack` (`frame.rs` arithmetic handlers and dispatch loop). For
+`sum = sum + i * 2 - 1` the codegen already uses constant operands and writes
+the result straight to `sum`, so no move problem is left: what remains is
+three dispatches, repeated tag handling and intermediate stack writes. For
+`total = total + entity.health`, `reg_get_field` writes the field into a
+register and the add reads it back.
+
+**Redesign:** a lowered execution ISA with a finite family of fused handlers
+(arithmetic chains, field-read-and-add, field updates, indexed read then
+arithmetic), keeping intermediates as `f64` locals and composing existing
+primitives such as the own-field cache probe (`eval_index.rs`). Needs a real
+lowering pass with control-flow targets, operand dependencies, capture
+information and temporary liveness. A vector of decoded micro-ops interpreted
+one by one would keep the bottleneck. The codegen hunter adds that a compiler
+can prove the induction value and an accumulator numeric through a loop, so
+the fused forms can skip tag tests.
+
+**Payoff:** removes dispatches, ip updates, operand decode, temporary
+store/reload and repeated type checks together; the mixed workloads contain
+arithmetic chains and field-read accumulations.
+
+**Risks:** each constituent keeps its own charge and error position; no
+upfront charging of a whole expression, no reassociation, no FMA. Failed
+guards resume original semantics before effects commit; partial exits need
+the intermediate state and original instruction position. Captured locals,
+allocation and metamethod calls are materialization boundaries; values held
+only in native locals are absent from the root inventory, so they must be
+restored before allocation or re-entry. Backward-transfer interrupt polls stay
+placed.
+
+**Classification:** rewrite, dispatch hunter's highest conviction. Subsumes
+`optimizations.md` "Compiler-recognized field-update fusion". Afterwards, if
+it works, broader instruction-description machinery is a follow-up.
+
+## PERF-003 - Threaded dispatch with guaranteed tail transfers
+
+Raised by the dispatch hunter.
+
+**Bottleneck:** one central opcode match (`frame.rs`). Threading could give
+handlers distinct dispatch sites and better opcode-transition prediction, and
+an execution stream of handler targets would remove opcode-to-handler
+selection.
+
+**Redesign:** handlers transferring by guaranteed tail call, a compact calling
+convention and a small set of live execution variables. Handler addresses stay
+internal execution data, out of Lua function identity and serialized
+bytecode.
+
+**Risks:** source cannot tell whether prediction, ip dependencies or operand
+traffic dominate. Ordinary function-pointer calls back to a loop add
+call/return; recursive handler calls without guaranteed tail transfer break
+the flat native stack, and every compiler/target combination needs the real
+constant-stack guarantee. Threading still dispatches once per instruction;
+fusion (PERF-002) reduces how often.
+
+**Classification:** rewrite, medium conviction, ranked behind PERF-002 and the
+register window. The hunter also says the 64-bit encoding should be redesigned
+around the fused handlers' operand needs, not narrowed first: the register
+limit (`limits.rs`) and literal indices exceed eight bits, `MAX_FRAME_SLOTS`
+does not bound temporaries, and a universal 32-bit word would lose programs or
+move complexity into extensions.
+
+## PERF-004 - Constant operands, predicate lowering and fused loop steps in codegen
+
+Raised by the codegen hunter, with the dispatch hunter (constant comparison
+forms, opcode-specific comparisons) and the lookup hunter (`t["k"]`).
+
+**Bottleneck:**
+- Comparison codegen (`codegen.rs`) materializes both operands in registers:
+  `if n < 2` needs a constant load before the fused compare-branch.
+- Condition generation recognizes a comparison only as the outermost
+  expression. `and`/`or`/`not` fall through value generation, which reserves a
+  result register and materializes operands: `if a and b then` on locals takes
+  two moves and three tests; `if a < 0 and b < 0 then` takes two constant
+  loads, two boolean-producing comparisons and two tests.
+- `t["health"]` compiles to register-key `GET_TABLE` with no lookup cache;
+  `t.health` uses `GET_FIELD`. A stable runtime string key cannot use the
+  field cache either.
+- Generic-for emits `TFOR_CALL`, `TFOR_LOOP`, the body and a backward `JMP`.
+- The comparison helper (`registers.rs`) takes a runtime `CompareOp` and goes
+  through `partial_cmp`, target ordering and negation.
+
+**Redesign:** recursive true/false continuation lowering for predicates (keep
+value lowering where operand-valued `and`/`or` is needed; `not` swaps
+destinations); constant forms for numeric/string comparisons, nil tests,
+literal and numeric-constant indexing and literal field stores; normalize
+proven constant string keys to the field path, and let dynamic string-key
+sites guard their interned key and reuse a field plan; a combined
+iterator-step-and-branch for generic-for reusing the `next`/`ipairs` fast
+paths; direct numeric comparison handlers with string/error fallbacks.
+
+**Risks:** branch polarity must be independent of comparison identity
+(negated `<` is not `>=` under NaN). The fused generic-for must keep the
+control update and poll every unbounded cycle. Preserve source locations and
+error behaviour. Numeric array access keeps its direct path.
+
+**Classification:** local changes, high confidence, smaller ceiling.
+
+## PERF-005 - Numeric-for controls rechecked every iteration
+
+Raised by the dispatch and codegen hunters.
+
+**Bottleneck:** `FOR_LOOP` (`eval_control.rs`) reloads and tag-checks three
+hidden control registers each iteration. The compiler knows normal source
+cannot overwrite them, but the verifier proves bounds, not setup dominance or
+control-register integrity, and snapshot-admitted code can skip setup or
+overwrite controls.
+
+**Redesign:** stronger dataflow validation proving control-register
+integrity for optimized execution, unboxed controls and direction-specific
+loop forms; the visible loop variable shares the induction value only when
+reassignment and capture analysis allow.
+
+**Risks:** needs a proof or fallback for snapshot-admitted bytecode.
+Converting the loop to an integer trip count changes floating-point
+behaviour.
+
+**Classification:** local (dispatch hunter), part of the PERF-014 rewrite
+(codegen hunter).
+
+## PERF-006 - Accounting owned by the invocation, not flushed at every frame transition
+
+Raised by the cost-charging hunter.
+
+**Bottleneck:** the pending counter belongs to `Frame::run`, which drives many
+Lua frames, yet calls and returns flush it (`frame.rs`) even when control stays
+in the same dispatch invocation. `TFOR_CALL` flushes eagerly before discovering
+that the recognized `next`/`ipairs` path completes without a callback
+(`eval_control.rs`), so `for _, v in pairs(t) do sum = sum + v end` settles its
+one pending add every iteration. `local_cost` also travels through table and
+metamethod resolution so a deeper helper can flush it.
+
+**Redesign:** an invocation-owned accounting context. Lua-to-Lua calls, tail
+calls, returns and recognized iterator fast paths keep the same owner.
+Publish complete accounting to `State` before arbitrary Rust runs, reload it
+after (the callback may have charged, reset the budget or made nested calls),
+and publish on escape before budget diagnostics or host error callbacks. The
+boundary follows actual independent access to the meter. Make the
+resolver's pending-call outcome carry the continuation that synchronizes
+accounting, and keep meter ownership out of helpers that only do direct work.
+
+**Payoff:** avoids short batches in method-heavy code, recursive Lua and
+generic iteration; fewer occasions where local execution state becomes shared
+state passed through helpers.
+
+**Risks:** the mid-run reset contract (`vm.rs`) makes reload after Rust
+essential; error notification ordering. The extra context must stay compact,
+since dispatch stays live across native re-entry. Retain the iterative call
+stack and stack-cap admission.
+
+**Classification:** rewrite, complementary to region accounting (appended to
+`optimizations.md` "Cost accounting on every arithmetic op").
+
+## PERF-007 - Cheaper per-charge settlement test and one authoritative counter
+
+Raised by the cost-charging hunter.
+
+**Bottleneck:** for every positively weighted opcode the loop reads the
+weight, zero-checks it, saturating-adds pending, compares with the batching
+interval, and unless that succeeds consults the optional finite budget and
+computes whether pending reaches it (`batch_needs_flush`, `cost_meter.rs`).
+Settlement then updates `used` and, for a finite budget, `remaining`, although
+snapshot validation already enforces `remaining = limit.saturating_sub_unsigned(used)`.
+`Costing::Off` works by supplying zero weights, so charged handlers still take
+the weight/zero decision.
+
+**Redesign:** after settlement or a native return compute one threshold
+(count-only: interval; finite: `min(interval, max(remaining, 0))`), so each
+charge accumulates and compares once; threshold zero routes the next positive
+charge to refusal. Pending stays below 64 between settlements and charges are
+bounded, so its addition needs no u64 saturation (persistent totals still do).
+Separately, admit with `limit > 0 && used < limit as u64`, update only `used`,
+and derive `remaining` for the API and snapshot encoder, keeping the
+configured-budget flag (a finite `i64::MAX` budget differs from count-only)
+and the snapshot fields.
+
+**Risks:** one accumulator dependency per charged instruction remains; load
+hoisting and register placement need compiled-code inspection before any
+estimate.
+
+**Classification:** local changes; not a substitute for region accounting.
+
+## PERF-008 - Rust library calls go through the host stack protocol
+
+Raised by the calls hunter (its third rewrite) and the host-boundary hunter
+(the callback half of its first rewrite).
+
+**Bottleneck:** the native ABI is `fn(&mut State) -> Result<u8>`
+(`lua_val.rs`). Before a tiny body, `begin_call` removes the function slot and
+shifts the arguments; `invoke_rust_fn` changes stack-bottom and active-function
+state; the callback reads arguments through relative stack APIs, clears or
+reshapes the stack and pushes results; `invoke_rust_fn` validates the count and
+copies the result suffix over arguments and temporaries; the caller adjusts
+result count and restores its extent. The math wrappers (`math.rs`) do
+argument checking, another indexed read, `set_top` and `push_number` around
+one arithmetic operation. `invoke_rust_fn` checks the floating-point
+environment after every successful return, including trusted leaf math
+functions, although `RustFnId::is_library` (`rust_fn.rs`) already lets
+`check_usable` skip repeated reads inside library functions. Host callbacks
+using `check_type` then `to_number` validate twice.
+
+**Redesign:** a native call context with explicit argument indices/count and a
+result destination or writer: one-value functions return a value, multi-result
+functions return a rooted span. Arguments stay where the caller put them. The
+registry keeps the same `RustFnId` identities but associates execution forms:
+trusted leaf library functions, resumable library operations, arbitrary host
+functions. Leaf entries that cannot run host code skip arbitrary-host return
+machinery (catalog membership alone is not enough: `print` is a catalog
+entry). The host hunter adds: simple host callbacks receive decoded scalars and
+borrowed string/table views and return values directly; callbacks that need
+Lua re-entry get a broader execution capability. Wrapping today's push/pop
+implementations in a context would keep most of the materialization.
+
+**Risks:** the stack cap. Removing the function slot gives callbacks one more
+usable slot today (`optimizations.md` records the retained-callee variant as
+rejected for this reason); the new context must keep logical capacity and
+exact overflow errors independent of physical placement. Also method argument
+numbering, missing-versus-nil arguments, result-count validation, poisoning,
+callback frame isolation. FP checks can be consolidated over VM-controlled
+marshalling but not hoisted across host code.
+
+**Classification:** rewrite.
+
+## PERF-009 - Hot library functions executed as interpreter operations
+
+Raised by the table-and-math-libraries hunter (its lead rewrite).
+
+**Bottleneck:** `math.floor` (`math.rs`) does `x.floor()` inside cost charging,
+an auxiliary type check, a checked read, a stack clear and a checked push,
+wrapped in `begin_call`/`invoke_rust_fn` bookkeeping, panic containment, FP
+validation and result processing, with a local-cost flush before calling out.
+The same disproportion holds for `ceil`, `sqrt`, `abs`, `type`, `rawequal`,
+numeric `tonumber`, `math.random` and append `table.insert`.
+
+**Redesign:** identify the actual library function value at call execution and
+run its operation directly against the register window, keeping cost
+accounting in the interpreter. Start with identity-based handling inside call
+dispatch (covers `local floor = math.floor`), then dedicated guarded
+instructions at suitable sites. Initial set: `floor`, `ceil`, `sqrt`, `abs`,
+`deg`, `rad`; `fmod`, `modf`, common `min`/`max`; `random`; `type`,
+`rawequal`, numeric `tonumber`, `rawlen`, `rawget`, `rawset`; append
+`table.insert`, then `remove`, `select`, `pairs`/`ipairs` construction. Crosses
+into dispatch, codegen, verification and static cost analysis; does not need
+the generic ABI redesign (PERF-008).
+
+**Risks:** identity is checked after evaluating callee and arguments (the
+spelling `math.floor` proves nothing; argument evaluation can rebind it).
+Exact error construction and attribution, method argument numbering,
+extra/missing arguments, variable result counts, tail calls, stack-cap
+failures and charge ordering (math wrappers charge before validating). Removing
+temporary slots must preserve the corresponding stack-cap refusal. Keep
+interrupt admission checks, function identities and snapshot encoding.
+
+**Classification:** rewrite, high conviction.
+
+## PERF-010 - Register window nil-filled on every call and return
+
+Raised by the calls hunter.
+
+**Bottleneck:** at CALL `call_window` (`frame.rs`) truncates the caller's
+suffix after the arguments; admission (`eval.rs`) nil-fills the callee's whole
+remaining window; a fixed-result return resizes back to the caller's top and
+nil-fills the restored suffix again. A small call pays initialization in
+proportion to callee frame width and the caller suffix it replaced. The value
+vector serves as register storage, active extent, native argument/result area
+and GC root list at once. Varargs are copied into a shared arena
+(`collect_varargs`) and copied back on use (`reg_vararg`).
+
+**Redesign:** separate backing capacity, logical height for limit behaviour,
+observable register ranges, and initialization/GC-root state. Derive an
+initialization plan from compiler/admission dataflow: initialize missing
+parameters and registers readable before assignment only; restore the
+caller's logical extent without writing nil across it. Use derived execution
+metadata, not the persisted instruction stream. Varargs could stay as a rooted
+span, but locals need distinct storage and hidden varargs live outside the
+capped stack today, so this needs a full layout and accounting design.
+
+**Risks:** stale storage must stay semantically nil and must not become an
+extra GC root (the collector visits the whole live stack slice,
+`inventory.rs`); clearing fewer roots can collect objects earlier; both are
+observable. The verifier does not establish definite initialization, and
+snapshot bytecode can read an untouched register and get nil today.
+
+**Classification:** calling-convention rewrite, lower conviction than the
+activation and continuation rewrites; real frame shapes decide whether the
+metadata beats the bulk writes.
+
+## PERF-011 - Local call-path changes
+
+Raised by the calls hunter.
+
+- **Project fixed results once.** `collect_returns` moves every returned value
+  before `finish_call` discards the surplus. Copy only the requested prefix,
+  after validating the full count and closing upvalues. Discarded results are
+  still computed, charged and validated.
+- **Replace tail activations directly.** Tail replacement (`eval.rs`) admits
+  another record, pops it, assigns it over the caller, then drops and rebuilds
+  the execution frame. Replace directly, keeping the caller's diagnostic state
+  until admission succeeds.
+- **Assemble `__call` receiver prefixes once.** `begin_callable_call` inserts
+  each receiver separately, shifting the arguments repeatedly; resolve the
+  prefix before one placement. Secondary: direct calls bypass this path.
+
+**Classification:** local.
+
+## PERF-012 - Calls with independent callee, argument and result locations, then inlining
+
+Raised by the codegen hunter (its second rewrite); the host-boundary hunter
+asks the calls scope for the same explicit operands.
+
+**Bottleneck:** call generation (`codegen.rs`) puts callee and arguments in a
+fresh consecutive block and the result starts at the same base, so
+`sum = f(sum)` copies locals into the window and moves the result back. The
+runtime enforces it: the call window truncates the stack after the arguments,
+the callee uses the window as its base, and return closes captures and slides
+results into the function slot before the caller's assignment move. The
+verifier requires adjacent open producers and consumers. The upside of today's
+convention is that argument slots become parameter slots, so a naive
+gather-into-buffer call would trade copies for copies.
+
+**Redesign:** a call describes the callee, the argument values or ranges, and
+the result destinations. Caller storage survives independently of the callee
+window; producers coalesce with parameter storage where possible and other
+local arguments are copied during admission, not by `MOVE` dispatches; fixed
+results land in their final destinations after captures close; dynamic result
+lists are explicit ranges. Rewrite admission, return continuations and the
+open-results protocol together. Then exploit known callees (immutable local
+function bindings) and inline small proven helpers (`local function add(a, b)
+return a + b end`), which exposes the body to the caller's type and allocation
+analysis. The host boundary wants the same: no materialized
+`[callee, arguments...]` that the next stage removes or rearranges.
+
+**Risks:** inlined calls keep logical call metadata: depth and stack-cap
+refusal where the original call would refuse, function-entry interruption,
+tracebacks, error and print locations naming the logical callee, captures,
+varargs, result adjustment, tail calls. Lua calls stay on the explicit frame
+stack; a Rust call per compiled Lua function would break the flat native
+stack. Closure creation and literal initialization stay until separately
+proven removable.
+
+**Classification:** rewrite, high conviction.
+
+## PERF-013 - table.sort ownership and comparator execution
+
+Raised by the table-and-math-libraries hunter (its second rewrite) and noted
+by the calls hunter.
+
+**Bottleneck:** `table_sort` (`table_ops.rs`) with a comparator holds the
+detached sorting array, a temporary roots vector and a copy appended to
+`in_flight.rooted_values`, because the mutable buffer is outside the
+collector's ownership. Every comparison pushes a call window and enters
+`call_unguarded`, a full nested invocation per comparison over `O(n log n)`
+comparisons. The metamethod path (`sort_through_metamethods`, `table.rs` in
+`lua_std`) materializes a scratch Lua table and runs heap sort through table
+lookup and insertion on what is a private indexed buffer.
+
+**Redesign:** a sort activation owns one GC-traced mutable value buffer and an
+explicit heap-sort continuation. Raw input is copied once; metamethod input is
+read, in today's order, straight into the buffer; a Lua comparator suspends
+the activation and is pushed on the current dispatch loop's frame stack; its
+return resumes the saved sift decision; completion does today's raw or
+metamethod writeback. Removes the scratch table, the duplicate root copies and
+the nested invocations. Afterwards, if this works, other library callbacks can
+share the continuation mechanism (see the continuations bullet in
+`optimizations.md` "Call path after the frame-stack flattening").
+
+**Risks:** preserve the heap-sort decision sequence exactly: argument order,
+comparator truthiness, read phase, write phase (comparators can print, mutate,
+draw RNG, fail or answer inconsistently). Raw sorts keep detached semantics:
+comparator writes to the source may be overwritten at writeback, and entries
+past the range survive. GC rooting through nested callbacks, unwinding,
+traceback attribution, partial metamethod writes, stack admission, and the
+script-visible native-depth refusal (keep equivalent logical accounting).
+Nested sorts need separate buffers; no Rust slice borrow survives a comparator
+call.
+
+**Classification:** rewrite, high conviction.
+
+## PERF-014 - Whole-function optimizing compiler
+
+Raised by the codegen hunter (its lead rewrite).
+
+**Bottleneck:** storage is committed too early. The parser assigns physical
+local slots, the AST carries them, and the generator walks statements once
+with declaration-ordered locals and a LIFO temporary allocator (`codegen.rs`,
+`ast.rs`, `parser.rs` function finalization). `Val` descriptors delay some
+decisions within an expression but stop at statement boundaries, and there is
+no dataflow or register-allocation pass. Consequences: no constant or type
+propagation through locals and joins; aliases occupy distinct slots; multiple
+assignment always stages in fresh registers then stores (`a, b = a + 1, b + 1`
+emits two arithmetic ops and two moves); every upvalue read is a new
+`GET_UPVAL`; repeated pure computations stay separate; no loop-invariant
+treatment; captures have one conservative `captured` property. `may_execute`
+(`ast.rs`) treats every suffix chain conservatively, and operand preparation
+treats every captured local as writable by later code.
+
+**Redesign:** a CFG with SSA values and explicit effects (values with known
+types/constants; reads and writes of mutable cells including upvalues;
+operations that can call Lua or Rust; operations that can fail, allocate or
+expose state; original charge sites, source locations and interrupt points),
+then propagation, copy coalescing, CSE, loop analysis and destination
+allocation before instruction selection. A nested-function analysis can prove
+many captures immutable. Feeds the typed fused forms of PERF-002 and the
+numeric-for proof of PERF-005.
+
+**Risks:** a dead result can still owe a charge or type error; hoisting cannot
+hoist a charge or a failure; an eliminated computation keeps the charged
+prefix under every cost model; captured values reflect the completed prefix
+when an error closes upvalues; unboxed values materialize at calls, escapes and
+diagnostic boundaries.
+
+**Classification:** rewrite, the codegen hunter's highest-conviction broad
+investment. `optimizations.md` "Compile-time table-shape prediction" (b)
+defers on the absence of exactly this analysis.
+
+## PERF-015 - Resolved lookup routes with mutation-driven invalidation
+
+Raised by the lookup hunter (its second rewrite, designed together with the
+shared layouts appended to `optimizations.md` "Shape-based polymorphic field
+IC").
+
+**Bottleneck:** a warm inherited read fails the receiver's own-field cache,
+searches the receiver's raw contents, gets its metatable, searches the two
+method-cache entries, reads and key-checks the metatable's `__index` slot,
+compares the current handler, then validates and reads the destination slot.
+Only the own-field hit is on the dispatch-side fast path; inherited hits enter
+`resolve_index`. The method cache covers a raw hit in the first handler table
+only; deeper inheritance and inherited misses keep walking (`walk_index`,
+`metamethod.rs`); delegated writes have no route cache. `MetaNames`
+(`meta_name.rs`) avoids interning event names but event access is still
+ordinary table lookup or key-checked slot access.
+
+**Redesign:** replace the separate own-field, method and string-method ladders
+with access plans describing the resolved action (own slot; slot in a given
+prototype; proven terminal miss returns nil; live slot in a delegated
+destination; continue to a function handler with receiver and depth
+requirement). The receiver guard proves the metatable and the absence of an
+overriding own value, cheap with shared layouts. Register dependencies on the
+shared prototype route; installing an overriding field, deleting a terminal
+field, replacing `__index`/`__newindex`, changing an intermediate metatable or
+moving a referenced slot invalidates. The hot read checks a route token and
+reads the terminal slot. Metatables expose direct event descriptors with
+explicit absence and mutation notification, acquired lazily; the string
+metatable uses the same mechanism. The mutation contract lives beneath all
+writers (bytecode stores, raw ops, host writes, pinned initialization), which
+means changing the table mutation interface.
+
+**Risks:** invalidation completeness and dependency fanout; not one VM-wide
+epoch (routine entity writes would destroy the benefit). Live-to-live
+replacement of a terminal value can stay cheap if the plan reads the slot
+live. Handler results are never cached. Depth requirements stay explicit: with
+insufficient headroom, take the original resolver for the exact error. Method
+lookup timing: `SELF` runs before explicit arguments, so `obj:m(change())`
+has already selected its value; preserve that and the receiver.
+
+**Classification:** rewrite, high conviction for methods and inheritance.
+Overlaps `optimizations.md` "GET_FIELD slow-path cache repopulation after
+`__index` resolution" and the method-IC entry, which this would replace.
+
+## PERF-016 - Global bindings as authoritative cells
+
+Raised by the lookup hunter.
+
+**Bottleneck:** ordinary globals probe the global table per bytecode; builtins
+add a value mirror validated by one heap mutation epoch that advances on any
+mutable access to `_G` even when no builtin changes; cached non-builtin writes
+have a special bypass; every ordinary heap mutation meets the watched-object
+comparison (`global_env.rs`, `GcHeap::get_mut` in `object.rs`). It is a
+coherence structure imposed by keeping the authoritative value in a movable
+table layout while wanting direct builtin access elsewhere.
+
+**Redesign:** assign referenced global names State-local binding IDs at
+runtime linking, store values in a dense active-environment array, have
+bytecode use the IDs and `_G` lookup map names to the same cells. `_G` keeps
+its numeric entries, metatable behaviour, insertion history, tombstones and
+sealing; reserving an ID for an absent name creates no logical entry.
+Restricted environments exchange active values and logical contents keeping
+`_G` identity. Requires breaking the context-free table access abstraction for
+global storage, or a heap-aware storage view; another mirror would keep the
+problem.
+
+**Payoff and ranking:** direct reads for arbitrary game globals, no mirror
+validation, no watched-object check in generic heap mutation. Ranked below
+PERF-015 because today's builtin hit is already an epoch compare and array read
+and ordinary global hits avoid hashing; extra indirection or costlier generic
+`_G` operations could lose. `src/globals.rs` is source-occurrence metadata,
+not a runtime stage.
+
+**Classification:** rewrite, medium conviction. Relates to the
+`optimizations.md` micro item "Keyed global writes invalidate every builtin
+mirror entry", which it would remove.
+
+## PERF-017 - Local lookup-path changes
+
+Raised by the lookup hunter.
+
+- **Carry lookup results through stores.** On an absent field `store_field`
+  (`metamethod.rs`) searches, `store_new_key` inserts, and `store_field`
+  searches again to fill the cache. In `walk_newindex` a terminal existing
+  entry is read with `get` then written through `insert`, which finds it again.
+  Return a mutation result holding the resulting slot and carry it into the
+  write; an absent insertion position cannot survive user code. Mostly helps
+  misses, insertions and delegated writes.
+- **Remove the static cache coverage cliff.** `assign_cache_slots`
+  (`compiler.rs`) stops at 255 entries per family in instruction order, so a
+  hot site late in a large function stays uncached. Index runtime access
+  metadata independently of the serialized cache operand.
+
+(The lookup hunter's key-checked position reuse across receivers is appended
+to `optimizations.md` "Shape-based polymorphic field IC", whose lighter-weight
+variant it is. Constant string indexing is in PERF-004.)
+
+**Classification:** local.
+
+## PERF-018 - Dictionary lookup index separate from iteration history
+
+Raised by the table-representation hunter.
+
+**Bottleneck:** a deleted key stays indexed so `next(t, deleted_key)` can
+resume. On reinsertion `insert_into_map_with_tombstones` (`table.rs`) renames
+the old slot to a synthetic `Vacant(index)` key and appends the real key.
+IndexMap's `replace_index` checks uniqueness, removes the old hash-index entry
+and inserts the replacement, then dellingr inserts the real key again; vacant
+positions occupy the hash index though no Lua query can find them.
+
+**Redesign:** a table-owned ordered slot vector plus a hashbrown `HashTable`
+over real keys. Dead real keys stay indexed while they are valid controls;
+vacant historical positions live only in the ordered vector. Reinsertion finds
+the dead key, appends its new slot, marks the old position vacant and retargets
+the existing index entry. hashbrown already offers `find_entry`, occupied
+entries, `entry`, `insert_unique` and fallible reservation; the string
+interner (`object.rs`) already uses a separate hash index. Compaction stays at
+today's logical thresholds; global tables keep their own revival and retention
+policies.
+
+**Payoff:** delete/reinsert churn (registries, sets, job tables) does fewer
+index operations and the index stops carrying synthetic entries. Little change
+for read- or overwrite-heavy dictionaries, which IndexMap already handles
+directly.
+
+**Risks:** compaction timing must stay a function of the old logical slot
+counts, not index occupancy, or deleted-control validity, snapshots and later
+reinsertion change. Cache tokens name logical slots under an epoch, not
+hashbrown bucket positions.
+
+**Classification:** rewrite, medium conviction.
+
+## PERF-019 - Local table-storage changes
+
+Raised by the table-representation hunter.
+
+- **Count live hash keys that could migrate.** `append` (`table.rs`) takes its
+  slow path whenever any hash entry is live, so one string field forces every
+  append through migration checks: `append_growth` and `migrate_from_hash` each
+  do an unsuccessful numeric lookup. A counter of eligible positive integral
+  hash keys, maintained through insert, delete, initialization, migration and
+  snapshot load, lets mixed tables append directly. `list_hash_cannot_migrate`
+  substitutes a bounded scan that also rejects bulk extension when the hash
+  slot count exceeds the remaining batch. The hunter's strongest local change.
+- **Answer nil for logical array keys outside the window.** `get` and
+  `get_with_index` fall through to the hash part when `array_slot` fails; for
+  an integer in `1..=vlen` outside the physical window no live hash entry can
+  exist. Keep the classification off the successful array path.
+- **Reserve fixed positional constructors across batches.** `set_list` already
+  bulk-extends and `reg_set_list` reads the stack directly; carry a fixed
+  constructor's total positional capacity to avoid repeated growth. Writes,
+  evaluation, logical growth and cost admission stay at their operations.
+- **Cache the computed border between occupancy changes.** Repeated `#t` on an
+  unchanged holey array repeats the binary search (`array_len`); a lazy cache
+  invalidated by nil/non-nil transitions and growth keeps the exact answer.
+  Secondary: dense-tail length is already constant time.
+
+The hunter notes iteration is already better than it looks: generic-for has
+direct `next`/`ipairs` paths, the pairs cursor avoids re-resolving the previous
+key, and IndexMap forwards `nth` so `.skip(hash_start)` does not rescan.
+
+**Classification:** local.
+
+## PERF-020 - Closure creation through several allocations and owners
+
+Raised by the heap hunter (its third rewrite; the per-call `Arc` half is
+appended to `optimizations.md` "Call path after the frame-stack flattening").
+
+**Bottleneck:** `reg_closure` (`registers.rs`) allocates a temporary capture
+`Vec`; `alloc_lua_fn_raw` (`object.rs`) converts it to an `Arc` slice; the
+closure gets a `Box`; the box occupies a table-sized slotmap slot; the closure
+owns separate `Arc`s for bytecode and runtime. Collection gathers active chunk
+identities into a fresh `BTreeSet`, recursively retains prototype trees, flags
+runtimes while tracing closures, then scans the runtime map to reconcile
+(`LiveChunks` in `collector.rs`, `sweep_bytecode_caches` in `vm.rs`).
+
+**Redesign:** a closure is a compact arena record holding an executable-record
+ID and its capture references, filled in final storage, with size classes for
+common capture counts. One State-owned executable record holds the bytecode
+owner, runtime literals, caches and links to nested records; closures, frames
+and activation records carry IDs; `Program` keeps its outer `Arc`. Executable
+records carry collection epochs and direct child IDs, marked from active
+frames, pending construction and traced closures through an iterative work
+queue, with no temporary ordered set.
+
+**Risks:** keep capture aliasing exact (sibling closures sharing a mutable
+cell, scope exits, tail calls, error cleanup); snapshots record shared upvalue
+identities, so copying apparently immutable captures by value needs extra work
+to reproduce the saved graph. The one-collection grace for literals of
+discarded runtime records must survive, or weak string identity and
+allocation counts change. Afterwards, if this works, compiler-proven immutable
+captures are a separate opportunity.
+
+**Classification:** rewrite, high conviction.
+
+## PERF-021 - Marking scans scalar payload
+
+Raised by the heap hunter.
+
+**Bottleneck:** `Table::mark_values` (`table.rs`) scans every array value after
+the dead-prefix hint and every stored hash key/value; numeric and boolean
+arrays get a full scan with no heap edges. The collection threshold counts
+objects and distinct strings, not table payload, so a large scalar array can
+be rescanned whenever unrelated allocations trigger a collection.
+
+**Redesign:** exact reference summaries in table storage: a count that skips a
+reference-free region, plus reference bitmaps for large mixed arrays, so the
+collector visits only positions holding strings or objects. Needs every write
+route (cached stores, bulk construction, shifts, sort writeback, snapshot
+load); `write_window` is an integration point, but the paths are not unified
+enough for a collector-only patch.
+
+**Risks:** bookkeeping is paid on mutation, so mutable reference-rich tables
+may lose; a missed update is a collection correctness bug; tombstone keys stay
+strong edges.
+
+**Classification:** architectural collector change, medium conviction,
+workload-dependent.
+
+## PERF-022 - Local heap and collector changes
+
+Raised by the heap hunter.
+
+- **Fuse interner lookup and insertion.** Creation does `find_by_hash` then
+  `insert_unique`, probing twice on a miss; `HashTable::entry` exists.
+- **Sweep strings through their content index.** Collection allocates a
+  removed-key vector, sweeps slots, then rehashes each removed entry back into
+  the index; `HashTable::retain` or `extract_if` can coordinate removal.
+- **Trace each shared upvalue's contents once.** `mark_slot` does not report
+  whether a cell was already marked, so every closure sharing it re-marks its
+  closed value.
+- **Reuse collection scratch.** The object worklist is reused; chunk-retention
+  bookkeeping and the string removal vector are freshly allocated.
+- **Keep the anchor release buffer's capacity.** `Registry::drain_released`
+  takes and consumes the queued `Vec`. Matters only with anchor churn.
+
+The hunter puts anchor locking low: values are `Copy` and normal instructions
+do not take that mutex. Constraints it records for any heap change: an intern
+hit can trigger collection today, because `State::allocator` (`collector.rs`)
+checks the threshold before searching the pool, so a lookup-first hit could
+keep a dead string and its `%p` identity alive; a nursery that leaves
+unreachable strings in the interner can resurrect identities; roots include
+all retained register values and cached runtime literals; `for_each_gc_root`
+(`inventory.rs`) is a generic visitor and not the bottleneck. It does not
+recommend a generational or incremental collector under this contract.
+
+(The `optimizations.md` micro item "String-pool index shape" is the same
+interner and can be done alongside.)
+
+**Classification:** local.
+
+## PERF-023 - Pattern matcher interprets every subject byte
+
+Raised by the strings hunter (its lead rewrite).
+
+**Bottleneck:** an ordinary atom in `luapat.rs` goes through `match_at`,
+charges an item step, dispatches `Item::Atom`, calls `singlematch`, charges
+again, fetches a class and tests membership; each charge polls the interrupt
+flag and enters the meter's mode-dependent accounting. Repetition skips some
+item dispatch but keeps per-byte charging and polling, and unanchored search
+restarts the machinery at every position. Compilation turns literal bytes, `.`
+and arbitrary classes all into indexed bitsets, so the plan cannot express a
+literal run, a delimiter scan or a specialized ASCII run.
+
+**Redesign:** a compiled execution plan of literal runs, specialized class
+scans, repetition kernels and explicit backtracking continuations, with scalar
+instructions kept for frontier, balance, backreferences, captures and deferred
+failures. Kernels carry today's logical cost arithmetically (a digit-free
+subject of length N with `%d` is `2 * (N + 1)` steps, including the final
+failed attempt). `consume_units_admitted` (`cost_meter.rs`) already keeps
+unit-by-unit admission (allow the crossing unit, reject the next); the matcher
+mostly calls it with one unit. Select the accounting mode outside the byte
+loop; flush on success, failure, pattern error and interruption; poll at
+bounded kernel boundaries and through backtracking.
+
+**Payoff:** attacks work multiplied by subject length across `find`, `match`,
+`gmatch` and `gsub`.
+
+**Risks:** backtracking order, capture values, deferred malformed-pattern
+errors and match-depth errors are observable; an explicit continuation stack
+must keep today's logical depth rules. Prefix skipping must prove what skipped
+attempts would have charged and whether they could have errored. No
+conventional regex engine (same matches, different costs and error
+precedence) and no general linear-time matcher, since reconstructing the
+backtracking bill could eat the savings.
+
+**Classification:** rewrite, highest ceiling in the scope.
+
+## PERF-024 - Number rendering formats twice
+
+Raised by the strings hunter and the table-and-math-libraries hunter.
+
+**Bottleneck:** `format_g14` (`lua_val.rs`) and `format_general`
+(`string_format.rs`) format scientific text to discover the rounded exponent,
+parse that exponent back, then build the final representation, often
+formatting again in fixed notation and allocating intermediate strings;
+`format_general` can do another scientific conversion after its probe. The
+small-integral fast path in `number_to_string` still allocates a `String`.
+Concat keeps separately allocated numeric renderings before copying them into
+its output (`concat_values`, `eval.rs`).
+
+**Redesign:** a decimal conversion yielding rounded digits and an exponent,
+rendered into fixed or scientific notation in a bounded buffer or the final
+sink, with exact `%.14g` selection and trimming. Keep the integral fast path's
+semantics but write into inline storage. Precision-directed conversion: a
+shortest-round-trip formatter is not a substitute.
+
+**Payoff:** reaches `tostring`, numeric string arguments, concat and `format`;
+concentrated in nonintegral values.
+
+**Risks:** decimal rounding boundaries, negative zero, rounding carries,
+exponent thresholds and spelling, NaN normalization, alternate form,
+precision behaviour.
+
+**Classification:** rewrite within the format work (strings hunter); local
+(table-and-math hunter). The format pipeline itself is appended to
+`optimizations.md` "Stdlib micro (E)".
+
+## PERF-025 - Pure gsub replacement crosses a callback-capable interface per match
+
+Raised by the strings hunter.
+
+**Bottleneck:** in `gsub_lua_pattern` (`string.rs`) each accepted match copies
+capture descriptions into a vector, enters replacement dispatch and resolves
+subject ranges through `State` again. Template compilation copies the
+replacement bytes, then allocates owned literal segments. Function and table
+replacements clone the returned value into a temporary vector before
+appending.
+
+**Redesign:** choose the replacement mode once before scanning. For string or
+numeric replacement, acquire the compiled pattern, a replacement plan, subject
+bytes, replacement bytes, meter, interrupt flag and output buffer together and
+run the whole loop over those borrows, consuming captures straight from matcher
+state. Replacement literals are spans with explicit operations for `%%` and
+capture references; cache plans for repeated replacement strings, with
+malformed escapes cached as deferred failures. Function and table replacement
+stay separate re-entry paths, appending returned bytes while the value is
+still rooted.
+
+**Risks:** unfinished captures error only when consumed; empty-match
+suppression and anchoring stay exact; callback effects survive a later
+failure; no global output-size preflight ahead of callbacks or deferred
+template errors.
+
+**Classification:** rewrite, high conviction, narrower coverage.
+
+## PERF-026 - Local string-library changes
+
+Raised by the strings hunter, with the `__tostring` item also from the
+table-and-math-libraries hunter.
+
+- **`sub` through `push_bytes_from_stack_range`.** That API already interns
+  from rooted source bytes; `sub` allocates a vector first. Keep argument and
+  charge order.
+- **Return unchanged results directly.** `gsub` allocates subject-sized output
+  even with no match; `upper`/`lower` can reuse the input when no byte
+  changes. Keep scan costs, errors and interrupt observation.
+- **No temporary copy of a `__tostring` result.** `tostring_rendering`
+  (`table_ops.rs`) pops the returned string, copies it to bytes and
+  re-interns; return the rooted value, or append its bytes while rooted.
+- **Bounded capture storage.** `gmatch` allocates a vector per yield and
+  `gsub` materializes capture descriptions per match; captures have a fixed
+  maximum.
+- **Fuse numeral validation and recognition.** `numeral.rs` scans decimal
+  syntax, validates it, validates UTF-8, then calls Rust parsing; a byte parser
+  with an exact small-integer path cuts passes. Explicit-base `tonumber` must
+  keep its successive floating-point accumulation.
+- **Literal-search kernels.** `scan_subslice` (`string.rs`) skips first-byte
+  mismatches but recompares long shared prefixes. A faster algorithm must
+  reconstruct today's naive comparison bill.
+
+**Classification:** local.
+
+## PERF-027 - Default sort runs through clone-out and generic insert
+
+Raised by the table-and-math-libraries hunter.
+
+**Bottleneck:** the no-comparator path cannot call Lua or collect during
+comparisons, yet it clones through `get_array` (`table.rs`) and writes every
+element back through general `Table::insert` in `set_array`.
+
+**Redesign:** for a homogeneous range of numbers or strings, split the
+table-storage and string-pool borrows, establish that the range sorts without
+a comparison error, and run a specialized version of the same heap sort on the
+storage, keeping structural metadata, iteration behaviour and snapshot shape.
+Mixed or fallible ranges keep detached sorting, since today a failed
+comparison leaves the raw source unchanged.
+
+**Risks:** "no comparator" does not license any algorithm: `0` and `-0`
+compare equal but render differently, NaN makes `<` partial and its position
+is observable, and mixed-type errors depend on which operands meet first.
+Changing algorithm is defensible only for a range proven to have a unique
+observable result (distinct non-NaN numbers), and proving that costs.
+Interrupted in-place sorts need deliberate treatment, since the detached path
+leaves storage untouched until writeback.
+
+**Classification:** targeted structural change, high conviction; needs table
+scope cooperation, not new storage.
+
+## PERF-028 - Sequence library functions go through stack choreography
+
+Raised by the table-and-math-libraries hunter.
+
+**Bottleneck:** `table.concat` (`lua_std/table.rs`) takes each element
+through numeric key, stack, general index resolution, stack value, owned byte
+vector, output vector; string elements are copied to temporary vectors, then
+into the result, which `push_bytes` copies again on an intern miss. Unpack
+pushes a key and runs general lookup per result; pack pushes key/value pairs
+and does raw stores per argument; append `insert` computes the border in the
+library, validates again in the host-facing method and computes it again in
+`array_insert`.
+
+**Redesign:** concat as a sequence reader feeding an output builder: ordinary
+tables read values directly; string bytes appended from the pool (the
+borrowing in `string_arg.rs` is the precedent); numbers rendered into the
+destination (PERF-024); the finished buffer interned by ownership transfer
+(appended to `optimizations.md` "Owned result buffers are copied again when
+interned"); metamethod reads keep their sequential order and append returned
+values without an owned copy. Unpack reads into return slots; pack uses
+`Table::set_list` keeping positional nils and `"n"`; insert/remove validate
+table, length and position once and do the storage operation once.
+
+**Risks:** no bulk-prefetch of metamethod results and no sizing pass:
+`__len`, `__index`, invalid-element and output-size errors have observable
+order; concat still evaluates length when an explicit end is given and admits
+its charge at the current point. Stack-cap error ordering, metatable mutation
+during handlers, GC rooting, partial effects. Fast paths use event-specific
+conditions (`__newindex` need not disqualify a read).
+
+**Classification:** coherent subsystem rewrite; high conviction about the
+waste, workload-dependent payoff.
+
+## PERF-029 - Certified fast phase for transcendental math
+
+Raised by the table-and-math-libraries hunter.
+
+**Bottleneck:** the kernels already have cheap approximation, rounding
+certification and accurate fallback, with FMA selected once at kernel entry,
+so there is no per-FMA selection to remove; `sqrt`, `floor`, `ceil` and `abs`
+have no algorithmic headroom (their gain is PERF-009). Cosine still does range
+reduction and double-double reconstruction through `cos_fast`
+(`crmath/cos.rs`).
+
+**Redesign:** a cheaper certified fast phase for common game-domain inputs,
+with the existing kernels as fallback, worth it only if a sound error interval
+certifies the binary64 answer often enough. A joint sine/cosine kernel sharing
+reduction and reconstruction, certifying each output separately, where scripts
+compute both for one angle; compiler fusion would have to keep identity
+checks, evaluation order and both charge points.
+
+**Risks:** new bounds and certification work; cannot be justified by visual
+accuracy or small ULP error. Payoff depends on input distributions.
+
+**Classification:** numerical rewrite, lower conviction; after PERF-009,
+PERF-013 and PERF-028.
+
+## PERF-030 - RNG range mapping recomputed per draw
+
+Raised by the table-and-math-libraries hunter.
+
+**Bottleneck:** `random_range_i64` (`rng.rs`) recomputes `2^64 mod span` for
+every nondegenerate range, then maps accepted draws with `raw % span`.
+
+**Redesign:** cached span metadata or an exact reciprocal-based remainder for
+repeated game ranges.
+
+**Risks:** keep the exact rejection predicate and exact remainder; a
+multiply-high mapper changes which draws are accepted and what they produce.
+Singleton ranges consume no draw today. Not a reason to redesign SplitMix64 or
+batch draws. (The loop's missing interrupt poll is filed in `bugs.md`.)
+
+**Classification:** local.
+
+## PERF-031 - Host calls into Lua assembled from independent stack operations
+
+Raised by the host-boundary hunter (the invocation half of its lead rewrite;
+the callback half is PERF-008).
+
+**Bottleneck:** each numeric argument push checks usability and stack space;
+calling an anchor looks up the value, inserts it below the arguments and enters
+the general call machinery; results are normalized onto the stack
+(`collect_returns`), read through another public operation each, then popped
+(`stack.rs`, `anchor.rs`, `eval.rs`). Pushing two numbers, calling, reading one
+number and popping makes five public usability checks, and on x86-64 the
+floating-point environment check is an out-of-line control-register read
+(`check_usable` in `vm.rs`, `read_control` in `fp_env.rs`).
+
+**Redesign:** an invocation interface owning the whole transfer: a state-bound
+entry identifies the callee, a built-in argument encoder writes into the final
+call window, execution returns a result span or decodes into the requested Rust
+result, and one owner handles operand cleanup, result normalization, errors and
+panic poisoning (conceptually `state.invoke(&mut tick_context, &entry,
+(entity_id, dt))`). An outermost invocation decodes from the returned span
+before the frame is destroyed. A tuple wrapper over `push_number`,
+`call_anchor`, `to_number` and `pop` would keep most of the cost. Needs the
+explicit callee, argument-span and result-destination operands of PERF-012.
+
+**Risks:** result views stay rooted until decoding ends and block
+incompatible mutation or re-entry; upvalues close before their source slots
+are destroyed or moved; typed decoding keeps accepted inputs and exact errors
+(no automatic exact-arity enforcement); FP checks consolidate only over
+VM-controlled marshalling; charges and callback-visible cost settle at today's
+boundaries, and batching several entity invocations keeps individual failure
+behaviour.
+
+**Classification:** rewrite, high conviction; greatest for short scripts and
+frequent small callbacks.
+
+## PERF-032 - Borrowed per-tick game context for host callbacks
+
+Raised by the host-boundary hunter.
+
+**Bottleneck:** user data is `Option<Box<dyn Any + Send>>` with `'static`
+accessors (`vm.rs`) and registered functions are plain function pointers, so a
+callback cannot receive a temporary borrow of the world's tick state. An
+engine where the world owns execution is pushed toward shared ownership,
+interior mutability, moving context in and out, command collection or copying
+tick data into Lua (integration consequences, not costs proven in a host).
+Even with data inside `State`, borrowing Lua string bytes through `to_bytes`
+borrows `State` and blocks `user_data_mut`, forcing a copy; `raw_field`
+conversions (`raw_field.rs`) return owned `Vec<u8>`/`String`. The downcast
+itself is not the prize.
+
+**Redesign:** durable `State` plus a borrowed tick context passed at
+invocation; callback entries keep identity, diagnostic name and thunk; an
+argument view borrows the VM heap while the callback mutates the context. A
+typed registration layer adapts at the thunk, so the interpreter need not be
+generic over the world type. `with_string_args` (`string_arg.rs`) already
+splits strings, cost accounting and interruption this way.
+
+**Payoff:** removes copying and synchronization at every host query, possibly
+more than PERF-031; lets many States run sequentially against one world
+borrow.
+
+**Risks:** re-entry: an exclusive world borrow must be suspended and
+reborrowed explicitly across Lua re-entry; borrowed Lua data cannot outlive
+arbitrary VM mutation; world changes keep their order and visibility
+(deferred commands are not transparent). Implement with PERF-031.
+
+**Classification:** rewrite, high architectural value; payoff depends on host
+integration. Related to `todo.md` "Typed `State<U>` for user-data", which
+addresses only the downcast.
+
+## PERF-033 - Host global and field access resolves names and tables afresh
+
+Raised by the host-boundary hunter.
+
+**Bottleneck:** `get_global(name)` for a non-builtin finds the interned string
+by its bytes and reads the global table without a cache (`read_name` against
+the bytecode path's `read_cached`, `global_env.rs`). Each `raw_field` resolves
+and validates the table argument, finds the name in the string pool, looks the
+field up and converts it, so ten fields repeat all of that ten times, and
+string fields allocate owned results (`raw_field.rs`). General Rust table
+access moves keys and values through stack operations.
+
+**Redesign:** prepared access plans: a global-binding descriptor caching a
+validated probe while still reading the current binding; a record view
+validating its table once; field descriptors resolving names and keeping
+validated slot information; reads converting straight to scalars or borrowed
+bytes; writes through slot stores with today's semantic fallback. The
+primitives exist (`find_slot`, `read_slot`, `renew_slot`, `store_slot`, global
+`HashProbe`; `eval_index.rs` shows identity plus slot validation). No temporary
+map or vector of decoded fields. Persistent entity tables benefit from slot
+caching; fresh option tables miss identity caches and gain only from
+validate-once and borrowed decoding (`SlotRef` is not a cross-table shape).
+
+**Risks:** cached global bindings observe rebinding (unlike an anchored
+function); raw stays raw; deletion, reinsertion, compaction and environment
+changes invalidate or renew tokens; descriptors must not intern and root every
+field name, which changes later identity; record decoding keeps the order
+validation errors appear; writes go through the mutation machinery so builtin
+mirrors and bookkeeping stay coherent.
+
+**Classification:** structural boundary change, high conviction for
+data-heavy callbacks.
+
+## PERF-034 - Restricted environment rebuilt on every entry
+
+Raised by the host-boundary hunter.
+
+**Bottleneck:** each `with_restricted_env` entry (`vm.rs`) builds a new
+`Table`, resolves the whitelist names, copies their values in and swaps it into
+the global table; exit swaps back. Both swaps advance the table version,
+invalidating global probes and other caches naming it (`restrict`/`resume`,
+`global_env.rs`).
+
+**Redesign:** restricted contents as a prepared ordered backing view with
+invocation-local writes, selected at entry and discarded at exit; unchanged
+visible bindings shared, not rebuilt; cache validation names the active
+backing view rather than going cold on entry and exit. It cannot be a second
+environment consulted only by global bytecodes: `_G`, retained aliases, raw
+operations and iteration all see the same active contents. Whitelist order,
+outer binding changes, nested restrictions and discarded writes stay exact.
+
+**Classification:** full representation rewrite, conditional: near the top if
+the game restricts around every tick, irrelevant if restriction is setup-only.
+
+## PERF-035 - Local host-boundary changes
+
+Raised by the host-boundary hunter.
+
+- **Transient anchors for temporary values.** Anchor insertion drains a
+  mutex-protected release queue and clones an `Arc`; dropping queues the key
+  under the mutex (`anchor.rs`). Scoped values could stay in invocation-owned
+  root storage and take an owned anchor only when they escape. Ordinary anchor
+  lookup takes no lock, and reusing one function anchor across ticks already
+  avoids creation and release.
+- **`State::to_string` intermediate.** It gets owned bytes, then builds a Rust
+  string, an extra allocation and copy for a valid UTF-8 Lua string
+  (`stack.rs`); field decoding has no borrowed form. Rendered numbers and
+  metamethod results keep byte-exact behaviour.
+
+The hunter notes `HostCallbacks` handles printing and error notification only,
+so making it generic would not touch the multiplier, and Rust function
+dispatch is already an indexed function-pointer lookup.
+
+**Classification:** local.
+
+---
+
+## Accounts added to existing entries
+
+This hunt's account of these mechanisms went into the entry already filed for
+them:
+
+- `optimizations.md` "Register access bounds checks": dispatch hunter's
+  verified register window with explicit slow exits.
+- `optimizations.md` "Cost accounting on every arithmetic op": cost-charging
+  hunter's region accounting.
+- `optimizations.md` "Call path after the frame-stack flattening": calls
+  hunter's single activation record and VM-owned continuations, with the heap,
+  host and codegen hunters' overlapping points.
+- `optimizations.md` "8-byte NaN-boxed `Val`": dispatch hunter's compact value
+  and heap hunter's typed arenas and paged sweep, with the table hunter's
+  `TableStorage` footprint point.
+- `optimizations.md` "Shape-based polymorphic field IC": lookup and table
+  hunters' shared layouts, and the lookup hunter's key-checked position reuse.
+- `optimizations.md` "Compile-time table-shape prediction": codegen hunter's
+  constructor plans.
+- `optimizations.md` "Owned result buffers are copied again when interned":
+  heap and strings hunters' owned-buffer adoption and short-string pooling.
+- `optimizations.md` "gmatch: drop the Lua-side wrapper and table-backed
+  iterator state": strings hunter's native iterator, failed-search exhaustion
+  and pattern-cache sizing.
+- `optimizations.md` "Stdlib micro (E)": strings hunter's cached format plan.
+- `todo.md` "Sparse storage for the array part's stragglers": table hunter's
+  numeric storage separated from the logical array boundary.
+- `todo.md` "Grow the brokkr workload registry": host hunter's note that the
+  harness warm path exercises no host traffic.
