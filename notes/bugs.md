@@ -18,17 +18,6 @@ one hunter per scope). Unverified: the fix pass decides which are real.
 
 ---
 
-## BUG-001 - RNG rejection sampling has no interrupt poll
-
-Raised by the table-and-math-libraries hunter. `random_range_i64`
-(`src/vm/rng.rs`) runs a data-dependent rejection loop that neither polls nor
-receives an interrupt handle. Expected retries are small, but the hunter judged
-that insufficient for the host-stoppable contract and said it needs a
-safepoint within rejection processing. (The `safepoint-loops` check requires a
-poll or a `// bounded:` / `// safepoint:` comment on every native library loop;
-whether this loop carries one, and whether its bound argument holds, is the
-question.)
-
 ## BUG-002 - crmath final fallbacks do not fully establish correct rounding
 
 Raised by the table-and-math-libraries hunter. `atan2_accurate`

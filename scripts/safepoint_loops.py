@@ -9,14 +9,16 @@ its trip count comes from, which a lexer cannot decide, so this check forces
 the decision to be written down instead. Every `for`, `while` and `loop` in
 the scoped files, outside test code, must either
 
-- call `poll_interrupt(` directly in its body, or
+- call `poll_interrupt(` (or, where the State is not at hand,
+  `interrupt_requested(` on the flag) directly in its body, or
 - sit under a comment, in the comment lines directly above it, containing
   `bounded:` (why one pass of it is bounded: a string under
   MAX_STRING_BYTES, a table's storage, a fixed count) or `safepoint:` (where
   it polls instead, such as a callee that polls per step).
 
-Scope: the standard library, the pattern matcher and the table operations
-under src/vm/table_ops.rs, which hold the native library work. Iteration
+Scope: the standard library, the pattern matcher, the table operations
+under src/vm/table_ops.rs and the `math.random` sampler under src/vm/rng.rs,
+which hold the native library work. Iteration
 through closures (`for_each`, `fold`, `map`) is not a loop here and is not
 checked. Uses native_calls' Rust lexer, so comments and literals cannot
 supply a poll. Prints `ok` when every loop is decided.
@@ -28,11 +30,11 @@ import sys
 import native_calls as rust
 
 SCOPE_DIRS = ("src/lua_std/", "src/patterns/")
-SCOPE_FILES = ("src/lua_std.rs", "src/vm/table_ops.rs")
+SCOPE_FILES = ("src/lua_std.rs", "src/vm/rng.rs", "src/vm/table_ops.rs")
 
 # `for` not followed by `<` (a higher-ranked bound), `while` and `loop`.
 LOOP = re.compile(r"\b(?:(for)\b(?!\s*<)|while\b|loop\b)")
-POLL = re.compile(r"\bpoll_interrupt\s*\(")
+POLL = re.compile(r"\b(?:poll_interrupt|interrupt_requested)\s*\(")
 DECISION = re.compile(r"//.*\b(?:bounded|safepoint):\s*\S")
 
 

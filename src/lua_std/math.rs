@@ -161,7 +161,11 @@ pub(super) const MATH_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
                         ArgDetail::IntervalEmpty,
                     )));
                 }
-                state.rng.random_range_i64(1, n) as f64
+                let flag = state.interrupt.flag();
+                match state.rng.random_range_i64(1, n, flag) {
+                    Some(v) => v as f64,
+                    None => return Err(state.interrupted_error()),
+                }
             }
             2 => {
                 // math.random(m, n) - returns integer in [m, n]
@@ -186,7 +190,13 @@ pub(super) const MATH_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
                 // `arg_integer` rejects 2^63), so they are representable, and
                 // round-to-nearest is monotonic. The i64 draw itself is
                 // unbiased (rejection sampling in `VmRng::random_range_i64`).
-                state.rng.random_range_i64(m, n) as f64
+                // Each rejected draw is an interrupt safepoint; see
+                // `VmRng::random_range_i64`.
+                let flag = state.interrupt.flag();
+                match state.rng.random_range_i64(m, n, flag) {
+                    Some(v) => v as f64,
+                    None => return Err(state.interrupted_error()),
+                }
             }
             _ => {
                 return Err(state.library_error(LibraryError::WrongNumberOfArguments {

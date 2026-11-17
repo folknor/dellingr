@@ -31,7 +31,9 @@
 //!   heap-sort step, each iteration of the library loops whose trip count
 //!   a script chooses by a number (`table.concat`, `table.move`, the
 //!   metamethod paths of `table.insert`, `table.remove` and `table.sort`),
-//!   each subject position of the empty-pattern `string.gsub`, and each
+//!   each subject position of the empty-pattern `string.gsub`, each
+//!   rejected draw of an integer `math.random` (`VmRng::random_range_i64`
+//!   says why its retries are not counted as bounded), and each
 //!   `string.format` directive and `%%` escape, before a directive is parsed
 //!   and its argument rendered (the literal bytes between them are one pass
 //!   over the format string, a string capped by `MAX_STRING_BYTES`).
@@ -47,7 +49,8 @@
 //! `docs/budget.md` ("Stopping a script from the host") states the same
 //! contract. The `safepoint-loops` script check
 //! (`scripts/safepoint_loops.py`) holds every loop in the standard library,
-//! the pattern matcher and the table operations to the per-step pass: each
+//! the pattern matcher, the table operations and the `math.random` sampler
+//! to the per-step pass: each
 //! polls, or records why it is bounded or where it polls instead.
 
 use std::sync::Arc;

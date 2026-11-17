@@ -947,7 +947,8 @@ repeated game ranges.
 **Risks:** keep the exact rejection predicate and exact remainder; a
 multiply-high mapper changes which draws are accepted and what they produce.
 Singleton ranges consume no draw today. Not a reason to redesign SplitMix64 or
-batch draws. (The loop's missing interrupt poll is filed in `bugs.md`.)
+batch draws. Keep the interrupt poll after each rejection and the
+commit-on-accept state copy.
 
 **Classification:** local.
 

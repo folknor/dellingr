@@ -35,6 +35,10 @@ tick budgets and re-record replays.
 
 ### Fixed
 
+- An integer `math.random` polls the host interrupt after each rejected
+  draw, so the rejection loop is no longer an unpolled native loop. An
+  interrupted call leaves the random stream unmoved; uninterrupted streams
+  are unchanged.
 - **Replay-visible:** the `ipairs` iterator, called directly or as a generic
   `for` iterator, requires an exact-integer control: `1.5`, NaN, infinities
   and values beyond 64-bit raise `bad argument #2 to 'ipairs' (number has no

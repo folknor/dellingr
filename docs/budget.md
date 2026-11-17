@@ -222,8 +222,9 @@ let mut state = State::builder().interrupt(stop.clone()).build();
   otherwise run without bound: pattern-matcher steps, plain substring search
   candidates, heap-sort steps, `string.format` directives and `%%` escapes,
   and the iterations of `table.concat`, `table.move`, the metamethod paths of `table.insert`,
-  `table.remove` and `table.sort`, and the empty-pattern `string.gsub`.
-  `vm/interrupt.rs` lists them.
+  `table.remove` and `table.sort`, the empty-pattern `string.gsub`, and each
+  rejected draw of an integer `math.random` (an interrupted draw leaves the
+  random stream where it was). `vm/interrupt.rs` lists them.
 - **Latency.** Nothing a script can repeat without bound avoids a safepoint,
   so the work between two polls is bounded by the VM's fixed limits, never by
   the script. It is a run of instructions with no backward jump and no call
