@@ -20,6 +20,18 @@ identity of a string rebuilt after collection. For replay, drop anchors on the
 State's thread at deterministic points, or finish and synchronize their drops
 between runs before resuming the State. Concurrent drops during a run are safe
 but their timing is an additional input that a replay must control.
+`anchor_count` also reads the queue: it subtracts drops at once, before any
+drain, so a concurrent drop changes what it returns at any moment, and a host
+callback that hands the count to a script carries that timing into the run.
+
+Draining only while the State is at rest (no invocation in flight) was
+considered and declined. It would make a run's releases depend only on drops
+ordered before its entry, so a host could synchronize drops against its own
+calls rather than against execution. But a host callback that anchors and drops
+values inside one long invocation would then keep every dropped value rooted,
+and every slot occupied, until that invocation returns, even when every drop is
+on the State's thread and already deterministic. Release one at once with
+`release_anchor` where the point of release matters.
 
 ## Cost
 

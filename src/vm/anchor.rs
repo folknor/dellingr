@@ -194,6 +194,11 @@ impl Registry {
     /// during execution. Replay hosts must synchronize cross-thread drops
     /// between runs; the queue deliberately retains prompt reclamation at
     /// automatic collections rather than delaying releases to a host entry.
+    /// Draining only at rest would let a host order drops against its own
+    /// calls instead of against execution, but a callback that anchors and
+    /// drops values inside one long invocation would then keep all of them
+    /// rooted until it returns, same-thread deterministic drops included
+    /// (`docs/determinism.md`).
     pub(crate) fn drain_released(&mut self) {
         let released = std::mem::take(&mut *self.released.lock());
         for key in released {
@@ -398,6 +403,10 @@ impl State {
     }
 
     /// Number of live anchor handles. For embedder leak diagnostics.
+    ///
+    /// A drop counts at once, on whatever thread it happens, so a concurrent
+    /// drop changes the result at any moment; do not feed it to a script
+    /// that must replay (`docs/determinism.md`).
     pub fn anchor_count(&self) -> usize {
         self.registry.len()
     }
