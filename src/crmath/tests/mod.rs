@@ -113,6 +113,30 @@ fn roundeven_finite_ties_to_even() {
     }
 }
 
+// Set when `atan2` or `pow` rounds an approximation its own error bound could
+// not certify (the branches where upstream CORE-MATH aborts). One flag shared
+// by every backend instantiation, so the reader sees whichever ran.
+thread_local! {
+    static UNCERTIFIED_ROUNDING: Cell<bool> = const { Cell::new(false) };
+}
+
+pub(crate) fn record_uncertified_rounding() {
+    UNCERTIFIED_ROUNDING.with(|cell| cell.set(true));
+}
+
+/// Whether a rounding went uncertified since the last call, clearing the flag.
+pub(crate) fn take_uncertified_rounding() -> bool {
+    UNCERTIFIED_ROUNDING.with(|cell| cell.replace(false))
+}
+
+#[test]
+fn uncertified_rounding_flag_is_consumed() {
+    let _ = take_uncertified_rounding();
+    record_uncertified_rounding();
+    assert!(take_uncertified_rounding());
+    assert!(!take_uncertified_rounding());
+}
+
 // Count entries, rather than individual FMA operations, so a forced-mode test
 // detects a kernel accidentally bypassing whole-kernel backend selection.
 thread_local! {

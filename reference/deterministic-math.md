@@ -44,7 +44,14 @@ replay recorded on one host could branch differently on another.
      is known to get there (CORE-MATH's worst-case files pass). The port
      rounds the high-precision approximation instead, which keeps property 1
      but could be off by one unit in the last place. A later correction of
-     such a case would be replay-visible.
+     such a case would be replay-visible. Test builds keep both tests and
+     record when one fails, and every kernel call the golden and oracle tests
+     make (`crmath::tests::oracle`, `Func::port`) fails on that record, so a
+     covered input that reaches the gap surfaces as a witness even when its
+     result happens to be right. A higher-precision fallback (a Ziv loop past
+     the final phase) would make the rounding unconditional and was not
+     built: no witness motivates it, and building it on libbeef would leave
+     the oracle unable to check it independently.
    - `math.log(x, base)` for a base other than 10 is `ln(x) / ln(base)`, each
      logarithm correctly rounded and the quotient rounded once more.
 
@@ -93,12 +100,30 @@ NaN's bits), and the VM never lets a script observe them.
   shifts that C leaves undefined at the limb width are made total, and every
   `__builtin_fma` becomes a call to `fma`, which each kernel instance binds
   to its backend.
-- One structural exception: pow's exactness predicate (upstream `is_exact`)
-  is narrowed to the one case its only reader, `exact_pow`, consults
-  (positive non-integer y, x not a power of two) and evaluated there rather
-  than up front. The branches dropped produced values nothing read, so the
-  results are bit-identical; the doc comment on `is_exact_root` has the
-  argument.
+- Departures from the literal port, all in the `pow` and `atan2`
+  implementations and their helpers:
+  - Bit-identical simplification: pow's exactness predicate (upstream
+    `is_exact`) is narrowed to the one case its only reader, `exact_pow`,
+    consults (positive non-integer y, x not a power of two) and evaluated
+    there rather than up front. The branches dropped produced values nothing
+    read; the doc comment on `is_exact_root` has the argument. Likewise the
+    phase-3 branch for x^y very close to 1 returns `1.0` where upstream
+    returns `1.0 +- 2^-100`, the same binary64 value in round to nearest.
+  - Domain and sentinel safeguards in `pow`: |y| < 2^-969 and x = 1 are
+    decided before phase 1 (the result is 1 with the sign), and so is
+    |y| >= 2^1014 (overflow or underflow), which kept `exp_2`'s overflow
+    sentinel out of the later phases; phase 2 returns infinity on that
+    sentinel, `exact_pow` rejects scale factors outside the binary64 range
+    before converting them to an integer, and `dint_tod` and `qint_tod` keep
+    the sign on overflow. The input that panicked dev builds before these
+    guards (x = 0x1.62a88613629b6p+678, y = 2^1014) is pinned in the golden
+    file.
+  - Certification window: pow's phase-3 near-boundary test accepts tails 1
+    to 60 units below a boundary, where upstream's expression accepts 60 to
+    120; the error bound is 60 units, so the port's window is the one the
+    bound calls for. This changes which tails are treated as certified.
+  - The final aborts of `pow` and `atan2` round instead (see "Two
+    properties").
 - Hex float literals are written as `h!("0x1.921fb54442d18p+0")`, evaluated at
   compile time by `crmath::hf`, which rejects any literal that is not exactly
   representable.

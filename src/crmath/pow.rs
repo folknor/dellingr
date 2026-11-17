@@ -7,7 +7,9 @@
 //! 128-bit one with exact and midpoint detection, and a 256-bit one. Upstream
 //! aborts if the third phase cannot certify the rounding; no input is known to
 //! get there, and this port instead rounds the 256-bit approximation, which
-//! keeps the result deterministic (see the module doc of `crmath`).
+//! keeps the result deterministic (see the module doc of `crmath`). Test
+//! builds record when that branch runs, which the golden and oracle tests
+//! check after every call.
 //!
 //! Deliberate departures from upstream: every NaN is treated as quiet, so
 //! `pow(NaN, +-0)` and `pow(1, NaN)` are 1 whatever the NaN's bits (upstream
@@ -911,7 +913,15 @@ macro_rules! kernel {
             }
             // Upstream aborts here ("unexpected worst case"). No input is known to
             // reach this point. Rounding the 256-bit approximation keeps the result
-            // deterministic; it may differ from the correctly rounded value.
+            // deterministic; it may differ from the correctly rounded value. Test
+            // builds record the case so every kernel run by the golden and oracle
+            // tests proves it did not happen. A higher-precision fallback was
+            // considered and not built: it has no witness to justify it, and
+            // building it on libbeef would leave the oracle that validates it
+            // unable to check it independently. reference/deterministic-math.md
+            // has the contract.
+            #[cfg(test)]
+            crate::crmath::tests::record_uncertified_rounding();
             qint_tod(&q_z)
         }
 

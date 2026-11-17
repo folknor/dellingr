@@ -73,8 +73,29 @@ impl Func {
         matches!(self, Self::Atan2 | Self::Pow)
     }
 
-    /// The port under test. `atan2` takes `(y, x)` in that order.
+    /// The port under test. `atan2` takes `(y, x)` in that order. Panics if
+    /// the call rounded an approximation its own error bound could not
+    /// certify (where upstream aborts): the result may still match the
+    /// oracle, but the input is the first known witness and must be reported.
+    /// Outside test builds (the regeneration tool) there is no record.
     pub(crate) fn port(self, x: f64, y: f64) -> f64 {
+        #[cfg(test)]
+        let _ = super::take_uncertified_rounding();
+        let result = self.port_unchecked(x, y);
+        #[cfg(test)]
+        assert!(
+            !super::take_uncertified_rounding(),
+            "{} rounded without certification at x={x:e} ({:#018x}), y={y:e} ({:#018x}), \
+             FMA mode {:?}",
+            self.name(),
+            x.to_bits(),
+            y.to_bits(),
+            super::forced_fma(),
+        );
+        result
+    }
+
+    fn port_unchecked(self, x: f64, y: f64) -> f64 {
         match self {
             Self::Sin => crm::sin(x),
             Self::Cos => crm::cos(x),

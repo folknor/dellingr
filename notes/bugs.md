@@ -18,15 +18,6 @@ one hunter per scope). Unverified: the fix pass decides which are real.
 
 ---
 
-## BUG-002 - crmath final fallbacks do not fully establish correct rounding
-
-Raised by the table-and-math-libraries hunter. `atan2_accurate`
-(`src/crmath/atan2.rs`) discards its final error bound and rounds the
-approximation. `pow` (`src/crmath/pow.rs`) also returns its approximation when
-the final boundary test remains unresolved. The hunter found no concrete
-failing input; these are explicit certification gaps. Any correction producing
-different bits is a replay-visible change.
-
 ## BUG-003 - Table growth failure handling is asymmetric
 
 Raised by the table-representation hunter. Array reservations translate

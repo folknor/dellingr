@@ -5,7 +5,9 @@
 //! The accurate path works on 192-bit `tint_t` values. Upstream aborts when
 //! its final error bound straddles a rounding boundary; no input is known to
 //! get there, and this port rounds the 192-bit approximation instead, which
-//! keeps the result deterministic (see the module doc of `crmath`).
+//! keeps the result deterministic (see the module doc of `crmath`). Test
+//! builds keep upstream's test and record when it fails, which the golden
+//! and oracle tests check after every call.
 
 /// `(-1)^sgn * (h/2^64 + m/2^128 + l/2^192) * 2^ex`, with `h`'s top bit set
 /// unless the value is zero.
@@ -313,10 +315,11 @@ macro_rules! kernel {
             from_bits(bits(x).wrapping_add((i as u64) << 52))
         }
 
-        /// Round `a` to binary64, nearest even. `exact` says `a` holds a binary64
-        /// value exactly (upstream's `err = 0`).
+        /// Round `a` to binary64, nearest even. `err` is 0 when `a` holds a
+        /// binary64 value exactly, otherwise a bound in ulps on the error of the
+        /// low limb `a.l`.
         $(#[$feature])*
-        fn tint_tod(a: &Tint, exact: bool) -> f64 {
+        fn tint_tod(a: &Tint, err: u64) -> f64 {
             if a.ex >= 1025 {
                 // overflow: |a| >= 2^1024
                 return if a.sgn != 0 {
@@ -344,6 +347,24 @@ macro_rules! kernel {
             let mut ll = a.l;
             let mut ex = a.ex;
             let mut low = hh & 0x7ff; // low 11 bits of h
+            // Upstream's certification test, in upstream's place (after the
+            // overflow and underflow returns, before the subnormal shift): the
+            // rounding is undetermined when the error bound can carry the value
+            // across a rounding boundary. Upstream aborts there; no binary64 input
+            // is known to get there. The port rounds the approximation, which is
+            // what upstream does whenever the test passes, so the result stays
+            // deterministic but could be one ulp off. Test builds record the case
+            // so every kernel run by the golden and oracle tests proves it did not
+            // happen. A higher-precision fallback was considered and not built:
+            // it has no witness to justify it, and building it on libbeef would
+            // leave the oracle that validates it unable to check it
+            // independently. reference/deterministic-math.md has the contract.
+            #[cfg(test)]
+            if (mm == 0 && (low == 0 || low == 0x400) && ll < err)
+                || (mm == u64::MAX && (low == 0x3ff || low == 0x7ff) && !ll < err)
+            {
+                crate::crmath::tests::record_uncertified_rounding();
+            }
             if ex <= -1022 {
                 // Subnormal.
                 let sh = (-1021 - ex) as u32; // 1 <= sh <= 52
@@ -354,7 +375,7 @@ macro_rules! kernel {
                 ex += i64::from(sh);
             }
             let mut h = (hh >> 11) as f64; // significant bits from h
-            let l = if exact {
+            let l = if err == 0 {
                 0.0
             } else if low < 0x400 {
                 0.25 // round to zero
@@ -375,7 +396,7 @@ macro_rules! kernel {
         /// 1/A, absolute error below 2^-103.9 for 1 <= r <= 2.
         $(#[$feature])*
         fn inv_tint(a: &Tint) -> Tint {
-            let mut ad = tint_tod(a, true); // exact
+            let mut ad = tint_tod(a, 0); // exact
             let subnormal = fabs(ad) < h!("0x1p-1022");
             if subnormal {
                 ad *= h!("0x1p53");
@@ -448,7 +469,7 @@ macro_rules! kernel {
                 z.l = z.l.wrapping_sub(2);
                 z.m = z.m.wrapping_sub(u64::from(z.l < 2));
                 z.h = z.h.wrapping_sub(u64::from(z.m < 1));
-                return tint_tod(&z, false);
+                return tint_tod(&z, 1);
             }
             // The rational approximation is for z > 0.
             let sz = z.sgn;
@@ -492,12 +513,9 @@ macro_rules! kernel {
                 }
                 err = 266;
             }
-            // `err` bounds the error in ulps of the low limb. Upstream checks
-            // whether that bound straddles a rounding boundary and aborts if so; no
-            // input is known to get there. The port skips the check and rounds the
-            // approximation, which is what upstream does whenever the check passes.
-            let _ = err;
-            tint_tod(&z, false)
+            // `err` bounds the error in ulps of the low limb; `tint_tod` carries
+            // upstream's certification test against it.
+            tint_tod(&z, err)
         }
 
         #[$inline]
@@ -664,6 +682,43 @@ macro_rules! kernel {
                 }
             }
             ub
+        }
+
+        #[cfg($test_cfg)]
+        mod kernel_unit_tests {
+            use super::*;
+            use crate::crmath::tests::take_uncertified_rounding;
+
+            fn rounds_uncertified(h: u64, m: u64, l: u64, err: u64) -> bool {
+                let _ = take_uncertified_rounding();
+                let a = Tint {
+                    h,
+                    m,
+                    l,
+                    ex: 1,
+                    sgn: 0,
+                };
+                let _ = tint_tod(&a, err);
+                take_uncertified_rounding()
+            }
+
+            // Synthetic limbs, not reachable witnesses: this tests the detector.
+            #[test]
+            fn certification_test_matches_upstream() {
+                let top = 1u64 << 63;
+                // Low limb within `err` of a boundary from above.
+                assert!(rounds_uncertified(top, 0, 5, 6));
+                assert!(rounds_uncertified(top | 0x400, 0, 0, 1));
+                assert!(!rounds_uncertified(top, 0, 6, 6));
+                assert!(!rounds_uncertified(top | 1, 0, 0, 6));
+                // From below.
+                assert!(rounds_uncertified(top | 0x3ff, u64::MAX, u64::MAX - 5, 6));
+                assert!(rounds_uncertified(top | 0x7ff, u64::MAX, u64::MAX, 1));
+                assert!(!rounds_uncertified(top | 0x7ff, u64::MAX, u64::MAX - 6, 6));
+                assert!(!rounds_uncertified(top | 0x7fe, u64::MAX, u64::MAX, 6));
+                // `err = 0` is an exact conversion and never uncertified.
+                assert!(!rounds_uncertified(top, 0, 0, 0));
+            }
         }
     };
 }
