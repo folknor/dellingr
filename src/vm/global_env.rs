@@ -453,6 +453,13 @@ impl GlobalEnv {
 
     /// The value of the global named `name`, for the host. A name nothing has
     /// interned cannot be bound, so the lookup never allocates.
+    //
+    // A non-builtin name pays a string-pool lookup and a table probe on
+    // every read. A host-held binding descriptor caching the probe was
+    // weighed and not added: a host looks up its entry callbacks about once
+    // per tick, the descriptor must still observe rebinding (so it saves one
+    // lookup, not the read), and a host that wants the value itself retains
+    // it with an anchor.
     pub(super) fn read_name(&self, heap: &GcHeap, name: &str) -> Val {
         if let Some(builtin) = Builtin::from_name(name) {
             return self.read_builtin(heap, builtin.to_u8());

@@ -83,6 +83,10 @@ tick budgets and re-record replays.
   docs/compatibility.md). Handler and comparator call order, results and
   costs are unchanged. A comparator sort on a plain table copies its values
   once instead of three times.
+- `RawField` takes the lifetime of the State borrow (`RawField<'s>`), and
+  `State::raw_field` reads into `&str`, `&[u8]` and their `Option`s,
+  borrowing the string instead of copying it. `&str` keeps the invalid-UTF-8
+  field error. A bound written `T: RawField` becomes `T: RawField<'s>`.
 
 ### Fixed
 

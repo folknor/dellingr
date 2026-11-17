@@ -39,23 +39,28 @@ mod sealed {
     /// The conversion behind [`super::RawField`]. Sealed: a field read never
     /// runs Lua, touches the stack or charges cost, which an outside
     /// implementation could not promise.
-    pub trait Convert: Sized {
-        fn convert(value: FieldValue<'_>) -> Result<Self, FieldFailure>;
+    ///
+    /// `'s` is the borrow of the State the read holds, so a borrowed
+    /// conversion (`&str`, `&[u8]`) can return the string's own bytes.
+    pub trait Convert<'s>: Sized {
+        fn convert(value: FieldValue<'s>) -> Result<Self, FieldFailure>;
     }
 }
 
 /// A Rust type [`State::raw_field`] can read a field into.
 ///
 /// Implemented for `f64`, `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`,
-/// `u64`, `bool`, `String`, and `Vec<u8>`, and for `Option<T>` whenever `T`
-/// implements `RawField`. The trait is sealed.
+/// `u64`, `bool`, `String`, `Vec<u8>`, the borrowed `&str` and `&[u8]`, and
+/// for `Option<T>` whenever `T` implements `RawField`. A borrowed read holds
+/// the State's shared borrow for as long as the result lives and copies
+/// nothing. The trait is sealed.
 //
 // The integer set is a choice for option-table fields, not an oversight.
 // `i128`/`u128` would be correct (every integral f64 below 2^127 or 2^128
 // converts exactly) but no embedder reads one; add them when one does.
 // `isize`/`usize` are left out because their accepted range would vary with
 // the host target, which a deterministic VM should not expose to scripts.
-pub trait RawField: sealed::Convert {}
+pub trait RawField<'s>: sealed::Convert<'s> {}
 
 fn number(value: &FieldValue<'_>) -> std::result::Result<f64, FieldFailure> {
     value
@@ -76,19 +81,19 @@ fn integral(value: &FieldValue<'_>) -> std::result::Result<f64, FieldFailure> {
     }
 }
 
-impl sealed::Convert for f64 {
+impl sealed::Convert<'_> for f64 {
     fn convert(value: FieldValue<'_>) -> std::result::Result<Self, FieldFailure> {
         // A NaN leaves as the canonical NaN, as from `State::to_number`.
         number(&value).map(crate::numeral::canonical_nan)
     }
 }
-impl RawField for f64 {}
+impl RawField<'_> for f64 {}
 
 // Every bound of a type up to 32 bits is an exact f64, so an inclusive
 // comparison is exact.
 macro_rules! small_integer {
     ($($ty:ty),+) => {$(
-        impl sealed::Convert for $ty {
+        impl sealed::Convert<'_> for $ty {
             fn convert(value: FieldValue<'_>) -> std::result::Result<Self, FieldFailure> {
                 let n = integral(&value)?;
                 if n < f64::from(<$ty>::MIN) || n > f64::from(<$ty>::MAX) {
@@ -101,7 +106,7 @@ macro_rules! small_integer {
                 Ok(n as $ty)
             }
         }
-        impl RawField for $ty {}
+        impl RawField<'_> for $ty {}
     )+};
 }
 
@@ -112,7 +117,7 @@ small_integer!(i8, i16, i32, u8, u16, u32);
 const TWO_POW_63: f64 = 9_223_372_036_854_775_808.0;
 const TWO_POW_64: f64 = 18_446_744_073_709_551_616.0;
 
-impl sealed::Convert for i64 {
+impl sealed::Convert<'_> for i64 {
     fn convert(value: FieldValue<'_>) -> std::result::Result<Self, FieldFailure> {
         let n = integral(&value)?;
         if !(-TWO_POW_63..TWO_POW_63).contains(&n) {
@@ -125,9 +130,9 @@ impl sealed::Convert for i64 {
         Ok(n as i64)
     }
 }
-impl RawField for i64 {}
+impl RawField<'_> for i64 {}
 
-impl sealed::Convert for u64 {
+impl sealed::Convert<'_> for u64 {
     fn convert(value: FieldValue<'_>) -> std::result::Result<Self, FieldFailure> {
         let n = integral(&value)?;
         if !(0.0..TWO_POW_64).contains(&n) {
@@ -141,9 +146,9 @@ impl sealed::Convert for u64 {
         Ok(n as u64)
     }
 }
-impl RawField for u64 {}
+impl RawField<'_> for u64 {}
 
-impl sealed::Convert for bool {
+impl sealed::Convert<'_> for bool {
     fn convert(value: FieldValue<'_>) -> std::result::Result<Self, FieldFailure> {
         match value.val {
             Val::Bool(b) => Ok(b),
@@ -151,7 +156,7 @@ impl sealed::Convert for bool {
         }
     }
 }
-impl RawField for bool {}
+impl RawField<'_> for bool {}
 
 fn bytes<'a>(value: &FieldValue<'a>) -> std::result::Result<&'a [u8], FieldFailure> {
     value
@@ -160,14 +165,28 @@ fn bytes<'a>(value: &FieldValue<'a>) -> std::result::Result<&'a [u8], FieldFailu
         .ok_or(FieldFailure::Type(LuaType::String))
 }
 
-impl sealed::Convert for Vec<u8> {
+impl sealed::Convert<'_> for Vec<u8> {
     fn convert(value: FieldValue<'_>) -> std::result::Result<Self, FieldFailure> {
         bytes(&value).map(<[u8]>::to_vec)
     }
 }
-impl RawField for Vec<u8> {}
+impl RawField<'_> for Vec<u8> {}
 
-impl sealed::Convert for String {
+impl<'s> sealed::Convert<'s> for &'s [u8] {
+    fn convert(value: FieldValue<'s>) -> std::result::Result<Self, FieldFailure> {
+        bytes(&value)
+    }
+}
+impl<'s> RawField<'s> for &'s [u8] {}
+
+impl<'s> sealed::Convert<'s> for &'s str {
+    fn convert(value: FieldValue<'s>) -> std::result::Result<Self, FieldFailure> {
+        str::from_utf8(bytes(&value)?).map_err(|_| FieldFailure::InvalidUtf8)
+    }
+}
+impl<'s> RawField<'s> for &'s str {}
+
+impl sealed::Convert<'_> for String {
     fn convert(value: FieldValue<'_>) -> std::result::Result<Self, FieldFailure> {
         let raw = bytes(&value)?;
         str::from_utf8(raw)
@@ -175,10 +194,10 @@ impl sealed::Convert for String {
             .map_err(|_| FieldFailure::InvalidUtf8)
     }
 }
-impl RawField for String {}
+impl RawField<'_> for String {}
 
-impl<T: RawField> sealed::Convert for Option<T> {
-    fn convert(value: FieldValue<'_>) -> std::result::Result<Self, FieldFailure> {
+impl<'s, T: RawField<'s>> sealed::Convert<'s> for Option<T> {
+    fn convert(value: FieldValue<'s>) -> std::result::Result<Self, FieldFailure> {
         if matches!(value.val, Val::Nil) {
             Ok(None)
         } else {
@@ -186,7 +205,7 @@ impl<T: RawField> sealed::Convert for Option<T> {
         }
     }
 }
-impl<T: RawField> RawField for Option<T> {}
+impl<'s, T: RawField<'s>> RawField<'s> for Option<T> {}
 
 impl State {
     /// Reads field `name` of the table at argument `table_arg` into `T`,
@@ -219,7 +238,22 @@ impl State {
     /// them as `None`, any other `T` fails with "got nil". Numbers are not
     /// read as strings nor strings as numbers, and `bool` takes only a Lua
     /// boolean. An integer type requires a finite integral number inside its
-    /// range. `String` requires valid UTF-8; `Vec<u8>` takes the exact bytes.
+    /// range. `String` and `&str` require valid UTF-8; `Vec<u8>` and `&[u8]`
+    /// take the exact bytes. `&str` and `&[u8]` borrow the string in place
+    /// instead of copying it, so the State stays borrowed while they live.
+    //
+    // Prepared field descriptors were weighed for repeated reads and not
+    // added. A descriptor holding an interned key would have to root it,
+    // which changes later string identity; one holding the name's bytes plus
+    // a slot-index hint (hit: the key at that index spells the name) is sound
+    // across States, snapshot loads and fresh tables, and can live in a
+    // `Cell` in user data, but a hit still compares the name and saves only
+    // the name hash, one string-pool probe and the table probe per field.
+    // Small option tables are inline and scan at most a few handles. Add it
+    // when a registered host-traffic workload decoding many fields of
+    // consistently laid-out records shows those lookups. Per-field
+    // `check_usable` stays either way: host code can change the
+    // floating-point environment between reads.
     ///
     /// The read is free, leaves the stack unchanged, and never runs Lua.
     ///
@@ -231,7 +265,7 @@ impl State {
     /// `bad argument #1 to 'spawn' (field 'x': number expected, got string)`.
     /// [`ErrorKind::InvalidStackIndex`] for argument 0, and the usual refusal
     /// of a poisoned State. Argument numbers follow [`State::check_type`].
-    pub fn raw_field<T: RawField>(&self, table_arg: isize, name: &str) -> Result<T> {
+    pub fn raw_field<'s, T: RawField<'s>>(&'s self, table_arg: isize, name: &str) -> Result<T> {
         self.check_usable()?;
         if table_arg == 0 {
             return Err(self.error(ErrorKind::InvalidStackIndex { index: table_arg }));

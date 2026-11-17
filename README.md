@@ -292,7 +292,8 @@ point.
   functions is the same in every build. `State::raw_field::<T>(arg, name)`
   reads a typed field of a table argument (an options table such as
   `spawn{x = 1}`), free of cost and without metamethods, and reports a bad
-  field as an argument error naming it.
+  field as an argument error naming it; `&str` and `&[u8]` borrow the
+  string in place.
 - Typed errors - `ErrorKind::ScriptError` carries the value a script passed to
   `error()` (`ErrorValue`: nil, boolean, number, exact string bytes, or a
   table/function's type and rendering); library, syntax, argument and limit

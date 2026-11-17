@@ -649,35 +649,27 @@ addresses only the downcast.
 
 Raised by the host-boundary hunter.
 
-**Bottleneck:** `get_global(name)` for a non-builtin finds the interned string
-by its bytes and reads the global table without a cache (`read_name` against
-the bytecode path's `read_cached`, `global_env.rs`). Each `raw_field` resolves
-and validates the table argument, finds the name in the string pool, looks the
-field up and converts it, so ten fields repeat all of that ten times, and
-string fields allocate owned results (`raw_field.rs`). General Rust table
-access moves keys and values through stack operations.
+Narrowed: borrowed `&str`/`&[u8]` field reads landed; global-binding
+descriptors and a record view were refused (reasons at `read_name` and
+`raw_field`). What remains is unmeasured.
 
-**Redesign:** prepared access plans: a global-binding descriptor caching a
-validated probe while still reading the current binding; a record view
-validating its table once; field descriptors resolving names and keeping
-validated slot information; reads converting straight to scalars or borrowed
-bytes (owned `String` decoding already validates once and copies once; a
-borrowed `&str` form must keep its strict invalid-UTF-8 error); writes through slot stores with today's semantic fallback. The
-primitives exist (`find_slot`, `read_slot`, `renew_slot`, `store_slot`, global
-`HashProbe`; `eval_index.rs` shows identity plus slot validation). No temporary
-map or vector of decoded fields. Persistent entity tables benefit from slot
-caching; fresh option tables miss identity caches and gain only from
-validate-once and borrowed decoding (`SlotRef` is not a cross-table shape).
+**Bottleneck (hypothesis):** each `raw_field` hashes the field name, probes the
+string pool and probes the table. A callback decoding many scalar fields of
+consistently laid-out records (more than the inline capacity, so a map probe)
+pays all three per field per call.
 
-**Risks:** cached global bindings observe rebinding (unlike an anchored
-function); raw stays raw; deletion, reinsertion, compaction and environment
-changes invalidate or renew tokens; descriptors must not intern and root every
-field name, which changes later identity; record decoding keeps the order
-validation errors appear; writes go through the mutation machinery so builtin
-mirrors and bookkeeping stay coherent.
+**Redesign:** a prepared field descriptor holding the name's bytes plus a
+`Cell` slot-index hint, kept in user data (`user_data` hands out `&T`). A hit
+reads the key at the hinted index and compares its bytes with the name; a miss
+takes today's lookup and refreshes the hint. Sound across States, snapshot
+loads and fresh tables without rooting the name. `check_usable` stays per
+read.
 
-**Classification:** structural boundary change, high conviction for
-data-heavy callbacks.
+**Precondition:** a registered host-traffic workload (the bench harness
+registers no Rust function today) that shows the lookups. Without it the
+saving is one short hash and two probes per field.
+
+**Classification:** micro, low conviction until measured.
 
 ## PERF-034 - Restricted environment rebuilt on every entry
 

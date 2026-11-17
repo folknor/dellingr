@@ -39,6 +39,28 @@ fn read_bytes(state: &mut State) -> dellingr::Result<u8> {
     Ok(1)
 }
 
+/// Borrowed reads: the rendering is owned before the push needs `&mut`.
+fn read_str(state: &mut State) -> dellingr::Result<u8> {
+    let value: &str = state.raw_field(1, "v")?;
+    let rendered = value.to_owned();
+    state.push_string(rendered)?;
+    Ok(1)
+}
+
+fn read_byte_slice(state: &mut State) -> dellingr::Result<u8> {
+    let value: &[u8] = state.raw_field(1, "v")?;
+    let rendered = format!("{value:?}");
+    state.push_string(rendered)?;
+    Ok(1)
+}
+
+fn read_opt_str(state: &mut State) -> dellingr::Result<u8> {
+    let value: Option<&str> = state.raw_field(1, "v")?;
+    let rendered = format!("{value:?}");
+    state.push_string(rendered)?;
+    Ok(1)
+}
+
 fn read_opt_u8(state: &mut State) -> dellingr::Result<u8> {
     let value: Option<u8> = state.raw_field(1, "v")?;
     state.push_string(format!("{value:?}"))?;
@@ -99,7 +121,7 @@ fn neutral(state: &mut State) -> dellingr::Result<u8> {
 }
 
 fn install(state: &mut State) {
-    let functions: [(&str, dellingr::RustFunc); 17] = [
+    let functions: [(&str, dellingr::RustFunc); 20] = [
         ("read_f64", read_f64),
         ("read_i8", read_i8),
         ("read_i16", read_i16),
@@ -112,6 +134,9 @@ fn install(state: &mut State) {
         ("read_bool", read_bool),
         ("read_string", read_string),
         ("read_bytes", read_bytes),
+        ("read_str", read_str),
+        ("read_byte_slice", read_byte_slice),
+        ("read_opt_str", read_opt_str),
         ("read_opt_u8", read_opt_u8),
         ("read_opt_string", read_opt_string),
         ("spawn", spawn),
@@ -301,6 +326,27 @@ fn strings_require_utf8_and_bytes_are_exact() {
     );
     assert_eq!(ok(r#"return read_bytes{v = "\255\0a"}"#), "[255, 0, 97]");
     assert_eq!(ok(r#"return read_bytes{v = ""}"#), "[]");
+}
+
+#[test]
+fn borrowed_strings_read_like_owned_ones() {
+    assert_eq!(ok(r#"return read_str{v = "héllo"}"#), "héllo");
+    assert_eq!(ok(r#"return read_str{v = "a\0b"}"#), "a\0b");
+    assert_detail(
+        r#"return read_str{v = "\255"}"#,
+        "bad argument #1 to 'read_str' (field 'v': invalid UTF-8)",
+        &ArgDetail::InvalidUtf8,
+    );
+    assert_eq!(
+        field_failure("return read_str{v = 1}").0,
+        "bad argument #1 to 'read_str' (field 'v': string expected, got number)"
+    );
+    assert_eq!(
+        ok(r#"return read_byte_slice{v = "\255\0a"}"#),
+        "[255, 0, 97]"
+    );
+    assert_eq!(ok("return read_opt_str{}"), "None");
+    assert_eq!(ok(r#"return read_opt_str{v = "x"}"#), r#"Some("x")"#);
 }
 
 #[test]
