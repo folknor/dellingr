@@ -639,6 +639,20 @@ impl GcHeap {
         }
     }
 
+    /// The watched table with its backing meter, for a capacity-changing
+    /// store, without moving its epoch. The same rule as
+    /// [`Self::watched_table_unmarked`]: only for the global table's keyed
+    /// store whose key is not a builtin name, or whose caller moved the
+    /// epoch itself. Such a store may insert, rehash or compact, which move
+    /// slots (the table version retires those probes) but change no other
+    /// key's value, so the builtin mirror stays exact.
+    pub(super) fn edit_watched_unmarked(&mut self) -> Option<TableEditor<'_>> {
+        match &mut self.objects.get_mut(self.watched.0)?.raw {
+            RawObject::Table(table) => Some(table.edit(&mut self.resident)),
+            RawObject::LuaFn(_) => None,
+        }
+    }
+
     /// Borrow the object as a Lua closure, if it is one, without cloning it.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(super) fn as_lua_function_ref(&self, ptr: ObjectPtr) -> Option<&Closure> {

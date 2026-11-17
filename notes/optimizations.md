@@ -1040,12 +1040,6 @@ in todo.md's workload-registry entry).
   trim `Frame::run` further. Mind the `bench/write` lesson from 2026-10-23:
   removing a never-taken slow branch from this inlined helper made the steady
   state 14% slower, so measure before trusting the idea.
-- **Keyed global writes invalidate every builtin mirror entry:**
-  `GlobalEnv::write` (the uncached keyed path) reaches `contents_mut` ->
-  `get_mut`, which moves the watched epoch even when the key is not a
-  builtin. Correct but broad: every uncached or new global write forces each
-  builtin read to revalidate. Matters only if a workload interleaves new
-  global definitions with builtin-heavy code.
 
 - **Error-path cost flush costs ~3.6% on `arithmetic`:** charging pending
   batched cost on runtime errors moved the dispatch loop into an inner

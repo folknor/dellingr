@@ -418,39 +418,6 @@ What could still pay, untested:
 
 **Classification:** local (second bullet), rewrite (first), unmeasured.
 
-## PERF-016 - Global bindings as authoritative cells
-
-Raised by the lookup hunter.
-
-**Bottleneck:** ordinary globals probe the global table per bytecode; builtins
-add a value mirror validated by one heap mutation epoch that advances on any
-mutable access to `_G` even when no builtin changes; cached non-builtin writes
-have a special bypass; every ordinary heap mutation meets the watched-object
-comparison (`global_env.rs`, `GcHeap::get_mut` in `object.rs`). It is a
-coherence structure imposed by keeping the authoritative value in a movable
-table layout while wanting direct builtin access elsewhere.
-
-**Redesign:** assign referenced global names State-local binding IDs at
-runtime linking, store values in a dense active-environment array, have
-bytecode use the IDs and `_G` lookup map names to the same cells. `_G` keeps
-its numeric entries, metatable behaviour, insertion history, tombstones and
-sealing; reserving an ID for an absent name creates no logical entry.
-Restricted environments exchange active values and logical contents keeping
-`_G` identity. Requires breaking the context-free table access abstraction for
-global storage, or a heap-aware storage view; another mirror would keep the
-problem.
-
-**Payoff and ranking:** direct reads for arbitrary game globals, no mirror
-validation, no watched-object check in generic heap mutation. Ranked below
-PERF-015 because today's builtin hit is already an epoch compare and array read
-and ordinary global hits avoid hashing; extra indirection or costlier generic
-`_G` operations could lose. `src/globals.rs` is source-occurrence metadata,
-not a runtime stage.
-
-**Classification:** rewrite, medium conviction. Relates to the
-`optimizations.md` micro item "Keyed global writes invalidate every builtin
-mirror entry", which it would remove.
-
 ## PERF-017 - Local lookup-path changes
 
 Raised by the lookup hunter.

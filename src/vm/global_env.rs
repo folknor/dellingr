@@ -352,6 +352,20 @@ impl GlobalEnv {
         matches!(key, Val::Str(ptr) if self.builtin_names.contains(&ptr))
     }
 
+    // Global bindings as authoritative cells (bytecode linked to State-local
+    // binding IDs, `_G` a view over the same cells) were weighed and not
+    // built. `_G` is a full table: array part and migration, border,
+    // metatable, field caches, `next` cursors, the table library, snapshot
+    // slots and compaction order all reach it as a `Table`. Cells mean either
+    // a second table implementation that must match the first's iteration
+    // order, compaction counts and save bytes exactly, or a statically
+    // specialized second hash backend with its own slot-token and tombstone
+    // contract. Against that, a hit here is a version compare and a slot
+    // read and a builtin hit an epoch compare and an array read; the saving
+    // is a short dependency chain, inside the band code layout alone has
+    // moved these paths, and the invalidations cells would remove (appends
+    // retiring cached absences, alias `rawset` on `_G` refreshing the
+    // mirror) have no workload behind them.
     /// The value of global `key` if `cache` still answers for it.
     #[inline(always)]
     pub(super) fn read_cached(&self, heap: &GcHeap, cache: &GlobalLookupCacheSlot) -> Option<Val> {
@@ -427,7 +441,19 @@ impl GlobalEnv {
         val: Val,
         cache: Option<&GlobalLookupCacheSlot>,
     ) {
-        let mut table = self.contents_mut(heap);
+        // Only a builtin's store moves the mirror's epoch, as in
+        // `write_cached`. The key is classified here, not inferred from the
+        // opcode: the verifier admits SET_GLOBAL with any name, builtins
+        // included. A non-builtin store, even one that inserts and compacts,
+        // changes no builtin's value; slots it moves are retired by the
+        // table version, not by the epoch.
+        let builtin = self.is_builtin_key(key);
+        if builtin {
+            heap.mark_watched_changed();
+        }
+        let mut table = heap
+            .edit_watched_unmarked()
+            .expect("the global table lives as long as the State");
         let (probe, _) = table.probe_hash(&key);
         if probe.has_slot() {
             assert!(
@@ -435,10 +461,7 @@ impl GlobalEnv {
                 "a slot found by its key under the current version remains writable"
             );
             if let Some(cache) = cache {
-                cache.set(GlobalLookupCacheEntry {
-                    probe,
-                    builtin: self.is_builtin_key(key),
-                });
+                cache.set(GlobalLookupCacheEntry { probe, builtin });
             }
         } else if !matches!(val, Val::Nil) {
             table
@@ -919,6 +942,42 @@ mod tests {
             .expect("string key fits the hash part");
         assert_ne!(state.heap.watched_epoch(), epoch);
         assert_eq!(env.read_builtin(&state.heap, slot), Val::Num(2.0));
+    }
+
+    #[test]
+    fn keyed_non_builtin_writes_that_compact_keep_the_builtin_mirror() {
+        let _hits = HitMode::required();
+        let mut state = State::raw();
+        state.seal_globals();
+        let live = Builtin::Print as u8;
+        let cleared = Builtin::Type as u8;
+        let names: Vec<Val> = (0..64)
+            .map(|i| key(&mut state, &format!("churn{i}")))
+            .collect();
+        let env = &state.global_env;
+        env.write_builtin(&mut state.heap, live, &Val::Num(1.0));
+        env.write_builtin(&mut state.heap, cleared, &Val::Num(2.0));
+        env.write_builtin(&mut state.heap, cleared, &Val::Nil);
+        assert_eq!(env.read_builtin(&state.heap, live), Val::Num(1.0));
+        assert_eq!(env.read_builtin(&state.heap, cleared), Val::Nil);
+        let epoch = state.heap.watched_epoch();
+        let version = env.contents(&state.heap).version_stamp();
+        for &name in &names {
+            env.write(&mut state.heap, name, Val::Num(3.0), None);
+            env.write(&mut state.heap, name, Val::Nil, None);
+        }
+        assert_ne!(
+            env.contents(&state.heap).version_stamp(),
+            version,
+            "the churn compacted the global table"
+        );
+        assert_eq!(state.heap.watched_epoch(), epoch);
+        assert_eq!(env.read_builtin(&state.heap, live), Val::Num(1.0));
+        assert_eq!(env.read_builtin(&state.heap, cleared), Val::Nil);
+        // A keyed store to a builtin name still moves the epoch.
+        env.write(&mut state.heap, env.builtin_key(live), Val::Num(4.0), None);
+        assert_ne!(state.heap.watched_epoch(), epoch);
+        assert_eq!(env.read_builtin(&state.heap, live), Val::Num(4.0));
     }
 
     #[test]
