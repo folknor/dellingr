@@ -105,7 +105,8 @@ allow_attributes_without_reason = "deny"
 # maps still use the explicit fixed hasher in `det_hash::IndexMap`.
 indexmap = { version = "2.14", default-features = false }
 foldhash = { version = "0.2", default-features = false }
-# Only `HashTable` is used (the string interner), with hashes computed by
+# Only `HashTable` is used (the string interner and the table hash part's
+# lookup index, both probed and never iterated), with hashes computed by
 # `det_hash`. `default-features = false` drops the default hasher; clippy
 # bans hashbrown's `HashMap`/`HashSet` in case a host re-enables it.
 hashbrown = { version = "0.17", default-features = false }

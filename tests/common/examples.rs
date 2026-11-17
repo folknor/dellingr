@@ -96,6 +96,7 @@ examples! {
     tables_mixed: "examples/tables/mixed.lua",
     tables_numeric_index: "examples/tables/numeric_index.lua",
     tables_queue: "examples/tables/queue.lua",
+    tables_rekey: "examples/tables/rekey.lua",
     tables_sequence_len: "examples/tables/sequence_len.lua",
     tables_sort: "examples/tables/sort.lua",
     tables_sort_proxy: "examples/tables/sort_proxy.lua",

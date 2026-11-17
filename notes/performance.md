@@ -471,9 +471,11 @@ a receiver that has a metatable, outside SET_FIELD's string path. `reg_set_table
 (`try_insert_table_direct` misses with `get_with_index`, then
 `store_absent_key` inserts) and `store_new_key`'s non-string insert look the
 key up again inside `Table::insert`. Closing it needs an insert that takes
-the miss's probe (a hashbrown-style vacant entry), which `__newindex`
-dispatch between the probe and the insert must not invalidate; that fits
-PERF-018's table-owned index better than today's IndexMap. Unmeasured.
+the miss's probe, which `__newindex` dispatch between the probe and the
+insert must not invalidate. The hash part now owns its index
+(`vm/table/hash_slots.rs`, a hashbrown `HashTable` beside the slot
+vector), so a miss could carry an insertion hint validated by the version
+and slot count, as `HashProbe` already does for absence. Unmeasured.
 
 (The 255-per-family cache cap was weighed and kept; the reasoning sits at
 `assign_cache_slots`. Key-checked position reuse across receivers is in
@@ -481,39 +483,6 @@ PERF-018's table-owned index better than today's IndexMap. Unmeasured.
 already take the field path; dynamic string-key sites are in PERF-004.)
 
 **Classification:** local.
-
-## PERF-018 - Dictionary lookup index separate from iteration history
-
-Raised by the table-representation hunter.
-
-**Bottleneck:** a deleted key stays indexed so `next(t, deleted_key)` can
-resume. On reinsertion `insert_into_map_with_tombstones` (`table.rs`) renames
-the old slot to a synthetic `Vacant(index)` key and appends the real key.
-IndexMap's `replace_index` checks uniqueness, removes the old hash-index entry
-and inserts the replacement, then dellingr inserts the real key again; vacant
-positions occupy the hash index though no Lua query can find them.
-
-**Redesign:** a table-owned ordered slot vector plus a hashbrown `HashTable`
-over real keys. Dead real keys stay indexed while they are valid controls;
-vacant historical positions live only in the ordered vector. Reinsertion finds
-the dead key, appends its new slot, marks the old position vacant and retargets
-the existing index entry. hashbrown already offers `find_entry`, occupied
-entries, `entry`, `insert_unique` and fallible reservation; the string
-interner (`object.rs`) already uses a separate hash index. Compaction stays at
-today's logical thresholds; global tables keep their own revival and retention
-policies.
-
-**Payoff:** delete/reinsert churn (registries, sets, job tables) does fewer
-index operations and the index stops carrying synthetic entries. Little change
-for read- or overwrite-heavy dictionaries, which IndexMap already handles
-directly.
-
-**Risks:** compaction timing must stay a function of the old logical slot
-counts, not index occupancy, or deleted-control validity, snapshots and later
-reinsertion change. Cache tokens name logical slots under an epoch, not
-hashbrown bucket positions.
-
-**Classification:** rewrite, medium conviction.
 
 ## PERF-019 - Local table-storage changes
 

@@ -92,6 +92,10 @@ xxhash = "40f694a23ec14829b96e0403b9a0b6dd"
 file = "bench/fill.lua"
 xxhash = "2d409aa1bb5f82a2a841f80aa69f54a5"
 
+[data.workloads.bench.rekey]
+file = "bench/rekey.lua"
+xxhash = "8c7380470ca1573bdbc1a3697410fbf9"
+
 # Never bench --commit a ref older than 2bcc71e: before that commit the VM
 # walks the queue's whole push history on every pairs start, and this file
 # runs for hours. Use the hotpath scale across it.
@@ -230,6 +234,10 @@ xxhash = "92432fb93c475cc93053539e2fd235ae"
 [data.workloads.hotpath.fill]
 file = "examples/tables/fill.lua"
 xxhash = "79bb664bac707da02ad807c7e4f71f39"
+
+[data.workloads.hotpath.rekey]
+file = "examples/tables/rekey.lua"
+xxhash = "81aeb2c8ccbefc52f292ada961f5c363"
 
 [data.workloads.hotpath.queue]
 file = "examples/tables/queue.lua"
