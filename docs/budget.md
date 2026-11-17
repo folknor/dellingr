@@ -221,7 +221,8 @@ let mut state = State::builder().interrupt(stop.clone()).build();
   functions and Rust metamethod handlers, and the library functions the
   dispatch loop executes directly without a callback, such as `math.floor` or
   `type`), and the library work that could
-  otherwise run without bound: pattern-matcher steps, plain substring search
+  otherwise run without bound: pattern-matcher steps (a run of steps the
+  matcher scans in one pass over the subject polls once), plain substring search
   candidates, heap-sort steps, `string.format` directives and `%%` escapes,
   and the iterations of `table.concat`, `table.move`, the metamethod paths of `table.insert`,
   `table.remove` and `table.sort`, the empty-pattern `string.gsub`, and each

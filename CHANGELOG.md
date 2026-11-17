@@ -140,6 +140,11 @@ tick budgets and re-record replays.
 
 ### Performance
 
+- The pattern matcher scans greedy class runs, runs of single atoms, start
+  positions that must fail, `%b` and backreferences in one pass each and
+  charges their steps in one batch, stopping at the same step a budget
+  allows. Matches, captures, errors and costs are unchanged; a host interrupt
+  is observed once per such pass rather than once per byte.
 - Lua calls of the standard library's leaf functions (every `math` function,
   `type`, `rawequal`, `rawlen`, one-argument `tonumber` and `rawget`) run in
   the dispatch loop without entering a Rust callback, recognised by the

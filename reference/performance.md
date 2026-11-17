@@ -73,6 +73,31 @@ that. An early `find`-only prototype measured `literal_find` at 4156 and
 4124, which the full change does not reproduce; it was not a same-binary
 control, so treat that gap as layout.
 
+## Batched matcher kernels, 2026-11-17
+
+Every matcher step polled the interrupt flag and entered the cost meter,
+once per subject byte in a greedy run and twice per failed start position.
+Five kernels now scan first and settle the steps they covered in one
+`consume_units` batch, after one poll: a greedy class run (`max_expand`), a
+run of single atoms in `match_at`, the start positions an unanchored search
+must fail at (a program opening with capture items and an `x` or `x+` atom,
+`StartSkip`), the `%b` scan and the backreference compare. Each kernel only
+inspects bytes whose steps `CostMeter::admissible_units` admits, and hands
+the exact position back to the scalar step at the budget edge, so cost,
+matches, captures and errors are unchanged, budget refusal included
+(`kernels_keep_the_scalar_steps_at_every_budget` pins a fingerprint taken
+from the step-per-byte matcher). An explicit continuation stack in place of
+the native recursion was considered and not taken: recursion happens per
+backtracking point, not per byte.
+
+Bygg, `brokkr bench wall` (best of 3), base 895cf3b and the change,
+interleaved pairs, ms:
+
+| Workload | 895cf3b | Kernels |
+|---|---|---|
+| `failed_scan` | 2785, 2809 | 2251, 2285 |
+| `patterns` | 1309, 1320 | 1193, 1188 |
+
 ## Matcher capture state per search, 2026-11-05
 
 `str_match` built a fresh `MatchState` for every start position it tried,

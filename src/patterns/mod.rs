@@ -121,7 +121,8 @@ impl LuaPattern {
     }
 
     /// Match the complete subject, beginning the search at `init`. Every
-    /// matcher step polls `interrupt` (the State's interrupt flag).
+    /// matcher step, or batch of steps scanned in one pass, polls `interrupt`
+    /// (the State's interrupt flag).
     pub(crate) fn matches_bytes_from(
         &mut self,
         s: &[u8],
@@ -244,6 +245,147 @@ mod tests {
         let mut meter = count_only(&mut used);
         let mut matcher = LuaPattern::new(pattern);
         matches!(matcher.matches_bytes(subject, &mut meter), Ok(false))
+    }
+
+    /// The matcher's batched kernels (greedy runs, literal runs, the start
+    /// skip, balance and backreference scans) against the step-per-byte
+    /// matcher they replaced. The fingerprint folds every case's outcome,
+    /// captures and step count; it was taken from the scalar matcher, so a
+    /// change to it is a change to matching or to the replay-visible cost.
+    /// Every finite budget below a case's cost must stop it with exactly that
+    /// budget used, and its exact cost must reproduce the unbudgeted outcome.
+    #[test]
+    fn kernels_keep_the_scalar_steps_at_every_budget() {
+        let mut deep = b"^".to_vec();
+        deep.extend(b"a?".repeat(199));
+        deep.extend(b"a+");
+        let patterns: Vec<Vec<u8>> = [
+            &b"%d"[..],
+            b"%d+",
+            b"(%u%l+)",
+            b"%a+",
+            b"()a",
+            b"(()b)c",
+            b"abc",
+            b"abd",
+            b"ab%",
+            b"^abc",
+            b"a*b",
+            b"a+b",
+            b"a-b",
+            b"a?b",
+            b"^a*a*a*b",
+            b"%b()",
+            b"x%b()y",
+            b"%f[%w]%w+",
+            b"(a+)%1",
+            b"(ab)c%1$",
+            b"[^,]+",
+            b"%s*(%S+)$",
+            b"(%w+)=(%w+)",
+            b".-x",
+            b"a.c",
+            b"(a",
+            b"a[",
+            b"%bxx",
+            b"((a)(b))%2%3",
+            b"^(a*)%1$",
+            b"(a*)x%1",
+        ]
+        .iter()
+        .map(|pattern| pattern.to_vec())
+        .collect();
+        let subjects: Vec<Vec<u8>> = [
+            &b""[..],
+            b"a",
+            b"abc",
+            b"aaab",
+            b"lorem ipsum 42",
+            b"((a)(b)) x(()))y",
+            b"key=value other=thing",
+            b"abcabcabd",
+            b"aaaa",
+            b"  trailing  ",
+            b"xxax",
+            b"ab",
+            b"abab",
+            b"one,two,,three",
+            b"Hello World",
+            b"xx",
+        ]
+        .iter()
+        .map(|subject| subject.to_vec())
+        .chain([b"a".repeat(40)])
+        .collect();
+        // The depth limit reached through a greedy kernel's suffix. Only on
+        // its own subject: on a shorter one it backtracks exponentially.
+        let deep_subject = b"a".repeat(200);
+        let cases = patterns
+            .iter()
+            .flat_map(|pattern| subjects.iter().map(move |subject| (pattern, subject)))
+            .chain(std::iter::once((&deep, &deep_subject)));
+        let mut fingerprint: u64 = 0xcbf2_9ce4_8422_2325;
+        for (pattern, subject) in cases {
+            for init in [0, 2] {
+                if init > subject.len() {
+                    continue;
+                }
+                let mut used = 0;
+                let mut matcher = LuaPattern::new(pattern);
+                let outcome = matcher.matches_bytes_from(
+                    subject,
+                    init,
+                    &mut count_only(&mut used),
+                    &NO_INTERRUPT,
+                );
+                let mut record = format!("{outcome:?} {used}");
+                if outcome == Ok(true) {
+                    for i in 0..matcher.num_matches() {
+                        record.push_str(&format!(" {:?}", matcher.capture(i)));
+                    }
+                }
+                for byte in record.bytes() {
+                    fingerprint = (fingerprint ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+                }
+                let at = format!("{pattern:?} on {subject:?} from {init}");
+                // Every budget for a short case; for a long one the
+                // start, the end and a stride across the middle.
+                let budgets: Vec<u64> = if used <= 600 {
+                    (0..=used).collect()
+                } else {
+                    (0..=used)
+                        .filter(|&b| b < 64 || used - b < 64 || b % 97 == 0)
+                        .collect()
+                };
+                for budget in budgets {
+                    let mut spent = 0;
+                    let mut flush_at = u64::MAX;
+                    let limit = i64::try_from(budget).expect("test budgets are small");
+                    let mut meter = CostMeter::finite_budget(limit, &mut spent, &mut flush_at);
+                    let mut matcher = LuaPattern::new(pattern);
+                    let result =
+                        matcher.matches_bytes_from(subject, init, &mut meter, &NO_INTERRUPT);
+                    assert_eq!(spent, budget, "{at} at budget {budget}");
+                    if budget < used {
+                        assert_eq!(
+                            result,
+                            Err(MatchError::BudgetExceeded),
+                            "{at} at budget {budget}"
+                        );
+                    } else {
+                        assert_eq!(result, outcome, "{at} at its exact cost");
+                        if result == Ok(true) {
+                            let mut again = String::new();
+                            for i in 0..matcher.num_matches() {
+                                again.push_str(&format!(" {:?}", matcher.capture(i)));
+                            }
+                            assert!(record.ends_with(&again), "{at} captures at its exact cost");
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(fingerprint, 15_874_795_369_313_267_844, "fingerprint");
     }
 
     fn assert_exact_finite_cost(pattern: &[u8], subject: &[u8], cost: u64) {

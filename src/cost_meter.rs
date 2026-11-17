@@ -395,6 +395,26 @@ impl<'a> CostMeter<'a> {
         }
     }
 
+    /// How many further one-unit charges ([`CostMeter::consume_units`] of 1
+    /// each) would be admitted: `u64::MAX` when nothing can block (off,
+    /// count-only, a zero unit), otherwise the units that start with budget
+    /// left, the crossing one included. A kernel that batches per-unit work
+    /// reads this to stop exactly where the unit-at-a-time loop would.
+    #[inline]
+    pub(crate) fn admissible_units(&self) -> u64 {
+        match self {
+            Self::Off | Self::CountOnly { .. } => u64::MAX,
+            Self::FiniteBudget {
+                limit, used, unit, ..
+            } => {
+                if *unit == 0 {
+                    return u64::MAX;
+                }
+                room(*limit, **used).div_ceil(*unit)
+            }
+        }
+    }
+
     /// Charges `cost`, returning false when a positive charge is blocked.
     ///
     /// Like [`crate::State::consume_cost`], a charge that begins with a
@@ -560,6 +580,12 @@ mod tests {
                     assert_eq!(batched, looped, "admitted mismatch at {at}");
                     assert_eq!(used_a, used_b, "used mismatch at {at}");
                     assert_eq!(flush_a, flush_b, "threshold mismatch at {at}");
+                    // `admissible_units` predicts the loop's stopping point.
+                    let (mut used_c, mut flush_c) = (7u64, flush);
+                    let admissible = CostMeter::finite_budget(limit, &mut used_c, &mut flush_c)
+                        .with_unit(unit)
+                        .admissible_units();
+                    assert_eq!(looped, n.min(admissible), "admissible mismatch at {at}");
                 }
             }
         }

@@ -6,6 +6,7 @@ use std::sync::atomic::AtomicBool;
 
 use crate::cost_meter::CostMeter;
 use crate::limits::{LUA_MAXCAPTURES, MAXCCALLS};
+use crate::saturate::saturating_cast;
 
 use super::errors::*;
 
@@ -278,11 +279,50 @@ impl AnchorMode {
     }
 }
 
+/// How an unanchored search can skip start positions that must fail: the
+/// program opens with `capture_items` capture or position-capture items and
+/// then an atom of `class` that has to match once (`x` or `x+`). A start
+/// position whose byte is outside `class`, and the end position, then fail
+/// at that atom after exactly `capture_items + 2` matcher steps (one per item
+/// reached plus the failing byte test) with no error reachable on the way:
+/// the capture items take at most `LUA_MAXCAPTURES` depth levels, far below
+/// `MAXCCALLS`, and a failed attempt publishes nothing.
+#[derive(Copy, Clone)]
+struct StartSkip {
+    class: ClassId,
+    attempt_units: usize,
+}
+
+impl StartSkip {
+    fn for_items(items: &[Item]) -> Option<Self> {
+        let mut capture_items = 0;
+        // bounded: one pass over the compiled items.
+        for item in items {
+            match *item {
+                Item::CaptureStart { .. } | Item::PositionCapture { .. } => capture_items += 1,
+                Item::Atom {
+                    class,
+                    repeat: Repeat::One | Repeat::OneOrMoreGreedy,
+                } => {
+                    return Some(Self {
+                        class,
+                        attempt_units: capture_items + 2,
+                    });
+                }
+                _ => return None,
+            }
+        }
+        None
+    }
+}
+
 pub(super) struct CompiledPattern {
     items: Vec<Item>,
     classes: Vec<ByteClass>,
     anchored: bool,
     captures: usize,
+    /// Present only for an unanchored program that admits the skip.
+    start_skip: Option<StartSkip>,
 }
 
 impl CompiledPattern {
@@ -437,11 +477,17 @@ impl<'a> Compiler<'a> {
         if let Err(error) = self.compile_items() {
             self.items.push(Item::Fail(error));
         }
+        let start_skip = if anchored {
+            None
+        } else {
+            StartSkip::for_items(&self.items)
+        };
         CompiledPattern {
             items: self.items,
             classes: self.classes,
             anchored,
             captures: self.captures,
+            start_skip,
         }
     }
 
@@ -600,14 +646,122 @@ impl MatchState<'_, '_, '_> {
     /// meter's unit cost.
     #[inline(always)]
     fn charge(&mut self) -> MatchResult<()> {
+        self.poll()?;
+        self.settle(1)
+    }
+
+    /// The interrupt safepoint alone: a kernel polls once before its scan.
+    #[inline(always)]
+    fn poll(&self) -> MatchResult<()> {
         if crate::vm::interrupt_requested(self.interrupt) {
-            return Err(MatchError::Interrupted);
+            Err(MatchError::Interrupted)
+        } else {
+            Ok(())
         }
-        if self.meter.consume_units(1) {
+    }
+
+    /// How many further steps the meter admits, the crossing one included.
+    ///
+    /// The kernels below replace a run of scalar steps with one scan and one
+    /// batched charge. They inspect only bytes whose steps fit inside this
+    /// count, so a budget stops a match part way exactly where the scalar
+    /// steps would; when the count rather than the subject ends a kernel, it
+    /// hands the exact logical position back to the scalar code, whose
+    /// `charge` does the refusal (poll first, as always). The batched charge
+    /// leaves `used` and the flush threshold where the unit-at-a-time steps
+    /// would (`CostMeter::consume_units`), and the matching between charges
+    /// is pure, so cost, matches, captures and errors are unchanged. Only a
+    /// host interrupt is observed at the kernel's one poll instead of per
+    /// byte; a kernel is at most one pass over the subject.
+    #[inline(always)]
+    fn admissible(&self) -> usize {
+        saturating_cast(self.meter.admissible_units())
+    }
+
+    /// Charge `steps` matcher steps a kernel has polled for and that
+    /// `admissible` admitted.
+    #[inline(always)]
+    fn settle(&mut self, steps: usize) -> MatchResult<()> {
+        if self.meter.consume_units(saturating_cast(steps)) {
             Ok(())
         } else {
             Err(MatchError::BudgetExceeded)
         }
+    }
+
+    /// How many bytes from `pos`, at most `limit`, are in `class`.
+    #[inline(always)]
+    fn class_run(&self, pos: usize, class: ClassId, limit: usize) -> usize {
+        let class = &self.pattern.classes[class.0];
+        let end = self.subject.len().min(pos.saturating_add(limit));
+        let window = self.subject.get(pos..end).unwrap_or_default();
+        window
+            .iter()
+            .position(|&byte| !class.contains(byte))
+            .unwrap_or(window.len())
+    }
+
+    /// A run of `Repeat::One` atoms starting at `item`, which is one, with
+    /// the step that reached it already charged. Unit order is the first
+    /// byte test, then for each later atom its item step and its byte test.
+    /// Returns how many atoms matched, or `None` at the first mismatch.
+    fn one_run(&mut self, pos: usize, item: usize, class: ClassId) -> MatchResult<Option<usize>> {
+        let cap = self.admissible();
+        if cap == 0 {
+            // The scalar test polls and refuses.
+            return Ok(self.singlematch(pos, class)?.then_some(1));
+        }
+        self.poll()?;
+        let pattern = self.pattern;
+        let afford = (cap - 1) / 2 + 1;
+        let mut matched = 0;
+        // bounded: one pass over the run's pattern items, at most one byte each.
+        for current in pattern.items[item..].iter().take(afford) {
+            let Item::Atom {
+                class,
+                repeat: Repeat::One,
+            } = *current
+            else {
+                break;
+            };
+            let hit = self
+                .subject
+                .get(pos + matched)
+                .is_some_and(|&byte| pattern.classes[class.0].contains(byte));
+            if !hit {
+                self.settle(1 + 2 * matched)?;
+                return Ok(None);
+            }
+            matched += 1;
+        }
+        self.settle(2 * matched - 1)?;
+        Ok(Some(matched))
+    }
+
+    /// Before the attempt at `pos`, skip the start positions that must fail
+    /// (`StartSkip`), charging their steps in one batch. Returns the next
+    /// position to attempt, or `None` when the skip consumed the end
+    /// position and the search has failed. A partial attempt at the budget
+    /// edge is left to `match_at`.
+    fn skip_starts(&mut self, pos: usize, skip: StartSkip) -> MatchResult<Option<usize>> {
+        let afford = self.admissible() / skip.attempt_units;
+        let class = &self.pattern.classes[skip.class.0];
+        let tail = self.subject.get(pos..).unwrap_or_default();
+        // A viable first position skips nothing: one byte of lookahead, and
+        // `match_at` takes the poll.
+        if afford == 0 || tail.first().is_some_and(|&byte| class.contains(byte)) {
+            return Ok(Some(pos));
+        }
+        self.poll()?;
+        // The positions `pos..=len`: every byte of the tail, then the end.
+        let window = afford.min(tail.len() + 1);
+        let skipped = tail
+            .iter()
+            .take(window)
+            .position(|&byte| class.contains(byte))
+            .unwrap_or(window);
+        self.settle(skipped * skip.attempt_units)?;
+        Ok((skipped <= tail.len()).then_some(pos + skipped))
     }
     /// One byte against one class: the matcher's per-byte step. Inlined into
     /// every caller: since the cost meter gained its `Off` variant the
@@ -628,6 +782,31 @@ impl MatchState<'_, '_, '_> {
         }
         let mut depth = 1;
         let mut cursor = pos + 1;
+        // Kernel: each byte examined is one step, the closing one included,
+        // with no step for running off the end.
+        let cap = self.admissible();
+        // Running off the end takes no step, so it takes no poll either.
+        if cap > 0 && cursor < self.subject.len() {
+            self.poll()?;
+            let end = self.subject.len().min(cursor.saturating_add(cap));
+            let mut scanned = 0;
+            // bounded: one pass over at most `cap` subject bytes.
+            for &byte in &self.subject[cursor..end] {
+                scanned += 1;
+                if byte == close {
+                    depth -= 1;
+                    if depth == 0 {
+                        self.settle(scanned)?;
+                        return Ok(Some(cursor + scanned));
+                    }
+                } else if byte == open {
+                    depth += 1;
+                }
+            }
+            self.settle(scanned)?;
+            cursor += scanned;
+        }
+        // Past the kernel: the subject's end (free) or the budget edge.
         // safepoint: `self.charge()` polls once per byte.
         while let Some(&byte) = self.subject.get(cursor) {
             self.charge()?;
@@ -656,9 +835,27 @@ impl MatchState<'_, '_, '_> {
         // `+` pre-advances `pos` past its mandatory first byte, so every
         // expansion here may shrink all the way back to `pos`.
         let mut end = pos;
-        // safepoint: `singlematch` polls once per byte.
-        while self.singlematch(end, class)? {
-            end += 1;
+        // Kernel: one step per byte matched plus the failing test (out of
+        // range included), capped so that test also fits the budget.
+        let cap = self.admissible();
+        let mut concluded = false;
+        // With one step left the scan would cover nothing; the scalar test
+        // takes it (and its poll).
+        if cap > 1 {
+            self.poll()?;
+            let limit = cap - 1;
+            let run = self.class_run(end, class, limit);
+            end += run;
+            concluded = run < limit;
+            self.settle(if concluded { run + 1 } else { run })?;
+        }
+        if !concluded {
+            // At the budget edge one admitted test may remain, so the
+            // scalar loop decides between a mismatch and a refusal.
+            // safepoint: `singlematch` polls once per byte.
+            while self.singlematch(end, class)? {
+                end += 1;
+            }
         }
         // safepoint: every backtrack enters `match_at`, which polls.
         loop {
@@ -690,6 +887,13 @@ impl MatchState<'_, '_, '_> {
             pos += 1;
         }
     }
+    /// Recursive by design, mirroring reference `match`: a level is taken
+    /// only per backtracking point (capture items, `?`, `*`, `+`, `-`), never
+    /// per subject byte, and the per-byte work runs in the batched kernels
+    /// above. An explicit continuation stack replacing this recursion was
+    /// considered and not taken: it removes no per-byte work, and the native
+    /// depth it would retire is already bounded by `MAXCCALLS` and measured
+    /// (docs/limits.md, "Native stack").
     fn match_at(
         &mut self,
         mut pos: usize,
@@ -767,8 +971,24 @@ impl MatchState<'_, '_, '_> {
                             return Err(PatternError::InvalidCaptureIndex(slot as i8).into());
                         }
                     };
+                    // Kernel: one step per in-range byte compared, the
+                    // mismatching one included; running off the end is free.
+                    let avail = len.min(self.subject.len() - pos);
+                    let afford = avail.min(self.admissible());
+                    if afford > 0 {
+                        self.poll()?;
+                        let earlier = &self.subject[capture.init..capture.init + afford];
+                        let here = &self.subject[pos..pos + afford];
+                        if let Some(at) = earlier.iter().zip(here).position(|(a, b)| a != b) {
+                            self.settle(at + 1)?;
+                            return Ok(None);
+                        }
+                        self.settle(afford)?;
+                    }
+                    // Past the kernel: done, the subject's end (free) or
+                    // the budget edge.
                     // safepoint: `self.charge()` polls once per byte.
-                    for offset in 0..len {
+                    for offset in afford..len {
                         let Some(&byte) = self.subject.get(pos + offset) else {
                             return Ok(None);
                         };
@@ -783,13 +1003,13 @@ impl MatchState<'_, '_, '_> {
                 Item::EndAnchor => return Ok((pos == self.subject.len()).then_some(pos)),
                 Item::Fail(error) => return Err(error.into()),
                 Item::Atom { class, repeat } => match repeat {
-                    Repeat::One => {
-                        if !self.singlematch(pos, class)? {
-                            return Ok(None);
+                    Repeat::One => match self.one_run(pos, item, class)? {
+                        Some(matched) => {
+                            pos += matched;
+                            item += matched;
                         }
-                        pos += 1;
-                        item += 1;
-                    }
+                        None => return Ok(None),
+                    },
                     Repeat::Optional => {
                         if self.singlematch(pos, class)?
                             && let Some(result) = self.recurse(pos + 1, item + 1, depth)?
@@ -839,7 +1059,9 @@ pub(super) fn compile(pattern: &[u8], mode: AnchorMode) -> CompiledPattern {
 ///
 /// One `MatchState` serves every start position: its slots need no reset
 /// between positions (`MatchState::captures`), and building the state
-/// charges nothing, so the cost and safepoints are those of `match_at` alone.
+/// charges nothing, so the cost and safepoints are those of `match_at` and
+/// of the start skip, which charges exactly the steps of the attempts it
+/// skips (`StartSkip`).
 pub(super) fn str_match(
     subject: &[u8],
     pattern: &CompiledPattern,
@@ -866,8 +1088,15 @@ pub(super) fn str_match(
         captures: CaptureSlots::new().0,
     };
     let mut pos = init;
-    // safepoint: every start position enters `match_at`, which polls.
+    // safepoint: every start position enters `match_at` (or the skip
+    // kernel), which polls.
     loop {
+        if let Some(skip) = pattern.start_skip {
+            match state.skip_starts(pos, skip)? {
+                Some(next) => pos = next,
+                None => return Ok(None),
+            }
+        }
         if let Some(end) = state.match_at(pos, 0, 0)? {
             let published = pattern.captures;
             captures.0[..published].copy_from_slice(&state.captures[..published]);

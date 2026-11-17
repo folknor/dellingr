@@ -570,43 +570,6 @@ strong edges.
 **Classification:** architectural collector change, medium conviction,
 workload-dependent.
 
-## PERF-023 - Pattern matcher interprets every subject byte
-
-Raised by the strings hunter (its lead rewrite).
-
-**Bottleneck:** an ordinary atom in `luapat.rs` goes through `match_at`,
-charges an item step, dispatches `Item::Atom`, calls `singlematch`, charges
-again, fetches a class and tests membership; each charge polls the interrupt
-flag and enters the meter's mode-dependent accounting. Repetition skips some
-item dispatch but keeps per-byte charging and polling, and unanchored search
-restarts the machinery at every position. Compilation turns literal bytes, `.`
-and arbitrary classes all into indexed bitsets, so the plan cannot express a
-literal run, a delimiter scan or a specialized ASCII run.
-
-**Redesign:** a compiled execution plan of literal runs, specialized class
-scans, repetition kernels and explicit backtracking continuations, with scalar
-instructions kept for frontier, balance, backreferences, captures and deferred
-failures. Kernels carry today's logical cost arithmetically (a digit-free
-subject of length N with `%d` is `2 * (N + 1)` steps, including the final
-failed attempt). `consume_units_admitted` (`cost_meter.rs`) already keeps
-unit-by-unit admission (allow the crossing unit, reject the next); the matcher
-mostly calls it with one unit. Select the accounting mode outside the byte
-loop; flush on success, failure, pattern error and interruption; poll at
-bounded kernel boundaries and through backtracking.
-
-**Payoff:** attacks work multiplied by subject length across `find`, `match`,
-`gmatch` and `gsub`.
-
-**Risks:** backtracking order, capture values, deferred malformed-pattern
-errors and match-depth errors are observable; an explicit continuation stack
-must keep today's logical depth rules. Prefix skipping must prove what skipped
-attempts would have charged and whether they could have errored. No
-conventional regex engine (same matches, different costs and error
-precedence) and no general linear-time matcher, since reconstructing the
-backtracking bill could eat the savings.
-
-**Classification:** rewrite, highest ceiling in the scope.
-
 ## PERF-025 - Callback gsub replacements copy the returned value and captures
 
 Raised by the strings hunter. The string and number replacement half landed

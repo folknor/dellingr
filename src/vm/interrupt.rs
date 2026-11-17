@@ -32,7 +32,10 @@
 //!   falls through without a poll, so a pending interrupt is observed at the
 //!   next safepoint after the loop;
 //! - native library work that can repeat a bounded pass without bound: each
-//!   pattern-matcher step, each candidate of a plain substring search, each
+//!   pattern-matcher step or batch of steps (a matcher kernel that scans a
+//!   class run, a run of single atoms, skipped start positions, a balance or
+//!   a backreference polls once before its scan, which is at most one pass
+//!   over the subject), each candidate of a plain substring search, each
 //!   heap-sort step, each iteration of the library loops whose trip count
 //!   a script chooses by a number (`table.concat`, `table.move`, the
 //!   metamethod paths of `table.insert`, `table.remove` and `table.sort`),
