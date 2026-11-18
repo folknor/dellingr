@@ -140,10 +140,9 @@ impl State {
                 (slot, true)
             }
         };
-        let Some(tbl) = self.heap.as_table(ptr) else {
-            return false;
-        };
-        let did_set = tbl.store_slot(slot, val);
+        // A live overwrite under the site's key, never `__index` (the set
+        // cache is not filled for it), so inherited routes stay standing.
+        let did_set = self.heap.overwrite_live_slot(ptr, slot, val);
         if did_set && renewed {
             cache.set(FieldLookupCacheEntry { table: ptr, slot });
         }

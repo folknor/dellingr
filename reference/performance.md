@@ -274,8 +274,9 @@ A field read through more than one `__index` table used to walk the whole
 chain on every call; a validate-on-hit route cache had been built and
 refused because each hit still resolved every table on the path. A site
 now caches the route behind one heap-wide route epoch: the walk marks
-every table it read, and `GcHeap` moves the epoch on any mutable handout
-of a marked table, so a hit checks the receiver's own miss, its metatable
+every table it read for a link or a miss, and `GcHeap` moves the epoch on
+a mutable handout of a marked table (the exemptions are in the next
+section), so a hit checks the receiver's own miss, its metatable
 identity and the epoch, takes the route's depth units and reads the
 terminal slot. The warm one-level method hit also stops resolving the
 metatable twice for `C.__index = C`. On bygg against c429707 (release,
@@ -290,6 +291,31 @@ interleaved pairs:
 | `method_polymorphic` | 3.6 s | 3.5 s |
 | `object_fields` | 3.5 s | 3.5 s |
 | `write` | 2.3 s | 2.3 s |
+
+## Route-preserving writes to class tables, 2026-11-18
+
+The route epoch above moved on every mutable handout of a marked table,
+so a class written in a loop retired every route on each write. Two
+writes no longer move it: the terminal table is not marked (the entry
+names it and reads its version-carrying slot live), and a cached
+SET_FIELD that overwrites a live slot takes `GcHeap::overwrite_live_slot`,
+which leaves the epoch alone (the set cache is never filled for an
+`__index` store, and a live overwrite creates no key and changes no
+link). `method_chain_counter` bumps a static counter on the receiver's
+metatable on every two-level method call. On bygg against 3adbfb7
+(release, best of 3, the change run from a dirty tree), interleaved:
+
+| Workload | 3adbfb7 | Change |
+|---|---|---|
+| `method_chain_counter`, `wall` | 3.1 s, 3.2 s | 3.1 s, 3.0 s |
+| `method_chain_counter`, `kernel` warm average | 355 us | 312 us |
+| `method_chain`, `wall` | 2.2 s | 2.2 s |
+| `write`, `wall` | 2.3 s | 2.3 s |
+
+Under `--hotpath`, `resolve_index` went from 49 ns to 12 ns average over
+the same 422006 calls and the cold walk's `Table::get` calls disappeared:
+the read now hits the route. The thrash was cheap to begin with, since a
+two-table cold walk is short; deeper or map-storage routes pay more.
 
 ## Closure creation in one allocation, 2026-11-17
 

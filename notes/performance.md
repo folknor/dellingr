@@ -189,18 +189,24 @@ Raised by the lookup hunter; the writer-side route epoch landed
 epoch"). The cold self-index reuse was refused (reason above the loop in
 `walk_index`).
 
-Residue: the epoch is heap-wide, so a write to any table on any route
-retires every route, and a class table that is both written (a static
-counter) and read through a deep route re-marks and refills on every
-read: the cold walk plus a few bit sets, never worse than that. Untested
-way out: a cached SET_FIELD that replaces a live value with another
-non-nil value under a key other than `__index` cannot change any
-route's links or intermediate misses (a route ending at that slot reads
-it live), so that one `store_slot` could skip route retirement. A
-dead-slot store still takes the fallback and must retire. No workload
-shows the thrash yet.
+The terminal table is no longer marked, and a warm cached SET_FIELD
+overwrite of a live slot leaves routes standing
+(`GcHeap::overwrite_live_slot`; numbers in `reference/performance.md`,
+"Route-preserving writes to class tables").
 
-**Classification:** local, unmeasured.
+Residue: every other mutable handout of a link or intermediate table
+still retires every route, including live overwrites that could not
+change one: an uncached `store_field` overwrite (a polymorphic store
+site), SET_TABLE with a string key, `rawset`, host writes, and the
+global table's `write_cached` (only when a route passes through `_G`).
+Covering them means classifying mutations instead of handouts: a
+conservative default on the editor plus explicit proven-overwrite
+entry points, so no caller can bypass retirement by accident. The
+measured thrash on a two-table route was about 12% of the warm call
+(355 to 312 us); none of the remaining paths is in a registered
+workload's loop.
+
+**Classification:** rewrite, unmeasured.
 
 ## PERF-033 - Host global and field access resolves names and tables afresh
 

@@ -208,22 +208,27 @@ pub(super) struct MethodLookupCacheEntry {
 /// continuing table steps.
 ///
 /// Unlike the one-level entry it does not re-read the route. Every table
-/// the filling walk read (the receiver's metatable, each handler table and
-/// each handler's metatable, and `terminal`) was marked `on_route` before
-/// `route_epoch` was recorded, and `GcHeap` moves the epoch on any mutable
-/// handout of a marked table. An unchanged epoch therefore proves every link
-/// and every intermediate miss unchanged, and the tables on the route stay
-/// reachable from the guarded metatable. The receiver's own contents and
+/// the filling walk read for a link or a miss (the receiver's metatable, each
+/// handler table it continued past and each such table's metatable) was
+/// marked `on_route` before `route_epoch` was recorded, and `GcHeap` moves
+/// the epoch on any mutable handout of a marked table except
+/// `GcHeap::overwrite_live_slot`, a live overwrite under a key other than
+/// `__index`, which can change no link or miss. An unchanged epoch therefore
+/// proves every link and every intermediate miss unchanged, and the tables
+/// on the route stay reachable from the guarded metatable. `terminal` is not
+/// marked: it is named here and `terminal_slot` carries its version, so the
+/// hit reads its value live and a moved version or dead slot only misses.
+/// The receiver's own contents and
 /// its metatable pointer are not on the route: the receiver is probed live
 /// and its metatable compared by identity on every use. A hit takes the
 /// route's `units` one at a time, as the cold walk does, so the depth limit
 /// and fault injection fall where they would without the cache.
 ///
 /// One per site, apart from the two one-level entries, so a site serving a
-/// deep class besides two shallow ones keeps the shallow pair. A write to
-/// any marked table retires every route; a class table written while it is
-/// read through a deep route refills on each read, a constant over the cold
-/// walk.
+/// deep class besides two shallow ones keeps the shallow pair. A
+/// route-changing write to any marked table (a new or revived key, an
+/// `__index` store, a metatable change, any uncached store) retires every
+/// route; a warm field store to an existing key (a static counter) does not.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct RouteLookupCacheEntry {
     pub(super) receiver_metatable: ObjectPtr,

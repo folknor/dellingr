@@ -24,7 +24,7 @@ use super::BytecodeRuntime;
 use super::LuaType;
 use super::Table;
 use super::Val;
-use super::table::{TableEditor, TemplatePrototype};
+use super::table::{SlotRef, TableEditor, TemplatePrototype};
 
 // ============================================================================
 // Upvalue Pool - Arena-based upvalue storage
@@ -579,7 +579,8 @@ pub(crate) struct GcHeap {
     watched_epoch: u64,
     /// Advances whenever a table carrying the `on_route` bit is handed out
     /// mutably (`get_mut` and the two watched-table bypasses, which are every
-    /// mutable route to an object), clearing the bit. An inherited-route
+    /// mutable route to an object but `overwrite_live_slot`, a live
+    /// overwrite that cannot change a route), clearing the bit. An inherited-route
     /// cache entry records it after marking every table its route read, so
     /// an unchanged epoch proves none of them changed. It saturates at
     /// `ROUTE_EPOCH_DISABLED`, where no route fills or hits: a wrapped epoch
@@ -755,6 +756,34 @@ impl GcHeap {
         match self.get_mut(ptr).0 {
             RawObject::Table(t) => Some(t),
             _ => None,
+        }
+    }
+
+    /// Overwrite live `slot` of table `ptr` with non-nil `val`
+    /// ([`Table::store_slot`]), without retiring inherited routes: the one
+    /// mutable handout that leaves the route epoch and the table's
+    /// `on_route` bit alone. Sound only when the slot's key is not
+    /// `__index`, which the caller proves (the set cache is never filled
+    /// for an `__index` store). A live overwrite under any other key
+    /// creates no key, so no intermediate miss on a route turns into a hit
+    /// (a table holding the written key live was never missing it), changes
+    /// no metatable link or `__index` value, and moves no table version; a
+    /// route ending at the slot reads it live. A dead slot is refused,
+    /// changing nothing: reviving it creates a key, and the keyed fallback
+    /// retires routes through the usual handout. The watched table's epoch
+    /// still moves, since the written key may be a builtin's name.
+    #[inline(always)]
+    pub(super) fn overwrite_live_slot(&mut self, ptr: ObjectPtr, slot: SlotRef, val: Val) -> bool {
+        if ptr == self.watched {
+            self.mark_watched_changed();
+        }
+        match self
+            .objects
+            .get_mut(ptr.0)
+            .expect("Invalid ObjectPtr: object was freed (use-after-free detected)")
+        {
+            RawObject::Table(table) => table.store_slot(slot, val),
+            RawObject::LuaFn(_) => false,
         }
     }
 

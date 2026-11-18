@@ -1,6 +1,7 @@
 //! A field read through more than one `__index` table is cached as a route
 //! that is not re-read on a hit: a heap-wide route epoch, moved by any write
-//! to a table the route went through, stands in for it. Each test warms one
+//! that could change a link or a miss on the route, stands in for it, and
+//! the terminal slot is read live. Each test warms one
 //! site through a two-level chain, changes one table on the route by one
 //! kind of write, and checks the site answers what the heap now says.
 
@@ -114,8 +115,43 @@ fn a_route_does_not_answer_after_its_epoch_is_moved_by_an_unrelated_table() {
             local other = setmetatable({}, Other)
             local function other_read() return other.n end
             if other_read() ~= 1 or other_read() ~= 1 then error("second route is wrong") end
+            Sub.extra = 1
             Base.m = "after"
             if read() ~= "after" or other_read() ~= 1 then error("routes disagree after a write") end
+        "#,
+    );
+}
+
+#[test]
+fn a_route_observes_warm_stores_into_its_tables() {
+    after_warm_route(
+        r#"
+            -- One store site per table, warmed so later runs take the set
+            -- cache: an overwrite of an existing key leaves the route
+            -- standing, a revived key must retire it.
+            local function set_sub(k, v) Sub.m = v end
+            local function set_base(v) Base.m = v end
+            local function set_meta(v) SubMeta.count = v end
+            SubMeta.count = 0
+            for i = 1, 3 do
+                set_meta(i)
+                set_base("base" .. i)
+                if read() ~= "base" .. i then error("warm terminal store missed") end
+            end
+            local function relink(t) SubMeta.__index = t end
+            relink(Base)
+            relink(Base)
+            if read() ~= "base3" then error("relinking the same handler changed the answer") end
+            relink({ m = "relinked" })
+            if read() ~= "relinked" then error("warm relink missed") end
+            relink(Base)
+            set_sub(nil, "sub")
+            set_sub(nil, "sub2")
+            if read() ~= "sub2" then error("warm intermediate overwrite missed") end
+            Sub.m = nil
+            if read() ~= "base3" then error("unshadowing missed") end
+            set_sub(nil, "revived")
+            if read() ~= "revived" then error("warm revival of a shadowing key missed") end
         "#,
     );
 }

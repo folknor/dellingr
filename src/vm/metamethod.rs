@@ -269,10 +269,15 @@ impl State {
                         None => Val::Nil,
                     },
                     None => match (route_fill, cache) {
-                        // A raw hit past a continuing step: a route.
+                        // A raw hit past a continuing step: a route. The
+                        // terminal is not marked: the entry names it and
+                        // reads its version-carrying slot live, so a write
+                        // to it (a static counter on the class that holds
+                        // the method) need not retire the route. A terminal
+                        // that is also a link on the route was marked by the
+                        // continuing step that read it as one.
                         (Some(receiver_metatable), Some(cache)) => match table.find_slot(&key) {
                             Some((terminal_slot, val)) => {
-                                table.mark_on_route();
                                 if let Some(route_epoch) = self.heap.route_epoch()
                                     && let Ok(units) = u8::try_from(*units)
                                 {
@@ -476,6 +481,10 @@ impl State {
         // With no metatable, or one known to hold no `__newindex`, there is
         // no `__newindex` to consult, so the store needs no presence lookup.
         let raw = self.newindex_absent(mt);
+        // A site storing `__index` never fills the cache, so the cached
+        // store (`State::try_set_field_cached`), which leaves inherited
+        // routes standing, never rewrites a route's link.
+        let cache = cache.filter(|_| key != self.meta_names.get(MetaName::Index));
         // A string key with a value is a raw store whose insert reports the
         // slot it wrote, so the cache is filled without a second lookup.
         let raw_string = match (key, val) {

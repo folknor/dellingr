@@ -163,6 +163,10 @@ xxhash = "592fe9284df75909e4e2ea2386da19b1"
 file = "bench/method_chain_wide.lua"
 xxhash = "839722cf7b77b3b64fb1c7dcd6d4718b"
 
+[data.workloads.bench.method_chain_counter]
+file = "bench/method_chain_counter.lua"
+xxhash = "8b617ff1979de3fb046b82e64d5ded00"
+
 [data.workloads.bench.method_polymorphic]
 file = "bench/method_polymorphic.lua"
 xxhash = "9a54ab4456ea475ecbb9335505a1a329"
@@ -330,6 +334,10 @@ xxhash = "141a5a7aa1d8453a36135afe9b714c44"
 [data.workloads.hotpath.method_chain_wide]
 file = "examples/calls/method_chain_wide.lua"
 xxhash = "f610ce8c547a99a8e54fc52b68f51bc6"
+
+[data.workloads.hotpath.method_chain_counter]
+file = "examples/calls/method_chain_counter.lua"
+xxhash = "ea8212f69d89a5be9742e08859081e19"
 
 [data.workloads.hotpath.method_polymorphic]
 file = "examples/calls/method_polymorphic.lua"

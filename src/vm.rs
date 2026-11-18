@@ -2341,9 +2341,10 @@ mod runtime_tests {
             .expect("the global is an object")
     }
 
-    /// The two method entries of one site replace the one not used last,
-    /// refill a class in place instead of naming it twice, and take a
-    /// position a collection emptied before evicting a survivor.
+    /// An inherited route fills once and keeps its epoch across hits,
+    /// receiver writes, writes to its terminal table and warm overwrites of
+    /// an existing key in a table on the route; a route-changing write to a
+    /// marked table retires it once and clears the mark.
     #[test]
     fn inherited_routes_fill_once_and_retire_only_on_route_writes() {
         let _hits = caches::HitMode::required();
@@ -2383,11 +2384,25 @@ mod runtime_tests {
         run(&mut state, "site() obj.x = 1 site()");
         assert_eq!(state.heap.route_epoch(), Some(epoch));
 
-        // A write to a table on the route retires it once and clears the
-        // mark, so a second write moves nothing until the next fill.
-        run(&mut state, "Base.y = 1 Base.z = 1");
+        // The terminal is read live, never marked: writing it, new keys
+        // included, retires nothing.
+        run(&mut state, "Base.y = 1 Base.z = 1 site()");
+        assert_eq!(state.heap.route_epoch(), Some(epoch));
+
+        // A new key in a table the route continued past retires it once and
+        // clears the mark, so a second write moves nothing until the next
+        // fill.
+        run(
+            &mut state,
+            "Sub.n = 0 function bump() Sub.n = Sub.n + 1 end bump()",
+        );
         assert_eq!(state.heap.route_epoch(), Some(epoch + 1));
         run(&mut state, "site()");
+        assert_eq!(routes(&state), vec![(sub, epoch + 1, 1)]);
+
+        // A warm overwrite of an existing key there leaves it standing.
+        run(&mut state, "bump() bump() site()");
+        assert_eq!(state.heap.route_epoch(), Some(epoch + 1));
         assert_eq!(routes(&state), vec![(sub, epoch + 1, 1)]);
     }
 
