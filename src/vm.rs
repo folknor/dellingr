@@ -203,7 +203,35 @@ struct BytecodeRuntime {
 }
 
 /// The main interface into the Lua VM.
-pub struct State {
+///
+/// A State is a dynamically sized type, owned as a `Box<State>`: every
+/// constructor returns one. Host code borrows it as `&mut State`, from its
+/// own box or as the argument of a [`RustFunc`](crate::RustFunc), a
+/// restricted-environment closure or a snapshot setup closure, and safe code
+/// cannot move an unsized value out of a borrow: `mem::take`, `mem::swap`
+/// and `mem::replace` all need a sized type, so they do not compile.
+///
+/// That is what keeps a running State in one piece. A callback runs while
+/// Lua frames of the State are suspended on the native stack, holding the
+/// State's bytecode runtimes, whose inline caches are unsynchronized cells
+/// (`vm/caches.rs`). Moving the State out of the callback's borrow, sending
+/// it to another thread and returning would let both threads reach the
+/// same cells. Moving the owning box between calls is fine: nothing of the
+/// State is live outside it then.
+///
+/// ```compile_fail
+/// fn steal(state: &mut dellingr::State) -> dellingr::Result<u8> {
+///     let mut other = dellingr::State::new();
+///     std::mem::swap(state, &mut *other);
+///     Ok(0)
+/// }
+/// ```
+///
+/// The `Tail` parameter exists only to make the type unsized and is never
+/// named: `State` is always `State<[()]>`. The sized form has private fields
+/// and no constructor outside this module, and the unsizing coercion that
+/// boxes it has no safe inverse.
+pub struct State<Tail: ?Sized = [()]> {
     #[cfg(feature = "fault-injection")]
     fault_injection: fault_injection::FaultInjection,
     /// The global table (which `_G` names), its builtin caches and its
@@ -299,6 +327,13 @@ pub struct State {
     /// still resolve its stable id. An unregister API would need an explicit
     /// host lifetime contract.
     pub(super) rust_fns: RustFnTable,
+    /// The unsized tail (see the type's documentation). Always empty; it
+    /// must stay the last field.
+    #[expect(
+        dead_code,
+        reason = "the field exists for its type, which makes State unsized; it holds nothing to read"
+    )]
+    tail: Tail,
 }
 
 /// Unwind payload that abandons execution on a State poisoned by a panic a
@@ -413,7 +448,7 @@ impl StateBuilder {
     /// Builds the State. Opening the standard library charges nothing under
     /// any costing.
     #[must_use]
-    pub fn build(self) -> State {
+    pub fn build(self) -> Box<State> {
         let callbacks = self.callbacks.unwrap_or_else(|| Box::new(DefaultCallbacks));
         let mut state = State::build_raw(callbacks, self.gc_policy, self.costing);
         if let Some(interrupt) = self.interrupt {
@@ -432,7 +467,7 @@ impl State {
     /// Creates a new, independent state with default callbacks (stdout), the
     /// standard library and the default cost model. See [`State::builder`]
     /// for the other settings.
-    pub fn new() -> Self {
+    pub fn new() -> Box<Self> {
         Self::builder().build()
     }
 
@@ -481,18 +516,22 @@ impl State {
     /// its global namespace is entirely empty, as with `lua_newstate` in the
     /// reference C API. [`State::open_libs`] installs them later if wanted.
     /// [`StateBuilder::raw`] builds one with other settings.
-    pub fn raw() -> Self {
+    pub fn raw() -> Box<Self> {
         Self::builder().raw().build()
     }
 
     /// The State every constructor starts from: the GC policy is active from
     /// the first allocation, the costing is fixed, and nothing is opened.
-    fn build_raw(callbacks: Box<dyn HostCallbacks>, gc_policy: GcPolicy, costing: Costing) -> Self {
+    fn build_raw(
+        callbacks: Box<dyn HostCallbacks>,
+        gc_policy: GcPolicy,
+        costing: Costing,
+    ) -> Box<Self> {
         let state_id = anchor::next_state_id();
         let mut heap = GcHeap::with_policy(gc_policy);
         let meta_names = MetaNames::intern(&mut heap);
         let global_env = GlobalEnv::new(&mut heap);
-        Self {
+        Box::new(State::<[(); 0]> {
             global_env,
             string_metatable: None,
             string_mt_index_shape: None,
@@ -519,7 +558,8 @@ impl State {
             format_pointer_ids: IndexMap::default(),
             next_format_pointer_id: 1,
             rust_fns: RustFnTable::new(state_id),
-        }
+            tail: [],
+        })
     }
 
     pub(crate) fn reserve_stdlib_capacity(&mut self) {
@@ -837,9 +877,9 @@ impl State {
     //
     // A VM-held borrowed context was weighed and not added: a context
     // parameter on `RustFunc` would change every library function's ABI, and
-    // a State-held pointer needs `unsafe` and can escape (a callback can
-    // `mem::replace` the State out of its `&mut` and send it to another
-    // thread), so it would end up in a thread-local anyway, enforcing no loan
+    // a State-held pointer needs `unsafe` and outlives the call that set it
+    // (the State is `Send`, and its box can move to another thread between
+    // calls), so it would end up in a thread-local anyway, enforcing no loan
     // rule the host's own scoped thread-local cannot. Host functions stay
     // plain function pointers, as ruled for closures (they also cannot be
     // saved, since a Rust function is saved as its id and rebound on load).
@@ -1474,16 +1514,6 @@ impl State {
     /// (for example by catching a panic from a nested `call`). A panic out of
     /// `f` poisons the State and is resumed; the environment is still
     /// restored on the way out, but that does not make the State reusable.
-    ///
-    /// Returns [`ErrorKind::StateReplacedInRestrictedEnv`] if `f` returns
-    /// with a State other than the one it was given behind the reference
-    /// (it moved the State out with `mem::take`, `mem::swap` or
-    /// `mem::replace`), or with an inner restriction still suspended on it.
-    /// Nothing is restored then: the State in the slot is left as it is, and
-    /// the moved-out State keeps the restricted environment for good. Moving
-    /// the State out and putting it back before `f` returns is fine. If the
-    /// State in the slot is poisoned, [`ErrorKind::StatePoisoned`] takes
-    /// precedence, as on every guarded entry.
     pub fn with_restricted_env<F, R>(&mut self, whitelist: &[&str], f: F) -> Result<R>
     where
         F: FnOnce(&mut Self) -> R,
@@ -1491,43 +1521,22 @@ impl State {
         self.guarded(|state| {
             let saved = state.global_env.restrict(&mut state.heap, whitelist);
             state.suspended_envs.push(saved);
-            // Which suspension this level owns: the State's identity and the
-            // stack depth. `f` gets `&mut State`, so it can move the State
-            // out and leave another behind; identity alone is not enough,
-            // because an inner level of the same State that refused this way
-            // leaves its own entry on top, which this level must not pop.
-            // Handing `f` a facade that cannot yield `&mut State` instead was
-            // weighed and not done here: a facade that derefs to State reopens
-            // the move, one that does not duplicates the host API, and any
-            // `call` inside `f` runs `RustFunc`s that receive `&mut State`
-            // anyway, so the hole is only closed for the whole host surface
-            // at once.
-            let owner = (state.registry.state_id(), state.suspended_envs.len());
 
             // Restore the environment on unwind too. This keeps the global
             // bindings coherent for whatever the host still reads before it
             // drops the State; it is not a reuse guarantee, since the State
-            // is poisoned by the panic either way.
+            // is poisoned by the panic either way. `f` cannot move the State
+            // out of its borrow (the type is unsized), and every inner level
+            // pops its own suspension on return or unwind, so this level's
+            // is on top here.
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(state)));
-
-            // A State that is not the owner is left alone: popping it would
-            // panic on an empty stack or resume a suspension some other level
-            // owns. The moved-out owner stays restricted; nothing here can
-            // reach it. A panic still poisons whatever State is in the slot,
-            // through `guarded`.
-            let owned = (state.registry.state_id(), state.suspended_envs.len()) == owner;
-            if owned {
-                let saved = state
-                    .suspended_envs
-                    .pop()
-                    .expect("this level's suspension is on top: checked by `owned`");
-                state.global_env.resume(&mut state.heap, saved);
-            }
+            let saved = state
+                .suspended_envs
+                .pop()
+                .expect("this level pushed a suspension and inner levels pop theirs");
+            state.global_env.resume(&mut state.heap, saved);
 
             match result {
-                Ok(_) if !owned => Err(Error::without_location(
-                    ErrorKind::StateReplacedInRestrictedEnv,
-                )),
                 Ok(r) => Ok(r),
                 Err(payload) => {
                     state.poisoned = true;
@@ -1809,12 +1818,6 @@ impl State {
         }
 
         trace
-    }
-}
-
-impl Default for State {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

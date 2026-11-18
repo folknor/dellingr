@@ -591,14 +591,6 @@ pub enum ErrorKind {
     /// restore while its function-table entry would remain for the State's
     /// lifetime, so the call is refused before registration.
     SetGlobalNamedRustFnInRestrictedEnv,
-    /// A `State::with_restricted_env` closure returned with a different
-    /// restriction behind its `&mut State` than the one it was given: it
-    /// moved the State out (`mem::take`, `mem::swap`, `mem::replace`), or an
-    /// inner restriction of the same State already failed this way. Nothing
-    /// is restored, and the State in the slot is neither restored nor
-    /// poisoned. The moved-out State keeps the restricted environment for
-    /// the rest of its life.
-    StateReplacedInRestrictedEnv,
     /// Invalid stack index passed to a host API.
     InvalidStackIndex {
         /// The bad index, as supplied by the caller.
@@ -1911,9 +1903,6 @@ impl fmt::Display for ErrorKind {
             }
             SetGlobalNamedRustFnInRestrictedEnv => f.write_str(
                 "cannot register and install a named Rust function inside a restricted environment",
-            ),
-            StateReplacedInRestrictedEnv => f.write_str(
-                "the restricted environment's closure moved its State out; nothing was restored",
             ),
             InvalidStackIndex { index } => {
                 write!(f, "invalid stack index ({index})")

@@ -273,10 +273,13 @@ point.
   `Program::compile(source, name)` is the one way to compile Lua: source and
   chunk name are bytes, kept exactly. Compile once, load into many states with
   `state.load(&program)`.
-- `State` (`Send`) - VM instance with cost-bounded execution. `State::new`
-  opens the standard library, `State::raw` starts with empty globals;
-  `State::builder()` sets callbacks, GC policy, the raw option and the costing. Movable across threads; pair with `Mutex<State>`
-  if you need to share one.
+- `State` (`Send`) - VM instance with cost-bounded execution, owned as a
+  `Box<State>`. `State::new` opens the standard library, `State::raw` starts
+  with empty globals; `State::builder()` sets callbacks, GC policy, the raw
+  option and the costing. The box is movable across threads; pair it with a
+  `Mutex` if you need to share one. `State` is unsized, so a callback holding
+  `&mut State` cannot move the State out from under the Lua frames that
+  called it.
 - `Anchor` (`Send + Sync + 'static`) - owned handle that retains a Lua value
   (function, table, etc.) across host calls without using globals. Dropping it
   releases the value. State-scoped; cross-state misuse surfaces as an error,

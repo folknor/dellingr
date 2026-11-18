@@ -19,7 +19,7 @@ pub(crate) struct Recorder(Arc<Mutex<Recorded>>);
 
 impl Recorder {
     /// A standard State reporting to a new recorder.
-    pub(crate) fn state() -> (State, Self) {
+    pub(crate) fn state() -> (Box<State>, Self) {
         let recorder = Self::default();
         let state = State::builder()
             .callbacks(Box::new(recorder.clone()))

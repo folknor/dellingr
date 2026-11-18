@@ -177,14 +177,6 @@ impl Registry {
         }
     }
 
-    /// The owning State's process-unique identity. It moves with the State's
-    /// data, so a host closure that `mem::take`s or `mem::swap`s its
-    /// `&mut State` leaves a different id behind the reference; the host
-    /// closure boundaries compare it on the way out.
-    pub(crate) fn state_id(&self) -> NonZeroU64 {
-        self.state_id
-    }
-
     // Synchronization overhead, from the source: one mutex acquisition (the
     // drain's swap) and one Arc clone per insert; one mutex acquisition and
     // one Arc drop per armed handle drop. The shared queue is what lets a

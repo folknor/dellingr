@@ -315,11 +315,6 @@ pub enum LoadError<E = Infallible> {
     /// unwound through (it caught the panic), so the snapshot is not loaded
     /// into it.
     StatePoisoned,
-    /// The load-time setup closure returned success with a State other than
-    /// the one the loader built behind its `&mut State` (it moved the State
-    /// out), or with a `State::with_restricted_env` suspension left on it;
-    /// nothing saved was materialized.
-    StateReplacedInSetup,
     /// The calling thread's floating-point environment is unsupported (see
     /// [`ErrorKind::UnsupportedFloatEnvironment`](crate::error::ErrorKind::UnsupportedFloatEnvironment)),
     /// on entry or after the setup closure returned success; nothing saved
@@ -342,10 +337,7 @@ impl<E> LoadError<E> {
     pub fn snapshot(&self) -> Option<&SnapshotError> {
         match self {
             Self::Snapshot(error) => Some(error),
-            Self::Setup(_)
-            | Self::StatePoisoned
-            | Self::StateReplacedInSetup
-            | Self::UnsupportedFloatEnvironment(_) => None,
+            Self::Setup(_) | Self::StatePoisoned | Self::UnsupportedFloatEnvironment(_) => None,
         }
     }
 }
@@ -355,10 +347,6 @@ impl<E: fmt::Display> fmt::Display for LoadError<E> {
         match self {
             LoadError::Setup(error) => write!(f, "load setup failed: {error}"),
             LoadError::StatePoisoned => write!(f, "load setup left the state poisoned by a panic"),
-            LoadError::StateReplacedInSetup => write!(
-                f,
-                "load setup moved the state out or left a restricted environment suspended"
-            ),
             LoadError::UnsupportedFloatEnvironment(environment) => {
                 write!(f, "unsupported floating-point environment ({environment})")
             }
@@ -373,7 +361,6 @@ impl<E: fmt::Debug + fmt::Display + 'static> std::error::Error for LoadError<E> 
             LoadError::Snapshot(error) => Some(error),
             LoadError::Setup(_)
             | LoadError::StatePoisoned
-            | LoadError::StateReplacedInSetup
             | LoadError::UnsupportedFloatEnvironment(_) => None,
         }
     }

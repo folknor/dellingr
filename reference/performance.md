@@ -312,6 +312,22 @@ host and compiler, so its row does not compare with the one above it); the
 | bygg, same `rustc`: string-replacement `gsub` in one borrow, on top of c4d8fe1 (the table measured 16816 / 3184 / 3200 there) | 16528 | 3040 | 2992 |
 | bygg, same `rustc`: library leaves in call dispatch, on top of 5e7a743 | 16576 | 3040 | 2992 |
 | bygg, same `rustc`: typed `State::invoke`, on top of b6da85b (b6da85b itself measured 3008 / 3056 in release; dev not re-measured) | 16576 | 3024 | 3072 |
+| bygg, same `rustc`: unsized `State`, on top of bea3fdd (bea3fdd itself measured 16576 / 3024 / 3072) | 16800 | 3104 | 3168 |
+
+### 2026-11-18: unsized `State`
+
+`State` gained an unsized tail so host code cannot move it out of the
+`&mut State` a callback holds (the soundness reason is at `State`'s type
+documentation). Every `&mut State` became a wide pointer whose length,
+always zero, is carried through each out-of-line call. Measured against its
+parent bea3fdd on the same host and `rustc`, release rows grew 16 to 80 bytes
+per cycle (`host_call` 864 to 912, `host_invoke` 896 to 960, the largest
+cycle 3024 to 3104), two shrank (`callable_rust` 1488 to 1472,
+`sort_comparator` 1424 to 1392), and dev rows grew 48 to 368. Accepted: the
+full-depth envelope tests pass on the documented threads. A thin internal
+handle (the engine on a sized inner type, re-widened only where host code is
+handed `&mut State`) would recover it, at the price of one layout-dependent
+unsafe cast or a trait-object public type; not done.
 
 ### 2026-11-17: typed host invocation
 

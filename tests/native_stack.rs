@@ -1090,7 +1090,7 @@ fn set_number(state: &mut State, name: &str, value: u32) -> dellingr::Result<()>
 
 /// A State with the callbacks and the leaf's pattern inputs, automatic
 /// collection off so the only collection is the one the leaf arms.
-fn test_state() -> dellingr::Result<State> {
+fn test_state() -> dellingr::Result<Box<State>> {
     let mut state = State::builder().callbacks(Box::new(Quiet)).build();
     state.gc_disable_auto();
     state.set_user_data(Harness::default());
@@ -1670,7 +1670,7 @@ fn native_bytes_per_level() {
         println!("{name}\t{bytes}\tnative {native}\tmeta {meta}");
         Ok(0)
     }
-    fn probe_state() -> State {
+    fn probe_state() -> Box<State> {
         let mut state = test_state().expect("test State setup");
         let functions: [(&str, dellingr::RustFunc); 2] = [("record", record), ("report", report)];
         for (name, function) in functions {

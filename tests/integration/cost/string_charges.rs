@@ -7,7 +7,7 @@ use dellingr::{ArgCount, LuaType, RetCount, State};
 use super::cost_golden::pinned_cost;
 use crate::support;
 
-fn run_with_budget(source: &str, budget: i64) -> (State, Error) {
+fn run_with_budget(source: &str, budget: i64) -> (Box<State>, Error) {
     let mut state = State::new();
     state.set_cost_budget(budget).expect("the State is metered");
     support::load(&mut state, source);

@@ -17,7 +17,7 @@ fn touch(state: &mut State) -> dellingr::Result<u8> {
     Ok(0)
 }
 
-fn state() -> State {
+fn state() -> Box<State> {
     let mut state = State::new();
     let functions: [(&str, dellingr::RustFunc); 2] = [("stop", stop), ("touch", touch)];
     for (name, function) in functions {

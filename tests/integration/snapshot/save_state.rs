@@ -141,7 +141,7 @@ fn global_environment_preserves_non_utf8_keys_across_save_load() {
     );
 }
 
-fn new_capture_state() -> (State, Arc<Mutex<Vec<String>>>) {
+fn new_capture_state() -> (Box<State>, Arc<Mutex<Vec<String>>>) {
     let callbacks = Capture::default();
     let lines = Arc::clone(&callbacks.lines);
     (
@@ -349,7 +349,7 @@ fn tombstone_is_the_only_root_of_its_collectable_key() {
     assert_eq!(before, loaded.save_state().unwrap().bytes);
 }
 
-fn byte_stability_state(with_slotmap_history: bool) -> State {
+fn byte_stability_state(with_slotmap_history: bool) -> Box<State> {
     let (mut state, _) = new_capture_state();
     state.gc_disable_auto();
 
@@ -1848,7 +1848,7 @@ fn corruption_sweep_never_panics() {
 
     // The decoder requires every field and exact input consumption. A proper
     // prefix must fail even though the format has no trailing integrity hash.
-    fn ignore(_: Result<State, LoadError>) {}
+    fn ignore(_: Result<Box<State>, LoadError>) {}
 
     // Every proper prefix (each truncation length) must be rejected.
     for len in 0..bytes.len() {

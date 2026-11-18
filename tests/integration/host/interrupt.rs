@@ -39,7 +39,7 @@ fn install(state: &mut State) {
     }
 }
 
-fn state() -> State {
+fn state() -> Box<State> {
     let mut state = State::new();
     install(&mut state);
     state
@@ -60,7 +60,7 @@ fn assert_interrupted(result: dellingr::Result<()>, source: &str) -> Error {
 
 /// Runs `source` on a fresh State, which must end interrupted, and returns
 /// the State for the caller to read back what the script left.
-fn interrupted(source: &str) -> State {
+fn interrupted(source: &str) -> Box<State> {
     let mut state = state();
     assert_interrupted(support::try_run(&mut state, source), source);
     state
@@ -318,7 +318,7 @@ fn an_interrupt_pending_at_raw_move_entry_leaves_it_unpaid_and_destination_empty
 #[test]
 fn one_handle_stops_every_state_that_shares_it() {
     let shared = Interrupt::new();
-    let mut states: Vec<State> = (0..2)
+    let mut states: Vec<Box<State>> = (0..2)
         .map(|_| State::builder().interrupt(shared.clone()).build())
         .collect();
     shared.trigger();

@@ -95,7 +95,7 @@ end
 reset()
 "#;
 
-fn state_with(source: &str) -> State {
+fn state_with(source: &str) -> Box<State> {
     let mut state = State::new();
     support::run(&mut state, PRELUDE);
     support::run(&mut state, source);

@@ -20,7 +20,7 @@ fn custom_model() -> CostModel {
         .with(Charge::TableSort, 123)
 }
 
-fn metered_state(model: CostModel) -> State {
+fn metered_state(model: CostModel) -> Box<State> {
     State::builder().costing(Costing::Metered(model)).build()
 }
 
@@ -39,7 +39,7 @@ fn costing_tag_offset() -> usize {
     8 + 4 + env!("CARGO_PKG_VERSION").len() + 1 + 8
 }
 
-fn load(bytes: &[u8]) -> Result<State, LoadError<Infallible>> {
+fn load(bytes: &[u8]) -> Result<Box<State>, LoadError<Infallible>> {
     State::load_state(bytes, Box::new(DefaultCallbacks), support::no_setup)
 }
 

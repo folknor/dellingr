@@ -88,16 +88,21 @@ tick budgets and re-record replays.
   borrowing the string instead of copying it. `&str` keeps the invalid-UTF-8
   field error. A bound written `T: RawField` becomes `T: RawField<'s>`.
 
+- `State` is unsized and owned as `Box<State>`: `State::new`, `State::raw`,
+  `StateBuilder::build` and `State::load_state` return `Box<State>`, and
+  `Default for State` is gone. Code that calls methods or passes
+  `&mut state` is unchanged; a field or return type naming `State` by value
+  becomes `Box<State>`. `RustFunc` keeps its signature.
+
 ### Fixed
 
-- A `State::with_restricted_env` closure that moves its State out of the
-  `&mut` (`mem::take`, `mem::swap`) no longer panics on exit or resumes a
-  suspension another level owns: it gets the new
-  `ErrorKind::StateReplacedInRestrictedEnv`, nothing is restored, and the
-  moved-out State stays restricted. Putting the State back before returning
-  restores normally. A `State::load_state` setup that moves the State out or
-  leaves a restriction suspended gets the new
-  `LoadError::StateReplacedInSetup` instead of materializing into it.
+- Soundness: a `RustFunc`, restricted-environment closure or snapshot setup
+  closure could move the State out of its `&mut State` (`mem::take`,
+  `mem::swap`) while Lua frames of that State were suspended under it, send
+  the original to another thread and return. Both threads could then reach
+  the same unsynchronized inline-cache cells: a data race from safe code.
+  The move no longer compiles, since `mem::take`, `mem::swap` and
+  `mem::replace` need a sized type.
 - **Replay-visible to hosts:** a NaN reaches the host as one canonical quiet
   NaN (`0x7ff8_0000_0000_0000`) through `State::to_number`,
   `State::raw_field` as `f64` or `Option<f64>`, and the numeric

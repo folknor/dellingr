@@ -299,6 +299,7 @@ impl State {
             format_pointer_ids,
             next_format_pointer_id: _,
             rust_fns: _,
+            tail: _,
         } = self;
 
         visit(GcCleanup::WeakTable(
@@ -345,6 +346,7 @@ impl State {
             format_pointer_ids: _, // Weak: pruned by for_each_gc_cleanup after sweep.
             next_format_pointer_id: _,
             rust_fns: _, // Function pointers and ids, not heap values; never pruned.
+            tail: _,     // Empty: only makes the type unsized.
             in_flight,
         } = self;
         let InFlight {
@@ -418,6 +420,7 @@ impl State {
             format_pointer_ids: _,
             next_format_pointer_id: _,
             rust_fns: _, // Persistent: entries live as long as the State.
+            tail: _,
             in_flight,
         } = self;
         // The pool itself persists (capacity); only its stacks' frames are

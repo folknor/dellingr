@@ -102,7 +102,7 @@ absent_site(one) absent_site(two)
 string_site("x") string_key_site("x", "upper")
 "#;
 
-fn state_with(source: &str) -> State {
+fn state_with(source: &str) -> Box<State> {
     let mut state = State::new();
     support::run(&mut state, PRELUDE);
     support::run(&mut state, source);

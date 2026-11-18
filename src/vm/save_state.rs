@@ -1551,10 +1551,7 @@ impl State {
     /// setup error is returned as [`LoadError::Setup`] without materializing
     /// any saved values. A setup that returns success after a panic unwound
     /// through the State (it caught the panic) gets
-    /// [`LoadError::StatePoisoned`]. A setup that returns success after
-    /// moving the State out of its `&mut` (`mem::take`, `mem::swap`), or
-    /// with a restricted environment still suspended on it, gets
-    /// [`LoadError::StateReplacedInSetup`].
+    /// [`LoadError::StatePoisoned`].
     ///
     /// The calling thread's floating-point environment is checked on entry
     /// and again after `setup`, which is host code and may change it, before
@@ -1578,7 +1575,7 @@ impl State {
         bytes: &[u8],
         callbacks: Box<dyn HostCallbacks>,
         setup: impl FnOnce(&mut State) -> std::result::Result<(), E>,
-    ) -> std::result::Result<State, LoadError<E>> {
+    ) -> std::result::Result<Box<State>, LoadError<E>> {
         if let Some(environment) = crate::fp_env::fault() {
             return Err(LoadError::UnsupportedFloatEnvironment(environment));
         }
@@ -1607,16 +1604,10 @@ impl State {
         // Anchors created by setup are deliberately retained and participate
         // in the final collection.
         state.global_env.begin_load_setup();
-        let prepared = state.registry.state_id();
+        // `setup` cannot move the State out of its borrow (the type is
+        // unsized), and a restricted closure inside it pops its own
+        // suspension, so this is still the State prepared above.
         setup(&mut state).map_err(LoadError::Setup)?;
-        // `setup` holds `&mut State`, so it can move this State out and leave
-        // another, or leave a restriction suspended (a restricted closure
-        // that moved the State out and had it put back). Neither is the
-        // State this loader prepared, and materializing into restricted
-        // globals would lose setup's own bindings.
-        if state.registry.state_id() != prepared || state.in_restricted_env() {
-            return Err(LoadError::StateReplacedInSetup);
-        }
         if state.poisoned {
             return Err(LoadError::StatePoisoned);
         }
@@ -3411,7 +3402,7 @@ mod tests {
     fn load_bytecode(
         bytecode: Vec<SavedBytecode>,
         objects: Vec<SavedObject>,
-    ) -> Result<State, SnapshotError> {
+    ) -> Result<Box<State>, SnapshotError> {
         load_bytecode_with_globals(bytecode, objects, Vec::new())
     }
 
@@ -3419,7 +3410,7 @@ mod tests {
         bytecode: Vec<SavedBytecode>,
         objects: Vec<SavedObject>,
         user_globals: Vec<(String, SavedVal)>,
-    ) -> Result<State, SnapshotError> {
+    ) -> Result<Box<State>, SnapshotError> {
         // The names are the string arena; the globals table binds them.
         let strings = user_globals
             .iter()

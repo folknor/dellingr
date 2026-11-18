@@ -351,13 +351,21 @@ pub(super) struct RuntimeCaches {
 }
 
 // SAFETY: Every access to a cache cell must be confined to the exclusive
-// execution of the one State that owns its BytecodeRuntime graph. All
-// `Arc<BytecodeRuntime>` clones, including those held by frames and heap
-// closures, remain inside that State and are never exposed independently.
-// `State` is Send but not Sync, so moving it transfers exclusive ownership;
-// safe code cannot run two executions of that State concurrently. This
-// implementation would become unsound if a runtime/cache handle escaped the
-// State or if separate threads could access the same cache cell at once. It is
+// execution of the one State that owns its BytecodeRuntime graph. Its
+// `Arc<BytecodeRuntime>` clones live in the State's heap closures and runtime
+// map, and in the frames of its running invocations, which sit on the native
+// stack outside the State allocation but are private to the invocation and
+// never exposed. `State` is Send but not Sync, so moving its owning box
+// transfers exclusive ownership; safe code cannot run two executions of that
+// State concurrently. While frames are suspended under a host callback, the
+// callback holds only `&mut State`, and State is unsized, so it cannot move the
+// State away from those frames (`mem::take` or `mem::swap` and sending the
+// original to another thread would hand the frames' runtimes to a second
+// thread). A scoped thread borrowing that `&mut State` finishes before the
+// callback returns and the suspended frames resume. This implementation would
+// become unsound if a runtime/cache handle escaped the State, if host code
+// could obtain a sized, movable value of a running State, or if separate
+// threads could access the same cache cell at once. It is
 // required for `Arc<BytecodeRuntime>` to remain Send and preserve State's Send
 // guarantee.
 unsafe impl Sync for RuntimeCaches {}

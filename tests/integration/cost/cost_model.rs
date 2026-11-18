@@ -8,7 +8,7 @@ use dellingr::{Charge, CostModel, Costing, Program, State};
 
 use crate::support;
 
-fn metered(model: CostModel) -> State {
+fn metered(model: CostModel) -> Box<State> {
     State::builder().costing(Costing::Metered(model)).build()
 }
 

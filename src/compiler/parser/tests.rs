@@ -74,7 +74,7 @@ fn opcodes(chunk: &Bytecode, opcode: u8) -> Vec<Instr> {
         .collect()
 }
 
-fn run(source: &str) -> State {
+fn run(source: &str) -> Box<State> {
     let mut state = State::new();
     crate::Program::compile(source, None)
         .and_then(|program| state.load(&program))

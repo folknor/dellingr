@@ -494,6 +494,25 @@ what materialized-value cost remains.
 
 ## Architectural
 
+### Thin engine handle under the unsized `State` (2026-11-18)
+
+`State` is unsized so host code cannot move it out of a callback's
+`&mut State` (see its type documentation). Every `&mut State` is a wide
+pointer, and the always-zero length rides through each out-of-line call:
+release native cycles grew 16 to 80 bytes, dev 48 to 368
+(reference/performance.md, "2026-11-18: unsized `State`"). Recovering it
+means running the engine on a sized inner type and re-widening only where
+host code is handed `&mut State` (`invoke_rust_fn`, the restricted closure,
+load setup). Shapes sparred with codex: a `repr(C)` outer with the inner at
+offset zero and one unsafe cast, sound because the length-zero outer covers
+exactly the inner's bytes, provided no outer field ever adds bytes or
+alignment; or a sealed trait object as the public `State` over a private
+concrete inner, which coerces safely but needs adapters for generic public
+methods. Library callbacks share the `RustFunc` path, so they stay wide
+unless they get an internal signature. A by-value context (`fn(Ctx<'_>)`)
+is the other sound shape and keeps thin pointers, at the price of every
+`RustFunc` signature. Measure wall time before paying any of these.
+
 ### Shape-based polymorphic field IC
 
 What: a per-callsite cache for `OP_GET_FIELD` keyed on (table_shape_id,

@@ -222,7 +222,7 @@ const COUNTER: &str = "
     end
 ";
 
-fn state_with_host(function: dellingr::RustFunc) -> (State, Recorder) {
+fn state_with_host(function: dellingr::RustFunc) -> (Box<State>, Recorder) {
     let (mut state, recorder) = Recorder::state();
     state
         .push_new_rust_fn(function)

@@ -2,7 +2,7 @@ use dellingr::{ArgCount, RetCount, State};
 
 use crate::support;
 
-fn run_one(code: &str) -> State {
+fn run_one(code: &str) -> Box<State> {
     let mut state = State::new();
     support::eval(&mut state, code, 1);
     state

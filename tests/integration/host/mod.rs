@@ -14,7 +14,6 @@ mod invoke;
 mod panic_poison;
 mod raw_field;
 mod restricted_env_open_libs;
-mod restricted_env_state_swap;
 mod rust_fn_names;
 mod rust_fn_result_count;
 mod rustfn_error;

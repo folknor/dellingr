@@ -189,14 +189,15 @@ use instr::Instr;
 use std::sync::Arc;
 
 // Compile-time witnesses for the thread-sharing contract. `State` can be
-// moved across threads but is deliberately NOT `Sync`; cost-budgeted dispatch
+// moved across threads (as the `Box<State>` that owns it; it is unsized, so
+// nothing moves it out of a borrow) but is deliberately NOT `Sync`; cost-budgeted dispatch
 // and bytecode-cache invariants only have well-defined semantics under
 // exclusive access. `Program` can be shared across threads, and `Error`
 // travels across them (its host-error payload is `Send + Sync`).
 const _: () = {
     const fn assert_send<T: Send>() {}
     const fn assert_send_sync<T: Send + Sync>() {}
-    assert_send::<State>();
+    assert_send::<Box<State>>();
     assert_send_sync::<Program>();
     assert_send_sync::<error::Error>();
     // A handle may be dropped on any thread; its release queue is a Mutex.

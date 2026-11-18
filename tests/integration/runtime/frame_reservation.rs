@@ -43,7 +43,7 @@ fn empty_iterator(_: &mut State) -> dellingr::Result<u8> {
     Ok(0)
 }
 
-fn state_with(extra: &str) -> State {
+fn state_with(extra: &str) -> Box<State> {
     let mut state = State::new();
     state
         .push_new_rust_fn(empty_iterator)

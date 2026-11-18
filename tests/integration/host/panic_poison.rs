@@ -65,7 +65,7 @@ fn swallowing_fn(state: &mut State) -> dellingr::Result<u8> {
     Ok(0)
 }
 
-fn state_with(fns: &[(&str, dellingr::RustFunc)], source: &str) -> State {
+fn state_with(fns: &[(&str, dellingr::RustFunc)], source: &str) -> Box<State> {
     let mut state = State::new();
     for (name, f) in fns {
         state.push_new_rust_fn(*f).expect("room for a function");

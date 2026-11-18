@@ -28,8 +28,7 @@ own typed kind: `ScriptError` (the `ErrorValue` a script passed to `error()`),
 `LibraryError` (a `LibraryError` reason), `PatternError`, `SyntaxError`,
 `ArgError`, `TypeError`, the limit kinds, and the restricted-environment setup
 refusals `OpenLibsInRestrictedEnv` and
-`SetGlobalNamedRustFnInRestrictedEnv`, and `StateReplacedInRestrictedEnv`
-for a restricted closure that moved its State out. `InternalError` wraps an opaque
+`SetGlobalNamedRustFnInRestrictedEnv`. `InternalError` wraps an opaque
 `InternalError` reason that only dellingr constructs: it always means a
 dellingr bug. `HostError` is the one kind dellingr never constructs; it boxes
 a `RustFunc`'s own `std::error::Error`, which `Error::source` returns and
@@ -183,10 +182,10 @@ State marks itself poisoned instead of trying to make each site unwind-safe:
   `ErrorKind::StatePoisoned` (`SaveError::StatePoisoned` for `save_state`,
   `LoadError::StatePoisoned` when a `load_state` setup
   closure returns success after a panic). `gc_collect` becomes a no-op.
-  Dropping a poisoned State is always safe. Poison marks the State behind
-  the boundary's `&mut` when the unwind arrives: a host closure that moved
-  the State out (`mem::take`, `mem::swap`) and then panicked poisons the
-  replacement, not the moved-out State. Panics from caller-supplied
+  Dropping a poisoned State is always safe. Host code cannot move a State
+  out from behind the `&mut` a boundary holds (`State` is unsized, so
+  `mem::take` and `mem::swap` do not compile), so the State a boundary
+  poisons is always the one whose bookkeeping the panic skipped. Panics from caller-supplied
   `AsRef` arguments or `user_data` destructors touch no VM bookkeeping and do
   not poison.
 - A callback that catches a panic and returns normally does not get its

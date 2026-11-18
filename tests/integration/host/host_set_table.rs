@@ -26,7 +26,7 @@ impl HostCallbacks for ErrorCounter {
     }
 }
 
-fn counting_state() -> (State, Arc<Mutex<usize>>) {
+fn counting_state() -> (Box<State>, Arc<Mutex<usize>>) {
     let count = Arc::new(Mutex::new(0));
     let state = State::builder()
         .callbacks(Box::new(ErrorCounter(Arc::clone(&count))))

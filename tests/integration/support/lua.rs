@@ -136,7 +136,7 @@ pub(crate) fn no_setup(_: &mut State) -> Result<(), std::convert::Infallible> {
 
 /// `state` saved and loaded back into a fresh State with default callbacks.
 #[cfg(feature = "snapshot")]
-pub(crate) fn reload(state: &State) -> State {
+pub(crate) fn reload(state: &State) -> Box<State> {
     let save = state.save_state().expect("the State saves");
     State::load_state(&save.bytes, Box::new(dellingr::DefaultCallbacks), no_setup)
         .expect("the save loads")

@@ -9,7 +9,7 @@ use crate::support::PushNewRustFn;
 use crate::support::{self, stack};
 
 /// Stack: [number 7, table]. Index 1 is a non-table target.
-fn number_then_table() -> State {
+fn number_then_table() -> Box<State> {
     let mut state = State::new();
     state.push_number(7.0).unwrap();
     state.new_table().unwrap();
