@@ -40,7 +40,7 @@ impl State {
                 self.stack[local_slot] = Val::Num(n);
             }
             if let Some(region) = frame.runtime.numeric_loops.get(*ip - 1) {
-                self.run_numeric_loop(region, frame.stack_bottom, ip, local_cost)?;
+                self.run_numeric_loop(region, frame, ip, local_cost)?;
             }
         } else {
             // Admission requires a forward offset here, so this jump is

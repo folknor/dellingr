@@ -217,6 +217,14 @@ tick budgets and re-record replays.
   2.9 s to 2.0 s on bygg. Results, costs and the charged prefix at a budget
   refusal, error locations, interrupt safepoints and collection timing are
   unchanged; bytecode and saves are untouched.
+- That typed loop also takes field reads of an upvalue table or of a local
+  table the loop never assigns, read once on entry (`bench/same_obj_read`
+  went from 2.4 s to 0.47 s on bygg), and a Lua function whose body up to its
+  return is the same arithmetic over its parameters, returning one value,
+  runs inside the call without an activation when its arguments are numbers
+  (`bench/global` went from 6.0 s to 2.1 s). Results, costs, the charged
+  prefix at a budget refusal, error locations, interrupt safepoints and
+  collection timing are unchanged.
 
 ## [0.7.1] - 2026-11-06
 

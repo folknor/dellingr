@@ -198,10 +198,11 @@ impl State {
 /// Execution runs the chunk's own `code`: there is no separate derived
 /// execution stream, and one is not built ahead of an optimization that
 /// needs it. A plan copied 1:1 from `code` removes no fetch, decode or
-/// dispatch. The one derived form so far is `numeric_loops`, typed regions
-/// keyed by the canonical `FOR_PREP` pc (`vm/numeric_loop.rs`): it needs no
-/// stream, because the canonical instructions stay in place as its fallback
-/// and every boundary it exposes names a canonical pc.
+/// dispatch. The derived forms so far are `numeric_loops`, typed regions
+/// keyed by the canonical `FOR_PREP` pc, and `numeric_leaf`, a whole-function
+/// plan selected at the call (`vm/numeric_loop.rs`): they need no stream,
+/// because the canonical instructions stay in place as their fallback and
+/// every boundary they expose names a canonical pc.
 /// Changed save bytes alone do not motivate one either: compiler output may
 /// change save bytes within a format (docs/save-state.md, "Format release
 /// policy"). A derived form earns its place when an optimization benefits
@@ -221,6 +222,10 @@ struct BytecodeRuntime {
     /// fixed weights. Plain data: building it allocates nothing on the heap
     /// the collector paces.
     numeric_loops: numeric_loop::NumericLoops,
+    /// This function's plan as a numeric leaf, run inside call dispatch
+    /// without an activation (`State::try_numeric_leaf`). Plain data, like
+    /// `numeric_loops`.
+    numeric_leaf: Option<numeric_loop::NumericLeaf>,
 }
 
 impl BytecodeRuntime {
@@ -1161,6 +1166,7 @@ impl State {
                 literals: literals.into_boxed_slice(),
                 caches: RuntimeCaches::new(bytecode),
                 numeric_loops: numeric_loop::NumericLoops::new(bytecode, &self.cost),
+                numeric_leaf: numeric_loop::NumericLeaf::recognize(bytecode, &self.cost),
             });
             self.bytecode_caches.insert(identity, Arc::clone(&runtime));
             Ok(runtime)
@@ -1186,6 +1192,7 @@ impl State {
             literals,
             caches: RuntimeCaches::new(bytecode),
             numeric_loops: numeric_loop::NumericLoops::new(bytecode, &self.cost),
+            numeric_leaf: numeric_loop::NumericLeaf::recognize(bytecode, &self.cost),
         });
         self.bytecode_caches.insert(identity, Arc::clone(&runtime));
         runtime

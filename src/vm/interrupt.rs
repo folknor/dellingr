@@ -20,7 +20,10 @@
 //! - the admission of every Lua function call, from Lua or from Rust (a host
 //!   call, a metamethod handler, an iterator, a library callback), after the
 //!   call-depth check and before anything is pushed, so an interruption there
-//!   is a refusal reported at the caller's call instruction. Recursion needs
+//!   is a refusal reported at the caller's call instruction. A numeric leaf
+//!   run without an activation (`State::try_numeric_leaf`) reads the same
+//!   poll flag at that point and declines to canonical admission when it is
+//!   set, so the poll there is the one that reports. Recursion needs
 //!   no backward jump, and tail recursion, which runs at constant depth, is
 //!   still a call admission each time; a return needs no poll, since every
 //!   return pairs with a call that polled;

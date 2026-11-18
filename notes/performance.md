@@ -67,30 +67,40 @@ accounting need not wait on such a stream: proof
 metadata keyed by canonical pc, an IR emitting existing opcodes, or canonical
 block boundaries priced per State are each candidate shapes for it.
 
-**Landed part: numeric-for loop regions** (`src/vm/numeric_loop.rs`). A
-numeric `for` whose body is straight-line arithmetic, `UNM`, `MOVE` and
-`LOAD_NUM` runs as a typed region keyed by its canonical `FOR_PREP` pc,
-selected by an entry guard on every register read before written (no static
-proof, no stream, no persisted opcode). `bench/arithmetic` went from 2.9 s to
-2.0 s wall on bygg. What it taught the residue: canonical-pc metadata with the
-canonical instructions left in place as the fallback needs no position map;
-deferred register writes are exact once the first checkpoint has published
-every written slot (stale numbers root nothing); an iteration's charges can be
-added at once when their sum stays below the flush threshold, with a
-per-operation path otherwise. The exact `i64` countdown was not built: the
-f64 add and compare are not where the loop's time went.
+**Landed part** (`src/vm/numeric_loop.rs`, reasoning in its module comment
+and at `State::try_numeric_leaf`; numbers in `reference/performance.md`):
+- Numeric-for loop regions over an `f64` mirror, keyed by the canonical
+  `FOR_PREP` pc and selected by an entry guard on every register read before
+  written. Their bodies take arithmetic, `UNM`, `MOVE`, `LOAD_NUM` and
+  loop-invariant field reads (`GET_UPVAL r; GET_FIELD r r k`, and `GET_FIELD`
+  on a register the body never writes), each field read once at entry as a
+  raw present number.
+- Numeric leaves: a function whose code up to its first `RETURN` is that
+  arithmetic over its parameters, returning one value, runs inside
+  `call_from_lua` without an activation when its arguments are numbers.
+  Every admission check is made first and declines rather than fails. This
+  was the argument-guarded specialization the call-site hunt asked for; the
+  tag test it named was never the cost, the activation was.
 
-**Residue:** everything outside such loops. Loop bodies with a compare-branch,
-an upvalue read, a field read or a call still run canonically (an `if` inside
-the body is the next most common shape); straight-line chains outside loops
-(fib's `SUB_RK; CALL` gives nothing, `sum + i * 2 - 1` in a loop with a call
-does); field-read-and-add (`same_obj_read`: `GET_UPVAL` + `GET_FIELD` + `ADD`
-per read; 6 of the loop's 19 dispatches are `GET_UPVAL` of one capture,
-and a fused `GET_UPVAL`+`GET_FIELD` that still reads the cell and stores the
-scratch register at each site removes them with every root kept; compiler-side
-caching of the capture was refused, see the `codegen.rs` header) and field
-updates. None of these has had its benefit established;
-each needs a workload whose loop the region does not already take.
+What the landed work taught: canonical-pc metadata with the canonical
+instructions as the fallback needs no position map or execution stream;
+deferred register writes are exact once the first checkpoint has published
+every written slot; free constituents let a fused read sit inside the
+per-operation charge path with no refusal between its halves. The exact `i64`
+countdown was not built: the f64 add and compare are not where the loop's time
+went.
+
+**Residue:** loop bodies with a compare-branch, a store or a call still run
+canonically (no registered workload has a numeric-for body that is a
+compare-branch plus region operations only; every one with an `if` also calls
+or touches a table). A region extending across a call to a numeric leaf
+(`global`'s `sum = add_one(sum)` would need a per-iteration check that the
+global still names the same closure) is the next step for call loops.
+Straight-line chains in functions that are not leaves (fib's `n - 1`,
+`n - 2`, `+` around its calls) still dispatch per instruction. Field updates
+(`self.count = self.count + n`) need a store in the region, which ends the
+invariance argument for every field the store can reach. Each needs a
+workload whose loop or call the landed forms do not already take.
 One stable shape for a two-op fusion: after a handler, test the actual next
 opcode and enter its body directly inside the dispatch loop. That is the
 predecessor-specific dispatch threaded dispatch was after, without its
@@ -170,25 +180,6 @@ shows it.
   the nearest).
 
 **Classification:** local changes, smaller ceiling; workload-gated.
-
-## PERF-012 - Argument-guarded helper specialization
-
-Raised by the codegen hunter (its second rewrite). Independent call operands
-and helper splicing are refused at `Generator::call` in `codegen.rs`; running
-the MOVE after a Lua return inside `return_to_caller` was built, measured
-and refused there. The per-activation overhead every Lua call pays is the
-`optimizations.md` call-path entry, not this one.
-
-**Residue, argument-guarded specialization:** a verified prototype could
-carry a derived numeric plan selected by guards on its arguments (`x` proven
-a number skips the tag test in `return x + 1`), and a typed numeric-for
-region could then extend across such a call. Every charge, refusal point,
-entry poll and root stays canonical; a leaf body that cannot collect, call
-out or capture may skip the physical activation on success and materialize
-the logical callee and cursor only on its failure path. Belongs with the
-typed-region work (PERF-002); the plan is designed by that consumer.
-
-**Classification:** rewrite, unmeasured; designed by PERF-002.
 
 ## PERF-015 - Inherited routes retire together on any route write
 

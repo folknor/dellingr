@@ -92,6 +92,170 @@ fn numeric_loop_region_matches_canonical_dispatch_at_every_budget() {
     }
 }
 
+/// A loop reading fields of an upvalue table and of a local table it never
+/// writes, besides arithmetic, so it runs as a region with invariant reads.
+fn field_region_program(twin: &str) -> String {
+    format!(
+        r#"
+        local up = 0
+        local cfg = {{ rate = 1.5, bias = -2 }}
+        function run()
+            local sum, last, k = 0.5, 0, 0
+            peek = function() return sum, last, k end
+            local obj = {{ gain = 0.25 }}
+            for i = 1, 40 do
+                sum = sum + cfg.rate * i - obj.gain
+                last = cfg.bias
+                k = sum * obj.gain
+                {twin}
+            end
+            return sum
+        end
+        "#
+    )
+}
+
+#[test]
+fn numeric_loop_region_with_field_reads_matches_canonical_dispatch_at_every_budget() {
+    let region = field_region_program("");
+    let canonical = field_region_program("local _u = up");
+    let models = [
+        CostModel::default(),
+        CostModel::default()
+            .with(Charge::Mul, 0)
+            .with(Charge::Sub, 5),
+        CostModel::zero(),
+    ];
+    for model in &models {
+        for budget in -1..=400 {
+            assert_eq!(
+                region_outcome(model, &region, budget),
+                region_outcome(model, &canonical, budget),
+                "budget {budget} under {model:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn numeric_loop_region_field_reads_keep_canonical_semantics() {
+    // An inherited field resolves through `__index`; a string field fails.
+    let sum = eval_number(
+        r#"
+        local base = { step = 2 }
+        local t = setmetatable({}, { __index = base })
+        local sum = 0
+        for i = 1, 5 do
+            sum = sum + t.step
+        end
+        return sum
+    "#,
+    );
+    assert_eq!(sum, 10.0);
+    let error = support::run_error(
+        r#"
+        local t = { step = "x" }
+        local sum = 0
+        for i = 1, 3 do
+            sum = sum + t.step
+        end
+        "#,
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("attempt to perform arithmetic on a string value"),
+        "{error}"
+    );
+}
+
+/// A caller looping over a numeric helper. `{twin}` is spliced at the top of
+/// the helper: a free upvalue read there keeps it off the leaf path without
+/// changing any charge.
+fn leaf_program(twin: &str) -> String {
+    format!(
+        r#"
+        local up = 0
+        local function step(x, y)
+            {twin}
+            local t = x * 2.5 - y
+            return -t / 3
+        end
+        function run()
+            local sum, last, k = 0.5, 0, 0
+            peek = function() return sum, last, k end
+            for i = 1, 40 do
+                sum = step(sum, i)
+                last = i
+                k = step(i, 1)
+            end
+            return sum
+        end
+        "#
+    )
+}
+
+#[test]
+fn numeric_leaf_matches_canonical_call_at_every_budget() {
+    let leaf = leaf_program("");
+    let canonical = leaf_program("local _u = up");
+    let models = [
+        CostModel::default(),
+        CostModel::default()
+            .with(Charge::Mul, 0)
+            .with(Charge::Sub, 5)
+            .with(Charge::Negate, 3),
+        CostModel::zero(),
+    ];
+    for model in &models {
+        for budget in -1..=500 {
+            assert_eq!(
+                region_outcome(model, &leaf, budget),
+                region_outcome(model, &canonical, budget),
+                "budget {budget} under {model:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn numeric_leaf_declines_arguments_that_are_not_numbers() {
+    let error = support::run_error(
+        r#"
+        local function inc(x) return x + 1 end
+        inc("x")
+        "#,
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("attempt to perform arithmetic on a string value"),
+        "{error}"
+    );
+    let error = support::run_error(
+        r#"
+        local function inc(x) return x + 1 end
+        inc()
+        "#,
+    );
+    assert!(
+        error.to_string().contains("arithmetic on a nil value"),
+        "{error}"
+    );
+    // `return x` reads `x`: a non-number passes through canonically.
+    let n = eval_number(
+        r#"
+        local function id(x) return x end
+        local function two(a, b) return a + b end
+        local s = id("abc")
+        local a, b = two(1, 2), two(3, 4, 5)
+        if s ~= "abc" or id() ~= nil then return -1 end
+        return a + b
+    "#,
+    );
+    assert_eq!(n, 10.0);
+}
+
 #[test]
 fn numeric_loop_region_falls_back_when_a_read_is_not_a_number() {
     let error = support::run_error(

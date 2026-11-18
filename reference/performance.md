@@ -408,6 +408,32 @@ snapshot: the `FOR_PREP` arm only passes two more arguments to its helper,
 and the region runs in an outlined function that is never live across a
 native re-entry.
 
+## Invariant field reads and numeric leaves, 2026-11-18
+
+The typed loop region also takes `GET_UPVAL r; GET_FIELD r r k` and
+`GET_FIELD` on a register the body never writes, reading each field once at
+entry (the region stores, calls and allocates nothing, so the receiver and its
+field cannot change). A Lua function whose code up to its first `RETURN` is
+the same arithmetic, returning one value, runs inside `call_from_lua` without
+an activation when its arguments are numbers (`State::try_numeric_leaf`).
+Measured on bygg with `brokkr bench wall`, best of three, A at `528a5b5`
+(`--commit`), B the same tree plus both changes (dirty):
+
+| Workload | A | B |
+|---|---:|---:|
+| `same_obj_read` | 2.4 s (4504964e) | 473 ms (5891aab5) |
+| `global` | 6.0 s (c5aa2185) | 2.1 s (4eba9b62) |
+| `arithmetic` | 1.8 s (c588fd30) | 1.8 s (cc40b853) |
+| `benchmark` | 3.6 s (c5e09438) | 3.6 s (fc82b13b) |
+| `method` | 3.0 s (2c3ffdfa) | 2.9 s (524d8734) |
+| `rust_boundary` | 3.8 s (cc93a66f) | 3.8 s (05e0cf56) |
+
+`global`'s `add_one` is a leaf; `arithmetic`'s and `benchmark`'s hot calls
+are `fib`, which branches and calls, so they are not. `method` and
+`rust_boundary` are the controls for the leaf check every Lua-object call now
+makes. `native_bytes_per_level` is identical to `528a5b5` in dev and release:
+the check is an outlined call from `call_from_lua`.
+
 ## Native stack frames and cycles
 
 The log behind reference/native-calls.md's current table: the frame-size

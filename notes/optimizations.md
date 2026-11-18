@@ -176,13 +176,15 @@ regions.
 
 What: an upvalue read goes `frame.upvalues` (a `Captures`: inline for one capture, else an `Arc` slice) to a
 pool slot, then branches on open (read the stack slot) or closed (read the
-stored value). same_obj_read executes one per field read.
+stored value). same_obj_read no longer runs them: its loop is a typed region
+that reads each upvalue field once on entry. Loops that call, store or branch
+still read upvalues per instruction.
 
-Sketch: measure first; candidates are caching the upvalue slice pointer per
-activation (as the code slice now is) and a closed-upvalue fast path. A
-compiler-side alternative is hoisting a loop-invariant upvalue read into a
-register, which is a codegen change with its own aliasing rules (the
-upvalue can be written through another closure).
+Sketch: measure first, on a workload whose loop the region does not take;
+candidates are caching the upvalue slice pointer per activation (as the code
+slice now is) and a closed-upvalue fast path. Hoisting the read into a
+register at compile time is refused (codegen.rs header: it drops scratch
+register overwrites that free dead values).
 
 ### 16-byte `Val` copies that miss store forwarding
 
