@@ -339,19 +339,6 @@ cache was declined at `array_len`. What remains:
 
 **Classification:** local.
 
-## PERF-037 - `CLOSURE` finds its runtime by a pointer-keyed map lookup
-
-Raised while closing the closure-allocation entry. `reg_closure` resolves the
-nested chunk's runtime through `State::bytecode_caches` keyed by bytecode
-address (a hash lookup per closure created). Direct child indices on the
-parent runtime (a per-runtime vector of the nested runtimes, filled lazily,
-since eager bundles would intern literals the continuous State never
-interned and change `%p` identities and save membership) would make it an
-index. Entry lifetime is still decided by the cache sweep, so a child slot
-must not keep a dropped runtime alive or name a stale one.
-
-**Classification:** experiment.
-
 ## PERF-025 - Callback gsub replacements copy the returned value and captures
 
 Raised by the strings hunter. The string and number replacement half landed

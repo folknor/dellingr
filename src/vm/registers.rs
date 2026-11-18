@@ -472,6 +472,22 @@ impl State {
     /// first, the one fallible step, so a refused closure has opened no
     /// upvalue; capturing and allocating cannot fail. Outlined, so the
     /// capture list and runtime handle stay out of `Frame::run`.
+    ///
+    /// The resolve is a hashed `bytecode_caches` lookup on every closure.
+    /// Replacing it with a per-parent child hint was built and measured on
+    /// 2026-11-18 (bygg, against a4a0c9a, A B B A): one `Cell<usize>` per
+    /// nested chunk in the parent's `RuntimeCaches` holding the child entry's
+    /// map position (from `get_full`, or `insert_full` after interning, since
+    /// an intern can collect and the sweep compacts the map), trusted only
+    /// when the entry there is keyed by the child's address, so the map stays
+    /// the only owner and no hint keeps or names a dropped runtime. `closure`
+    /// (one hot child, every hint a hit) was flat, 2330 and 2355 ms before
+    /// against 2353 and 2342 ms after; `gc_churn` moved 1.3 to 2.0 percent,
+    /// inside the layout band. The hashed hit is a negligible share of a
+    /// closure creation, so the extra resolve path and per-runtime slice were
+    /// not kept. Reopen only for a workload dominated by closure creation
+    /// (captureless closures created and not called would be the case that
+    /// gives the lookup its largest share), with a same-binary comparison.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     #[inline(never)]
     pub(super) fn reg_closure(&mut self, frame: &Frame, dst: usize, nested: u16) -> Result<()> {
