@@ -1,9 +1,9 @@
 //! State collection protocol and explicit allocation modes.
 
-use super::{Captures, GcHeap, Markable, ObjectPtr, StringPtr};
+use super::{Captures, GcHeap, Markable, ObjectPtr, StringPtr, TemplatePrototype};
 use crate::det_hash::IndexSet;
 use crate::vm::inventory::{GcCleanup, GcRoot};
-use crate::vm::{BytecodeRuntime, State, Val};
+use crate::vm::{BytecodeRuntime, State};
 use std::sync::Arc;
 
 /// A single allocation which cannot collect while graph edges are installed.
@@ -42,10 +42,9 @@ impl NoGcAllocator<'_> {
 
     pub(in crate::vm) fn alloc_table_with_template(
         self,
-        key_ids: &[u16],
-        literals: &[Val],
+        prototype: &TemplatePrototype,
     ) -> ObjectPtr {
-        self.heap.alloc_table_with_template_raw(key_ids, literals)
+        self.heap.alloc_table_with_template_raw(prototype)
     }
 
     pub(in crate::vm) fn alloc_string(self, bytes: &[u8]) -> StringPtr {
@@ -224,6 +223,7 @@ mod tests {
     use super::*;
     use crate::limits::PATTERN_CACHE_ENTRIES;
     use crate::patterns::AnchorMode;
+    use crate::vm::Val;
 
     /// A pending identity that is also the chunk of a marked closure must not
     /// stop that closure from retaining its nested prototypes' entries.

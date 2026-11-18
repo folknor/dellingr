@@ -615,6 +615,44 @@ impl TombstonesAndDense {
     }
 }
 
+/// The hash part every table from one constructor template starts with: its
+/// keys, all dead, in source order. Built once per template and State (the
+/// keys are that State's interned literals, rooted by its bytecode runtime)
+/// on the template's first execution, then copied into each new table, so a
+/// construction hashes and probes no key. The copy keeps the slot order, the
+/// index layout and the reserved capacity of a fresh build, so `pairs`
+/// order, snapshots and the backing charged to the collector are those of
+/// building the map key by key.
+///
+/// Source compilation selects this layout only for unique, all-named
+/// constructors, whose bytecode initializes slots with pinned writes in
+/// source order. Such a constructor has no positional or computed key
+/// insert to compact the reserved tombstones before those writes. The
+/// general insert path still handles other table mutations and a missed
+/// pinned lookup.
+#[derive(Debug)]
+pub(super) struct TemplatePrototype {
+    slots: HashSlots,
+    /// The slot capacity a fresh build reserves: one per key id, even when
+    /// a duplicate id (rejected by the verifier) adds no slot.
+    reserved: usize,
+}
+
+impl TemplatePrototype {
+    pub(super) fn build(key_ids: &[u16], literals: &[Val]) -> Self {
+        let mut slots = HashSlots::with_capacity(key_ids.len());
+        // bounded: one pass over the template's key ids
+        for key_id in key_ids {
+            let key = TableKey::from_prevalidated(literals[usize::from(*key_id)]);
+            slots.push_if_absent(key.value(), Val::Nil);
+        }
+        Self {
+            slots,
+            reserved: key_ids.len(),
+        }
+    }
+}
+
 impl Default for Table {
     fn default() -> Self {
         Self {
@@ -673,19 +711,15 @@ impl Table {
         }
     }
 
-    pub(super) fn with_template_keys(key_ids: &[u16], literals: &[Val]) -> Self {
-        // Source compilation selects this layout only for unique, all-named
-        // constructors, whose bytecode initializes slots with pinned writes
-        // in source order. Such a constructor has no positional or computed
-        // key insert to compact the reserved tombstones before those writes.
-        // The general insert path still handles other table mutations and a
-        // missed pinned lookup.
-        let mut map = HashSlots::with_capacity(key_ids.len());
-        for key_id in key_ids {
-            let key = literals[*key_id as usize];
-            let key = TableKey::from_prevalidated(key);
-            map.push_if_absent(key.value(), Val::Nil);
-        }
+    #[cfg(test)]
+    fn with_template_keys(key_ids: &[u16], literals: &[Val]) -> Self {
+        Self::from_template(&TemplatePrototype::build(key_ids, literals))
+    }
+
+    /// A fresh constructor-template table: the prototype's slots, all dead,
+    /// copied rather than rebuilt (`TemplatePrototype` says why).
+    pub(super) fn from_template(prototype: &TemplatePrototype) -> Self {
+        let map = prototype.slots.copy_with_capacity(prototype.reserved);
         // Count the slots actually created, not the ids supplied: the bytecode
         // verifier rejects duplicate template keys, but a duplicate that got
         // through would otherwise leave phantom tombstones and underflow
@@ -4617,6 +4651,25 @@ mod tests {
         assert_eq!(t.tally.dead(), 0);
         t.insert(h(8), Val::Bool(true)).unwrap();
         assert_eq!(t.get(&h(8)), Val::Bool(true));
+    }
+
+    /// A copied template table holds exactly the backing a key-by-key build
+    /// reserves, the spare slot of a duplicate id included: the collector
+    /// is charged that size, so a difference would move GC pacing.
+    #[test]
+    fn template_copies_keep_the_fresh_build_backing() {
+        let literals = [h(7), h(8), h(9)];
+        for key_ids in [&[0, 1, 2][..], &[0, 0], &[2, 0, 1, 1]] {
+            let prototype = TemplatePrototype::build(key_ids, &literals);
+            let copy = Table::from_template(&prototype);
+            let TableStorage::Map(map, _) = &copy.storage else {
+                panic!("a template table is map-backed");
+            };
+            assert_eq!(map.slots(), prototype.slots.slots());
+            assert_eq!(map.resident_bytes(), prototype.slots.resident_bytes());
+            assert_eq!(copy.resident_bytes(), prototype.slots.resident_bytes());
+            assert_eq!(copy.tally.dead(), prototype.slots.len());
+        }
     }
 
     #[test]

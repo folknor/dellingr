@@ -85,8 +85,8 @@ pub(super) use lua_val::Val;
 pub(super) use object::ObjectPtr;
 use object::{GcHeap, GcPolicy, StringPtr, UpvaluePool};
 use rng::VmRng;
-use table::Table;
 pub(crate) use table::integer_index;
+use table::{Table, TemplatePrototype};
 
 use crate::limits::{
     MAX_CALL_DEPTH, MAX_STACK_SIZE, PATTERN_CACHE_BYTES, PATTERN_CACHE_ENTRIES, check_string_size,
@@ -221,6 +221,17 @@ struct BytecodeRuntime {
     /// fixed weights. Plain data: building it allocates nothing on the heap
     /// the collector paces.
     numeric_loops: numeric_loop::NumericLoops,
+}
+
+impl BytecodeRuntime {
+    /// The prototype of constructor template `template`, built from this
+    /// runtime's literals on the template's first execution.
+    #[inline]
+    fn template(&self, template: usize) -> &TemplatePrototype {
+        self.caches.table_templates[template].get_or_init(|| {
+            TemplatePrototype::build(&self.bytecode.table_templates[template], &self.literals)
+        })
+    }
 }
 
 /// The main interface into the Lua VM.
@@ -1994,6 +2005,9 @@ mod runtime_tests {
                 field_lookup,
                 set_field_lookup,
                 tfor_cursor,
+                // Prototypes hold only the runtime's own literals as keys,
+                // never a handle that can die while the runtime lives.
+                table_templates: _,
                 // The collector's mark flag, not a cache family.
                 reached: _,
             } = &entry.caches;

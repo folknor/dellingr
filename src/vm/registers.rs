@@ -89,10 +89,8 @@ impl State {
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     #[inline(never)]
     pub(super) fn reg_new_table_template(&mut self, frame: &Frame, dst: usize, template: u16) {
-        let template = &frame.bytecode().table_templates[usize::from(template)];
-        let obj = self
-            .allocator()
-            .alloc_table_with_template(template, &frame.runtime.literals);
+        let prototype = frame.runtime.template(usize::from(template));
+        let obj = self.allocator().alloc_table_with_template(prototype);
         self.stack[dst] = Val::Obj(obj);
     }
 

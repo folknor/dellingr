@@ -1,12 +1,12 @@
 //! Per-State runtime caches for immutable bytecode.
 
-use std::cell::Cell;
+use std::cell::{Cell, OnceCell};
 
 use crate::compiler::Bytecode;
 
 use super::lua_val::Val;
 use super::object::{GcHeap, ObjectPtr};
-use super::table::{HashProbe, KeyedIndex, SlotRef};
+use super::table::{HashProbe, KeyedIndex, SlotRef, TemplatePrototype};
 
 // Under `disable-inline-caches` every cache read misses (the builtin mirror
 // included), and every library leaf declines to its callback (`vm/leaf.rs`). Only this crate's unit tests can turn hits back on, per thread,
@@ -343,6 +343,12 @@ pub(super) struct RuntimeCaches {
     pub(super) field_lookup: Vec<FieldLookupCacheSlot>,
     pub(super) set_field_lookup: Vec<SetFieldLookupCacheSlot>,
     pub(super) tfor_cursor: Vec<TforCursorSlot>,
+    /// One prototype per `table_templates` entry, filled on the template's
+    /// first execution (`BytecodeRuntime::template`), so an unexecuted
+    /// template costs only its empty cell at load. Its keys are the runtime's literals,
+    /// which the runtime roots. Plain data outside the paced heap, like
+    /// `numeric_loops`; each table copied from one is charged as usual.
+    pub(super) table_templates: Box<[OnceCell<TemplatePrototype>]>,
     /// Set when the mark phase traces a closure running this bundle, and
     /// consumed by `State::sweep_bytecode_caches` for every entry in the
     /// same collection, so it is false between collections. Not a cache;
@@ -382,6 +388,7 @@ impl RuntimeCaches {
             field_lookup: slots(bc.field_cache_slots),
             set_field_lookup: slots(bc.set_field_cache_slots),
             tfor_cursor: slots(bc.tfor_cursor_slots),
+            table_templates: bc.table_templates.iter().map(|_| OnceCell::new()).collect(),
             reached: Cell::new(false),
         }
     }
@@ -443,6 +450,8 @@ impl RuntimeCaches {
             field_lookup,
             set_field_lookup,
             tfor_cursor,
+            // Keys are this runtime's own literals, live as long as it is.
+            table_templates: _,
             reached: _, // The collector's own flag, not a cache cell.
         } = self;
         for slot in global_lookup {
@@ -491,6 +500,7 @@ impl RuntimeCaches {
             field_lookup,
             set_field_lookup,
             tfor_cursor,
+            table_templates: _,
             reached: _,
         } = self;
         let mut out = Vec::new();

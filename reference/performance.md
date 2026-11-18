@@ -221,12 +221,33 @@ pairs of the packed layout:
 `deep_stack` pushes and pops 32 entries on a stack 500 deep whose logical
 array once reached 1024 keys, taking `#s` on every operation.
 `record_tables` is about 5% slower (WARM blocks 47 ms against 50 ms, in
-every block), cause unisolated. It never reaches the array part; its
-executed differences are code generation around the template
-constructor: `with_template_keys` now calls `HashSlots::push_new` outlined
-and stages key and value through the stack, and the pinned-init decrement
-is materialized differently. Forcing `push_new` inline did not recover it
-(2.6 s), so how much is that work and how much code placement is open.
+every block). It never reaches the array part; its executed differences
+are code generation around the template constructor, which then rebuilt
+each instance's hash part key by key: `push_new` went outlined and staged
+key and value through the stack. Forcing `push_new` inline did not recover
+it (2.6 s). The next entry removes that per-instance build.
+
+## Constructor templates copied from a prototype, 2026-11-18
+
+A named-field constructor template used to build every instance's hash
+part key by key: hash, probe and insert each key as a nil placeholder.
+Each bytecode runtime now builds one `TemplatePrototype` per template on its
+first execution and every instance copies it: the slot vector at the
+reserved capacity, the hashbrown index by `clone`, which keeps the bucket
+layout. Slot order, backing bytes charged to the collector, snapshots and
+costs are those of the key-by-key build. Taken on bygg against fb1081f
+(release, `brokkr bench wall`, best of 3, the change run from a dirty tree),
+interleaved with 5c4f6e5:
+
+| Workload | 5c4f6e5 | fb1081f | Change |
+|---|---|---|---|
+| `record_tables` | 2.4 s | 2.6 s | 2.0 s, 2.0 s |
+
+On `examples/alloc/record_tables.lua` with 2000 warm iterations, `perf
+stat` against fb1081f: cycles 2.53G to 2.00G, instructions 10.44G to
+8.79G, `ex_no_retire.load_not_complete` 0.87G to 0.64G. This also retires
+the fb1081f regression above: the code whose generation shifted no longer
+runs per construction.
 
 ## Closure creation in one allocation, 2026-11-17
 

@@ -49,6 +49,22 @@ impl HashSlots {
         }
     }
 
+    /// A copy of these slots and their index, with room for exactly
+    /// `capacity` slots (at least `len`). The index copy keeps the bucket
+    /// count and layout, so the copy is indistinguishable from the same
+    /// pushes made into `with_capacity(capacity)`: same order, same
+    /// `resident_bytes`. Constructor templates use it to skip rehashing and
+    /// reprobing every key on every construction.
+    pub(super) fn copy_with_capacity(&self, capacity: usize) -> Self {
+        debug_assert!(capacity >= self.entries.len());
+        let mut entries = Vec::with_capacity(capacity);
+        entries.extend_from_slice(&self.entries);
+        Self {
+            entries,
+            index: self.index.clone(),
+        }
+    }
+
     /// The number of slots, vacant ones included.
     #[inline]
     pub(super) fn len(&self) -> usize {

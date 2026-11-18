@@ -314,25 +314,6 @@ saving is one short hash and two probes per field.
 
 **Classification:** micro, low conviction until measured.
 
----
-
-## PERF-040 - Template constructors slowed about 5% with no executed-work change
-
-Raised while landing the table `dense` proof (packed with the tombstone
-count in `TombstonesAndDense`, `vm/table.rs`). `bench/record_tables`
-measured 2.4-2.5 s at 5c4f6e5 against 2.6 s with the change (bygg, three
-interleaved pairs, WARM blocks 47 ms against 50 ms in every block). The
-workload never reaches the array part. Disassembly of the two binaries
-shows `with_template_keys` now calling `HashSlots::push_new` outlined,
-staging key and value on the stack and reloading them as one 32-byte load,
-and the pinned-init decrement materialized differently. Forcing `push_new`
-inline did not recover the time, so the cause is open: code placement, or
-another code-generation change around the template constructor. Worth a
-`perf` comparison of cycles and `ex_no_retire.load_not_complete` on
-`hotpath.record_tables`.
-
-**Classification:** local.
-
 ## Accounts added to existing entries
 
 This hunt's account of these mechanisms went into the entry already filed for

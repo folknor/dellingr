@@ -24,7 +24,7 @@ use super::BytecodeRuntime;
 use super::LuaType;
 use super::Table;
 use super::Val;
-use super::table::TableEditor;
+use super::table::{TableEditor, TemplatePrototype};
 
 // ============================================================================
 // Upvalue Pool - Arena-based upvalue storage
@@ -797,8 +797,8 @@ impl GcHeap {
     }
 
     /// Allocate a new table pre-filled from a constructor template.
-    fn alloc_table_with_template_raw(&mut self, key_ids: &[u16], literals: &[Val]) -> ObjectPtr {
-        let table = Table::with_template_keys(key_ids, literals);
+    fn alloc_table_with_template_raw(&mut self, prototype: &TemplatePrototype) -> ObjectPtr {
+        let table = Table::from_template(prototype);
         self.charge_table_backing(&table);
         self.publish_object(RawObject::Table(table))
     }

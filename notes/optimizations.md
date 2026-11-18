@@ -704,18 +704,18 @@ stack. That is a larger bytecode/stack-shape change than the pinned
 write path, and the pinned path only proved a small remaining win after
 capacity pre-sizing.
 
-Caveat: if the template were to hold `Val::Str` or table objects
-directly, closure marking / chunk rooting would need extension to keep
-those reachable. Storing only literal-id ints in the template avoids
-this entirely - the strings get interned at template-instantiation
-time using the existing literal-string path.
+The bytecode keeps only literal ids; the State-local `TemplatePrototype`
+(built lazily in `RuntimeCaches`) holds the interned keys, which the bytecode
+runtime's literals already root, and each instance copies its slots and
+index instead of rehashing the keys.
 
 The 2026-11-17 performance hunt (codegen scope) proposed compiling a
 constructor plan holding its key layout, initialization sequence and value
 sources, with larger records sharing an immutable key/index structure between
 instances and compiler-proven initialization writing known slots directly (the
-result is private until the expression completes). Today `with_template_keys`
-builds a fresh map inserting every key as nil and each pinned initialization
+result is private until the expression completes). Today each instance
+copies a per-runtime prototype map holding every key as nil (no per-instance
+hashing; the index is still copied per instance rather than shared) and each pinned initialization
 (`registers.rs`) checks the constructor table, the indexed key, liveness
 bookkeeping and keeps a fallback insert. It must not evaluate every value and
 then charge all writes together: a later value may call code or fail, so

@@ -536,7 +536,7 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
     }
     for (template_idx, template) in view.table_templates().iter().enumerate() {
         // Keys are compared by content, not id: two equal-content string
-        // literals intern to one runtime key, and `Table::with_template_keys`
+        // literals intern to one runtime key, and `TemplatePrototype::build`
         // relies on every template key being distinct (the parser guarantees
         // it; a forged snapshot must not get past this check without it).
         let mut seen: std::collections::BTreeSet<&[u8]> = std::collections::BTreeSet::new();
