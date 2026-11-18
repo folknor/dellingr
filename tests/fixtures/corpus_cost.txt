@@ -61,6 +61,7 @@ examples/negative_zero.lua|065acf801523f2bf1867eae2281ab404|2
 examples/numerics/arithmetic.lua|6377d75406074f15184e1f03a00f15b8|7217916
 examples/numerics/constants.lua|04a3cab7b19967cd1f71ad224c5a5ea6|3505000
 examples/numerics/cos.lua|061e0ee13eb8db17b9da6ca0a41a0d65|3612000
+examples/numerics/cull.lua|7f6872ee5a301537ec57436c30278e9b|434768
 examples/numerics/math.lua|ae2f33864c810825e2b6ec753ece6b21|1745800
 examples/paren_new_line_call.lua|c5027ec3fde16da0c7a49632b2353746|4
 examples/parse/large_source.lua|3d87b6e87edaa28e17783d5c9a89b3d3|97650

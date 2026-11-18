@@ -352,8 +352,8 @@ fn literal_right_operands_branch_without_a_load() {
         assert!(loads <= 1, "{source}: {ops:?}");
     }
     // A string literal is ordered through registers, and a literal on the
-    // left stays a register operand so a type error names the operands in
-    // source order.
+    // left is loaded into a scratch register (see `cond_jump` for why it is
+    // not fused).
     for source in [
         "local s = 'a' if s < 'b' then return end",
         "local n = 0 if 3 < n then return end",
@@ -409,6 +409,36 @@ fn lowered_conditions_keep_their_semantics() {
         (
             "local x = 0/0 if x < 1 or x >= 1 then return 1 end return 2",
             2.0,
+        ),
+        // Orderings that must jump on true (`or`, `not`), register and
+        // literal, NaN included.
+        (
+            "local x, y = 0/0, 1 if x < y or y > x then return 1 end return 2",
+            2.0,
+        ),
+        (
+            "local x, y = 0/0, 1 if not (x <= y) and not (x >= 1) then return 1 end return 2",
+            1.0,
+        ),
+        (
+            "local x, y = 1, 2 if x < y or y < x then return 1 end return 2",
+            1.0,
+        ),
+        (
+            "local x, y = 2, 2 if x < y or x > 2 or x >= y then return 1 end return 2",
+            1.0,
+        ),
+        (
+            "local x, y = 3, 2 if not (x > y) then return 1 end return 2",
+            2.0,
+        ),
+        (
+            "local s, t = 'a', 'b' if s < t or s > t then return 1 end return 2",
+            1.0,
+        ),
+        (
+            "local s = 'b' if not (s <= 'a') then return 1 end return 2",
+            1.0,
         ),
         ("local x = 0/0 if x ~= x then return 1 end return 2", 1.0),
         ("local x = 0/0 if x == 0/0 then return 1 end return 2", 2.0),
@@ -1581,21 +1611,40 @@ fn compare_branches_keep_comparison_semantics() {
         eval_number("local nan = 0/0 if nan <= nan then return 1 else return 2 end"),
         2.0
     );
-    // The branch still raises the comparison type error.
-    let mut state = State::new();
-    crate::Program::compile("if 1 < 'x' then return 1 end return 0", None)
-        .and_then(|program| state.load(&program))
-        .expect("type-error fixture compiles");
-    let error = state
-        .call(ArgCount::Fixed(0), RetCount::Fixed(1))
-        .expect_err("number/string comparison must still error in a branch");
-    assert!(
-        matches!(
-            error.kind(),
-            ErrorKind::TypeError(TypeError::Comparison(LuaType::Number, LuaType::String))
+    // Every branch form still raises the comparison type error, operands
+    // in source order, whether the condition jumps on false or on true.
+    for (source, lhs, rhs) in [
+        (
+            "if 1 < 'x' then return 1 end return 0",
+            LuaType::Number,
+            LuaType::String,
         ),
-        "unexpected comparison error kind: {error}"
-    );
+        (
+            "local a, b = 1, 'x' if a < b or false then return 1 end return 0",
+            LuaType::Number,
+            LuaType::String,
+        ),
+        (
+            "local a = 'x' if not (a >= 1) then return 1 end return 0",
+            LuaType::String,
+            LuaType::Number,
+        ),
+    ] {
+        let mut state = State::new();
+        crate::Program::compile(source, None)
+            .and_then(|program| state.load(&program))
+            .expect("type-error fixture compiles");
+        let error = state
+            .call(ArgCount::Fixed(0), RetCount::Fixed(1))
+            .expect_err("a mixed comparison must still error in a branch");
+        assert!(
+            matches!(
+                error.kind(),
+                ErrorKind::TypeError(TypeError::Comparison(l, r)) if *l == lhs && *r == rhs
+            ),
+            "{source}: unexpected comparison error kind: {error}"
+        );
+    }
 }
 
 #[test]

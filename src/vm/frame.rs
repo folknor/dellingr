@@ -711,7 +711,11 @@ impl Frame {
                 // Compare-and-branch: jump when the comparison is false.
                 // One range arm with the variant decode outlined - per-
                 // variant arms measurably perturbed the dispatch loop's
-                // codegen in the stack VM.
+                // codegen in the stack VM. Matching a number pair on `op`
+                // inline, as the literal arm below does, instead of
+                // `compare_vals`'s `ordering` and `partial_cmp`, was measured
+                // together with a branch-if-true family on the `cull`
+                // workload (see `cond_jump` in codegen.rs) and was flat.
                 Instr::OP_BR_LT..=Instr::OP_BR_NE => {
                     fixed_cost!(Instr::OP_BR_LT, Instr::OP_BR_NE);
                     let op = CompareOp::from_branch_opcode(inst.opcode())

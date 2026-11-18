@@ -972,7 +972,16 @@ impl Generator<'_> {
                 let (lhs_reg, lhs) = self.operand_reg(lhs)?;
                 // The branch jumps when the comparison is false; jumping on
                 // true takes the complementary equality, or for an ordering
-                // a branch over an unconditional jump.
+                // a branch over an unconditional jump. A branch-if-true
+                // family for the orderings (eight opcodes, register and
+                // number literal) was built and measured on bygg against
+                // dd7f2a2 on the `cull` workload, whose `or` chains reject
+                // 1930 of 2016 pairs on an early ordering: the dump lost
+                // about one dispatch in eight, and interleaved warm walls
+                // went 24531 to 24363 and 24459 to 24431 us, inside the
+                // noise. The perfectly predicted `JMP` overlaps with its
+                // neighbours; a hit and a layout loss cancelling was not
+                // ruled out. It is not worth eight persisted opcodes.
                 let (op, over) = match (jump_if, last.op.complement()) {
                     (false, _) => (last.op, false),
                     (true, Some(complement)) => (complement, false),

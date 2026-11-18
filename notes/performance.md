@@ -164,36 +164,24 @@ measurement attributing branch misses to the dispatch branch before work
 begins. The stable-Rust route that tests the actual next opcode and enters
 its handler directly lives under PERF-002.
 
-## PERF-004 - Remaining constant operand and loop-step forms
+## PERF-004 - Dynamic string-key reads through uncached `GET_TABLE`
 
-Raised by the codegen, dispatch and lookup hunters. Predicate lowering, the
-literal compare-and-branch forms, `t["k"]` on the field path and the fused
-generic `for` step have landed. Fusing a literal load into its consumer
-(`t[1]`, and by extension `t.k = 0`, `local b = x < 2`, `2 < n`) was built,
-measured flat and refused; the reasoning and numbers are at `Generator::suffix`
-and `cond_jump` in `codegen.rs`. Each remaining item waits for a workload that
-shows it.
+Raised by the lookup hunter. The other constant-operand and loop-step forms
+have landed or were measured flat and refused (reasons at `Generator::suffix`,
+`cond_jump` in `codegen.rs` and the compare-branch arm in `frame.rs`).
 
-**Bottleneck:**
-- A dynamic string key (`t[name]`) uses uncached `GET_TABLE`. Every registered
-  dynamic-string-key site is polymorphic (`rekey`, `fill`'s 3000-key store,
-  `object_fields`), so a last-key cache tied to the receiver would only miss;
-  `fill`'s one monomorphic read runs once per fresh table. If a workload shows
-  hot monomorphic dynamic reads across receivers of one layout, the shape is a
-  cached `KeyedIndex` checked with `value_if_key` against the live slot, not a
-  field plan: the field cache trusts one key per slot with no key compare.
-- An ordering comparison that must jump when true (`or`'s left operand, a
-  `not` in a condition) is a compare-branch over a `JMP`; the extra dispatch
-  runs only when the comparison holds. A branch-when-true family (RR and RK
-  orderings, eight opcodes) keeps every register; no registered workload has
-  a hot site.
-- The register-register comparison arms decode `op.ordering()` and run
-  `partial_cmp` inside the inlined `compare_vals`, where the number-literal arm
-  matches the operator directly. Whether that survives optimization needs the
-  assembly and a hot RR site; none is registered (`rust_boundary`'s `less` is
-  the nearest).
+**Bottleneck:** a dynamic string key (`t[name]`) reads through uncached
+`GET_TABLE`. The only registered dynamic-key reads give a last-key cache
+nothing to hit: `rekey` reads one receiver at one site with the key cycling
+over 64 names, and `fill` reads once per freshly built table. `fill`'s
+3000-key site and `object_fields`' tag site are stores. If a workload shows
+hot reads repeating one key across receivers of one layout, the shape is a
+cached `KeyedIndex` checked with `value_if_key` against the live table and
+key, not a field plan (the field cache trusts one key per slot with no key
+compare); a missing or cleared slot still takes the ordinary lookup so
+`__index` can answer.
 
-**Classification:** local changes, smaller ceiling; workload-gated.
+**Classification:** local change, smaller ceiling; workload-gated.
 
 ## Accounts added to existing entries
 

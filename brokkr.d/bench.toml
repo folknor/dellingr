@@ -76,6 +76,10 @@ xxhash = "14bf617d8736c9c3fa6f93242cd231f5"
 file = "bench/arithmetic.lua"
 xxhash = "5b241180b776f94825c7bc316347f1f4"
 
+[data.workloads.bench.cull]
+file = "bench/cull.lua"
+xxhash = "a2875cde6c135d563ab052742df457c4"
+
 [data.workloads.bench.constants]
 file = "bench/constants.lua"
 xxhash = "468576a94bddba291b96b604288b988c"
@@ -254,6 +258,10 @@ xxhash = "fd1b898cc308645a3135b078c4fd180a"
 [data.workloads.hotpath.arithmetic]
 file = "examples/numerics/arithmetic.lua"
 xxhash = "6377d75406074f15184e1f03a00f15b8"
+
+[data.workloads.hotpath.cull]
+file = "examples/numerics/cull.lua"
+xxhash = "7f6872ee5a301537ec57436c30278e9b"
 
 [data.workloads.hotpath.constants]
 file = "examples/numerics/constants.lua"

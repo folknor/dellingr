@@ -68,6 +68,7 @@ examples! {
     numerics_arithmetic: "examples/numerics/arithmetic.lua",
     numerics_constants: "examples/numerics/constants.lua",
     numerics_cos: "examples/numerics/cos.lua",
+    numerics_cull: "examples/numerics/cull.lua",
     numerics_math: "examples/numerics/math.lua",
     paren_new_line_call: "examples/paren_new_line_call.lua",
     parse_large_source: "examples/parse/large_source.lua",
