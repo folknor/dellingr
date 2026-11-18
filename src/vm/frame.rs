@@ -130,8 +130,12 @@ impl Frame {
         self.bytecode.number_literals[i as usize]
     }
 
-    /// Settle this frame's accrued cost before control can re-enter Lua. Table
-    /// helpers call this only after a direct access path has been ruled out.
+    /// Publish the invocation's pending batch before code outside the
+    /// dispatch loop can touch the meter (a Rust callee, a leaf, an iterator,
+    /// a metamethod handler). Table helpers call this only after a direct
+    /// access path has been ruled out. The resolvers take the batch for that
+    /// reason: hoisting their flush to the caller would still need it in the
+    /// `reg_*` helpers and save no meter write.
     pub(super) fn flush_local_cost(state: &mut State, local_cost: &mut u64) -> Result<()> {
         if *local_cost > 0 {
             state.charge_cost(*local_cost)?;
@@ -174,25 +178,28 @@ impl Frame {
     /// Calls and access helpers can additionally charge native work, including
     /// strings, patterns, table traversal and metamethod callbacks.
     pub(super) fn run(frames: &mut Vec<Frame>, state: &mut State) -> Result<(usize, usize)> {
-        // Batch cost checking: accumulate locally and flush periodically.
-        // Calls and returns flush before leaving, so a batch never outlives
-        // the run of the frame that accrued it.
+        // Batch cost checking: the invocation owns one pending batch across
+        // all its Lua frames. Lua calls, tail calls and returns into a Lua
+        // caller carry it forward, since admission and return never touch
+        // the meter. It is published before anything that can (a Rust
+        // callee, a library leaf, a callable object, an iterator, a
+        // metamethod handler), so pending is zero whenever non-dispatch code
+        // runs, and settled here on every exit.
         let mut pending: u64 = 0;
         let result = crate::native_call!(
             "run->eval_batched",
             Self::eval_batched(frames, state, &mut pending)
         );
-        if result.is_err() && pending > 0 {
-            // An error leaving the dispatch loop must still charge the work
-            // that already executed, or `cost_used` after a failed callback
-            // would depend on the batching interval rather than on the
-            // script. Pending cost never reaches the budget edge (add_cost!
-            // flushes first when it would), so for any error other than
-            // BudgetExceeded this charge is admitted. For BudgetExceeded the
-            // meter is already at or below zero and refuses it without
-            // mutating anything, which keeps that path's `cost_used`
-            // unchanged. Either way the original error is what propagates.
-            let _admitted = state.cost_meter().consume(pending);
+        if pending > 0 {
+            // The work that already executed is charged on every exit, Ok
+            // or Err, so `cost_used` after a return or a failed callback
+            // does not depend on the batching interval. A positive batch
+            // stays below the flush threshold, which a finite budget caps at
+            // its room (add_cost! settles first when it would reach it), so
+            // this charge is always admitted; a refused settle leaves
+            // nothing pending. On error the original error propagates.
+            let admitted = state.cost_meter().consume(pending);
+            debug_assert!(admitted, "a pending batch always fits the budget");
         }
         result
     }
@@ -795,12 +802,11 @@ impl Frame {
                 Instr::OP_CALL => {
                     fixed_cost!(Instr::OP_CALL);
                     state.record_call_site(*ip);
-                    Self::flush_local_cost(state, local_cost)?;
                     let args = state.call_window(ra, inst.call_args())?;
                     let results = inst.call_results();
                     if crate::native_call!(
                         "run_frame->call_from_lua",
-                        state.call_from_lua(args, results, inst.call_is_method())
+                        state.call_from_lua(args, results, inst.call_is_method(), local_cost)
                     )? {
                         return Ok(Leave::Call);
                     }
@@ -810,8 +816,8 @@ impl Frame {
                 }
                 Instr::OP_RETURN => {
                     fixed_cost!(Instr::OP_RETURN);
-                    // Flush any remaining accumulated cost before returning
-                    Self::flush_local_cost(state, local_cost)?;
+                    // No flush: a return into a Lua caller keeps the batch,
+                    // and `Frame::run` settles it when the entry frame returns.
                     let count = match inst.return_count() {
                         RetCount::Fixed(n) => usize::from(n),
                         RetCount::All => state.stack.len() - ra,

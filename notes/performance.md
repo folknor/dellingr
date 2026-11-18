@@ -165,38 +165,31 @@ frame-size history of the `TFOR_CALL` arm.
 
 **Classification:** local changes, smaller ceiling.
 
-## PERF-006 - Accounting owned by the invocation, not flushed at every frame transition
+## PERF-006 - Generic-for iterator steps still settle the pending batch
 
-Raised by the cost-charging hunter.
+Raised by the cost-charging hunter; narrowed when its call and return half
+landed.
 
-**Bottleneck:** the pending counter belongs to `Frame::run`, which drives many
-Lua frames, yet calls and returns flush it (`frame.rs`) even when control stays
-in the same dispatch invocation. `TFOR_CALL` flushes eagerly before discovering
-that the recognized `next`/`ipairs` path completes without a callback
-(`eval_control.rs`), so `for _, v in pairs(t) do sum = sum + v end` settles its
-one pending add every iteration. `local_cost` also travels through table and
-metamethod resolution so a deeper helper can flush it.
+**Landed:** the pending batch is owned by the `Frame::run` invocation. Lua
+calls, Lua tail calls and returns into a Lua caller carry it forward (Lua
+admission and return never touch the meter); `call_from_lua` and
+`tail_call_from_lua` publish it only when the callee is not a Lua function,
+and `Frame::run` settles it on every exit. The rule: pending is zero whenever
+code outside the dispatch loop runs. No cost, prefix or golden changed.
+Interleaved wall pairs on bygg against b9becfb: method 3.2 and 3.3 s to 3.1 s
+in both pairs, arithmetic and tail_call flat (no same-binary control run).
 
-**Redesign:** an invocation-owned accounting context. Lua-to-Lua calls, tail
-calls, returns and recognized iterator fast paths keep the same owner.
-Publish complete accounting to `State` before arbitrary Rust runs, reload it
-after (the callback may have charged, reset the budget or made nested calls),
-and publish on escape before budget diagnostics or host error callbacks. The
-boundary follows actual independent access to the meter. Make the
-resolver's pending-call outcome carry the continuation that synchronizes
-accounting, and keep meter ownership out of helpers that only do direct work.
+**Residue:** `TFOR_CALL` still flushes eagerly before its `next`/`ipairs` fast
+paths, so `for _, v in pairs(t) do sum = sum + v end` settles its one pending
+add every iteration. Deferring that flush into the iterator helper or behind a
+probe was measured to grow release `Frame::run` (reference/performance.md
+"Shared vararg arena"); a retry belongs with the PERF-004 residue's fused
+generic-for step, measured the same way.
 
-**Payoff:** avoids short batches in method-heavy code, recursive Lua and
-generic iteration; fewer occasions where local execution state becomes shared
-state passed through helpers.
-
-**Risks:** the mid-run reset contract (`vm.rs`) makes reload after Rust
-essential; error notification ordering. The extra context must stay compact,
-since dispatch stays live across native re-entry. Retain the iterative call
-stack and stack-cap admission.
-
-**Classification:** rewrite, complementary to region accounting (appended to
-`optimizations.md` "Cost accounting on every arithmetic op").
+**Not pursued:** removing `local_cost` from the metamethod resolvers. The flush
+must still precede every handler call, so it would only move one level up into
+the `reg_*` helpers, which keep the parameter; no meter write is saved. A
+dispatch-local cached threshold was measured neutral under PERF-007.
 
 ## PERF-008 - Rust library calls go through the host stack protocol
 

@@ -285,8 +285,10 @@ impl State {
         num_args: u8,
         num_ret_expected: RetCount,
         method: bool,
+        local_cost: &mut u64,
     ) -> Result<bool> {
         let idx = self.call_base(num_args)?;
+        self.publish_cost_unless_lua_callee(idx, local_cost)?;
         // A library leaf runs here without a callback (`vm/leaf.rs`).
         if matches!(self.stack[idx], Val::RustFn(_))
             && let Some(n) = self.call_leaf(idx, num_args)?
@@ -310,6 +312,25 @@ impl State {
                 Ok(false)
             }
             None => Ok(true),
+        }
+    }
+
+    /// Publish the dispatch loop's pending cost unless the callee at `idx` is
+    /// a Lua function. Lua admission never touches the meter, so the batch
+    /// carries into the callee; every other callee (a Rust function, a
+    /// library leaf, a callable object, a non-callable value's error) sees a
+    /// complete meter. A callable object publishes even when its `__call`
+    /// resolves to a Lua function: resolution is not inspected here.
+    #[inline(always)]
+    fn publish_cost_unless_lua_callee(&mut self, idx: usize, local_cost: &mut u64) -> Result<()> {
+        let lua = match self.stack[idx] {
+            Val::Obj(ptr) => self.heap.as_lua_function_ref(ptr).is_some(),
+            _ => false,
+        };
+        if lua {
+            Ok(())
+        } else {
+            Frame::flush_local_cost(self, local_cost)
         }
     }
 
@@ -340,8 +361,8 @@ impl State {
     /// `State::replace_tail_frame` replaces the caller's frame.
     ///
     /// The arm's whole body, from recording the call site (`inst` at
-    /// register `ra`, the cursor `ip` past it) and settling the frame's
-    /// pending cost on: out of line, so the dispatch loop's frame, live
+    /// register `ra`, the cursor `ip` past it) on, including publishing the
+    /// pending cost for a callee that is not a Lua function: out of line, so the dispatch loop's frame, live
     /// across every native re-entry, holds none of its temporaries. The
     /// result stays register-sized for the same reason: handing back a
     /// whole `Leave` made the loop reserve a separate return slot for it.
@@ -354,9 +375,9 @@ impl State {
         local_cost: &mut u64,
     ) -> Result<Option<u8>> {
         self.record_call_site(ip);
-        Frame::flush_local_cost(self, local_cost)?;
         let num_args = self.call_window(ra, inst.call_args())?;
         let callee = self.call_base(num_args)?;
+        self.publish_cost_unless_lua_callee(callee, local_cost)?;
         let caller_bottom = self.in_flight.stack_bottom;
         let destination = caller_bottom - 1;
         self.close_upvalues(caller_bottom);
