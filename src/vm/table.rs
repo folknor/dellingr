@@ -2737,7 +2737,16 @@ impl Table {
 
     /// Advance from `control`, retaining physical storage indices. A dead
     /// control slot remains valid, matching Lua's `next` behaviour here.
-    pub(super) fn next_with_index(&self, control: &Val) -> TableNextWithIndex {
+    ///
+    /// `hint` is a cursor's index from an earlier step (the TFOR_CALL `next`
+    /// cursor). It can only spare the hash lookup, so it is consulted after
+    /// the control has been classified: an array key resumes the array scan
+    /// whatever the hint says. That order is load-bearing, because a key in
+    /// `1..=vlen` can still own a dead hash slot (left by migration, or by a
+    /// removal before the key was appended directly), and a hint naming that
+    /// slot would otherwise resume in the hash part. A hint that does not hold
+    /// `control` falls back to the lookup, so the answer never depends on it.
+    pub(super) fn next_with_index(&self, control: &Val, hint: Option<usize>) -> TableNextWithIndex {
         if matches!(control, Val::Nil) {
             return self.next_live_from(Position::Array(0));
         }
@@ -2749,47 +2758,31 @@ impl Table {
         if let Some(key) = self.array_key(control) {
             return self.next_live_from(Position::Array(key));
         }
-        let index = match &self.storage {
-            TableStorage::Inline { entries, len } => entries
-                .iter()
-                .take(*len as usize)
-                .position(|(key, _)| key == control),
-            TableStorage::Map(map, _) => map.find(*control),
+        let index = match hint {
+            Some(index) if self.hash_slot_holds(index, control) => Some(index),
+            _ => match &self.storage {
+                TableStorage::Inline { entries, len } => entries
+                    .iter()
+                    .take(*len as usize)
+                    .position(|(key, _)| key == control),
+                TableStorage::Map(map, _) => map.find(*control),
+            },
         };
         index.map_or(TableNextWithIndex::InvalidKey, |index| {
             self.next_live_from(Position::Hash(index.saturating_add(1)))
         })
     }
 
-    /// Validate a cursor's raw slot key, including a tombstone, then advance
-    /// with the same storage-specific walk as `next_with_index`.
-    pub(super) fn next_from_matching_index(
-        &self,
-        index: usize,
-        control: &Val,
-    ) -> TableNextWithIndex {
-        if !is_valid_table_key(control) {
-            return TableNextWithIndex::InvalidKey;
-        }
-        if index & ARRAY_SLOT_TAG != 0 {
-            let slot = index & !ARRAY_SLOT_TAG;
-            return if self.array_key(control) == Some(slot + 1) {
-                self.next_live_from(Position::Array(slot + 1))
-            } else {
-                TableNextWithIndex::InvalidKey
-            };
-        }
-        let matches = match &self.storage {
+    /// Whether hash slot `index` holds the valid key `control`, live or
+    /// tombstoned. A non-array key has at most one hash slot, so for one a hit
+    /// is the slot the lookup would find. A tagged array index never matches.
+    fn hash_slot_holds(&self, index: usize, control: &Val) -> bool {
+        match &self.storage {
             TableStorage::Inline { entries, len } => {
                 index < *len as usize && entries[index].0 == *control
             }
             // `control` is valid, so it never equals a vacant slot's nil.
             TableStorage::Map(map, _) => map.get(index).is_some_and(|(key, _)| key == control),
-        };
-        if matches {
-            self.next_live_from(Position::Hash(index.saturating_add(1)))
-        } else {
-            TableNextWithIndex::InvalidKey
         }
     }
 
@@ -2798,7 +2791,7 @@ impl Table {
     /// of iteration from an invalid control key.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(super) fn next(&self, key: &Val) -> TableNext {
-        match self.next_with_index(key) {
+        match self.next_with_index(key, None) {
             TableNextWithIndex::Pair { key, value, .. } => TableNext::Pair(key, value),
             TableNextWithIndex::End => TableNext::End,
             TableNextWithIndex::InvalidKey => TableNext::InvalidKey,
@@ -3058,12 +3051,12 @@ mod tests {
         }
 
         assert!(matches!(
-            table.next_with_index(&Val::Num(f64::NAN)),
+            table.next_with_index(&Val::Num(f64::NAN), None),
             TableNextWithIndex::InvalidKey
         ));
         let (index, _) = table.get_with_index(&h(1)).expect("hash key exists");
         assert!(matches!(
-            table.next_from_matching_index(index, &Val::Num(f64::NAN)),
+            table.next_with_index(&Val::Num(f64::NAN), Some(index)),
             TableNextWithIndex::InvalidKey
         ));
     }
@@ -3719,7 +3712,7 @@ mod tests {
             assert_eq!(table.array.len(), 1);
             assert_eq!(table.array_live, 1);
             assert_eq!(keys(&table), vec![n(key)]);
-            match table.next_with_index(&n(1500)) {
+            match table.next_with_index(&n(1500), None) {
                 TableNextWithIndex::End => assert_eq!(key, 1),
                 TableNextWithIndex::Pair { key: next, .. } => {
                     assert_eq!(key, 2002);
@@ -3847,11 +3840,14 @@ mod tests {
             );
             control = Val::Nil;
             loop {
-                match table.next_with_index(&control) {
+                match table.next_with_index(&control, None) {
                     TableNextWithIndex::Pair { index, key, value } => {
                         indexed.push((index, key, value));
                         assert_eq!(table.get_index(index), Some((key, value)));
-                        match table.next_from_matching_index(index, &key) {
+                        if table.array_key(&key).is_none() {
+                            assert!(table.hash_slot_holds(index, &key));
+                        }
+                        match table.next_with_index(&key, Some(index)) {
                             TableNextWithIndex::Pair {
                                 key: next, value, ..
                             } => match table.next(&key) {
@@ -3881,17 +3877,54 @@ mod tests {
                     .collect::<Vec<_>>()
             );
             assert!(matches!(
-                table.next_with_index(&n(1)),
+                table.next_with_index(&n(1), None),
                 TableNextWithIndex::Pair { .. }
             ));
             assert!(matches!(
-                table.next_with_index(&h(count + 1)),
+                table.next_with_index(&h(count + 1), None),
                 TableNextWithIndex::InvalidKey
             ));
             assert!(matches!(
-                table.next_with_index(&Val::Num(f64::NAN)),
+                table.next_with_index(&Val::Num(f64::NAN), None),
                 TableNextWithIndex::InvalidKey
             ));
+        }
+    }
+
+    #[test]
+    fn array_key_with_a_dead_hash_slot_ignores_a_hint_at_that_slot() {
+        // Integer key 2 owns hash slot 0, then joins the array while its dead
+        // slot stays. Both routes leave the overlap: migration, and removal
+        // followed by a direct append. Extra string keys keep the tombstone
+        // from compacting; `extra` 4 takes Map storage.
+        let s = |i: usize| Val::Bool(i % 2 == 0);
+        for extra in [0, 4] {
+            for migrate in [true, false] {
+                let mut t = Table::default();
+                t.insert(n(2), Val::Num(2.0)).unwrap();
+                t.insert(s(0), Val::Num(10.0)).unwrap();
+                t.insert(s(1), Val::Num(11.0)).unwrap();
+                fill_hash(&mut t, 1..=extra);
+                let (slot, _) = t.get_with_index(&n(2)).unwrap();
+                if !migrate {
+                    t.insert(n(2), Val::Nil).unwrap();
+                }
+                t.insert(n(1), Val::Num(1.0)).unwrap();
+                if !migrate {
+                    t.insert(n(2), Val::Num(2.0)).unwrap();
+                }
+                t.insert(n(3), Val::Num(3.0)).unwrap();
+                assert_eq!(t.array_len(), 3);
+                assert!(t.hash_slot_holds(slot, &n(2)), "the dead slot must survive");
+                assert!(matches!(
+                    t.next_with_index(&n(2), Some(slot)),
+                    TableNextWithIndex::Pair {
+                        key: Val::Num(3.0),
+                        ..
+                    }
+                ));
+                assert!(matches!(t.next(&n(2)), TableNext::Pair(Val::Num(3.0), _)));
+            }
         }
     }
 
@@ -3902,7 +3935,7 @@ mod tests {
             let mut table = Table::default();
             fill_hash(&mut table, 1..=count);
             table.remove(&h(2));
-            let control_index = match table.next_with_index(&h(1)) {
+            let control_index = match table.next_with_index(&h(1), None) {
                 TableNextWithIndex::Pair {
                     index,
                     key: Val::Num(3.5),
@@ -3913,14 +3946,15 @@ mod tests {
             // A tombstoned control (key 2.5, dead at index 1) must validate
             // and step to the live successor - filter-in-place iteration
             // depends on it.
+            assert!(table.hash_slot_holds(1, &h(2)));
             assert!(matches!(
-                table.next_from_matching_index(1, &h(2)),
+                table.next_with_index(&h(2), Some(1)),
                 TableNextWithIndex::Pair {
                     key: Val::Num(3.5),
                     ..
                 }
             ));
-            match table.next_from_matching_index(control_index, &h(3)) {
+            match table.next_with_index(&h(3), Some(control_index)) {
                 TableNextWithIndex::Pair {
                     key: Val::Num(next),
                     ..
@@ -3928,12 +3962,12 @@ mod tests {
                 TableNextWithIndex::End if count == 3 => {}
                 other => panic!("unexpected successor of key 3.5 (count {count}): {other:?}"),
             }
-            let last_index = match table.next_with_index(&h(count - 1)) {
+            let last_index = match table.next_with_index(&h(count - 1), None) {
                 TableNextWithIndex::Pair { index, .. } => index,
                 _ => panic!("expected the last live entry"),
             };
             assert!(matches!(
-                table.next_from_matching_index(last_index, &h(count)),
+                table.next_with_index(&h(count), Some(last_index)),
                 TableNextWithIndex::End
             ));
         }
@@ -3945,7 +3979,7 @@ mod tests {
             let mut t = Table::default();
             fill(&mut t, 1..=6);
             fill_hash(&mut t, 1..=hash_count);
-            let mut next = t.next_with_index(&Val::Nil);
+            let mut next = t.next_with_index(&Val::Nil, None);
             let mut visited = Vec::new();
             loop {
                 let (index, key) = match next {
@@ -3956,8 +3990,11 @@ mod tests {
                 t.insert(key, Val::Nil).unwrap();
                 visited.push(key);
                 // Follow the indexed successor itself, including the boundary
-                // into each hash storage variant, without a lookup fallback.
-                next = t.next_from_matching_index(index, &key);
+                // into each hash storage variant: every hash hint must hold.
+                if t.array_key(&key).is_none() {
+                    assert!(t.hash_slot_holds(index, &key));
+                }
+                next = t.next_with_index(&key, Some(index));
             }
             assert_eq!(
                 visited,
@@ -4415,10 +4452,7 @@ mod tests {
         assert_eq!(t.version(), version + 2);
         assert_eq!(t.get_index(old), None);
         assert!(!t.set_at_index(old, Val::Bool(false)));
-        assert!(matches!(
-            t.next_from_matching_index(old, &h(3)),
-            TableNextWithIndex::InvalidKey
-        ));
+        assert!(!t.hash_slot_holds(old, &h(3)));
         let (new, value) = t.get_with_index(&h(3)).unwrap();
         assert_eq!(value, Val::Num(3.0));
         assert_eq!(t.get_index(new), Some((h(3), Val::Num(3.0))));

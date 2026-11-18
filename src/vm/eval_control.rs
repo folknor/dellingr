@@ -179,15 +179,11 @@ impl State {
         };
 
         let cursor = caches.tfor_cursor(cursor_slot);
-        let next = match cursor.and_then(TforCursorSlot::get) {
-            Some(entry) if entry.table == table_ptr => {
-                match tbl.next_from_matching_index(entry.index, &control) {
-                    super::table::TableNextWithIndex::InvalidKey => tbl.next_with_index(&control),
-                    next => next,
-                }
-            }
-            _ => tbl.next_with_index(&control),
+        let hint = match cursor.and_then(TforCursorSlot::get) {
+            Some(entry) if entry.table == table_ptr => Some(entry.index),
+            _ => None,
         };
+        let next = tbl.next_with_index(&control, hint);
         match next {
             super::table::TableNextWithIndex::Pair { index, key, value } => {
                 if let Some(slot) = cursor {

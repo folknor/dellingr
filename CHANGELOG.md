@@ -96,6 +96,12 @@ tick budgets and re-record replays.
 
 ### Fixed
 
+- **Replay-visible:** a generic `for` over `next` (or `pairs`) whose cached
+  cursor named the dead hash slot of an integer key that had since joined
+  the array part (by migration, or by removal then a direct append) resumed
+  in the hash part, skipping the array keys after it. It now resumes in the
+  array, as `next(t, k)` always did, so the result no longer depends on what
+  the loop site saw before.
 - Soundness: a `RustFunc`, restricted-environment closure or snapshot setup
   closure could move the State out of its `&mut State` (`mem::take`,
   `mem::swap`) while Lua frames of that State were suspended under it, send

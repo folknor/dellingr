@@ -86,6 +86,28 @@ fn pairs_cursor_preserves_mutation_and_same_site_recursion_semantics() {
 }
 
 #[test]
+fn warm_next_cursor_resumes_a_key_that_joined_the_array_in_the_array() {
+    // Key 2 starts in the hash part, then joins the array while its dead hash
+    // slot remains; the warmed cursor names that slot. The answer must be the
+    // array successor, as raw `next` gives, not the hash successor 'a'.
+    for setup in [
+        "t[1] = 1; t[3] = 3",
+        "t[2] = nil; t[1] = 1; t[2] = 2; t[3] = 3",
+    ] {
+        let code = format!(
+            "local function step(t, c) for k in next, t, c do return k end end; local t = {{}}; t[2] = 2; t.a = 1; t.b = 1; if step(t, nil) ~= 2 then error('warm-up') end; {setup}; local cached = step(t, 2); if cached ~= 3 or next(t, 2) ~= 3 then error('next after key 2 gave ' .. tostring(cached)) end return 1"
+        );
+        assert_eq!(support::eval_number(&code), 1.0);
+    }
+    assert_eq!(
+        support::eval_number(
+            "local t = {}; t[2] = 2; t.a = 1; t.b = 1; local s = ''; for k in pairs(t) do s = s .. tostring(k); if k == 2 then t[1] = 1; t[3] = 3 end end; if s ~= '23ab' then error('pairs across a migration iterated ' .. s) end return 1"
+        ),
+        1.0
+    );
+}
+
+#[test]
 fn pairs_cursor_keeps_invalid_controls_and_costs_unchanged() {
     let mut state = State::new();
     support::run(

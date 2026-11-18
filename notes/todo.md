@@ -118,17 +118,6 @@ Cosmetic:
   fixed-width integer"; the trait doc now lists the actual set (8- to 64-bit,
   signed and unsigned).
 
-### Raised by the restricted-environment version spar (2026-11-18)
-
-Source-reading findings from codex, not reproduced yet:
-
-- The cached `next` cursor may ignore array precedence: warm
-  `for k in next, t, control do return k end` on a table with hash keys
-  `2`, `"a"`, `"b"` in that order, then add `t[1]` and `t[3]`. Key `2`
-  migrates to the array and leaves a hash tombstone; with control `2` the
-  cached cursor accepts the tombstone and returns `"a"` where raw `next`
-  returns `3` (cursor validation in `table.rs`).
-
 ## Deferred forward-looking ideas
 
 ### Execution trace hook for a stepping debugger
