@@ -200,10 +200,10 @@ tick budgets and re-record replays.
   inheriting from a class) is cached per site behind a heap-wide epoch that
   a write able to change the route moves, so a warm read no longer walks
   the chain: about 17% off a two-level method call and 30% off one through
-  map-storage classes. Writing the class that holds the answer, or a warm
-  field store to an existing key of a class on the route (a static
-  counter), leaves the cache standing. Answers, depth limits and costs are
-  unchanged.
+  map-storage classes. Writing the class that holds the answer, or
+  overwriting an existing key of a class on the route (a static counter)
+  by any store, `rawset` and host stores included, leaves the cache
+  standing. Answers, depth limits and costs are unchanged.
 - The deterministic math port moves to a newer CORE-MATH commit: `math.cos`
   uses upstream's new cosine, built on the sine's tables with a cheaper fast
   phase (about a fifth faster on a cosine-only probe), and `math.log` gains

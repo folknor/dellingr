@@ -24,7 +24,7 @@ use super::BytecodeRuntime;
 use super::LuaType;
 use super::Table;
 use super::Val;
-use super::table::{SlotRef, TableEditor, TemplatePrototype};
+use super::table::{HashProbe, RouteState, SlotRef, TableEditor, TemplatePrototype};
 
 // ============================================================================
 // Upvalue Pool - Arena-based upvalue storage
@@ -540,16 +540,6 @@ impl ResidentBytes {
 /// The saturated route epoch: no inherited route fills or hits at it.
 const ROUTE_EPOCH_DISABLED: u64 = u64::MAX;
 
-/// A mutable handout of `table`: if a route may read it, move the route
-/// epoch (retiring every route) and clear the mark. The next fill through
-/// the table marks it again.
-#[inline(always)]
-fn retire_routes_through(route_epoch: &mut u64, table: &mut Table) {
-    if table.take_on_route() {
-        *route_epoch = route_epoch.saturating_add(1);
-    }
-}
-
 /// A collection of objects which need to be garbage-collected.
 /// Uses a generational arena for safe access to objects.
 pub(crate) struct GcHeap {
@@ -577,15 +567,18 @@ pub(crate) struct GcHeap {
     /// the stores `watched_table_unmarked` admits. The builtin mirror
     /// (`GlobalEnv`) is validated by it.
     watched_epoch: u64,
-    /// Advances whenever a table carrying the `on_route` bit is handed out
-    /// mutably (`get_mut` and the two watched-table bypasses, which are every
-    /// mutable route to an object but `overwrite_live_slot`, a live
-    /// overwrite that cannot change a route), clearing the bit. An inherited-route
-    /// cache entry records it after marking every table its route read, so
-    /// an unchanged epoch proves none of them changed. It saturates at
-    /// `ROUTE_EPOCH_DISABLED`, where no route fills or hits: a wrapped epoch
-    /// could match a stale entry.
-    route_epoch: u64,
+    /// The route epoch and the `__index` name it classifies by. The epoch
+    /// advances, clearing the table's `on_route` bit, when a write that may
+    /// change a route reaches a marked table: any mutation through a
+    /// `TableEditor` but a live non-`__index` overwrite (the editor
+    /// classifies each one) and any `as_table` handout. The cached global
+    /// store (`store_watched_probe`) refuses a marked table, and
+    /// `overwrite_live_slot` is the caller-proven overwrite, so neither moves
+    /// it. An inherited-route cache entry records the epoch after marking
+    /// every table its route read, so an unchanged epoch proves none of them
+    /// changed. It saturates at `ROUTE_EPOCH_DISABLED`, where no route fills
+    /// or hits: a wrapped epoch could match a stale entry.
+    routes: RouteState,
     /// Collections left before the next one clears runtime cache entries
     /// naming freed objects (`GcHeap::runtime_cache_prune_due`).
     cache_prune_countdown: u32,
@@ -603,7 +596,7 @@ impl GcHeap {
             live_chunks: LiveChunks::default(),
             watched: ObjectPtr(ObjectKey(SlotKey::NULL)),
             watched_epoch: 0,
-            route_epoch: 0,
+            routes: RouteState::default(),
             cache_prune_countdown: CACHE_PRUNE_INTERVAL,
         };
         heap.refresh_gc_watermark();
@@ -625,7 +618,14 @@ impl GcHeap {
     /// The route epoch (see the field); `None` once it has saturated.
     #[inline(always)]
     pub(super) fn route_epoch(&self) -> Option<u64> {
-        (self.route_epoch != ROUTE_EPOCH_DISABLED).then_some(self.route_epoch)
+        (self.routes.epoch != ROUTE_EPOCH_DISABLED).then_some(self.routes.epoch)
+    }
+
+    /// Record the interned `__index` name, the one key whose live overwrite
+    /// can relink a route (`TableEditor` classifies by it). Until then every
+    /// key counts as a possible link.
+    pub(super) fn set_route_link_key(&mut self, index_name: StringPtr) {
+        self.routes.link_key = Some(index_name);
     }
 
     /// Create a heap with a chosen threshold for collector tests.
@@ -641,7 +641,7 @@ impl GcHeap {
             live_chunks: LiveChunks::default(),
             watched: ObjectPtr(ObjectKey(SlotKey::NULL)),
             watched_epoch: 0,
-            route_epoch: 0,
+            routes: RouteState::default(),
             cache_prune_countdown: CACHE_PRUNE_INTERVAL,
         }
     }
@@ -670,10 +670,13 @@ impl GcHeap {
     // non-builtin write conservatively invalidates the mirror. Moving this
     // into GlobalEnv alone misses those routes; classifying each generic
     // table write would add key checks to ordinary table mutations.
-    /// Get a mutable reference to the object.
+    /// Get a mutable reference to the object, with the backing meter and
+    /// the route witness. Inherited routes are not retired here: an editor
+    /// classifies each mutation (`TableEditor`), and `as_table`, whose raw
+    /// `&mut Table` cannot, retires at the handout.
     /// Panics if the key is invalid (use-after-free detection).
     #[inline]
-    fn get_mut(&mut self, ptr: ObjectPtr) -> (&mut RawObject, &mut ResidentBytes) {
+    fn get_mut(&mut self, ptr: ObjectPtr) -> (&mut RawObject, &mut ResidentBytes, &mut RouteState) {
         if ptr == self.watched {
             self.mark_watched_changed();
         }
@@ -681,53 +684,48 @@ impl GcHeap {
             .objects
             .get_mut(ptr.0)
             .expect("Invalid ObjectPtr: object was freed (use-after-free detected)");
-        if let RawObject::Table(table) = object {
-            retire_routes_through(&mut self.route_epoch, table);
-        }
-        (object, &mut self.resident)
+        (object, &mut self.resident, &mut self.routes)
     }
 
     /// Move the watched object's epoch, for a store made through
-    /// [`Self::watched_table_unmarked`] that can change what it guards.
+    /// [`Self::edit_watched_unmarked`] that can change what it guards.
     #[inline]
     pub(super) fn mark_watched_changed(&mut self) {
         self.watched_epoch = self.watched_epoch.wrapping_add(1);
     }
 
-    // This bypass is for version-validated global slot caches only. Their
-    // builtin bit is classified from the key when filling the cache, so the
-    // steady non-builtin store needs neither a key lookup nor an epoch bump.
-    /// The watched table, mutably, without moving its epoch. Only for a
-    /// store that provably cannot change what the epoch guards (the global
-    /// table's cached store to a slot whose key is not a builtin name, which
-    /// neither moves a slot nor touches a builtin's value), or whose caller
-    /// moved it with [`Self::mark_watched_changed`].
+    // This bypass is for the global table's keyed and version-validated
+    // cached stores only. Their builtin bit is classified from the key, so
+    // the steady non-builtin store needs neither a key lookup nor an epoch
+    // bump.
+    /// The watched table's editor, without moving the watched epoch. Only
+    /// for a store that provably cannot change what the epoch guards (a
+    /// global store whose key is not a builtin name), or whose caller moved
+    /// it with [`Self::mark_watched_changed`]. Such a store may insert,
+    /// rehash or compact, which move slots (the table version retires those
+    /// probes) but change no other key's value, so the builtin mirror stays
+    /// exact. The builtin mirror's exemption is not the route epoch's: a
+    /// non-builtin global store can shadow an inherited key, so the editor
+    /// classifies it like any other store.
     #[inline]
-    pub(super) fn watched_table_unmarked(&mut self) -> Option<&mut Table> {
+    pub(super) fn edit_watched_unmarked(&mut self) -> Option<TableEditor<'_>> {
         match self.objects.get_mut(self.watched.0)? {
-            RawObject::Table(table) => {
-                // The builtin mirror's exemption is not the route epoch's:
-                // a non-builtin global store can shadow an inherited key.
-                retire_routes_through(&mut self.route_epoch, table);
-                Some(table)
-            }
+            RawObject::Table(table) => Some(table.edit(&mut self.resident, &mut self.routes)),
             RawObject::LuaFn(_) => None,
         }
     }
 
-    /// The watched table with its backing meter, for a capacity-changing
-    /// store, without moving its epoch. The same rule as
-    /// [`Self::watched_table_unmarked`]: only for the global table's keyed
-    /// store whose key is not a builtin name, or whose caller moved the
-    /// epoch itself. Such a store may insert, rehash or compact, which move
-    /// slots (the table version retires those probes) but change no other
-    /// key's value, so the builtin mirror stays exact.
-    pub(super) fn edit_watched_unmarked(&mut self) -> Option<TableEditor<'_>> {
+    /// `Table::store_probe` into the watched table, under
+    /// [`Self::edit_watched_unmarked`]'s rule, for the cached global store
+    /// inlined into the dispatch loop. A table some route reads refuses
+    /// (false, changing nothing), so the caller's keyed fallback stores
+    /// through an editor, which classifies the store; a call to classify it
+    /// here grew the dispatch loop's release native frame by 16 bytes.
+    /// `None` when there is no watched table.
+    #[inline(always)]
+    pub(super) fn store_watched_probe(&mut self, probe: &HashProbe, val: &Val) -> Option<bool> {
         match self.objects.get_mut(self.watched.0)? {
-            RawObject::Table(table) => {
-                retire_routes_through(&mut self.route_epoch, table);
-                Some(table.edit(&mut self.resident))
-            }
+            RawObject::Table(table) => Some(!table.is_on_route() && table.store_probe(probe, val)),
             RawObject::LuaFn(_) => None,
         }
     }
@@ -751,26 +749,33 @@ impl GcHeap {
         }
     }
 
-    /// Get a mutable reference to the object as a table, if it is one.
+    /// Get a mutable reference to the object as a table, if it is one. The
+    /// raw borrow can make any change, so it retires inherited routes
+    /// through the table at the handout; a store an editor can classify
+    /// goes through [`Self::edit_table`] instead.
     pub(super) fn as_table(&mut self, ptr: ObjectPtr) -> Option<&mut Table> {
-        match self.get_mut(ptr).0 {
-            RawObject::Table(t) => Some(t),
+        match self.get_mut(ptr) {
+            (RawObject::Table(t), _, routes) => {
+                routes.retire_through(t);
+                Some(t)
+            }
             _ => None,
         }
     }
 
     /// Overwrite live `slot` of table `ptr` with non-nil `val`
-    /// ([`Table::store_slot`]), without retiring inherited routes: the one
-    /// mutable handout that leaves the route epoch and the table's
-    /// `on_route` bit alone. Sound only when the slot's key is not
-    /// `__index`, which the caller proves (the set cache is never filled
-    /// for an `__index` store). A live overwrite under any other key
+    /// ([`Table::store_slot`]), without retiring inherited routes and
+    /// without the editor's classification: the caller has already proved
+    /// the slot's key is not `__index` (the set cache is never filled for
+    /// an `__index` store; a field leaf checks its keys at entry), so the
+    /// hot cached store skips the `on_route` test and the key read
+    /// `TableEditor::store_slot` would make. A live overwrite under any other key
     /// creates no key, so no intermediate miss on a route turns into a hit
     /// (a table holding the written key live was never missing it), changes
     /// no metatable link or `__index` value, and moves no table version; a
     /// route ending at the slot reads it live. A dead slot is refused,
-    /// changing nothing: reviving it creates a key, and the keyed fallback
-    /// retires routes through the usual handout. The watched table's epoch
+    /// changing nothing: reviving it creates a key, and the keyed fallback's
+    /// editor retires routes for it. The watched table's epoch
     /// still moves, since the written key may be a builtin's name.
     #[inline(always)]
     pub(super) fn overwrite_live_slot(&mut self, ptr: ObjectPtr, slot: SlotRef, val: Val) -> bool {
@@ -787,11 +792,13 @@ impl GcHeap {
         }
     }
 
-    /// Borrow the table and its backing meter for capacity-changing writes.
+    /// Borrow the table, its backing meter and the route witness for
+    /// writes. The editor decides per mutation whether inherited routes
+    /// retire (`TableEditor`).
     pub(super) fn edit_table(&mut self, ptr: ObjectPtr) -> Option<TableEditor<'_>> {
-        let (object, resident) = self.get_mut(ptr);
+        let (object, resident, routes) = self.get_mut(ptr);
         match object {
-            RawObject::Table(table) => Some(table.edit(resident)),
+            RawObject::Table(table) => Some(table.edit(resident, routes)),
             RawObject::LuaFn(_) => None,
         }
     }

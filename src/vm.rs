@@ -2404,6 +2404,34 @@ mod runtime_tests {
         run(&mut state, "bump() bump() site()");
         assert_eq!(state.heap.route_epoch(), Some(epoch + 1));
         assert_eq!(routes(&state), vec![(sub, epoch + 1, 1)]);
+
+        // So does a live overwrite through every uncached path: a cold
+        // SET_FIELD site, SET_TABLE with a string key, `rawset` and a host
+        // store.
+        run(
+            &mut state,
+            "local function put(t, v) t.n = v end put(Base, 1) put(Sub, 2) \
+             local k = 'n' Sub[k] = 3 rawset(Sub, 'n', 4) site()",
+        );
+        state.get_global("Sub").expect("global fits");
+        state.push_string("n").expect("string fits");
+        state.push_number(5.0).expect("number fits");
+        state.set_table(-3).expect("host store succeeds");
+        state.pop(1).expect("the table is on the stack");
+        run(
+            &mut state,
+            "if Sub.n ~= 5 or site() ~= 1 then error('lost a store') end",
+        );
+        assert_eq!(state.heap.route_epoch(), Some(epoch + 1));
+        assert_eq!(routes(&state), vec![(sub, epoch + 1, 1)]);
+
+        // A live overwrite of `__index`, even with the same value, and a
+        // removal retire.
+        run(&mut state, "rawset(Sub, '__index', Sub) site()");
+        assert_eq!(state.heap.route_epoch(), Some(epoch + 2));
+        run(&mut state, "rawset(Sub, 'n', nil) site()");
+        assert_eq!(state.heap.route_epoch(), Some(epoch + 3));
+        assert_eq!(routes(&state), vec![(sub, epoch + 3, 1)]);
     }
 
     #[test]

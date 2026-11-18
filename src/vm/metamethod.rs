@@ -634,9 +634,9 @@ impl State {
                         if let Some((slot, _)) = existing {
                             // A terminal table that holds the key: write
                             // through the slot just found, unit-free.
-                            let table = self
+                            let mut table = self
                                 .heap
-                                .as_table(ptr)
+                                .edit_table(ptr)
                                 .expect("checked to be a table just above");
                             if matches!(val, Val::Nil) {
                                 table.remove_slot(slot);

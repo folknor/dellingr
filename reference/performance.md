@@ -274,9 +274,9 @@ A field read through more than one `__index` table used to walk the whole
 chain on every call; a validate-on-hit route cache had been built and
 refused because each hit still resolved every table on the path. A site
 now caches the route behind one heap-wide route epoch: the walk marks
-every table it read for a link or a miss, and `GcHeap` moves the epoch on
-a mutable handout of a marked table (the exemptions are in the next
-section), so a hit checks the receiver's own miss, its metatable
+every table it read for a link or a miss, and a write that may change a
+route moves the epoch when it reaches a marked table (which writes count
+is in the next two sections), so a hit checks the receiver's own miss, its metatable
 identity and the epoch, takes the route's depth units and reads the
 terminal slot. The warm one-level method hit also stops resolving the
 metatable twice for `C.__index = C`. On bygg against c429707 (release,
@@ -316,6 +316,25 @@ Under `--hotpath`, `resolve_index` went from 49 ns to 12 ns average over
 the same 422006 calls and the cold walk's `Table::get` calls disappeared:
 the read now hits the route. The thrash was cheap to begin with, since a
 two-table cold walk is short; deeper or map-storage routes pay more.
+
+## Route retirement classified per mutation, 2026-11-18
+
+Every other store still retired every route at the handout, even a live
+overwrite: an uncached or polymorphic SET_FIELD, SET_TABLE with a string
+key, `rawset`, host stores and `__newindex` table stores. `TableEditor`
+now classifies each mutation instead: on a marked table, a non-nil store
+under a key other than `__index` that finds the key live writes that entry
+and leaves the epoch alone; anything else retires first. An unmarked
+table pays one bit test, as before. Only a raw `GcHeap::as_table` borrow
+(`setmetatable`, the sort writeback) still retires at the handout. The
+cached global store refuses a marked global table rather than classify
+inline, since a call there grew the dispatch loop's release native frame
+by 16 bytes; its keyed fallback classifies. Release native frames are
+unchanged; the dev build grew 32 bytes a level. No registered workload
+writes a route table through these paths, so the gain is the cold walk
+each such write used to force. On bygg (A 8db1c49, B the change from a
+dirty tree, best of 3): `write` 2.4 s, 2.4 s; `global` 884 ms, 896 ms;
+`object_fields` 3.4 s, 3.4 s; `method_chain_counter` 1.6 s, 1.5 s.
 
 ## Closure creation in one allocation, 2026-11-17
 

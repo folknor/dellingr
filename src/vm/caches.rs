@@ -210,10 +210,11 @@ pub(super) struct MethodLookupCacheEntry {
 /// Unlike the one-level entry it does not re-read the route. Every table
 /// the filling walk read for a link or a miss (the receiver's metatable, each
 /// handler table it continued past and each such table's metatable) was
-/// marked `on_route` before `route_epoch` was recorded, and `GcHeap` moves
-/// the epoch on any mutable handout of a marked table except
-/// `GcHeap::overwrite_live_slot`, a live overwrite under a key other than
-/// `__index`, which can change no link or miss. An unchanged epoch therefore
+/// marked `on_route` before `route_epoch` was recorded, and the epoch moves
+/// on any write to a marked table except a live overwrite under a key other
+/// than `__index`, which can change no link or miss (`TableEditor` classifies
+/// each mutation; `GcHeap::overwrite_live_slot` is the caller-proven
+/// overwrite; a raw `GcHeap::as_table` handout always retires). An unchanged epoch therefore
 /// proves every link and every intermediate miss unchanged, and the tables
 /// on the route stay reachable from the guarded metatable. `terminal` is not
 /// marked: it is named here and `terminal_slot` carries its version, so the
@@ -226,9 +227,10 @@ pub(super) struct MethodLookupCacheEntry {
 ///
 /// One per site, apart from the two one-level entries, so a site serving a
 /// deep class besides two shallow ones keeps the shallow pair. A
-/// route-changing write to any marked table (a new or revived key, an
-/// `__index` store, a metatable change, any uncached store) retires every
-/// route; a warm field store to an existing key (a static counter) does not.
+/// route-changing write to any marked table (a new or revived key, a
+/// removal, an `__index` store, a metatable change, a bulk or array-shifting
+/// edit) retires every route; an overwrite of an existing key (a static
+/// counter), through any store path, does not.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct RouteLookupCacheEntry {
     pub(super) receiver_metatable: ObjectPtr,

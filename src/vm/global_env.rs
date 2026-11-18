@@ -34,7 +34,7 @@ use crate::instr::Builtin;
 use super::Val;
 use super::caches::{GlobalLookupCacheEntry, GlobalLookupCacheSlot};
 use super::object::{GcHeap, Markable, ObjectPtr, ResidentBytes, StringPtr};
-use super::table::{SlotPolicy, Table, TableEditor};
+use super::table::{RouteState, SlotPolicy, Table, TableEditor};
 
 /// Hash slots the global table starts with: past inline storage, because
 /// only map storage carries a slot policy.
@@ -423,11 +423,11 @@ impl GlobalEnv {
         if entry.builtin {
             heap.mark_watched_changed();
         }
-        // A rejected probe (stale, absent or vacant) takes the keyed
-        // fallback, never reports a completed store.
-        heap.watched_table_unmarked()
+        // A rejected probe (stale, absent or vacant), or a global table an
+        // inherited route reads, takes the keyed fallback, never reports a
+        // completed store.
+        heap.store_watched_probe(&entry.probe, val)
             .expect("the global table lives as long as the State")
-            .store_probe(&entry.probe, val)
     }
 
     /// Store global `key`, a string. A binding with a slot (live or cleared)
@@ -551,7 +551,9 @@ impl GlobalEnv {
         let outer = self.contents(heap);
         let mut restricted = Table::with_capacity(INITIAL_GLOBAL_SLOTS.max(whitelist.len()));
         let mut resident = ResidentBytes::new(restricted.resident_bytes());
-        let mut editor = restricted.edit(&mut resident);
+        // A fresh table carries no route mark, so its own witness suffices.
+        let mut routes = RouteState::default();
+        let mut editor = restricted.edit(&mut resident, &mut routes);
         editor.set_slot_policy(slot_policy(Phase::Sealed));
         for name in whitelist {
             let Some(key) = heap.find_string(name.as_bytes()) else {

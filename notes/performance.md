@@ -195,33 +195,6 @@ shows it.
 
 **Classification:** local changes, smaller ceiling; workload-gated.
 
-## PERF-015 - Inherited routes retire together on any route write
-
-Raised by the lookup hunter; the writer-side route epoch landed
-(`RouteLookupCacheEntry`, `caches.rs`; numbers in
-`reference/performance.md`, "Inherited routes under a writer-side
-epoch"). The cold self-index reuse was refused (reason above the loop in
-`walk_index`).
-
-The terminal table is no longer marked, and a warm cached SET_FIELD
-overwrite of a live slot leaves routes standing
-(`GcHeap::overwrite_live_slot`; numbers in `reference/performance.md`,
-"Route-preserving writes to class tables").
-
-Residue: every other mutable handout of a link or intermediate table
-still retires every route, including live overwrites that could not
-change one: an uncached `store_field` overwrite (a polymorphic store
-site), SET_TABLE with a string key, `rawset`, host writes, and the
-global table's `write_cached` (only when a route passes through `_G`).
-Covering them means classifying mutations instead of handouts: a
-conservative default on the editor plus explicit proven-overwrite
-entry points, so no caller can bypass retirement by accident. The
-measured thrash on a two-table route was about 12% of the warm call
-(355 to 312 us); none of the remaining paths is in a registered
-workload's loop.
-
-**Classification:** rewrite, unmeasured.
-
 ## Accounts added to existing entries
 
 This hunt's account of these mechanisms went into the entry already filed for

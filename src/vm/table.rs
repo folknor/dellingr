@@ -569,9 +569,10 @@ pub(super) struct Table {
 ///
 /// `on_route` says an inherited-route cache entry may depend on this table
 /// (`RouteLookupCacheEntry`). It is set under a shared borrow when a route
-/// is filled through the table, and taken by `GcHeap` on every mutable
-/// handout of the table, which moves the heap's route epoch and so retires
-/// every route at once; a clear bit is only a table no live route reads.
+/// is filled through the table, and taken by any write that may change a
+/// route (`TableEditor` classifies them; a raw `GcHeap::as_table` borrow
+/// always counts), which moves the heap's route epoch and so retires every
+/// route at once; a clear bit is only a table no live route reads.
 /// Never saved, and a fresh, copied or rebuilt table starts without it.
 ///
 /// `dead` is the number of occupied hash slots whose nil value makes them
@@ -676,6 +677,11 @@ impl TombstonesAndDense {
         self.0.set(self.word() | ON_ROUTE_BIT);
     }
 
+    #[inline]
+    fn on_route(&self) -> bool {
+        self.word() & ON_ROUTE_BIT != 0
+    }
+
     /// Clear the route mark, reporting whether it was set.
     #[inline]
     fn take_on_route(&mut self) -> bool {
@@ -760,10 +766,15 @@ impl Table {
         self.array.capacity() * size_of::<Val>() + hash
     }
 
-    pub(super) fn edit<'a>(&'a mut self, resident: &'a mut ResidentBytes) -> TableEditor<'a> {
+    pub(super) fn edit<'a>(
+        &'a mut self,
+        resident: &'a mut ResidentBytes,
+        routes: &'a mut RouteState,
+    ) -> TableEditor<'a> {
         TableEditor {
             table: self,
             resident,
+            routes,
         }
     }
 
@@ -2948,8 +2959,16 @@ impl Table {
         self.tally.mark_on_route();
     }
 
-    /// Clear the `on_route` bit, reporting whether it was set. Only
-    /// `GcHeap`'s mutable handouts call this, moving the route epoch on true.
+    /// Whether an inherited route may depend on this table (the `on_route`
+    /// bit), without clearing it.
+    #[inline]
+    pub(super) fn is_on_route(&self) -> bool {
+        self.tally.on_route()
+    }
+
+    /// Clear the `on_route` bit, reporting whether it was set. Only route
+    /// retirement calls this ([`RouteState::retire_through`]), moving the
+    /// route epoch on true.
     #[inline]
     pub(super) fn take_on_route(&mut self) -> bool {
         self.tally.take_on_route()
@@ -3121,11 +3140,57 @@ impl Table {
     }
 }
 
-/// A table and the heap meter for its backing. Shared reads can use the
-/// table directly, while mutable operations go through explicit methods.
+/// The heap's inherited-route witness: the epoch every route entry records
+/// (`GcHeap::route_epoch`) and the interned `__index` name, the one key
+/// whose live overwrite can relink a route.
+#[derive(Debug, Default)]
+pub(super) struct RouteState {
+    /// Moves (saturating) when a write that may change a route reaches a
+    /// table carrying the `on_route` bit.
+    pub(super) epoch: u64,
+    /// The State's interned `__index`; `None` before it is interned, when
+    /// every key counts as a possible link.
+    pub(super) link_key: Option<StringPtr>,
+}
+
+impl RouteState {
+    /// A write that may change a route is about to reach `table`: if a
+    /// route may read it, move the epoch (retiring every route) and clear
+    /// the mark. The next fill through the table marks it again.
+    #[inline(always)]
+    pub(super) fn retire_through(&mut self, table: &mut Table) {
+        if table.take_on_route() {
+            self.epoch = self.epoch.saturating_add(1);
+        }
+    }
+
+    /// Whether a live overwrite under `key` could change a route: only an
+    /// `__index` value is a route's link.
+    #[inline]
+    pub(super) fn is_link_key(&self, key: &Val) -> bool {
+        self.link_key.is_none_or(|link| *key == Val::Str(link))
+    }
+}
+
+/// A table, the heap meter for its backing and the route witness. Shared
+/// reads can use the table directly, while mutable operations go through
+/// explicit methods.
+///
+/// Route retirement is classified here, per mutation, not at the handout.
+/// On a table no route reads (`on_route` clear) every method is the plain
+/// operation. On a marked table, a store that overwrites a live entry with
+/// a non-nil value under a key other than `__index` leaves routes standing,
+/// and every other mutation retires them first. Such an overwrite creates
+/// and removes no key, so no miss a route recorded turns into a hit, and
+/// changes no metatable link, `__index` value or table version; a route
+/// ending at the entry reads it live. The proof is the write itself: the
+/// classifying lookup finds the entry index the overwrite then writes, so
+/// no second probe can disagree with it. A new mutation method retires
+/// unless it proves the same.
 pub(super) struct TableEditor<'a> {
     table: &'a mut Table,
     resident: &'a mut ResidentBytes,
+    routes: &'a mut RouteState,
 }
 
 impl std::ops::Deref for TableEditor<'_> {
@@ -3137,24 +3202,107 @@ impl std::ops::Deref for TableEditor<'_> {
 }
 
 impl TableEditor<'_> {
+    /// The conservative default: retire routes through this table if it is
+    /// marked.
+    #[inline(always)]
+    fn retire(&mut self) {
+        self.routes.retire_through(self.table);
+    }
+
+    /// On a marked table: the live entry index a store of `value` under
+    /// `key` would overwrite without changing a route, if it is one.
+    #[inline]
+    fn neutral_overwrite_index(&self, key: &Val, value: &Val) -> Option<usize> {
+        if matches!(value, Val::Nil) || self.routes.is_link_key(key) {
+            return None;
+        }
+        self.table.get_with_index(key).map(|(index, _)| index)
+    }
+
     pub(super) fn reserve_hash(&mut self, additional: usize) {
+        self.retire();
         self.table.reserve_hash_tracked(self.resident, additional);
     }
 
+    // The marked-table halves below are outlined: the unmarked test is all
+    // that the dispatch loop's inlined stores carry into its native frame.
+    // The marked halves take the editor's parts, not `&mut self`: a call
+    // through the editor's address would spill its three references into
+    // every inlining caller's frame.
+
     pub(super) fn insert(&mut self, key: Val, value: Val) -> Result<(), TableError> {
+        if self.table.is_on_route() {
+            return Self::insert_marked(self.table, self.resident, self.routes, key, value);
+        }
         self.table.insert_tracked(self.resident, key, value)
     }
 
+    #[inline(never)]
+    fn insert_marked(
+        table: &mut Table,
+        resident: &mut ResidentBytes,
+        routes: &mut RouteState,
+        key: Val,
+        value: Val,
+    ) -> Result<(), TableError> {
+        let mut editor = table.edit(resident, routes);
+        if let Some(index) = editor.neutral_overwrite_index(&key, &value) {
+            let stored = editor.table.set_at_index(index, value);
+            debug_assert!(stored, "the entry was just found live");
+            return Ok(());
+        }
+        editor.retire();
+        editor.table.insert_tracked(editor.resident, key, value)
+    }
+
     pub(super) fn store_string_key(&mut self, key: StringPtr, value: Val) -> SlotRef {
+        if self.table.is_on_route() {
+            return Self::store_string_key_marked(
+                self.table,
+                self.resident,
+                self.routes,
+                key,
+                value,
+            );
+        }
+        self.table
+            .store_string_key_tracked(self.resident, key, value)
+    }
+
+    #[inline(never)]
+    fn store_string_key_marked(
+        table: &mut Table,
+        resident: &mut ResidentBytes,
+        routes: &mut RouteState,
+        key: StringPtr,
+        value: Val,
+    ) -> SlotRef {
+        let mut editor = table.edit(resident, routes);
+        editor.store_string_key_classified(key, value)
+    }
+
+    #[inline(always)]
+    fn store_string_key_classified(&mut self, key: StringPtr, value: Val) -> SlotRef {
+        if let Some(index) = self.neutral_overwrite_index(&Val::Str(key), &value) {
+            let stored = self.table.set_at_index(index, value);
+            debug_assert!(stored, "the entry was just found live");
+            return SlotRef {
+                version: self.table.version(),
+                index,
+            };
+        }
+        self.retire();
         self.table
             .store_string_key_tracked(self.resident, key, value)
     }
 
     pub(super) fn set_slot_policy(&mut self, policy: SlotPolicy) {
+        self.retire();
         self.table.set_slot_policy_tracked(self.resident, policy);
     }
 
     pub(super) fn set_list(&mut self, first: usize, values: &[Val]) -> Result<(), TableError> {
+        self.retire();
         self.table.set_list_tracked(self.resident, first, values)
     }
 
@@ -3164,6 +3312,7 @@ impl TableEditor<'_> {
         len: usize,
         value: Val,
     ) -> Result<(), TableError> {
+        self.retire();
         self.table
             .array_insert_at_len_tracked(self.resident, pos, len, value)
     }
@@ -3173,44 +3322,98 @@ impl TableEditor<'_> {
         pos: usize,
         len: usize,
     ) -> Result<Val, TableError> {
+        self.retire();
         self.table
             .array_remove_at_len_tracked(self.resident, pos, len)
     }
 
     pub(super) fn set_array(&mut self, values: &[Val]) -> Result<(), TableError> {
+        self.retire();
         self.table.set_array_tracked(self.resident, values)
     }
 
     pub(super) fn store_slot(&mut self, slot: SlotRef, value: Val) -> bool {
+        if self.table.is_on_route() {
+            Self::classify_overwrite(self.table, self.routes, Some(slot), slot.index, &value);
+        }
         self.table.store_slot(slot, value)
     }
 
+    /// On a marked table, before an overwrite of entry `index` (named by a
+    /// token `slot`, which must be current, when there is one): retire
+    /// routes unless the write is route-neutral.
+    #[inline(never)]
+    fn classify_overwrite(
+        table: &mut Table,
+        routes: &mut RouteState,
+        slot: Option<SlotRef>,
+        index: usize,
+        value: &Val,
+    ) {
+        let neutral = slot.is_none_or(|slot| table.slot_is_current(slot))
+            && !matches!(value, Val::Nil)
+            && table
+                .get_index(index)
+                .is_some_and(|(key, _)| !routes.is_link_key(&key));
+        if !neutral {
+            routes.retire_through(table);
+        }
+    }
+
     pub(super) fn remove_slot(&mut self, slot: SlotRef) -> bool {
+        self.retire();
         self.table.remove_slot(slot)
     }
 
+    /// A stale or absent probe writes nothing, so it retires nothing; a
+    /// current one naming a tombstone revives a key in place without moving
+    /// the version, so it retires like any new key.
     pub(super) fn store_probe(&mut self, probe: &HashProbe, value: &Val) -> bool {
+        if self.table.is_on_route() {
+            Self::classify_probe_store(self.table, self.routes, probe, value);
+        }
         self.table.store_probe(probe, value)
     }
 
+    /// On a marked table, before `table.store_probe(probe, value)`: retire
+    /// routes unless the store is a route-neutral live overwrite.
+    #[inline(never)]
+    fn classify_probe_store(
+        table: &mut Table,
+        routes: &mut RouteState,
+        probe: &HashProbe,
+        value: &Val,
+    ) {
+        if probe.version == table.version() && probe.present {
+            Self::classify_overwrite(table, routes, None, probe.at, value);
+        }
+    }
+
     pub(super) fn init_at_index(&mut self, index: usize, key: Val, value: Val) -> bool {
+        self.retire();
         self.table.init_at_index(index, key, value)
     }
 
     #[cfg(feature = "snapshot")]
     pub(super) fn set_metatable(&mut self, mt: Option<ObjectPtr>) {
+        self.retire();
         self.table.set_metatable(mt);
     }
 
     pub(super) fn set_at_index(&mut self, index: usize, value: Val) -> bool {
+        if self.table.is_on_route() {
+            Self::classify_overwrite(self.table, self.routes, None, index, &value);
+        }
         self.table.set_at_index(index, value)
     }
 
     pub(super) fn remove_at_index(&mut self, index: usize) -> bool {
+        self.retire();
         self.table.remove_at_index(index)
     }
 
     pub(super) fn swap_contents(&mut self, incoming: Table) -> Table {
+        self.retire();
         self.table.swap_contents(incoming)
     }
 
@@ -3221,6 +3424,7 @@ impl TableEditor<'_> {
         array_slots: usize,
         entries: Vec<(Val, Val)>,
     ) -> Result<(), TableError> {
+        self.retire();
         let old = self.table.resident_bytes();
         self.table
             .rebuild_from_snapshot(array_len, array_slots, entries)?;
@@ -3230,6 +3434,7 @@ impl TableEditor<'_> {
 
     #[cfg(test)]
     fn replace_for_test(&mut self, incoming: Table) {
+        self.retire();
         self.resident
             .replace(self.table.resident_bytes(), incoming.resident_bytes());
         *self.table = incoming;

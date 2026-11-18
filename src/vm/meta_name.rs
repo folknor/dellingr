@@ -53,11 +53,15 @@ pub(super) struct MetaNames([StringPtr; MetaName::ALL.len()]);
 impl MetaNames {
     /// Intern every name without collecting. Called while the heap is being
     /// built, before anything else can need rooting.
+    /// Also hands the heap its `__index`, which route retirement classifies
+    /// stores by.
     pub(super) fn intern(heap: &mut GcHeap) -> Self {
-        Self(MetaName::ALL.map(|name| {
+        let names = Self(MetaName::ALL.map(|name| {
             heap.no_gc_allocator()
                 .alloc_string(name.as_str().as_bytes())
-        }))
+        }));
+        heap.set_route_link_key(names.0[MetaName::Index as usize]);
+        names
     }
 
     /// The interned key for `name`, as a value ready for a table lookup.
