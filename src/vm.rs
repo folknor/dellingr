@@ -42,7 +42,7 @@ pub use invoke::{InvokeArg, InvokeArgs, InvokeResult, InvokeResults};
 pub(crate) use leaf::Leaf;
 pub use lua_val::LuaType;
 pub use lua_val::RustFunc;
-pub use raw_field::{FieldKey, FieldName, RawField};
+pub use raw_field::{FieldKey, FieldName, RawField, RawFields};
 pub use rust_fn::RustFnHandle;
 pub(crate) use rust_fn::RustFnId;
 use rust_fn::RustFnTable;

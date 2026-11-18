@@ -369,19 +369,13 @@ static KIND: FieldName = FieldName::new("kind");
 static ALIVE: FieldName = FieldName::new("alive");
 
 /// `_host_decode(e)`: the host side of a record-decoding workload. Reads
-/// eight own fields of the entity table with `State::raw_field` through
-/// `FieldName` descriptors and returns the sum the workload's Lua fallback
+/// eight own fields of the entity table in one `State::raw_fields` batch
+/// through `FieldName` descriptors and returns the sum the workload's Lua fallback
 /// computes.
 fn host_decode(state: &mut State) -> dellingr::Result<u8> {
-    let x: f64 = state.raw_field(1, &X)?;
-    let y: f64 = state.raw_field(1, &Y)?;
-    let vx: f64 = state.raw_field(1, &VX)?;
-    let vy: f64 = state.raw_field(1, &VY)?;
-    let hp: f64 = state.raw_field(1, &HP)?;
-    let player: u32 = state.raw_field(1, &PLAYER)?;
-    let kind: &str = state.raw_field(1, &KIND)?;
+    let (x, y, vx, vy, hp, player, kind, alive): (f64, f64, f64, f64, f64, u32, &str, bool) =
+        state.raw_fields(1, (&X, &Y, &VX, &VY, &HP, &PLAYER, &KIND, &ALIVE))?;
     let kind_len = kind.len() as f64;
-    let alive: bool = state.raw_field(1, &ALIVE)?;
     let sum = x + y + vx + vy + hp + f64::from(player) + kind_len + f64::from(u8::from(alive));
     state.push_number(sum)?;
     Ok(1)

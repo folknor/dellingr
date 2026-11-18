@@ -283,6 +283,7 @@ mod sealed_key {
     use std::sync::atomic::Ordering;
 
     /// A table to look a field up in, with the heap that holds its keys.
+    #[derive(Clone, Copy)]
     pub struct Lookup<'a> {
         pub(in super::super) heap: &'a GcHeap,
         pub(in super::super) table: &'a Table,
@@ -347,6 +348,53 @@ mod sealed_key {
 impl FieldKey for &str {}
 impl FieldKey for &FieldName {}
 
+mod sealed_fields {
+    use super::super::{Result, State};
+    use super::sealed_key::Lookup;
+
+    /// Reads a tuple of fields of one resolved table, in tuple order.
+    pub trait ReadFields<'s, K>: Sized {
+        fn read(state: &'s State, table_arg: isize, at: Lookup<'s>, keys: K) -> Result<Self>;
+    }
+}
+
+/// The tuple [`State::raw_fields`] reads into: up to eight [`RawField`]
+/// types, named by a tuple of the same number of [`FieldKey`]s. Sealed.
+pub trait RawFields<'s, K>: sealed_fields::ReadFields<'s, K> {}
+
+macro_rules! field_tuples {
+    ($(($($ty:ident $key:ident),+))+) => {$(
+        impl<'s, $($ty: RawField<'s>, $key: FieldKey),+>
+            sealed_fields::ReadFields<'s, ($($key,)+)> for ($($ty,)+)
+        {
+            #[expect(non_snake_case, reason = "the bindings reuse the type parameter names")]
+            fn read(
+                state: &'s State,
+                table_arg: isize,
+                at: sealed_key::Lookup<'s>,
+                ($($key,)+): ($($key,)+),
+            ) -> Result<Self> {
+                Ok(($(state.read_field::<$ty>(table_arg, at, $key)?,)+))
+            }
+        }
+        impl<'s, $($ty: RawField<'s>, $key: FieldKey),+> RawFields<'s, ($($key,)+)>
+            for ($($ty,)+)
+        {
+        }
+    )+};
+}
+
+field_tuples! {
+    (A KA)
+    (A KA, B KB)
+    (A KA, B KB, C KC)
+    (A KA, B KB, C KC, D KD)
+    (A KA, B KB, C KC, D KD, E KE)
+    (A KA, B KB, C KC, D KD, E KE, F KF)
+    (A KA, B KB, C KC, D KD, E KE, F KF, G KG)
+    (A KA, B KB, C KC, D KD, E KE, F KF, G KG, H KH)
+}
+
 impl State {
     /// Reads field `name` of the table at argument `table_arg` into `T`,
     /// without metamethods: only the table's own fields are seen, so a field
@@ -388,9 +436,12 @@ impl State {
     /// and reads the same value and error either way.
     //
     // Per-field `check_usable` stays: host code can change the
-    // floating-point environment between reads. The `host_records` workload
-    // (eight fields of persistent map-stored records per callback) is the
-    // one that measures descriptors against plain names.
+    // floating-point environment between reads, which is also why a record
+    // view checked once at creation was refused (host code runs between its
+    // reads). `raw_fields` is the once-per-call form. The `host_records`
+    // workload (eight fields of persistent map-stored records per callback)
+    // measures descriptors against plain names and the batch against
+    // separate reads.
     ///
     /// The read is free, leaves the stack unchanged, and never runs Lua.
     ///
@@ -408,6 +459,66 @@ impl State {
         name: impl FieldKey,
     ) -> Result<T> {
         self.check_usable()?;
+        let table = self.table_arg(table_arg)?;
+        self.read_field(table_arg, table, name)
+    }
+
+    /// Reads several fields of the table at argument `table_arg` at once,
+    /// each exactly as [`State::raw_field`] reads it: `keys` is a tuple of
+    /// up to eight names (`&str` or [`FieldName`]) and `T` the tuple of
+    /// types they read into.
+    ///
+    /// ```
+    /// use dellingr::{FieldName, State};
+    ///
+    /// static PLAYER: FieldName = FieldName::new("player");
+    /// static X: FieldName = FieldName::new("x");
+    ///
+    /// fn spawn(state: &mut State) -> dellingr::Result<u8> {
+    ///     let (player, x, flags): (u32, f64, Option<&str>) =
+    ///         state.raw_fields(1, (&PLAYER, &X, "flags"))?;
+    ///     assert_eq!((player, x, flags), (1, 2.5, Some("Structure")));
+    ///     Ok(0)
+    /// }
+    /// # let mut state = State::new();
+    /// # let handle = state.add_rust_fn("spawn", spawn)?;
+    /// # state.push_rust_fn(handle)?;
+    /// # state.set_global("spawn")?;
+    /// # let program = dellingr::Program::compile(r#"spawn{player = 1, x = 2.5, flags = "Structure"}"#, None)?;
+    /// # state.load(&program)?;
+    /// # state.call(dellingr::ArgCount::Fixed(0), dellingr::RetCount::Fixed(0))?;
+    /// # Ok::<(), dellingr::error::Error>(())
+    /// ```
+    ///
+    /// The State is checked and the table resolved once for the whole
+    /// tuple, where separate reads pay both per field. That is sound
+    /// because no host code runs between the reads: the keys and
+    /// conversions are the sealed ones `raw_field` uses (an owned `String`
+    /// or `Vec<u8>` allocates, and the allocator is assumed to leave the
+    /// floating-point environment alone, as everywhere else).
+    ///
+    /// With turbofish the key tuple's type is inferred:
+    /// `raw_fields::<_, (f64, u32)>(1, ("x", "player"))`.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`State::raw_field`]. Fields are read in tuple order
+    /// and the first that fails is the error: the same first error reading
+    /// these keys one by one would return, with the State and the
+    /// floating-point environment unchanged between them.
+    pub fn raw_fields<'s, K, T: RawFields<'s, K>>(
+        &'s self,
+        table_arg: isize,
+        keys: K,
+    ) -> Result<T> {
+        self.check_usable()?;
+        let table = self.table_arg(table_arg)?;
+        T::read(self, table_arg, table, keys)
+    }
+
+    /// The table at argument `table_arg`, or the argument error `raw_field`
+    /// reports for a missing or non-table argument.
+    fn table_arg(&self, table_arg: isize) -> Result<sealed_key::Lookup<'_>> {
         if table_arg == 0 {
             return Err(self.error(ErrorKind::InvalidStackIndex { index: table_arg }));
         }
@@ -429,10 +540,21 @@ impl State {
                 received,
             ))));
         };
-        let value = name.lookup(sealed_key::Lookup {
+        Ok(sealed_key::Lookup {
             heap: &self.heap,
             table: table_ref,
-        });
+        })
+    }
+
+    /// One field of the resolved table `at`, converted to `T`; the field
+    /// error names argument `table_arg`.
+    fn read_field<'s, T: RawField<'s>>(
+        &'s self,
+        table_arg: isize,
+        at: sealed_key::Lookup<'s>,
+        name: impl FieldKey,
+    ) -> Result<T> {
+        let value = name.lookup(at);
         let val = value.val;
         T::convert(value).map_err(|failure| {
             let received = val.typ(&self.heap);

@@ -87,7 +87,7 @@ pub trait HostCallbacks: Send {
     /// own failure reports it then, like any other callback error.
     ///
     /// Other host APIs, including `concat`, `set_metatable_of`,
-    /// `table_insert_at`, `table_remove_at` and `raw_field`, return failures
+    /// `table_insert_at`, `table_remove_at`, `raw_field` and `raw_fields`, return failures
     /// without notifying at their own boundary, even when they use an error
     /// kind also used during execution. If a Rust callback returns one of
     /// those errors as its own failure, it is reported at the callback

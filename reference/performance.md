@@ -544,6 +544,25 @@ descriptor arm to 8.0 s, so it stays out of line. Both are layout effects
 of the kind `AGENTS.md` warns about, and the reason those two attributes
 are where they are.
 
+## Batch host field reads, 2026-11-18
+
+`State::raw_fields` reads a tuple of fields with one `check_usable` (on
+x86-64 an out-of-line MXCSR read for host code) and one table-argument
+resolution, where eight `raw_field` calls pay both eight times. Measured on
+bygg with `brokkr bench wall --workload host_records`, best of three, dirty
+tree at `221a609` with the harness callback switched between eight
+`&FieldName` reads and one eight-field batch, run interleaved:
+
+| Callback | Wall |
+|---|---:|
+| eight `raw_field` | 6.5 s (54193fc1), 6.6 s (1a52d2c2) |
+| one `raw_fields` | 4.5 s (a4679e09) |
+
+About 44 ns per decode over about 46 million decodes. The arms are separate
+harness builds, so code layout is not excluded, but the gap is well beyond
+the layout spread `AGENTS.md` records. The harness callback now uses the
+batch.
+
 ## Native stack frames and cycles
 
 The log behind reference/native-calls.md's current table: the frame-size

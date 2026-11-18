@@ -222,30 +222,6 @@ workload's loop.
 
 **Classification:** rewrite, unmeasured.
 
-## PERF-042 - Host field reads pay admission and argument resolution per field
-
-Raised while landing `FieldName` slot hints for `State::raw_field`.
-
-**Bottleneck (hypothesis):** a callback decoding N fields of one table calls
-`raw_field` N times, and each call runs `check_usable` (an out-of-line
-MXCSR read for host code on x86-64), checks the argument index and resolves
-the table. With descriptors the lookups are cheap; the `host_records`
-workload still spends about 150 ns of process wall per eight-field decode
-(6.7 s over about 46 million decodes, bygg, Lua call overhead included);
-how much of it is per-field admission is unmeasured.
-
-**Redesign:** a sealed batch read, `raw_fields::<(f64, u32, &str)>(arg,
-(&X, &PLAYER, &KIND))`, resolving the table and checking the environment
-once, converting in tuple order and reporting the first failing field with
-the scalar read's error. Sound within one call: no host code runs between
-the reads (the per-read check exists because host code may change the
-floating-point environment between separate calls). The tuple machinery has
-a precedent in `State::invoke`'s sealed tuples.
-
-**Measure on:** `host_records`, scalar against batch in one binary.
-
-**Classification:** local, unmeasured.
-
 ## Accounts added to existing entries
 
 This hunt's account of these mechanisms went into the entry already filed for

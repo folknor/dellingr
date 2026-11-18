@@ -712,3 +712,73 @@ fn a_descriptor_fails_with_the_plain_name_error() {
     assert_eq!(hinted.replace("read_hinted_f64", "read_f64"), plain);
     assert!(plain.contains("field 'v'"), "{plain}");
 }
+
+/// `spawn` read as one batch: two descriptors and a plain name.
+fn spawn_batch(state: &mut State) -> dellingr::Result<u8> {
+    let (player, x, flags): (u32, f64, Option<String>) =
+        state.raw_fields(1, (&BATCH_PLAYER, &BATCH_X, "flags"))?;
+    state.push_string(format!("{player} {x} {flags:?}"))?;
+    Ok(1)
+}
+
+/// A batch read at argument 0.
+fn batch_arg_zero(state: &mut State) -> dellingr::Result<u8> {
+    let (value,): (f64,) = state.raw_fields(0, ("v",))?;
+    state.push_number(value)?;
+    Ok(1)
+}
+
+// process-global: a validated slot hint only, see above.
+static BATCH_PLAYER: FieldName = FieldName::new("player");
+// process-global: as above.
+static BATCH_X: FieldName = FieldName::new("x");
+
+/// The outcome of `source` with `CALL` replaced by `function`: the result,
+/// or the error kind with the function's name masked so spellings compare.
+fn outcome(state: &mut State, source: &str, function: &str) -> String {
+    support::load(state, source.replace("CALL", function));
+    match state.call(ArgCount::Fixed(0), RetCount::Fixed(1)) {
+        Ok(()) => {
+            let value = state.to_string(-1).expect("a string result");
+            state.pop(1).expect("the result pops");
+            value
+        }
+        Err(error) => format!("{:?}", error.kind()).replace(function, "F"),
+    }
+}
+
+/// A batch reads what separate reads read and fails with the error the
+/// first failing one raises, in tuple order.
+#[test]
+fn a_batch_reads_and_fails_like_separate_reads_in_order() {
+    let mut state = State::new();
+    install(&mut state);
+    let functions: [(&str, dellingr::RustFunc); 2] = [
+        ("spawn_batch", spawn_batch),
+        ("batch_arg_zero", batch_arg_zero),
+    ];
+    for (name, function) in functions {
+        state
+            .push_named_rust_fn(name, function)
+            .expect("function fits");
+        state.set_global(name).expect("global is set");
+    }
+    for source in [
+        "return CALL{player = 1, x = 2.5, flags = 'Structure'}",
+        "return CALL{player = 1, x = 2.5}",
+        "return CALL{x = 2.5, player = 3, other = true}",
+        "return CALL{player = -1, x = 'far'}",
+        "return CALL{player = 1, x = 'far', flags = 5}",
+        "return CALL{player = 1, x = 2, flags = 5}",
+        "return CALL{}",
+        "return CALL(5)",
+        "return CALL()",
+    ] {
+        let scalar = outcome(&mut state, source, "spawn");
+        let batch = outcome(&mut state, source, "spawn_batch");
+        assert_eq!(batch, scalar, "{source}");
+    }
+    let error = outcome(&mut state, "return CALL{v = 1}", "batch_arg_zero");
+    assert!(error.contains("InvalidStackIndex"), "{error}");
+    assert_eq!(state.get_top(), 0);
+}

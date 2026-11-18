@@ -98,7 +98,9 @@ detail with `field 'name': ` inside the usual parentheses (`bad argument #1 to
 self (field 'x': ...)` for a method call), and `expected` and `received`
 describe the field, not the argument. `ArgDetail::ValueOutOfRange` and
 `ArgDetail::InvalidUtf8` cover an integral number outside the target integer
-type and a string that is not valid UTF-8.
+type and a string that is not valid UTF-8. `State::raw_fields` reads its
+tuple of fields in order and returns the first of these errors, the one the
+same reads made one by one would have returned.
 
 The host-facing `State::check_any` and `State::check_type` helpers set the
 function name only when validation fails. They ask the active Rust callback for

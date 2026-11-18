@@ -106,6 +106,14 @@ tick budgets and re-record replays.
   `&mut state` is unchanged; a field or return type naming `State` by value
   becomes `Box<State>`. `RustFunc` keeps its signature.
 
+### Added
+
+- `State::raw_fields(arg, keys)` reads a tuple of up to eight fields of one
+  table argument, each as `raw_field` reads it, checking the State and
+  resolving the table once instead of per field; the first failing field in
+  tuple order is the error. The `host_records` decode of eight fields went
+  from 6.5 s to 4.5 s on bygg.
+
 ### Fixed
 
 - **Replay-visible:** a generic `for` over `next` (or `pairs`) whose cached
