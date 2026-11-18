@@ -460,6 +460,33 @@ are `fib`, which branches and calls, so they are not. `method` and
 makes. `native_bytes_per_level` is identical to `528a5b5` in dev and release:
 the check is an outlined call from `call_from_lua`.
 
+## Leaf calls inside typed loop regions, 2026-11-18
+
+The typed loop region also takes a callee load (`GET_GLOBAL r k` or
+`GET_UPVAL r u`) and its `CALL r` with fixed arguments and one result when
+the callee, read once at region entry, has a numeric-leaf plan; the leaf runs
+on the region's mirror. Each call still reads the poll flag as its admission
+would, and hands the call to canonical dispatch when the flag is set or a leaf
+charge could be refused. Measured on bygg with `brokkr bench wall`, best of
+three, A at `16e16d5` (`--commit`), B the same tree plus the change (dirty):
+
+| Workload | A | B |
+|---|---:|---:|
+| `global` | 2.1 s (c6bfd6b6) | 897 ms (7ab71330) |
+| `benchmark` | 3.6 s (9175ec9f) | 3.6 s (8da1afdf) |
+| `arithmetic` | 1.8 s (47d48688) | 1.9 s (8fb54aae) |
+| `same_obj_read` | 473 ms (596b9763) | 489 ms (0c8a61f2) |
+| `constants` | 994 ms (2b890054) | 996 ms (a3265f14) |
+
+`arithmetic`'s wall moved without its region moving: a hotpath kernel pair
+(f4e7905b, bdf1ca57) puts `run_numeric_loop` at 15.0 ms and 14.8 ms of about
+265 ms in both, and the rest is `fib`'s call path, which the change does not
+touch, so the delta reads as code layout. Region bodies without calls keep
+passes of their own, compiled apart from the call-carrying ones.
+`native_bytes_per_level` is unchanged in dev and release, default and
+snapshot: the region stays an outlined function that is never live across a
+native re-entry.
+
 ## Native stack frames and cycles
 
 The log behind reference/native-calls.md's current table: the frame-size

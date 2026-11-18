@@ -210,6 +210,17 @@ impl CostState {
         self.flush_at
     }
 
+    /// Whether dispatch charges summing to `weight`, added one by one to a
+    /// pending batch of `pending` and settled whenever the batch reaches the
+    /// flush threshold, all succeed. A settlement fails only when nothing is
+    /// left before it, and each settlement lowers what is left and what is
+    /// still unsettled by the same amount, so a total strictly below what is
+    /// left can never meet a settlement with nothing left.
+    pub(crate) fn admits_charges(&self, pending: u64, weight: u64) -> bool {
+        self.limit
+            .is_none_or(|limit| pending.saturating_add(weight) < room(limit, self.used))
+    }
+
     /// A meter whose unit costs the weight of `charge`.
     pub(crate) fn charge_meter(&mut self, charge: Charge) -> CostMeter<'_> {
         let unit = self.weight(charge);

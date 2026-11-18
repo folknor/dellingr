@@ -118,16 +118,6 @@ Cosmetic:
   fixed-width integer"; the trait doc now lists the actual set (8- to 64-bit,
   signed and unsigned).
 
-### `reference/native-calls.md` release column is stale
-
-At 528a5b5 on bygg, `brokkr test native_bytes_per_level --release` reports
-16 bytes more per cycle than the table's release columns on every scenario
-row (`index_field` 624 against 608, `host_call` 944 against 928, `tfor_lua`
-656 against 640); the dev column matches. Some commit before 528a5b5 moved
-the release frames without re-measuring. Re-measure and replace the table
-(commit, host, `rustc -V` together), and find which commit it was if the
-16 bytes matter.
-
 ## Deferred forward-looking ideas
 
 ### Execution trace hook for a stepping debugger

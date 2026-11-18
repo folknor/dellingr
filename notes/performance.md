@@ -81,6 +81,13 @@ and at `State::try_numeric_leaf`; numbers in `reference/performance.md`):
   Every admission check is made first and declines rather than fails. This
   was the argument-guarded specialization the call-site hunt asked for; the
   tag test it named was never the cost, the activation was.
+- Loop regions calling numeric leaves through a global or upvalue
+  (`GET_GLOBAL`/`GET_UPVAL r`, then `CALL r` with fixed arguments and one
+  result). The callee is read once at entry: the per-iteration identity
+  check this entry once asked for is unnecessary, since nothing the region
+  or a leaf runs can rebind it. Each call polls as its admission would and
+  hands off to canonical dispatch on a set flag or a possibly refused leaf
+  charge.
 
 What the landed work taught: canonical-pc metadata with the canonical
 instructions as the fallback needs no position map or execution stream;
@@ -90,13 +97,11 @@ per-operation charge path with no refusal between its halves. The exact `i64`
 countdown was not built: the f64 add and compare are not where the loop's time
 went.
 
-**Residue:** loop bodies with a compare-branch, a store or a call still run
-canonically (no registered workload has a numeric-for body that is a
-compare-branch plus region operations only; every one with an `if` also calls
-or touches a table). A region extending across a call to a numeric leaf
-(`global`'s `sum = add_one(sum)` would need a per-iteration check that the
-global still names the same closure) is the next step for call loops.
-Straight-line chains in functions that are not leaves (fib's `n - 1`,
+**Residue:** loop bodies with a compare-branch, a store, or a call to
+anything but a numeric leaf (nested `f(g(x))`, a method call, open
+arguments or results) still run canonically (no registered workload has a
+numeric-for body that is a compare-branch plus region operations only; every
+one with an `if` also calls or touches a table). Straight-line chains in functions that are not leaves (fib's `n - 1`,
 `n - 2`, `+` around its calls) still dispatch per instruction. Field updates
 (`self.count = self.count + n`) need a store in the region, which ends the
 invariance argument for every field the store can reach. Each needs a

@@ -130,6 +130,33 @@ fn a_typed_numeric_loop_stops_at_its_first_back_edge() {
     assert_eq!(state.to_number(-1).expect("last is a number"), 1.0);
 }
 
+/// A typed loop calling a numeric leaf keeps the call's admission as a
+/// safepoint: an interrupt raised before the loop stops it at the first
+/// call, before the callee or anything after it in the body runs.
+#[test]
+fn a_typed_loop_with_a_leaf_call_stops_at_its_first_call() {
+    let source = "function inc(x) return x + 1 end
+                  local s, before, after = 0, 0, 0
+                  peek = function() return s, before, after end
+                  stop()
+                  for i = 1, 10 do
+                    before = i
+                    s = inc(s)
+                    after = i
+                  end";
+    let mut state = state();
+    let error = assert_interrupted(support::try_run(&mut state, source), source);
+    assert!(error.to_string().starts_with("7:"), "{error}");
+    state.interrupt().reset();
+    state.get_global("peek").expect("peek is defined");
+    state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(3))
+        .expect("peek runs once the interrupt is reset");
+    assert_eq!(state.to_number(-3).expect("s is a number"), 0.0);
+    assert_eq!(state.to_number(-2).expect("before is a number"), 1.0);
+    assert_eq!(state.to_number(-1).expect("after is a number"), 0.0);
+}
+
 #[test]
 fn recursion_without_loops_stops_at_the_next_call() {
     let source = "local function f(k) n = k if k == 3 then stop() end return f(k + 1) + 1 end

@@ -218,6 +218,81 @@ fn numeric_leaf_matches_canonical_call_at_every_budget() {
     }
 }
 
+/// A typed loop calling global numeric leaves, one with a temporary above
+/// its function register, so the region runs across the calls. `{twin}` is
+/// spliced into one helper: a free upvalue read makes it no leaf, which
+/// keeps the whole loop canonical without changing any charge.
+fn global_call_program(twin: &str) -> String {
+    format!(
+        r#"
+        local up = 0
+        function scale(x, y)
+            {twin}
+            return x * 0.5 + y
+        end
+        function shift(x) return x - 3 end
+        function run()
+            local sum, last, k = 0.5, 0, 0
+            peek = function() return sum, last, k end
+            for i = 1, 40 do
+                last = i * 2
+                sum = scale(sum, i * 3 - 1)
+                k = shift(sum) / 2
+            end
+            return sum
+        end
+        "#
+    )
+}
+
+#[test]
+fn numeric_loop_region_with_leaf_calls_matches_canonical_dispatch_at_every_budget() {
+    let region = global_call_program("");
+    let canonical = global_call_program("local _u = up");
+    let models = [
+        CostModel::default(),
+        CostModel::default()
+            .with(Charge::Mul, 0)
+            .with(Charge::Sub, 5)
+            .with(Charge::Add, 3),
+        CostModel::zero(),
+    ];
+    for model in &models {
+        for budget in -1..=700 {
+            assert_eq!(
+                region_outcome(model, &region, budget),
+                region_outcome(model, &canonical, budget),
+                "budget {budget} under {model:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn numeric_loop_region_calls_see_the_callee_the_loop_started_with() {
+    // A callee that is not a leaf, or that is rebound before the loop, runs
+    // canonically; a non-function callee fails as a call does.
+    let n = eval_number(
+        r#"
+        function f(x) return x + 1 end
+        local sum = 0
+        for i = 1, 3 do sum = f(sum) end
+        f = function(x) return x + 10 end
+        for i = 1, 3 do sum = f(sum) end
+        return sum
+    "#,
+    );
+    assert_eq!(n, 33.0);
+    let error = support::run_error(
+        r#"
+        g = 5
+        local sum = 0
+        for i = 1, 3 do sum = g(sum) end
+        "#,
+    );
+    assert!(error.to_string().contains("attempt to call"), "{error}");
+}
+
 #[test]
 fn numeric_leaf_declines_arguments_that_are_not_numbers() {
     let error = support::run_error(

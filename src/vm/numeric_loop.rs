@@ -16,9 +16,10 @@
 //!
 //! Why a loop region is exact, observable boundary by observable boundary:
 //!
-//! - Types. A body holds only arithmetic, `UNM`, `MOVE`, `LOAD_NUM` and
-//!   loop-invariant field reads, so numbers in give numbers out, and nothing
-//!   else runs while the region does: no call, store, allocation, upvalue
+//! - Types. A body holds only arithmetic, `UNM`, `MOVE`, `LOAD_NUM`,
+//!   loop-invariant field reads and calls to numeric leaves, so numbers in
+//!   give numbers out, and nothing else runs while the region does: no
+//!   other call, store, allocation, upvalue
 //!   write or handler. The only foreign code is the back-edge checkpoint
 //!   (`State::poll_gc_checkpoint`), which polls the interrupt and may
 //!   collect, and runs no Lua or host code. A guard at entry on every
@@ -56,6 +57,21 @@
 //!   completed prefix. Zero weights are skipped as dispatch skips them. A
 //!   fused field read's two instructions are both free, so no refusal falls
 //!   between them.
+//! - Calls. A body may call numeric leaves: `GET_GLOBAL r k` or `GET_UPVAL
+//!   r u`, then `CALL r` with fixed arguments and one result, nothing else
+//!   touching `r` in between. The callee is read once at entry and must be
+//!   a Lua closure with a leaf plan; nothing the region or a leaf runs can
+//!   rebind a global or upvalue, so no pass needs to check it again, and the
+//!   binding keeps the closure reachable. Each call runs the leaf on the
+//!   mirror, writes nil into every register above `r` up to the frame's
+//!   top as a fixed-result call leaves them, and records its call site. A
+//!   register read before written must lie below every `r`, or the second
+//!   pass would read that nil. Each call reads the poll flag first, as its
+//!   admission would poll, and when the flag is set, or in a
+//!   per-operation pass when the leaf's charges might be refused, the
+//!   region exits at the `CALL` with the callee back in `r` (installed
+//!   after the mirror is published) and canonical dispatch makes the call.
+//!   A fast pass adds the charges of the operations before the exit only.
 //! - The loop step reads the mirror's controls, which a body may have
 //!   written, computes the next value into a temporary, polls on the taken
 //!   back edge with the cursor past `FOR_LOOP`, and only then writes the
@@ -64,6 +80,9 @@
 //!
 //! Why a numeric leaf is exact: see `State::try_numeric_leaf`.
 
+use std::sync::Arc;
+
+use super::BytecodeRuntime;
 use super::Result;
 use super::State;
 use super::Val;
@@ -71,7 +90,7 @@ use super::eval::FRAME_HEADROOM;
 use super::frame::Frame;
 use crate::compiler::Bytecode;
 use crate::cost_meter::CostState;
-use crate::instr::{ArithOp, ArithOperands, Instr, RetCount};
+use crate::instr::{ArgCount, ArithOp, ArithOperands, Instr, RetCount};
 use crate::limits::{MAX_CALL_DEPTH, MAX_STACK_SIZE};
 use crate::numeral::{lua_add, lua_div, lua_modulo, lua_mul, lua_sub};
 
@@ -114,8 +133,39 @@ struct Body {
     /// The closing instruction's charge: `FOR_LOOP` for a loop, `RETURN`
     /// for a leaf.
     tail: (usize, u64),
-    /// Sum of every charge of one pass, saturating.
+    /// Sum of every charge of one pass, saturating; a loop's leaf calls add
+    /// their callees' weights at entry.
     weight: u64,
+    /// A loop's calls to numeric leaves, in body order. Empty for a leaf.
+    calls: Box<[CallSite]>,
+}
+
+/// Calls one loop body may make to numeric leaves.
+const MAX_CALLS: usize = 4;
+
+/// A loop body's `GET_GLOBAL r k` or `GET_UPVAL r u`, then its `CALL r` with
+/// fixed arguments and one result, made to a numeric leaf read once at entry.
+#[derive(Debug)]
+struct CallSite {
+    callee: Callee,
+    /// The function register `r`.
+    register: u16,
+    /// `r`'s mirror slot, which holds the call's result.
+    slot: u8,
+    /// The argument registers' mirror slots, `r + 1` upwards.
+    args: Box<[u8]>,
+    /// Mirror slots of the registers above `r`, which the call leaves nil.
+    above: u32,
+    /// The `CALL` pc.
+    pc: usize,
+    /// The `Call` operation's index in the body.
+    op: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Callee {
+    Global { name: u16, cache: Option<u8> },
+    Upvalue(u16),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -152,6 +202,10 @@ enum OpKind {
     Unm,
     /// `MOVE`, `LOAD_NUM` and invariant field reads (from a constant slot).
     Copy,
+    /// The callee load of call site `b`: writes no mirror slot.
+    Load,
+    /// Call site `b`, its result into slot `a`.
+    Call,
 }
 
 impl NumericLoops {
@@ -197,6 +251,16 @@ struct Layout {
     receivers: Vec<u16>,
     ops: Vec<LoopOp>,
     charges: Vec<(usize, u64)>,
+    calls: Vec<CallSite>,
+    /// A callee loaded into its register and not yet called: no other
+    /// operation may touch that register in between.
+    loading: Option<(u16, Callee)>,
+    /// The lowest function register called so far. A fixed-result call
+    /// leaves every register above its function register nil, so a register
+    /// above this floor reads nil unless it is in `revived`.
+    nil_floor: Option<u16>,
+    /// Registers above `nil_floor` written since the call that cleared them.
+    revived: Vec<u16>,
 }
 
 impl Layout {
@@ -217,6 +281,13 @@ impl Layout {
 
     /// A register operand being read: guarded unless written earlier.
     fn read(&mut self, register: u16) -> Option<u8> {
+        if self.untouchable(register)
+            || self
+                .nil_floor
+                .is_some_and(|floor| register > floor && !self.revived.contains(&register))
+        {
+            return None;
+        }
         let slot = self.register(register)?;
         if self.written & (1 << slot) == 0 {
             self.guards |= 1 << slot;
@@ -225,9 +296,87 @@ impl Layout {
     }
 
     fn write(&mut self, register: u16) -> Option<u8> {
+        if self.untouchable(register) {
+            return None;
+        }
         let slot = self.register(register)?;
         self.written |= 1 << slot;
+        if self.nil_floor.is_some_and(|floor| register > floor) && !self.revived.contains(&register)
+        {
+            self.revived.push(register);
+        }
         Some(slot)
+    }
+
+    /// The register of a callee loaded and not yet called.
+    fn untouchable(&self, register: u16) -> bool {
+        self.loading.is_some_and(|(loaded, _)| loaded == register)
+    }
+
+    /// `GET_GLOBAL r k` or `GET_UPVAL r u` loading a callee into `r`. Off
+    /// under fault injection, whose call-depth and stack-space sites count
+    /// every admission.
+    fn load(&mut self, register: u16, callee: Callee) -> Option<LoopOp> {
+        if cfg!(feature = "fault-injection")
+            || self.loading.is_some()
+            || self.calls.len() >= MAX_CALLS
+            || self.untouchable(register)
+        {
+            return None;
+        }
+        self.register(register)?;
+        self.loading = Some((register, callee));
+        Some(LoopOp {
+            kind: OpKind::Load,
+            a: 0,
+            b: self.calls.len() as u8,
+            c: 0,
+        })
+    }
+
+    /// `CALL r` of the loaded callee, with fixed arguments and one result.
+    fn call_site(&mut self, inst: Instr, pc: usize) -> Option<LoopOp> {
+        // An exit at the call leaves canonical dispatch to charge `CALL`
+        // again, which only a free `CALL` makes exact.
+        const {
+            assert!(Instr::fixed_charge(Instr::OP_CALL).is_none());
+        }
+        let (register, callee) = self.loading?;
+        let ArgCount::Fixed(count) = inst.call_args() else {
+            return None;
+        };
+        if inst.a() != register
+            || inst.call_results() != RetCount::Fixed(1)
+            || inst.call_is_method()
+        {
+            return None;
+        }
+        let mut args = Vec::with_capacity(usize::from(count));
+        for offset in 1..=u16::from(count) {
+            args.push(self.read(register.checked_add(offset)?)?);
+        }
+        self.loading = None;
+        // Everything above `r` is nil after the call.
+        let floor = self.nil_floor.map_or(register, |floor| floor.min(register));
+        self.nil_floor = Some(floor);
+        self.revived.retain(|&revived| revived <= register);
+        let a = self.write(register)?;
+        let index = self.calls.len() as u8;
+        self.calls.push(CallSite {
+            callee,
+            register,
+            slot: a,
+            args: args.into_boxed_slice(),
+            above: 0,
+            pc,
+            op: self.ops.len(),
+        });
+        Some(LoopOp {
+            kind: OpKind::Call,
+            a,
+            b: index,
+            c: 0,
+        })
     }
 
     /// Constant slots are numbered after the register slots once the layout
@@ -374,6 +523,17 @@ impl Layout {
                             c: 0,
                         }
                     }
+                    Instr::OP_GET_GLOBAL if fields => self.load(
+                        inst.a(),
+                        Callee::Global {
+                            name: inst.b(),
+                            cache: inst.cache_slot(),
+                        },
+                    )?,
+                    Instr::OP_GET_UPVAL if fields => {
+                        self.load(inst.a(), Callee::Upvalue(inst.b()))?
+                    }
+                    Instr::OP_CALL if fields => self.call_site(inst, pc)?,
                     _ if end.is_none() => return Some(pc),
                     _ => return None,
                 }
@@ -388,11 +548,37 @@ impl Layout {
     /// The finished body. `None` if a field receiver register is written by
     /// the body or is one of the first `reserved` registers (loop controls).
     fn finish(mut self, reserved: usize, tail: (usize, u64)) -> Option<(Body, Vec<u16>)> {
+        if self.loading.is_some() {
+            return None;
+        }
         for &receiver in &self.receivers {
             if let Some(slot) = self.registers.iter().position(|&r| r == receiver)
                 && (slot < reserved || self.written & (1 << slot) != 0)
             {
                 return None;
+            }
+        }
+        if let Some(floor) = self.nil_floor {
+            // A call clears every register above its function register, so a
+            // register read before written above the lowest one would read
+            // nil from the second pass on; the loop controls and a field
+            // receiver must survive every pass.
+            let reserved_above = self.registers[..reserved].iter().any(|&r| r >= floor);
+            let guard_above = self
+                .registers
+                .iter()
+                .enumerate()
+                .any(|(slot, &r)| self.guards & (1 << slot) != 0 && r > floor);
+            if reserved_above || guard_above || self.receivers.iter().any(|&r| r > floor) {
+                return None;
+            }
+            for site in &mut self.calls {
+                site.above = self
+                    .registers
+                    .iter()
+                    .enumerate()
+                    .filter(|&(_, &r)| r > site.register)
+                    .fold(0, |mask, (slot, _)| mask | 1 << slot);
             }
         }
         // Number the constant slots after the registers. The layout never
@@ -430,6 +616,7 @@ impl Layout {
                 charges: self.charges.into_boxed_slice(),
                 tail,
                 weight,
+                calls: self.calls.into_boxed_slice(),
             },
             registers,
         ))
@@ -572,20 +759,61 @@ impl State {
         ip: &mut usize,
         local_cost: &mut u64,
     ) -> Result<()> {
+        if region.body.calls.is_empty() {
+            self.run_region::<false>(region, frame, ip, local_cost)
+        } else {
+            self.run_region::<true>(region, frame, ip, local_cost)
+        }
+    }
+
+    /// `run_numeric_loop` for a body with leaf calls (`CALLS`) or without,
+    /// compiled apart so a body without calls keeps passes free of the call
+    /// arms and the per-operation charge test.
+    #[inline(always)]
+    fn run_region<const CALLS: bool>(
+        &mut self,
+        region: &NumericLoop,
+        frame: &Frame,
+        ip: &mut usize,
+        local_cost: &mut u64,
+    ) -> Result<()> {
         let base = frame.stack_bottom;
         let body = &region.body;
         let mut x = [0.0f64; MIRROR_SLOTS];
         if !self.load_mirror(body, frame, base, &mut x) {
             return Ok(());
         }
+        let mut callees: [Option<(Val, Arc<BytecodeRuntime>)>; MAX_CALLS] = Default::default();
+        if CALLS && !self.resolve_callees(body, frame, &mut callees) {
+            return Ok(());
+        }
+        let leaf = |index: usize| {
+            callees[index]
+                .as_ref()
+                .and_then(|(_, runtime)| runtime.numeric_leaf.as_ref())
+                .expect("resolve_callees found a leaf plan for every call site")
+        };
+        let weight = body
+            .calls
+            .iter()
+            .enumerate()
+            .fold(body.weight, |sum, (index, _)| {
+                sum.saturating_add(leaf(index).body.weight)
+            });
 
         let step_pc = region.step_pc;
         let mut written: u32 = 0;
         let mut published = false;
-        let result = loop {
-            if body.weight == 0 || body.weight < self.cost_flush_at().saturating_sub(*local_cost) {
-                if body.weight != 0 {
-                    *local_cost += body.weight;
+        // The call site whose callee is loaded and not yet called, which an
+        // exit puts back in its register.
+        let mut loaded: Option<usize> = None;
+        let result = 'pass: loop {
+            // Below the threshold no charge of the pass settles the batch,
+            // so its sum, or the prefix before an exit, is added at once.
+            let fast = weight == 0 || weight < self.cost_flush_at().saturating_sub(*local_cost);
+            if !CALLS && fast {
+                if weight != 0 {
+                    *local_cost += weight;
                     #[cfg(feature = "cost-check-interval")]
                     body.record_charges();
                 }
@@ -593,27 +821,103 @@ impl State {
                     x[at(op.a)] = eval(op, &x);
                     written |= 1 << op.a;
                 }
-            } else {
-                let mut refused = None;
-                for (op, &(cursor, weight)) in body.ops.iter().zip(&body.charges) {
-                    if weight != 0 {
+            } else if !CALLS {
+                for (op, &(cursor, charge)) in body.ops.iter().zip(&body.charges) {
+                    if charge != 0 {
                         *ip = cursor;
-                        if let Err(error) = self.charge_dispatch(local_cost, cursor, weight) {
-                            refused = Some(error);
-                            break;
+                        if let Err(error) = self.charge_dispatch(local_cost, cursor, charge) {
+                            break 'pass Err(error);
                         }
                     }
                     x[at(op.a)] = eval(op, &x);
                     written |= 1 << op.a;
                 }
-                if let Some(error) = refused {
-                    break Err(error);
-                }
-                let (cursor, weight) = body.tail;
-                if weight != 0 {
+                let (cursor, charge) = body.tail;
+                if charge != 0 {
                     *ip = cursor;
-                    if let Err(error) = self.charge_dispatch(local_cost, cursor, weight) {
+                    if let Err(error) = self.charge_dispatch(local_cost, cursor, charge) {
                         break Err(error);
+                    }
+                }
+            } else {
+                for (index, (op, &(cursor, charge))) in
+                    body.ops.iter().zip(&body.charges).enumerate()
+                {
+                    if !fast && charge != 0 {
+                        *ip = cursor;
+                        if let Err(error) = self.charge_dispatch(local_cost, cursor, charge) {
+                            break 'pass Err(error);
+                        }
+                    }
+                    match op.kind {
+                        OpKind::Load => {
+                            // The register holds the callee, not a number, until
+                            // the call writes it.
+                            let site = usize::from(op.b);
+                            written &= !(1 << body.calls[site].slot);
+                            loaded = Some(site);
+                        }
+                        OpKind::Call => {
+                            let site = &body.calls[usize::from(op.b)];
+                            let callee = leaf(usize::from(op.b));
+                            // The call's admission safepoint, and in the
+                            // per-operation path a callee charge that could be
+                            // refused, hand the call to canonical dispatch.
+                            if self.heap.gc_poll_requested()
+                                || (!fast
+                                    && !self.cost.admits_charges(*local_cost, callee.body.weight))
+                            {
+                                if fast {
+                                    *local_cost += prefix_weight(body, &leaf, index);
+                                    #[cfg(feature = "cost-check-interval")]
+                                    record_pass(body, &leaf, index, false);
+                                }
+                                *ip = site.pc;
+                                break 'pass Ok(());
+                            }
+                            let result =
+                                callee.eval(|register| x[at(site.args[usize::from(register)])]);
+                            if !fast {
+                                for &(cursor, charge) in callee
+                                    .body
+                                    .charges
+                                    .iter()
+                                    .chain(std::iter::once(&callee.body.tail))
+                                {
+                                    if charge != 0
+                                        && let Err(error) =
+                                            self.charge_dispatch(local_cost, cursor, charge)
+                                    {
+                                        break 'pass Err(error);
+                                    }
+                                }
+                            }
+                            x[at(op.a)] = result;
+                            written = (written | 1 << op.a) & !site.above;
+                            let function = base + usize::from(site.register);
+                            self.stack[function + 1..frame.top].fill(Val::Nil);
+                            self.record_call_site(site.pc + 1);
+                            loaded = None;
+                        }
+                        _ => {
+                            x[at(op.a)] = eval(op, &x);
+                            written |= 1 << op.a;
+                        }
+                    }
+                }
+                if fast {
+                    if weight != 0 {
+                        *local_cost += weight;
+                        #[cfg(feature = "cost-check-interval")]
+                        record_pass(body, &leaf, body.ops.len(), true);
+                    }
+                } else {
+                    let (cursor, charge) = body.tail;
+                    if charge != 0 {
+                        *ip = cursor;
+                        if let Err(error) = self.charge_dispatch(local_cost, cursor, charge) {
+                            break Err(error);
+                        }
                     }
                 }
             }
@@ -641,7 +945,78 @@ impl State {
             *ip = region.prep + 1;
         };
         self.publish_mirror(body, base, &x, written);
+        // Last, so no published number overwrites it.
+        if CALLS
+            && let Some(site) = loaded
+            && let Some((callee, _)) = &callees[site]
+        {
+            self.stack[base + usize::from(body.calls[site].register)] = *callee;
+        }
         result
+    }
+
+    /// Read every call site's callee into `callees` and check what the
+    /// canonical admission of each of its calls would check that the region
+    /// cannot change: the callee is a Lua closure with a leaf plan whose
+    /// parameter reads are all arguments, the call depth, the frame
+    /// reservation under the stack cap, and no open upvalue in a call window.
+    /// The stack must also end at the frame's top, where a fixed-result call
+    /// leaves it. `false` declines the region.
+    ///
+    /// Read once: nothing the region or a leaf runs stores to a table or an
+    /// upvalue, and a collection changes no live table, so the global or
+    /// upvalue names the same closure, which it also keeps reachable, on
+    /// every pass.
+    fn resolve_callees(
+        &self,
+        body: &Body,
+        frame: &Frame,
+        callees: &mut [Option<(Val, Arc<BytecodeRuntime>)>; MAX_CALLS],
+    ) -> bool {
+        let base = frame.stack_bottom;
+        if self.stack.len() != frame.top || self.in_flight.call_depth >= MAX_CALL_DEPTH {
+            return false;
+        }
+        for (index, site) in body.calls.iter().enumerate() {
+            let function = base + usize::from(site.register);
+            if self
+                .in_flight
+                .open_upvalues
+                .last()
+                .is_some_and(|&(open, _)| open >= function)
+            {
+                return false;
+            }
+            let value = match site.callee {
+                Callee::Global { name, cache } => self.read_global(frame, name, cache),
+                Callee::Upvalue(index) => self.upvalue_value(frame, index),
+            };
+            let Val::Obj(ptr) = value else {
+                return false;
+            };
+            let Some(closure) = self.heap.as_lua_function_ref(ptr) else {
+                return false;
+            };
+            let Some(leaf) = closure.runtime.numeric_leaf.as_ref() else {
+                return false;
+            };
+            let arguments = site.args.len();
+            let parameters_are_arguments =
+                leaf.body
+                    .registers
+                    .iter()
+                    .enumerate()
+                    .all(|(slot, &register)| {
+                        leaf.body.guards & (1 << slot) == 0 || usize::from(register) < arguments
+                    });
+            if !parameters_are_arguments
+                || function + 1 + leaf.max_stack + FRAME_HEADROOM > MAX_STACK_SIZE
+            {
+                return false;
+            }
+            callees[index] = Some((value, Arc::clone(&closure.runtime)));
+        }
+        true
     }
 
     /// Load `body`'s guarded registers of the frame at `base` and its
@@ -823,7 +1198,63 @@ fn eval(op: &LoopOp, x: &[f64; MIRROR_SLOTS]) -> f64 {
         OpKind::Arith(ArithOp::Mod) => lua_modulo(lhs, rhs),
         OpKind::Arith(ArithOp::Pow) => crate::crmath::pow(lhs, rhs),
         OpKind::Unm => -lhs,
-        OpKind::Copy => lhs,
+        // Calls and loads are run by the region loop, never through here.
+        OpKind::Copy | OpKind::Load | OpKind::Call => lhs,
+    }
+}
+
+impl NumericLeaf {
+    /// The leaf's result with `argument(register)` as each parameter it
+    /// reads, which the caller has checked is a number it passes.
+    #[inline(always)]
+    fn eval(&self, argument: impl Fn(u16) -> f64) -> f64 {
+        let body = &self.body;
+        let mut y = [0.0f64; MIRROR_SLOTS];
+        for (slot, &register) in body.registers.iter().enumerate() {
+            if body.guards & (1 << slot) != 0 {
+                y[slot] = argument(register);
+            }
+        }
+        for &(slot, constant) in &body.constants {
+            if let Constant::Number(value) = constant {
+                y[at(slot)] = value;
+            }
+        }
+        for op in &body.ops {
+            y[at(op.a)] = eval(op, &y);
+        }
+        y[at(self.result)]
+    }
+}
+
+/// The charges of a pass's operations before operation `end`, the leaves
+/// of the calls among them included.
+fn prefix_weight<'a>(body: &Body, leaf: &impl Fn(usize) -> &'a NumericLeaf, end: usize) -> u64 {
+    let ops = body.charges[..end].iter().map(|&(_, weight)| weight);
+    let leaves = body
+        .calls
+        .iter()
+        .enumerate()
+        .filter(|(_, site)| site.op < end)
+        .map(|(index, _)| leaf(index).body.weight);
+    ops.chain(leaves).fold(0, u64::saturating_add)
+}
+
+/// Record the positive charges of a pass's operations before `end`, each
+/// call's leaf charges after the call's own, then `FOR_LOOP`'s if `tail`,
+/// in the charge-site trace, as per-instruction dispatch would.
+#[cfg(feature = "cost-check-interval")]
+fn record_pass<'a>(body: &Body, leaf: &impl Fn(usize) -> &'a NumericLeaf, end: usize, tail: bool) {
+    for (op, &(cursor, weight)) in body.ops.iter().zip(&body.charges).take(end) {
+        if weight != 0 {
+            crate::cost_meter::interval_test::record(cursor, weight);
+        }
+        if let OpKind::Call = op.kind {
+            leaf(usize::from(op.b)).body.record_charges();
+        }
+    }
+    if tail && body.tail.1 != 0 {
+        crate::cost_meter::interval_test::record(body.tail.0, body.tail.1);
     }
 }
 
@@ -869,6 +1300,33 @@ mod tests {
             regions("local function f(o) local s = 0 for i = 1, 9 do s = s + o.y; o = i end end"),
             0
         );
+    }
+
+    #[test]
+    fn regions_take_calls_with_one_result_and_no_nil_reads() {
+        // A global or upvalue callee, called with fixed arguments for one
+        // result. Calls are off under fault injection.
+        let taken = usize::from(!cfg!(feature = "fault-injection"));
+        assert_eq!(
+            regions("local function f() local s = 0 for i = 1, 9 do s = g(s, i) end end"),
+            taken
+        );
+        assert_eq!(
+            regions("local h local function f() local s = 0 for i = 1, 9 do s = h(s) + 1 end end"),
+            taken
+        );
+        // A nested call has two callees loaded at once; a statement call
+        // wants no result; a method call and open arguments are refused.
+        for source in [
+            "local function f() local s = 0 for i = 1, 9 do s = g(h(s)) end end",
+            "local function f() local s = 0 for i = 1, 9 do g(s) end end",
+            "local function f(o) local s = 0 for i = 1, 9 do s = o:m(s) end end",
+            "local function f(...) local s = 0 for i = 1, 9 do s = g(...) end end",
+            // A callee loaded and never called holds a non-number.
+            "local function f() local s = 0 for i = 1, 9 do s = s + 1 local _ = g end end",
+        ] {
+            assert_eq!(regions(source), 0, "{source}");
+        }
     }
 
     #[test]

@@ -23,7 +23,10 @@
 //!   is a refusal reported at the caller's call instruction. A numeric leaf
 //!   run without an activation (`State::try_numeric_leaf`) reads the same
 //!   poll flag at that point and declines to canonical admission when it is
-//!   set, so the poll there is the one that reports. Recursion needs
+//!   set, so the poll there is the one that reports. A typed loop region
+//!   calling a numeric leaf reads it at each such call the same way and,
+//!   when it is set, leaves the region at that `CALL` for canonical
+//!   admission to report. Recursion needs
 //!   no backward jump, and tail recursion, which runs at constant depth, is
 //!   still a call admission each time; a return needs no poll, since every
 //!   return pairs with a call that polled;

@@ -228,6 +228,11 @@ tick budgets and re-record replays.
   (`bench/global` went from 6.0 s to 2.1 s). Results, costs, the charged
   prefix at a budget refusal, error locations, interrupt safepoints and
   collection timing are unchanged.
+- The typed loop also runs calls to such functions, named by a global or an
+  upvalue, without leaving the loop: `sum = add_one(sum)` in
+  `bench/global` went from 2.1 s to 0.9 s on bygg. Results, costs, the
+  charged prefix at a budget refusal, error locations and tracebacks,
+  interrupt safepoints and collection timing are unchanged.
 
 ## [0.7.1] - 2026-11-06
 
