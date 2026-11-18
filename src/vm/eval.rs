@@ -290,7 +290,7 @@ impl State {
         let idx = self.call_base(num_args)?;
         self.publish_cost_unless_lua_callee(idx, local_cost)?;
         // A Lua function with a numeric leaf plan runs here without an
-        // activation when its arguments are numbers (`vm/numeric_loop.rs`).
+        // activation when its entry checks pass (`vm/numeric_loop.rs`).
         if matches!(self.stack[idx], Val::Obj(_))
             && self.try_numeric_leaf(idx, num_args, num_ret_expected, local_cost)
         {

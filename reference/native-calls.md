@@ -226,12 +226,14 @@ marker, which is the quickest way to see what a change touched.
 
 The recurring native stack of each scenario's cycle, as printed by the
 on-demand probe `brokkr test native_bytes_per_level`, which covers dev and
-release through the sweeps configured in `brokkr.toml`. Measured at commit
-16e16d53023c on bygg (x86-64 Linux) with
+release through the sweeps configured in `brokkr.toml`. Measured on the
+commit that added field leaves (`State::try_numeric_leaf`), on top of
+a77b68f8d, on bygg (x86-64 Linux) with
 `rustc 1.101.0-nightly (249c1e4e3 2026-11-05)` and that host's global Cargo
 configuration. Release is Cargo's default release profile (the repository
-sets no overrides). Within each profile, the default and snapshot builds
-agree in every row.
+sets no overrides). Dev's default and snapshot builds agree in every row;
+the release snapshot build differs from release default in the
+`error_tostring` and `gsub_pattern_*` rows.
 
 These are compiler-dependent measurements of one build, not limits and not
 assertions of headroom for another build; a different compiler version or
@@ -271,7 +273,7 @@ separately.
 | `tostring` | 12000 | 1120 | 1120 |
 | `print` | 12512 | 1296 | 1296 |
 | `format` | 13840 | 1568 | 1568 |
-| `error_tostring` | 12704 | 1408 | 1408 |
+| `error_tostring` | 12704 | 1408 | 1424 |
 | `sort_comparator` | 13808 | 1424 | 1424 |
 | `sort_comparator_right` | 13808 | 1424 | 1424 |
 | `sort_comparator_sortdown` | 13808 | 1424 | 1424 |
@@ -299,11 +301,11 @@ separately.
 | `unpack_read` | 12240 | 1072 | 1072 |
 | `gsub_empty_function` | 13024 | 1536 | 1536 |
 | `gsub_plain_function` | 12880 | 1536 | 1536 |
-| `gsub_pattern_function` | 16288 | 3200 | 3200 |
-| `gsub_pattern_captures` | 16288 | 3200 | 3200 |
+| `gsub_pattern_function` | 16288 | 3200 | 3120 |
+| `gsub_pattern_captures` | 16288 | 3200 | 3120 |
 | `gsub_empty_table` | 13152 | 1472 | 1472 |
 | `gsub_plain_table` | 13008 | 1472 | 1472 |
-| `gsub_pattern_table` | 16416 | 3136 | 3136 |
+| `gsub_pattern_table` | 16416 | 3136 | 3056 |
 | `tfor_lua` | 10400 | 656 | 656 |
 | `tfor_ipairs` | 12256 | 1056 | 1056 |
 | `tfor_host_iterator` | 12112 | 944 | 944 |

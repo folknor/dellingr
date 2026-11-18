@@ -648,21 +648,18 @@ sidesteps reason 1.
 
 ### Compiler-recognized field-update fusion
 
-What: parse `t.x = t.x + n` into a single `OP_FIELD_ADD` that does
-GET + ADD + SET in one instruction, eliminating dispatch overhead and
-ideally sharing one cache slot across the read and write of the same
-(receiver, key) pair.
+Method bodies of the form `self.field = self.field + ...` that are
+straight-line up to their return now run as field leaves without an
+activation (`vm/numeric_loop.rs`; bench/method 3.1 s to 1.7 s), which
+takes more than a fused opcode would. Residue: the same update inside a
+function that branches or calls, where an `OP_FIELD_ADD` (or next-opcode
+fusion in the `GET_FIELD` arm) would save two of the update's three
+dispatches. It owes the canonical register state and cursor when the add
+succeeds and the store's `TableWrite` charge is refused, and must prove the
+receiver register still holds the same table at the store.
 
-Why deferred: requires parser-side pattern recognition, a new opcode, and
-unifying cache slot management. The win compounds (one dispatch + one
-cache lookup instead of three), but the complexity is parser-level, not
-VM-level, which is where we've been working. With register bytecode it is
-a codegen peephole over `GET_FIELD`, an arithmetic op and `SET_FIELD` on the
-same receiver register and name.
-
-Signal that would promote it: a workload where method bodies of the form
-`self.field = self.field + ...` dominate, and the per-instruction
-dispatch cost shows up in profiling.
+Signal that would promote it: a workload whose hot non-leaf function does
+such updates, with the dispatches showing in profiling.
 
 ### Compile-time table-shape prediction
 

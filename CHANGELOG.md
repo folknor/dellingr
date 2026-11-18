@@ -233,6 +233,16 @@ tick budgets and re-record replays.
   `bench/global` went from 2.1 s to 0.9 s on bygg. Results, costs, the
   charged prefix at a budget refusal, error locations and tracebacks,
   interrupt safepoints and collection timing are unchanged.
+- Such a function may also read and store string-keyed fields of a table
+  parameter or an upvalue table, and may return nothing: a method like
+  `function C:inc(n) self.count = self.count + n return self.count end`
+  runs inside the call without an activation whenever every field it
+  touches is already present in its table. On bygg `bench/method` went from
+  3.1 s to 1.7 s, `method_chain_counter` 3.0 to 1.6 s,
+  `method_polymorphic` 3.5 to 2.1 s and `object_fields` 3.6 to 3.4 s.
+  Results, costs, the charged prefix at a budget refusal, error locations,
+  interrupt safepoints and collection timing are unchanged; a missing field,
+  a metamethod or a non-number read runs the call as before.
 
 ## [0.7.1] - 2026-11-06
 

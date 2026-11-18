@@ -170,8 +170,9 @@ fn numeric_loop_region_field_reads_keep_canonical_semantics() {
 }
 
 /// A caller looping over a numeric helper. `{twin}` is spliced at the top of
-/// the helper: a free upvalue read there keeps it off the leaf path without
-/// changing any charge.
+/// the helper: a free boolean load there keeps it off the leaf path without
+/// changing any charge. (An upvalue read would not: a leaf takes one as a
+/// field receiver it never uses.)
 fn leaf_program(twin: &str) -> String {
     format!(
         r#"
@@ -198,7 +199,7 @@ fn leaf_program(twin: &str) -> String {
 #[test]
 fn numeric_leaf_matches_canonical_call_at_every_budget() {
     let leaf = leaf_program("");
-    let canonical = leaf_program("local _u = up");
+    let canonical = leaf_program("local _u = false");
     let models = [
         CostModel::default(),
         CostModel::default()
@@ -220,7 +221,7 @@ fn numeric_leaf_matches_canonical_call_at_every_budget() {
 
 /// A typed loop calling global numeric leaves, one with a temporary above
 /// its function register, so the region runs across the calls. `{twin}` is
-/// spliced into one helper: a free upvalue read makes it no leaf, which
+/// spliced into one helper: a free boolean load makes it no leaf, which
 /// keeps the whole loop canonical without changing any charge.
 fn global_call_program(twin: &str) -> String {
     format!(
@@ -248,7 +249,7 @@ fn global_call_program(twin: &str) -> String {
 #[test]
 fn numeric_loop_region_with_leaf_calls_matches_canonical_dispatch_at_every_budget() {
     let region = global_call_program("");
-    let canonical = global_call_program("local _u = up");
+    let canonical = global_call_program("local _u = false");
     let models = [
         CostModel::default(),
         CostModel::default()
@@ -329,6 +330,135 @@ fn numeric_leaf_declines_arguments_that_are_not_numbers() {
     "#,
     );
     assert_eq!(n, 10.0);
+}
+
+/// Methods and helpers that read and store fields of a parameter and of an
+/// upvalue table, one returning nothing, called from a loop that is no
+/// region. `{twin}` is spliced at the top of each: a free boolean load keeps
+/// them off the leaf path without changing any charge.
+fn field_leaf_program(twin: &str) -> String {
+    format!(
+        r#"
+        local stats = {{ calls = 0 }}
+        local Counter = {{}}
+        Counter.__index = Counter
+        function Counter:inc(n)
+            {twin}
+            stats.calls = stats.calls + 1
+            self.count = self.count + n * 2
+            return self.count
+        end
+        function Counter:damage(n)
+            {twin}
+            self.hp = self.hp - n
+        end
+        local function area(s)
+            {twin}
+            return s.w * s.h
+        end
+        local function bump(t)
+            {twin}
+            stats.calls = stats.calls + 1
+            t.calls = t.calls + 10
+            return stats.calls
+        end
+        local c = setmetatable({{ count = 0.5, hp = 100 }}, Counter)
+        local sh = {{ w = 2, h = 3 }}
+        local k = 0
+        peek = function() return c.count + stats.calls, c.hp, k end
+        function run()
+            local sum = 0
+            for i = 1, 30 do
+                sum = c:inc(i)
+                c:damage(i % 3)
+                k = k + area(sh) + bump(stats)
+            end
+            return sum
+        end
+        "#
+    )
+}
+
+#[test]
+fn field_leaf_matches_canonical_call_at_every_budget() {
+    let leaf = field_leaf_program("");
+    let canonical = field_leaf_program("local _u = false");
+    let models = [
+        CostModel::default(),
+        CostModel::default()
+            .with(Charge::TableWrite, 4)
+            .with(Charge::Mul, 0)
+            .with(Charge::Sub, 5),
+        CostModel::zero(),
+    ];
+    for model in &models {
+        for budget in -1..=900 {
+            assert_eq!(
+                region_outcome(model, &leaf, budget),
+                region_outcome(model, &canonical, budget),
+                "budget {budget} under {model:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn field_leaf_declines_to_canonical_semantics() {
+    // A read through `__index`, a store of a new key through `__newindex`,
+    // aliased receivers, a zero-result call adjusted to fixed and open
+    // results, and a receiver whose register a later number overwrites.
+    let n = eval_number(
+        r##"
+        local log = 0
+        local base = { step = 2 }
+        local mt = { __index = base, __newindex = function(t, k, v) log = log + v end }
+        local function add(t, n) t.step = t.step + n return t.step end
+        local inherited = setmetatable({}, mt)
+        local first = add(inherited, 1)
+        if first ~= 2 or log ~= 3 or rawget(inherited, "step") ~= nil then return -1 end
+        local own = setmetatable({ step = 5 }, mt)
+        if add(own, 1) ~= 6 or log ~= 3 then return -2 end
+        local g = { n = 1 }
+        local function both(t) g.n = g.n + 1 t.n = t.n * 10 return g.n end
+        if both(g) ~= 20 then return -3 end
+        local function hit(t) t.n = t.n - 1 end
+        local a, b = hit(g)
+        if a ~= nil or b ~= nil or select("#", hit(g)) ~= 0 or g.n ~= 18 then return -4 end
+        return first + log
+    "##,
+    );
+    assert_eq!(n, 5.0);
+    // A typed loop does not call a leaf that stores: the store would change
+    // what the loop reads.
+    let n = eval_number(
+        r#"
+        acc = { v = 0 }
+        function g(x) acc.v = acc.v + x return x end
+        local s = 0
+        for i = 1, 5 do s = g(i) end
+        return s + acc.v
+    "#,
+    );
+    assert_eq!(n, 20.0);
+    let error = support::run_error(
+        r#"
+        local function add(t, n) t.x = t.x + n return t.x end
+        add({ x = "s" }, 1)
+        "#,
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("attempt to perform arithmetic on a string value"),
+        "{error}"
+    );
+    let error = support::run_error(
+        r#"
+        local function add(t, n) t.x = t.x + n return t.x end
+        add(7, 1)
+        "#,
+    );
+    assert!(error.to_string().contains("number value"), "{error}");
 }
 
 #[test]

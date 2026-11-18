@@ -5,8 +5,13 @@
 //!   `f64` mirror, and each iteration runs its body operations and the loop
 //!   step without going back through the dispatch loop.
 //! - **Numeric leaves.** A Lua function whose code up to its first `RETURN`
-//!   is such arithmetic, returning one value, runs inside call dispatch
-//!   without an activation when its arguments are numbers.
+//!   is such arithmetic, returning one value or none, runs inside call
+//!   dispatch without an activation when its arguments are numbers. Its
+//!   body may also read and store string-keyed fields of receiver tables (a
+//!   parameter used only as a receiver, or an upvalue), the method shape
+//!   `self.count = self.count + n`; such a field leaf runs when every field
+//!   is raw present in its table. Only a leaf with no field and one result
+//!   may be called from a loop region.
 //!
 //! Both are derived metadata built per State from admitted bytecode (fresh
 //! compiles and snapshot loads alike), so nothing here is persisted or
@@ -83,11 +88,15 @@
 use std::sync::Arc;
 
 use super::BytecodeRuntime;
+use super::MetaName;
 use super::Result;
 use super::State;
 use super::Val;
+use super::caches::{FieldLookupCacheEntry, FieldLookupCacheSlot, SetFieldLookupCacheSlot};
 use super::eval::FRAME_HEADROOM;
 use super::frame::Frame;
+use super::object::{ObjectPtr, Upvalue};
+use super::table::SlotRef;
 use crate::compiler::Bytecode;
 use crate::cost_meter::CostState;
 use crate::instr::{ArgCount, ArithOp, ArithOperands, Instr, RetCount};
@@ -187,6 +196,34 @@ enum Receiver {
     Register(u16),
 }
 
+/// Where a field leaf's receiver table comes from: a parameter register
+/// used only as a receiver, or one of the running closure's upvalues.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TableSource {
+    Param(u16),
+    Upvalue(u16),
+}
+
+/// Most distinct field sites one leaf may touch.
+const MAX_FIELD_SITES: usize = 16;
+
+/// One field a leaf reads or stores: a receiver source and a key literal,
+/// shared by every `GET_FIELD` and `SET_FIELD` of the body that names both.
+#[derive(Clone, Copy, Debug)]
+struct FieldSite {
+    source: TableSource,
+    /// The key's literal index.
+    key: u16,
+    /// A constituent `GET_FIELD`'s own-field cache slot, if any.
+    read_cache: Option<u8>,
+    /// A constituent `SET_FIELD`'s set cache slot, if any.
+    set_cache: Option<u8>,
+    /// Some constituent reads it, so it must hold a number at entry.
+    number: bool,
+    /// Some constituent stores to it, so its key must not be `__index`.
+    store: bool,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct LoopOp {
     kind: OpKind,
@@ -206,6 +243,22 @@ enum OpKind {
     Load,
     /// Call site `b`, its result into slot `a`.
     Call,
+    /// A field leaf's read of field site `b` into slot `a`.
+    Read,
+    /// A field leaf's store of slot `c` into field site `b`: writes no
+    /// mirror slot.
+    Store,
+}
+
+/// What a scan admits besides arithmetic.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// A loop body: invariant field reads read at entry, and calls to
+    /// numeric leaves.
+    Region,
+    /// A function body: field reads and stores on receiver tables, executed
+    /// in place.
+    Leaf,
 }
 
 impl NumericLoops {
@@ -261,6 +314,11 @@ struct Layout {
     nil_floor: Option<u16>,
     /// Registers above `nil_floor` written since the call that cleared them.
     revived: Vec<u16>,
+    /// A leaf's registers whose reaching definition is a table, with its
+    /// source. A numeric read of one refuses the plan.
+    tables: Vec<(u16, TableSource)>,
+    /// A leaf's field sites.
+    sites: Vec<FieldSite>,
 }
 
 impl Layout {
@@ -282,6 +340,7 @@ impl Layout {
     /// A register operand being read: guarded unless written earlier.
     fn read(&mut self, register: u16) -> Option<u8> {
         if self.untouchable(register)
+            || self.tables.iter().any(|&(r, _)| r == register)
             || self
                 .nil_floor
                 .is_some_and(|floor| register > floor && !self.revived.contains(&register))
@@ -301,6 +360,7 @@ impl Layout {
         }
         let slot = self.register(register)?;
         self.written |= 1 << slot;
+        self.tables.retain(|&(r, _)| r != register);
         if self.nil_floor.is_some_and(|floor| register > floor) && !self.revived.contains(&register)
         {
             self.revived.push(register);
@@ -311,6 +371,64 @@ impl Layout {
     /// The register of a callee loaded and not yet called.
     fn untouchable(&self, register: u16) -> bool {
         self.loading.is_some_and(|(loaded, _)| loaded == register)
+    }
+
+    /// The table source `register` holds where a leaf uses it as a field
+    /// receiver: its reaching definition's, or, for a register the body has
+    /// not yet read or written as a number, the parameter itself (checked to
+    /// be a parameter when the plan is finished). A parameter so used is a
+    /// table from then on, so a later numeric read of it refuses.
+    fn receiver(&mut self, register: u16) -> Option<TableSource> {
+        if let Some(&(_, source)) = self.tables.iter().find(|&&(r, _)| r == register) {
+            return Some(source);
+        }
+        if self.registers.contains(&register) {
+            return None;
+        }
+        let source = TableSource::Param(register);
+        self.tables.push((register, source));
+        Some(source)
+    }
+
+    /// The field site of `source` and `key`, shared with earlier
+    /// constituents naming both.
+    fn site(
+        &mut self,
+        source: TableSource,
+        key: u16,
+        cache: Option<u8>,
+        store: bool,
+    ) -> Option<u8> {
+        let index = match self
+            .sites
+            .iter()
+            .position(|site| site.source == source && site.key == key)
+        {
+            Some(index) => index,
+            None => {
+                if self.sites.len() >= MAX_FIELD_SITES {
+                    return None;
+                }
+                self.sites.push(FieldSite {
+                    source,
+                    key,
+                    read_cache: None,
+                    set_cache: None,
+                    number: false,
+                    store: false,
+                });
+                self.sites.len() - 1
+            }
+        };
+        let site = &mut self.sites[index];
+        if store {
+            site.store = true;
+            site.set_cache = site.set_cache.or(cache);
+        } else {
+            site.number = true;
+            site.read_cache = site.read_cache.or(cache);
+        }
+        Some(index as u8)
     }
 
     /// `GET_GLOBAL r k` or `GET_UPVAL r u` loading a callee into `r`. Off
@@ -410,16 +528,18 @@ impl Layout {
     /// (exclusive) or, when `end` is `None`, up to the first instruction
     /// that is not a body operation. Returns the pc where the scan stopped,
     /// or `None` on an instruction the body cannot hold when `end` is set.
-    /// `fields` admits the invariant field reads (loop regions only).
+    /// `mode` says which field and call forms the body admits.
     fn scan(
         &mut self,
         bytecode: &Bytecode,
         cost: &CostState,
         mut pc: usize,
         end: Option<usize>,
-        fields: bool,
+        mode: Mode,
     ) -> Option<usize> {
         let code = &bytecode.code;
+        let fields = mode == Mode::Region;
+        let leaf = mode == Mode::Leaf;
         while end.is_none_or(|end| pc < end) {
             let inst = *code.get(pc)?;
             let opcode = inst.opcode();
@@ -534,6 +654,39 @@ impl Layout {
                         self.load(inst.a(), Callee::Upvalue(inst.b()))?
                     }
                     Instr::OP_CALL if fields => self.call_site(inst, pc)?,
+                    // A leaf's upvalue load defines a table receiver and
+                    // writes no mirror slot; it is free, so it has no charge.
+                    Instr::OP_GET_UPVAL if leaf => {
+                        const {
+                            assert!(Instr::fixed_charge(Instr::OP_GET_UPVAL).is_none());
+                        }
+                        let register = inst.a();
+                        self.tables.retain(|&(r, _)| r != register);
+                        self.tables.push((register, TableSource::Upvalue(inst.b())));
+                        pc += 1;
+                        continue;
+                    }
+                    Instr::OP_GET_FIELD if leaf => {
+                        let source = self.receiver(inst.b())?;
+                        let b = self.site(source, inst.c(), inst.cache_slot(), false)?;
+                        LoopOp {
+                            kind: OpKind::Read,
+                            a: self.write(inst.a())?,
+                            b,
+                            c: 0,
+                        }
+                    }
+                    Instr::OP_SET_FIELD if leaf => {
+                        let source = self.receiver(inst.a())?;
+                        let c = self.read(inst.c())?;
+                        let b = self.site(source, inst.b(), inst.cache_slot(), true)?;
+                        LoopOp {
+                            kind: OpKind::Store,
+                            a: 0,
+                            b,
+                            c,
+                        }
+                    }
                     _ if end.is_none() => return Some(pc),
                     _ => return None,
                 }
@@ -676,7 +829,7 @@ impl NumericLoop {
         for offset in 0..4 {
             layout.register(base.checked_add(offset)?)?;
         }
-        layout.scan(bytecode, cost, after, Some(step_pc), true)?;
+        layout.scan(bytecode, cost, after, Some(step_pc), Mode::Region)?;
         let tail = Layout::charge(cost, Instr::OP_FOR_LOOP, step_pc);
         // The loop step reads the three hidden controls after the body.
         for slot in 0..3u8 {
@@ -693,46 +846,73 @@ impl NumericLoop {
     }
 }
 
-/// A function whose code from pc 0 to its first `RETURN` is a numeric body
-/// returning one register, run by `State::try_numeric_leaf`.
+/// A function whose code from pc 0 to its first `RETURN` is a numeric body,
+/// possibly reading and storing fields of receiver tables, returning one
+/// register or nothing, run by `State::try_numeric_leaf`.
 #[derive(Debug)]
 pub(super) struct NumericLeaf {
     body: Body,
-    /// The returned register's mirror slot.
-    result: u8,
+    /// The returned register's mirror slot; `None` for `return` with no
+    /// values.
+    result: Option<u8>,
+    /// The field sites the body reads and stores, in first-use order. A leaf
+    /// with none and one result is pure: a typed loop region may call it.
+    sites: Box<[FieldSite]>,
     /// The callee's frame size, which admission would reserve.
     max_stack: usize,
 }
 
 impl NumericLeaf {
     /// The leaf plan of `bytecode`, with fixed weights from `cost`. Every
-    /// register the body reads before writing must be a parameter: any other
-    /// is nil at admission, so canonical execution would fail or return nil,
-    /// which the plan does not model.
+    /// register the body reads before writing, as a number or as a field
+    /// receiver, must be a parameter: any other is nil at admission, so
+    /// canonical execution would fail or return nil, which the plan does not
+    /// model.
     pub(super) fn recognize(bytecode: &Bytecode, cost: &CostState) -> Option<Self> {
         if bytecode.is_vararg {
             return None;
         }
         let mut layout = Layout::default();
-        let ret_pc = layout.scan(bytecode, cost, 0, None, false)?;
+        let ret_pc = layout.scan(bytecode, cost, 0, None, Mode::Leaf)?;
         let ret = *bytecode.code.get(ret_pc)?;
-        if ret.opcode() != Instr::OP_RETURN || ret.return_count() != RetCount::Fixed(1) {
+        if ret.opcode() != Instr::OP_RETURN {
             return None;
         }
-        // The returned register is a read: `return x` must see a number.
-        let result = layout.read(ret.a())?;
+        let result = match ret.return_count() {
+            // The returned register is a read: `return x` must see a number.
+            RetCount::Fixed(1) => Some(layout.read(ret.a())?),
+            RetCount::Fixed(0) => None,
+            _ => return None,
+        };
+        let params = u16::from(bytecode.num_params);
+        let table_params_ok = layout.sites.iter().all(|site| match site.source {
+            TableSource::Param(register) => register < params,
+            TableSource::Upvalue(_) => true,
+        });
+        if !table_params_ok {
+            return None;
+        }
+        let sites = std::mem::take(&mut layout.sites).into_boxed_slice();
         let tail = Layout::charge(cost, Instr::OP_RETURN, ret_pc);
         let (body, registers) = layout.finish(0, tail)?;
         for (slot, &register) in registers.iter().enumerate() {
-            if body.guards & (1 << slot) != 0 && register >= u16::from(bytecode.num_params) {
+            if body.guards & (1 << slot) != 0 && register >= params {
                 return None;
             }
         }
         Some(Self {
             body,
             result,
+            sites,
             max_stack: usize::from(bytecode.max_stack),
         })
+    }
+
+    /// Whether a typed loop region may call this leaf: no field site, whose
+    /// store could change a value the region read at entry, and one result
+    /// for its mirror.
+    fn pure(&self) -> bool {
+        self.sites.is_empty() && self.result.is_some()
     }
 }
 
@@ -997,7 +1177,12 @@ impl State {
             let Some(closure) = self.heap.as_lua_function_ref(ptr) else {
                 return false;
             };
-            let Some(leaf) = closure.runtime.numeric_leaf.as_ref() else {
+            let Some(leaf) = closure
+                .runtime
+                .numeric_leaf
+                .as_ref()
+                .filter(|leaf| leaf.pure())
+            else {
                 return false;
             };
             let arguments = site.args.len();
@@ -1105,16 +1290,24 @@ impl State {
     ///   `FRAME_HEADROOM`, fits under the stack cap;
     /// - every register the body reads before writing is an argument holding
     ///   a number, so no instruction can fail;
+    /// - every field site resolves to a live slot of a table, holding a
+    ///   number where the body reads it (`State::resolve_sites`), so no read
+    ///   or store consults a metamethod or fails;
     /// - the callee's charges, body then `RETURN`, sum strictly below the
     ///   flush threshold minus the pending batch, so adding them at once
     ///   leaves the batch where per-instruction charging would.
     ///
-    /// The body runs no call, allocation, upvalue access or capture, so
-    /// nothing can observe the missing activation: no traceback, call-site
-    /// record, collection or handler runs while it would exist. The result
+    /// Receivers are tracked by the reaching definition at each use, so a
+    /// register that held a table and then a number is never taken as the
+    /// table. The body runs no call, allocation, capture or upvalue write,
+    /// and stores only numbers into slots already live, so nothing can
+    /// observe the missing activation: no traceback, call-site record,
+    /// collection or handler runs while it would exist, and the next
+    /// checkpoint sees the roots canonical execution would leave. The result
     /// lands in the function slot and the stack is cut above it, as the
-    /// return slides it; the `OP_CALL` arm's resize then supplies a fixed
-    /// count's missing results, as after a return.
+    /// return slides it; a return with no values cuts it at the function
+    /// slot. The `OP_CALL` arm's resize then supplies a fixed count's
+    /// missing results, as after a return.
     ///
     /// Out of line: `call_from_lua`, its caller, stays live across a Rust
     /// callee's re-entry, so its frame must not hold this one's mirror.
@@ -1166,23 +1359,181 @@ impl State {
                 x[at(slot)] = value;
             }
         }
-        for op in &body.ops {
-            x[at(op.a)] = eval(op, &x);
-        }
-        let result = x[at(leaf.result)];
-        let weight = body.weight;
-        #[cfg(feature = "cost-check-interval")]
-        if weight != 0 {
-            body.record_charges();
-        }
-        *local_cost += weight;
-        if expected == RetCount::Fixed(0) {
-            self.stack.truncate(idx);
+        let (result, weight) = if leaf.sites.is_empty() {
+            for op in &body.ops {
+                x[at(op.a)] = eval(op, &x);
+            }
+            #[cfg(feature = "cost-check-interval")]
+            if body.weight != 0 {
+                body.record_charges();
+            }
+            (leaf.result.map(|result| x[at(result)]), body.weight)
         } else {
-            self.stack[idx] = Val::Num(result);
-            self.stack.truncate(idx + 1);
+            let mut fields = [None; MAX_FIELD_SITES];
+            if !self.resolve_sites(closure, leaf, idx, num_args, &mut fields) {
+                return false;
+            }
+            // The stores need the heap mutably, so hold the plan through its
+            // runtime rather than through the closure.
+            let runtime = Arc::clone(&closure.runtime);
+            let leaf = runtime
+                .numeric_leaf
+                .as_ref()
+                .expect("the closure's runtime holds the plan just read");
+            self.run_fields(&leaf.body, &fields, &mut x);
+            #[cfg(feature = "cost-check-interval")]
+            if leaf.body.weight != 0 {
+                leaf.body.record_charges();
+            }
+            (leaf.result.map(|result| x[at(result)]), leaf.body.weight)
+        };
+        *local_cost += weight;
+        match result {
+            Some(result) if expected != RetCount::Fixed(0) => {
+                self.stack[idx] = Val::Num(result);
+                self.stack.truncate(idx + 1);
+            }
+            _ => self.stack.truncate(idx),
         }
         true
+    }
+
+    /// Resolve every field site of field leaf `leaf`, called through
+    /// `closure` at function slot `idx` with `num_args` arguments, to the
+    /// live slot of its receiver table, into `fields`. `false`, changing
+    /// nothing a later lookup could answer differently, when the call must
+    /// run canonically: a receiver is not a table, a key is not raw present
+    /// in it, a read field does not hold a number, or a stored key is
+    /// `__index`.
+    ///
+    /// Why that makes the body exact: a store writes a number into a slot
+    /// already live, which creates or removes no key, moves no slot and no
+    /// table version, so every site checked here stays present, and every
+    /// read site keeps holding a number, through the whole body, even when
+    /// two sources name one table. Raw presence means canonical execution
+    /// consults no `__index` or `__newindex` either. The cache entries this
+    /// consults or refills only accelerate the lookup, as dispatch's do.
+    fn resolve_sites(
+        &self,
+        closure: &super::object::Closure,
+        leaf: &NumericLeaf,
+        idx: usize,
+        num_args: u8,
+        fields: &mut [Option<(ObjectPtr, SlotRef)>; MAX_FIELD_SITES],
+    ) -> bool {
+        // The inline-cache differential compares leaves with the canonical
+        // path, as library leaves do (`vm/leaf.rs`).
+        #[cfg(feature = "disable-inline-caches")]
+        if super::caches::hits_disabled() {
+            return false;
+        }
+        let runtime = &closure.runtime;
+        let index_key = self.meta_names.get(MetaName::Index);
+        for (site, field) in leaf.sites.iter().zip(fields.iter_mut()) {
+            let receiver = match site.source {
+                TableSource::Param(register) => {
+                    if register >= u16::from(num_args) {
+                        return false;
+                    }
+                    self.stack[idx + 1 + usize::from(register)]
+                }
+                TableSource::Upvalue(index) => {
+                    let Some(&uv_ref) = closure.upvalues.as_slice().get(usize::from(index)) else {
+                        return false;
+                    };
+                    match self.upvalue_pool.get(uv_ref) {
+                        Upvalue::Open(stack_idx) => self.stack[*stack_idx],
+                        Upvalue::Closed(value) => *value,
+                    }
+                }
+            };
+            let Val::Obj(table) = receiver else {
+                return false;
+            };
+            let Some(tbl) = self.heap.as_table_ref(table) else {
+                return false;
+            };
+            let key = runtime.literals[usize::from(site.key)];
+            if site.store && key == index_key {
+                return false;
+            }
+            let cached = site
+                .read_cache
+                .and_then(|slot| runtime.caches.field(Some(slot)))
+                .and_then(FieldLookupCacheSlot::get_field)
+                .or_else(|| {
+                    site.set_cache
+                        .and_then(|slot| runtime.caches.set_field(Some(slot)))
+                        .and_then(SetFieldLookupCacheSlot::get)
+                })
+                .filter(|entry| entry.table == table)
+                .and_then(|entry| Some((entry.slot, tbl.read_slot(entry.slot)?)));
+            let (slot, value) = match cached {
+                Some(hit) => hit,
+                None => {
+                    let Some((slot, value)) = tbl.find_slot(&key) else {
+                        return false;
+                    };
+                    let entry = FieldLookupCacheEntry { table, slot };
+                    if let Some(cache) = site.read_cache.and_then(|s| runtime.caches.field(Some(s)))
+                    {
+                        cache.set_field(entry);
+                    }
+                    if let Some(cache) = site
+                        .set_cache
+                        .and_then(|s| runtime.caches.set_field(Some(s)))
+                    {
+                        cache.set(entry);
+                    }
+                    (slot, value)
+                }
+            };
+            if site.number && !matches!(value, Val::Num(_)) {
+                return false;
+            }
+            *field = Some((table, slot));
+        }
+        true
+    }
+
+    /// Run a field leaf's body over `x` with its sites resolved to
+    /// `fields`, in program order: each read reloads its slot, each store
+    /// overwrites it with a number.
+    fn run_fields(
+        &mut self,
+        body: &Body,
+        fields: &[Option<(ObjectPtr, SlotRef)>; MAX_FIELD_SITES],
+        x: &mut [f64; MIRROR_SLOTS],
+    ) {
+        for op in &body.ops {
+            match op.kind {
+                OpKind::Read => {
+                    let (table, slot) =
+                        fields[usize::from(op.b)].expect("resolve_sites resolved every site");
+                    let value = self
+                        .heap
+                        .as_table_ref(table)
+                        .and_then(|tbl| tbl.read_slot(slot));
+                    let Some(Val::Num(n)) = value else {
+                        panic!(
+                            "a read site resolved to a number stays one: stores write numbers into live slots"
+                        );
+                    };
+                    x[at(op.a)] = n;
+                }
+                OpKind::Store => {
+                    let (table, slot) =
+                        fields[usize::from(op.b)].expect("resolve_sites resolved every site");
+                    // A live overwrite under a key proven not `__index`, so
+                    // inherited routes stay standing (`GcHeap::overwrite_live_slot`).
+                    let stored = self
+                        .heap
+                        .overwrite_live_slot(table, slot, Val::Num(x[at(op.c)]));
+                    debug_assert!(stored, "a resolved site stays live");
+                }
+                _ => x[at(op.a)] = eval(op, x),
+            }
+        }
     }
 }
 
@@ -1198,8 +1549,9 @@ fn eval(op: &LoopOp, x: &[f64; MIRROR_SLOTS]) -> f64 {
         OpKind::Arith(ArithOp::Mod) => lua_modulo(lhs, rhs),
         OpKind::Arith(ArithOp::Pow) => crate::crmath::pow(lhs, rhs),
         OpKind::Unm => -lhs,
-        // Calls and loads are run by the region loop, never through here.
-        OpKind::Copy | OpKind::Load | OpKind::Call => lhs,
+        // Calls and loads are run by the region loop, and field reads and
+        // stores by a field leaf, never through here.
+        OpKind::Copy | OpKind::Load | OpKind::Call | OpKind::Read | OpKind::Store => lhs,
     }
 }
 
@@ -1223,7 +1575,8 @@ impl NumericLeaf {
         for op in &body.ops {
             y[at(op.a)] = eval(op, &y);
         }
-        y[at(self.result)]
+        // A region calls only pure leaves, which return one value.
+        y[at(self.result.unwrap_or(0))]
     }
 }
 
@@ -1341,6 +1694,28 @@ mod tests {
             "local function f(x) if x then return 1 end return 2 end"
         ));
         assert!(!leaf("local function f(x) return x, x end"));
+        // Field reads and stores on parameter and upvalue receivers, and a
+        // return with no values.
+        assert!(leaf(
+            "local function f(self, n) self.count = self.count + n return self.count end"
+        ));
+        assert!(leaf("local function f(self, n) self.hp = self.hp - n end"));
+        assert!(leaf(
+            "local s = {} local function f(o) s.c = s.c + 1 return o.w * o.h end"
+        ));
+        assert!(leaf("local function f() end"));
+        for source in [
+            // A receiver used as a number, stored, or returned.
+            "local function f(t) t.x = t.x + t end",
+            "local function f(t) t.x = t end",
+            "local function f(t) t.x = 1 return t end",
+            // A receiver register later holding a number is no receiver.
+            "local s = {} local function f() local a = s; a = 1; a.x = 2 end",
+            // A receiver that is not a parameter.
+            "local function f() local t; t.x = 1 end",
+        ] {
+            assert!(!leaf(source), "{source}");
+        }
         // 31 parameters and one temporary fill the mirror with no constants.
         let params = (0..31).map(|i| format!("p{i}")).collect::<Vec<_>>();
         let sum = params.join(" + ");

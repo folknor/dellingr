@@ -487,6 +487,39 @@ passes of their own, compiled apart from the call-carrying ones.
 snapshot: the region stays an outlined function that is never live across a
 native re-entry.
 
+## Field leaves, 2026-11-18
+
+A numeric leaf may also read and store string-keyed fields of a table
+parameter or an upvalue table, and may return nothing: the method shape
+`self.count = self.count + n`. Every field site is resolved to a live slot at
+entry, and the call runs canonically unless every one is raw present (a
+number where it is read) and no stored key is `__index`; the body then reads
+and overwrites those slots in order. A loop region calls only leaves with no
+field and one result. The candidates weighed were next-opcode fusion of
+`GET_FIELD`, arithmetic and `SET_FIELD` in the dispatch loop, and a
+persisted fused opcode; both keep the activation and remove two dispatches
+of a method call's ten, where the leaf removes the activation, the return
+and the body's dispatches together. Measured on bygg with `brokkr bench
+wall`, best of three, A at `a77b68f` (`--commit`), B the same tree plus the
+change (dirty):
+
+| Workload | A | B |
+|---|---:|---:|
+| `method` | 3.1 s (a27619f2) | 1.7 s (aee20ab3) |
+| `method_chain_counter` | 3.0 s (3f9b9e2d) | 1.6 s (9b7d305d) |
+| `method_polymorphic` | 3.5 s (ace7272f) | 2.1 s (c19c6b11) |
+| `object_fields` | 3.6 s (51a19861) | 3.4 s (c6d7edd9) |
+| `global` | 871, 868 ms (d55d8af7, f7c2495c) | 896, 888 ms (c3def6aa, 41ffa368) |
+| `arithmetic` | 1.9 s (4125c38b) | 1.9 s (7fa74398) |
+
+`object_fields` takes only `Unit:damage`; its construction, indexing and the
+caller's own field update still dispatch. `global`'s region-called leaf runs
+the same code as before apart from an entry check, and its 2 to 3% is
+unattributed (no same-binary control was run). `native_bytes_per_level` is
+unchanged in dev and release default; release with snapshot moved
+`error_tostring` up 16 bytes and the `gsub_pattern_*` rows down 80, which no
+changed function is live across (reference/native-calls.md has the table).
+
 ## Native stack frames and cycles
 
 The log behind reference/native-calls.md's current table: the frame-size

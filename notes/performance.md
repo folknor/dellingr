@@ -88,6 +88,12 @@ and at `State::try_numeric_leaf`; numbers in `reference/performance.md`):
   or a leaf runs can rebind it. Each call polls as its admission would and
   hands off to canonical dispatch on a set flag or a possibly refused leaf
   charge.
+- Field leaves: a leaf body may also read and store string-keyed fields of
+  a table parameter or an upvalue table and may return nothing (the method
+  shape `self.count = self.count + n`), resolved to live slots at entry
+  (`State::resolve_sites`). bench/method 3.1 s to 1.7 s. Fusing
+  `GET_FIELD; ADD; SET_FIELD` in the dispatch loop or as a persisted opcode
+  was weighed and passed over: both keep the activation, which is the cost.
 
 What the landed work taught: canonical-pc metadata with the canonical
 instructions as the fallback needs no position map or execution stream;
@@ -103,9 +109,12 @@ arguments or results) still run canonically (no registered workload has a
 numeric-for body that is a compare-branch plus region operations only; every
 one with an `if` also calls or touches a table). Straight-line chains in functions that are not leaves (fib's `n - 1`,
 `n - 2`, `+` around its calls) still dispatch per instruction. Field updates
-(`self.count = self.count + n`) need a store in the region, which ends the
-invariance argument for every field the store can reach. Each needs a
-workload whose loop or call the landed forms do not already take.
+outside a leaf (in a function that branches or calls, or in a loop body
+such as object_fields' `u.x = u.x + u.speed` beside `units[i]` and a method
+call) still dispatch; inside a loop region a store would need slot identity
+hoisted and every value it can reach reloaded, not the region's read-once
+fields, and a region still calls neither a field leaf nor a method. Each
+needs a workload whose loop or call the landed forms do not already take.
 One stable shape for a two-op fusion: after a handler, test the actual next
 opcode and enter its body directly inside the dispatch loop. That is the
 predecessor-specific dispatch threaded dispatch was after, without its
