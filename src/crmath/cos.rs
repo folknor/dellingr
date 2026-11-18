@@ -70,6 +70,16 @@ macro_rules! kernel {
 
         /// Fast path for regular x > 0x1.6a09e667f3bccp-27: `(h, l, err)` with
         /// |h + l - cos(x)| < err.
+        ///
+        /// This is the older CORE-MATH cosine design. Newer upstream ships a
+        /// cosine in the style of `sin_moderate`, with its own proof, so the way
+        /// to make this cheaper is a literal re-port at a newer pin. Two other
+        /// options were considered and refused. A home-grown, looser "common
+        /// input" phase is one: it has no proof, and a wider bound sends more
+        /// calls to `cos_accurate`. Fusing `math.sin(a), math.cos(a)` in the
+        /// compiler is the other: it would have to keep both lookups, both
+        /// charges, the poll and the failure point. A joint result belongs in an
+        /// explicit library function, if anywhere.
         #[$inline]
         $(#[$feature])*
         fn cos_fast(x: f64) -> (f64, f64, f64) {
