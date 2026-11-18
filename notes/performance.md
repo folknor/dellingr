@@ -187,40 +187,26 @@ typed-region work (PERF-002); the plan is designed by that consumer.
 
 **Classification:** rewrite, unmeasured; designed by PERF-002.
 
-## PERF-015 - Inherited reads re-resolve every table on the path
+## PERF-015 - Inherited routes retire together on any route write
 
-Raised by the lookup hunter; narrowed after a build and measurement.
+Raised by the lookup hunter; the writer-side route epoch landed
+(`RouteLookupCacheEntry`, `caches.rs`; numbers in
+`reference/performance.md`, "Inherited routes under a writer-side
+epoch"). The cold self-index reuse was refused (reason above the loop in
+`walk_index`).
 
-Residue: an inherited read through more than one handler table walks it
-in full each time (`walk_index`, `metamethod.rs`); the method cache
-covers only a raw hit in the first handler table. A validate-on-hit route
-cache for deeper chains was built and measured and did not pay: each hit
-still resolves every table on the path to compare its live links, so it
-saves only the keyed scans (numbers at `MethodLookupCacheEntry`,
-`caches.rs`). The access-plan rewrite with a dependency registry beneath
-every table writer is refused on the same measurement: the one-level hit
-is already near its floor (`resolve_index` about 12 ns warm on
-`examples/calls/method.lua`), and the receiver's own-key absence still
-needs its raw probe without shared layouts across tables, which no entry
-proposes.
+Residue: the epoch is heap-wide, so a write to any table on any route
+retires every route, and a class table that is both written (a static
+counter) and read through a deep route re-marks and refills on every
+read: the cold walk plus a few bit sets, never worse than that. Untested
+way out: a cached SET_FIELD that replaces a live value with another
+non-nil value under a key other than `__index` cannot change any
+route's links or intermediate misses (a route ending at that slot reads
+it live), so that one `store_slot` could skip route retirement. A
+dead-slot store still takes the fallback and must retire. No workload
+shows the thrash yet.
 
-What could still pay, untested:
-
-- A writer-side witness with constant work per mutation instead of
-  dependency lists: mark tables when a route is filled through them, and
-  move one epoch on any mutation of a marked table (raw ops, host writes,
-  `set_metatable`, cached global writes and other bypasses included). A
-  hit checks the epoch, guards the receiver, and reads the terminal slot
-  live. A write to one marked prototype invalidates unrelated routes;
-  ordinary instance writes do not. Baseline workloads: `method_chain`
-  (two-key classes) and `method_chain_wide` (map-storage classes), 2749
-  and 3111 ms wall at 8f6a6bb on bygg.
-- The self-index idiom (`C.__index = C`) resolves the same table handle
-  twice in the cold walk: once as the receiver's metatable, again as the
-  first handler. Reusing the borrowed table when the handler equals the
-  metatable removes one heap resolution per inherited read, with no cache.
-
-**Classification:** local (second bullet), rewrite (first), unmeasured.
+**Classification:** local, unmeasured.
 
 ## PERF-033 - Host global and field access resolves names and tables afresh
 

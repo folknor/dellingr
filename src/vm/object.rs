@@ -537,6 +537,19 @@ impl ResidentBytes {
     }
 }
 
+/// The saturated route epoch: no inherited route fills or hits at it.
+const ROUTE_EPOCH_DISABLED: u64 = u64::MAX;
+
+/// A mutable handout of `table`: if a route may read it, move the route
+/// epoch (retiring every route) and clear the mark. The next fill through
+/// the table marks it again.
+#[inline(always)]
+fn retire_routes_through(route_epoch: &mut u64, table: &mut Table) {
+    if table.take_on_route() {
+        *route_epoch = route_epoch.saturating_add(1);
+    }
+}
+
 /// A collection of objects which need to be garbage-collected.
 /// Uses a generational arena for safe access to objects.
 pub(crate) struct GcHeap {
@@ -564,6 +577,14 @@ pub(crate) struct GcHeap {
     /// the stores `watched_table_unmarked` admits. The builtin mirror
     /// (`GlobalEnv`) is validated by it.
     watched_epoch: u64,
+    /// Advances whenever a table carrying the `on_route` bit is handed out
+    /// mutably (`get_mut` and the two watched-table bypasses, which are every
+    /// mutable route to an object), clearing the bit. An inherited-route
+    /// cache entry records it after marking every table its route read, so
+    /// an unchanged epoch proves none of them changed. It saturates at
+    /// `ROUTE_EPOCH_DISABLED`, where no route fills or hits: a wrapped epoch
+    /// could match a stale entry.
+    route_epoch: u64,
     /// Collections left before the next one clears runtime cache entries
     /// naming freed objects (`GcHeap::runtime_cache_prune_due`).
     cache_prune_countdown: u32,
@@ -581,6 +602,7 @@ impl GcHeap {
             live_chunks: LiveChunks::default(),
             watched: ObjectPtr(ObjectKey(SlotKey::NULL)),
             watched_epoch: 0,
+            route_epoch: 0,
             cache_prune_countdown: CACHE_PRUNE_INTERVAL,
         };
         heap.refresh_gc_watermark();
@@ -599,6 +621,12 @@ impl GcHeap {
         self.watched_epoch
     }
 
+    /// The route epoch (see the field); `None` once it has saturated.
+    #[inline(always)]
+    pub(super) fn route_epoch(&self) -> Option<u64> {
+        (self.route_epoch != ROUTE_EPOCH_DISABLED).then_some(self.route_epoch)
+    }
+
     /// Create a heap with a chosen threshold for collector tests.
     #[cfg(test)]
     pub(super) fn with_threshold(threshold: usize) -> Self {
@@ -612,6 +640,7 @@ impl GcHeap {
             live_chunks: LiveChunks::default(),
             watched: ObjectPtr(ObjectKey(SlotKey::NULL)),
             watched_epoch: 0,
+            route_epoch: 0,
             cache_prune_countdown: CACHE_PRUNE_INTERVAL,
         }
     }
@@ -651,6 +680,9 @@ impl GcHeap {
             .objects
             .get_mut(ptr.0)
             .expect("Invalid ObjectPtr: object was freed (use-after-free detected)");
+        if let RawObject::Table(table) = object {
+            retire_routes_through(&mut self.route_epoch, table);
+        }
         (object, &mut self.resident)
     }
 
@@ -672,7 +704,12 @@ impl GcHeap {
     #[inline]
     pub(super) fn watched_table_unmarked(&mut self) -> Option<&mut Table> {
         match self.objects.get_mut(self.watched.0)? {
-            RawObject::Table(table) => Some(table),
+            RawObject::Table(table) => {
+                // The builtin mirror's exemption is not the route epoch's:
+                // a non-builtin global store can shadow an inherited key.
+                retire_routes_through(&mut self.route_epoch, table);
+                Some(table)
+            }
             RawObject::LuaFn(_) => None,
         }
     }
@@ -686,7 +723,10 @@ impl GcHeap {
     /// key's value, so the builtin mirror stays exact.
     pub(super) fn edit_watched_unmarked(&mut self) -> Option<TableEditor<'_>> {
         match self.objects.get_mut(self.watched.0)? {
-            RawObject::Table(table) => Some(table.edit(&mut self.resident)),
+            RawObject::Table(table) => {
+                retire_routes_through(&mut self.route_epoch, table);
+                Some(table.edit(&mut self.resident))
+            }
             RawObject::LuaFn(_) => None,
         }
     }

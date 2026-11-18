@@ -564,7 +564,15 @@ pub(super) struct Table {
     shape_witness: Cell<Option<ShapeWitness>>,
 }
 
-/// Three table facts in one word: `(dead << 2) | (no_newindex << 1) | !dense`.
+/// Four table facts in one word:
+/// `(dead << 3) | (on_route << 2) | (no_newindex << 1) | !dense`.
+///
+/// `on_route` says an inherited-route cache entry may depend on this table
+/// (`RouteLookupCacheEntry`). It is set under a shared borrow when a route
+/// is filled through the table, and taken by `GcHeap` on every mutable
+/// handout of the table, which moves the heap's route epoch and so retires
+/// every route at once; a clear bit is only a table no live route reads.
+/// Never saved, and a fresh, copied or rebuilt table starts without it.
 ///
 /// `dead` is the number of occupied hash slots whose nil value makes them
 /// logically absent. It never exceeds the slots of an allocated slot vector,
@@ -593,9 +601,11 @@ pub(super) struct Table {
 #[derive(Debug, Default, Clone)]
 struct TombstonesAndDense(Cell<usize>);
 
-const DEAD_SHIFT: u32 = 2;
+const DEAD_SHIFT: u32 = 3;
 const NOT_DENSE_BIT: usize = 1;
 const NO_NEWINDEX_BIT: usize = 2;
+const ON_ROUTE_BIT: usize = 4;
+const FLAG_BITS: usize = NOT_DENSE_BIT | NO_NEWINDEX_BIT | ON_ROUTE_BIT;
 
 impl TombstonesAndDense {
     #[inline]
@@ -631,8 +641,7 @@ impl TombstonesAndDense {
     /// key live, so the `no_newindex` proof is kept.
     #[inline]
     fn set_dead(&mut self, n: usize) {
-        self.0
-            .set((n << DEAD_SHIFT) | (self.word() & (NOT_DENSE_BIT | NO_NEWINDEX_BIT)));
+        self.0.set((n << DEAD_SHIFT) | (self.word() & FLAG_BITS));
     }
 
     #[inline]
@@ -660,6 +669,19 @@ impl TombstonesAndDense {
     #[inline]
     fn forget_no_newindex(&mut self) {
         self.0.set(self.word() & !NO_NEWINDEX_BIT);
+    }
+
+    #[inline]
+    fn mark_on_route(&self) {
+        self.0.set(self.word() | ON_ROUTE_BIT);
+    }
+
+    /// Clear the route mark, reporting whether it was set.
+    #[inline]
+    fn take_on_route(&mut self) -> bool {
+        let word = self.word();
+        self.0.set(word & !ON_ROUTE_BIT);
+        word & ON_ROUTE_BIT != 0
     }
 }
 
@@ -2917,6 +2939,20 @@ impl Table {
     #[inline]
     pub(super) fn learn_no_newindex(&self) {
         self.tally.learn_no_newindex();
+    }
+
+    /// Record that an inherited-route cache entry is about to depend on this
+    /// table's contents and metatable (the `on_route` bit).
+    #[inline]
+    pub(super) fn mark_on_route(&self) {
+        self.tally.mark_on_route();
+    }
+
+    /// Clear the `on_route` bit, reporting whether it was set. Only
+    /// `GcHeap`'s mutable handouts call this, moving the route epoch on true.
+    #[inline]
+    pub(super) fn take_on_route(&mut self) -> bool {
+        self.tally.take_on_route()
     }
 
     /// Sets the metatable of this table.

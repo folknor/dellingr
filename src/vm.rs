@@ -2338,6 +2338,53 @@ mod runtime_tests {
     /// refill a class in place instead of naming it twice, and take a
     /// position a collection emptied before evicting a survivor.
     #[test]
+    fn inherited_routes_fill_once_and_retire_only_on_route_writes() {
+        let _hits = caches::HitMode::required();
+        let mut state = State::new();
+        state.gc_disable_auto();
+        let run = |state: &mut State, source: &str| {
+            crate::Program::compile(source, None)
+                .and_then(|program| state.load(&program))
+                .expect("test source compiles");
+            state
+                .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+                .expect("test source runs");
+        };
+        let routes = |state: &State| {
+            let mut found = Vec::new();
+            for entry in state.bytecode_caches.values() {
+                for slot in &entry.caches.field_lookup {
+                    if let Some(route) = slot.get_route() {
+                        found.push((route.receiver_metatable, route.route_epoch, route.units));
+                    }
+                }
+            }
+            found
+        };
+        run(
+            &mut state,
+            "Base = { m = 1 } Base.__index = Base \
+             Sub = setmetatable({}, { __index = Base }) Sub.__index = Sub \
+             obj = setmetatable({}, Sub) \
+             function site() return obj.m end site()",
+        );
+        let sub = global_ptr(&mut state, "Sub");
+        let epoch = state.heap.route_epoch().expect("a fresh epoch is enabled");
+        assert_eq!(routes(&state), vec![(sub, epoch, 1)]);
+
+        // Hits and receiver writes leave the epoch alone.
+        run(&mut state, "site() obj.x = 1 site()");
+        assert_eq!(state.heap.route_epoch(), Some(epoch));
+
+        // A write to a table on the route retires it once and clears the
+        // mark, so a second write moves nothing until the next fill.
+        run(&mut state, "Base.y = 1 Base.z = 1");
+        assert_eq!(state.heap.route_epoch(), Some(epoch + 1));
+        run(&mut state, "site()");
+        assert_eq!(routes(&state), vec![(sub, epoch + 1, 1)]);
+    }
+
+    #[test]
     fn method_entries_replace_least_recently_used_and_never_duplicate() {
         let _hits = caches::HitMode::required();
         let mut state = State::new();

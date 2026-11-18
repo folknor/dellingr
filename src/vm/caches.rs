@@ -176,8 +176,10 @@ pub(super) struct FieldLookupCacheEntry {
 /// tables as the uncached miss, so measured on a two-level inheritance site
 /// it saved nothing; the miss is simply looked up again.
 ///
-/// Routes through more than one handler table are not cached either. One
-/// was built and measured against 8f6a6bb on bygg: a per-site entry recording,
+/// Routes through more than one handler table are cached by
+/// `RouteLookupCacheEntry`, under a writer-side epoch, not here. A
+/// validate-on-hit form was built first and measured against 8f6a6bb on
+/// bygg: a per-site entry recording,
 /// for each intermediate table, a `HashProbe` absence proof, its metatable
 /// and that metatable's `__index` slot, validated in full before taking the
 /// route's depth units. It hit, but each hit still resolves every table on
@@ -185,8 +187,10 @@ pub(super) struct FieldLookupCacheEntry {
 /// does; it only skipped the keyed scans. `bench/method_chain` (two-key
 /// classes) went 2749 to about 3110 ms and `bench/method_chain_wide`
 /// (map-storage classes) stayed at about 3110. Skipping those table reads
-/// needs a witness outside the route that every writer to a prototype
-/// moves, which a validate-on-hit entry cannot provide.
+/// needed a witness outside the route that every writer to a prototype
+/// moves, which a validate-on-hit entry cannot provide; the route epoch is
+/// that witness. The one-level entry stays validate-on-hit so that writes
+/// to a class table (a static counter) do not retire it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct MethodLookupCacheEntry {
     pub(super) receiver_metatable: ObjectPtr,
@@ -196,6 +200,37 @@ pub(super) struct MethodLookupCacheEntry {
     pub(super) index_field: KeyedIndex,
     pub(super) method_table: ObjectPtr,
     pub(super) method_slot: SlotRef,
+}
+
+/// A proven hit through more than one `__index` table: a receiver whose
+/// metatable is `receiver_metatable`, and whose raw lookup has proved the
+/// key absent, finds it in `terminal` at `terminal_slot` after `units`
+/// continuing table steps.
+///
+/// Unlike the one-level entry it does not re-read the route. Every table
+/// the filling walk read (the receiver's metatable, each handler table and
+/// each handler's metatable, and `terminal`) was marked `on_route` before
+/// `route_epoch` was recorded, and `GcHeap` moves the epoch on any mutable
+/// handout of a marked table. An unchanged epoch therefore proves every link
+/// and every intermediate miss unchanged, and the tables on the route stay
+/// reachable from the guarded metatable. The receiver's own contents and
+/// its metatable pointer are not on the route: the receiver is probed live
+/// and its metatable compared by identity on every use. A hit takes the
+/// route's `units` one at a time, as the cold walk does, so the depth limit
+/// and fault injection fall where they would without the cache.
+///
+/// One per site, apart from the two one-level entries, so a site serving a
+/// deep class besides two shallow ones keeps the shallow pair. A write to
+/// any marked table retires every route; a class table written while it is
+/// read through a deep route refills on each read, a constant over the cold
+/// walk.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct RouteLookupCacheEntry {
+    pub(super) receiver_metatable: ObjectPtr,
+    pub(super) route_epoch: u64,
+    pub(super) terminal: ObjectPtr,
+    pub(super) terminal_slot: SlotRef,
+    pub(super) units: u8,
 }
 
 /// Cache for `s:method()` style calls where the receiver is a string and
@@ -226,6 +261,7 @@ pub(super) struct FieldLookupCacheSlot {
     /// depends on history, but every entry is a proven hit, so it decides
     /// only which lookups are skipped, never an answer or its route.
     method_victim: Cell<u8>,
+    route_entry: Cell<Option<RouteLookupCacheEntry>>,
     string_method_entry: Cell<Option<StringMethodCacheEntry>>,
 }
 
@@ -283,6 +319,18 @@ impl FieldLookupCacheSlot {
             .unwrap_or(usize::from(self.method_victim.get()));
         self.method_entries[position].set(Some(entry));
         self.method_used(position);
+    }
+
+    pub(super) fn get_route(&self) -> Option<RouteLookupCacheEntry> {
+        #[cfg(feature = "disable-inline-caches")]
+        if hits_disabled() {
+            return None;
+        }
+        self.route_entry.get()
+    }
+
+    pub(super) fn set_route(&self, entry: RouteLookupCacheEntry) {
+        self.route_entry.set(Some(entry));
     }
 
     pub(super) fn get_string_method(&self) -> Option<StringMethodCacheEntry> {
@@ -469,11 +517,13 @@ impl RuntimeCaches {
                 field_entry,
                 method_entries: [method_first, method_second],
                 method_victim: _,
+                route_entry,
                 string_method_entry,
             } = slot;
             clear_dead(field_entry, heap);
             clear_dead(method_first, heap);
             clear_dead(method_second, heap);
+            clear_dead(route_entry, heap);
             clear_dead(string_method_entry, heap);
         }
         for slot in set_field_lookup {
@@ -515,12 +565,14 @@ impl RuntimeCaches {
                 field_entry,
                 method_entries,
                 method_victim: _,
+                route_entry,
                 string_method_entry,
             } = slot;
             push(field_entry, &mut out);
             for cell in method_entries {
                 push(cell, &mut out);
             }
+            push(route_entry, &mut out);
             push(string_method_entry, &mut out);
         }
         for slot in set_field_lookup {
@@ -570,6 +622,22 @@ impl CacheEntry for MethodLookupCacheEntry {
         } = self;
         f(Val::Obj(*receiver_metatable));
         f(Val::Obj(*method_table));
+    }
+}
+
+impl CacheEntry for RouteLookupCacheEntry {
+    fn for_each_handle(&self, f: &mut dyn FnMut(Val)) {
+        // The tables between the two are not named: while the epoch holds
+        // they are reachable from `receiver_metatable`.
+        let Self {
+            receiver_metatable,
+            route_epoch: _,
+            terminal,
+            terminal_slot: _,
+            units: _,
+        } = self;
+        f(Val::Obj(*receiver_metatable));
+        f(Val::Obj(*terminal));
     }
 }
 

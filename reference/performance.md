@@ -268,6 +268,29 @@ wall`, best of 3, the change run from a dirty tree), two interleaved pairs:
 | `method` | 2.9 s | 2.8 s |
 | `fill` | 1.5 s | 1.5 s |
 
+## Inherited routes under a writer-side epoch, 2026-11-18
+
+A field read through more than one `__index` table used to walk the whole
+chain on every call; a validate-on-hit route cache had been built and
+refused because each hit still resolved every table on the path. A site
+now caches the route behind one heap-wide route epoch: the walk marks
+every table it read, and `GcHeap` moves the epoch on any mutable handout
+of a marked table, so a hit checks the receiver's own miss, its metatable
+identity and the epoch, takes the route's depth units and reads the
+terminal slot. The warm one-level method hit also stops resolving the
+metatable twice for `C.__index = C`. On bygg against c429707 (release,
+`brokkr bench wall`, best of 3, the change run from a dirty tree), two
+interleaved pairs:
+
+| Workload | c429707 | Change |
+|---|---|---|
+| `method_chain` | 2.6 s, 2.6 s | 2.2 s, 2.1 s |
+| `method_chain_wide` | 3.0 s, 3.1 s | 2.1 s, 2.2 s |
+| `method` | 3.0 s, 3.0 s | 2.8 s, 2.8 s |
+| `method_polymorphic` | 3.6 s | 3.5 s |
+| `object_fields` | 3.5 s | 3.5 s |
+| `write` | 2.3 s | 2.3 s |
+
 ## Closure creation in one allocation, 2026-11-17
 
 A closure is stored inline in its heap slot (no `Box`), its runtime owns

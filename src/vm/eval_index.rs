@@ -130,6 +130,30 @@ impl State {
         None
     }
 
+    /// The inherited-route hit alone, for a receiver with metatable
+    /// `receiver_metatable` whose raw lookup has proved the key absent: the
+    /// value and the number of continuing steps whose units the caller must
+    /// take before answering. `None` is only "not answered here". See
+    /// `RouteLookupCacheEntry` for why the epoch stands in for the route.
+    #[inline(always)]
+    pub(super) fn get_cached_route(
+        &self,
+        receiver_metatable: ObjectPtr,
+        cache: &FieldLookupCacheSlot,
+    ) -> Option<(Val, u8)> {
+        let entry = cache.get_route()?;
+        if entry.receiver_metatable != receiver_metatable
+            || self.heap.route_epoch() != Some(entry.route_epoch)
+        {
+            return None;
+        }
+        let value = self
+            .heap
+            .as_table_ref(entry.terminal)?
+            .read_slot(entry.terminal_slot)?;
+        Some((value, entry.units))
+    }
+
     /// One method entry's validation; `None` rejects this entry only.
     #[inline(always)]
     fn cached_method_at(
@@ -155,7 +179,13 @@ impl State {
             return None;
         }
 
-        let method_table = self.heap.as_table_ref(entry.method_table)?;
+        // The self-index idiom (`C.__index = C`) names one table twice;
+        // reuse the borrow rather than resolving the handle again.
+        let method_table = if entry.method_table == receiver_metatable {
+            metatable
+        } else {
+            self.heap.as_table_ref(entry.method_table)?
+        };
         if let Some(method) = method_table.slot_value(entry.method_slot) {
             return method;
         }

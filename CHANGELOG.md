@@ -183,6 +183,11 @@ tick budgets and re-record replays.
 
 ### Performance
 
+- A field or method read through more than one `__index` table (a class
+  inheriting from a class) is cached per site behind a heap-wide epoch that
+  any write to a table on the route moves, so a warm read no longer walks
+  the chain: about 17% off a two-level method call and 30% off one through
+  map-storage classes. Answers, depth limits and costs are unchanged.
 - The deterministic math port moves to a newer CORE-MATH commit: `math.cos`
   uses upstream's new cosine, built on the sine's tables with a cheaper fast
   phase (about a fifth faster on a cosine-only probe), and `math.log` gains

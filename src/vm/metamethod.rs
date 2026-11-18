@@ -19,8 +19,8 @@ use super::MetaName;
 use super::Result;
 use super::State;
 use super::caches::{
-    FieldLookupCacheEntry, FieldLookupCacheSlot, MethodLookupCacheEntry, SetFieldLookupCacheSlot,
-    StringMethodCacheEntry,
+    FieldLookupCacheEntry, FieldLookupCacheSlot, MethodLookupCacheEntry, RouteLookupCacheEntry,
+    SetFieldLookupCacheSlot, StringMethodCacheEntry,
 };
 use super::frame::Frame;
 use super::lua_val::Val;
@@ -175,8 +175,12 @@ impl State {
         // The receiver's metatable and the slot of its `__index`, while the
         // first handler table may still fill the method cache. Only that
         // first table step fills anything: a cached route through further
-        // tables did not pay (see `MethodLookupCacheEntry`).
+        // tables re-checked on every hit did not pay (see
+        // `MethodLookupCacheEntry`); a deeper raw hit fills the epoch-guarded
+        // route entry instead (`RouteLookupCacheEntry`), keyed by the
+        // receiver's metatable held here.
         let mut method_fill = None;
+        let mut route_fill: Option<ObjectPtr> = None;
         let (mut receiver, mut handler) = match start {
             IndexStart::AfterRawMiss(metatable) => {
                 let handler = self
@@ -205,6 +209,16 @@ impl State {
                     {
                         return Ok(Some(method));
                     }
+                    if let Some(cache) = cache
+                        && let Some((val, steps)) = self.get_cached_route(metatable, cache)
+                    {
+                        // bounded: a route records at most MAX_METAMETHOD_DEPTH steps
+                        for _ in 0..steps {
+                            self.take_metamethod_unit()?;
+                            *units += 1;
+                        }
+                        return Ok(Some(val));
+                    }
                     let found = self
                         .heap
                         .as_table_ref(metatable)
@@ -214,6 +228,7 @@ impl State {
                     };
                     if cache.is_some() {
                         method_fill = Some((metatable, index_field));
+                        route_fill = Some(metatable);
                     }
                     (receiver, handler)
                 }
@@ -227,6 +242,13 @@ impl State {
         if matches!(handler, Val::Nil) {
             return Ok(Some(Val::Nil));
         }
+        // With `C.__index = C` the first pass resolves the metatable handle
+        // again as the handler. Reusing that borrow would mean holding it
+        // into the loop, which takes depth units through `&mut self`, or
+        // duplicating the first step outside the loop, the shape the loop
+        // replaced so that only the caller's frames stay live; one arena
+        // lookup on a walk the route and method caches mostly skip does not
+        // pay for either.
         loop {
             if let Some(table_ptr) = handler.as_object_ptr()
                 && let Some(table) = self.heap.as_table_ref(table_ptr)
@@ -246,17 +268,54 @@ impl State {
                         }
                         None => Val::Nil,
                     },
-                    None => table.get(&key),
+                    None => match (route_fill, cache) {
+                        // A raw hit past a continuing step: a route.
+                        (Some(receiver_metatable), Some(cache)) => match table.find_slot(&key) {
+                            Some((terminal_slot, val)) => {
+                                table.mark_on_route();
+                                if let Some(route_epoch) = self.heap.route_epoch()
+                                    && let Ok(units) = u8::try_from(*units)
+                                {
+                                    cache.set_route(RouteLookupCacheEntry {
+                                        receiver_metatable,
+                                        route_epoch,
+                                        terminal: table_ptr,
+                                        terminal_slot,
+                                        units,
+                                    });
+                                }
+                                return Ok(Some(val));
+                            }
+                            None => Val::Nil,
+                        },
+                        _ => table.get(&key),
+                    },
                 };
                 if !matches!(val, Val::Nil) {
                     return Ok(Some(val));
                 }
-                let next = table
+                let next_mt = table
                     .get_metatable()
-                    .and_then(|mt_ptr| self.heap.as_table_ref(mt_ptr))
-                    .map_or(Val::Nil, |mt| mt.get(&index_key));
+                    .and_then(|mt_ptr| self.heap.as_table_ref(mt_ptr));
+                let next = next_mt.map_or(Val::Nil, |mt| mt.get(&index_key));
                 if matches!(next, Val::Nil) {
                     return Ok(Some(Val::Nil));
+                }
+                // A step that continues is part of any route this walk
+                // fills: mark what it read (this table's miss and metatable
+                // link, and that metatable's `__index`) and, on the first
+                // such step, the receiver's metatable, before the fill
+                // records the epoch.
+                if let Some(receiver_metatable) = route_fill {
+                    table.mark_on_route();
+                    if let Some(mt) = next_mt {
+                        mt.mark_on_route();
+                    }
+                    if *units == 0
+                        && let Some(mt) = self.heap.as_table_ref(receiver_metatable)
+                    {
+                        mt.mark_on_route();
+                    }
                 }
                 // A table step that continues holds a unit until the lookup
                 // ends.
@@ -270,6 +329,8 @@ impl State {
                 Val::Obj(ptr) => self.heap.as_lua_function_ref(ptr).is_some(),
                 Val::RustFn(_) => true,
                 Val::Str(_) => {
+                    // Routes run through tables only.
+                    route_fill = None;
                     self.take_metamethod_unit()?;
                     *units += 1;
                     // A string handler is indexed as a string receiver
