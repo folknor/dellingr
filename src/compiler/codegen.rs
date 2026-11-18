@@ -1203,6 +1203,20 @@ impl Generator<'_> {
         }
     }
 
+    // The fresh consecutive block is the calling convention, kept on purpose.
+    // Its argument slots already are the callee's parameter slots, so an
+    // encoding naming independent argument locations only moves the same
+    // copies from MOVE dispatches into admission. A result destination
+    // operand would drop the store at `base`, which is a GC root until
+    // overwritten: `x = make(); x = nil; local t = {}` can collect the made
+    // table at the constructor only if that store is gone. Splicing a proven
+    // local helper's body in here was weighed and refused as well: keeping
+    // its own literal pool and runtime (interned at closure creation),
+    // bytecode identity and cursor for errors raised inside handlers it
+    // re-enters, its frame top for nested calls, and the admission order of
+    // depth, interrupt, collection and stack-cap checks rebuilds a Lua
+    // activation, so the savings are the per-activation overhead every Lua
+    // call pays, not something only inlining gets.
     fn call(&mut self, callee: Val, call: &CallSuffix) -> Result<Val> {
         self.error_line = call.line;
         let base = self.next_reg(callee)?;

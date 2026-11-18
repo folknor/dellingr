@@ -219,42 +219,35 @@ persisted opcode encodings.
 
 **Classification:** rewrite, medium conviction.
 
-## PERF-012 - Calls with independent callee, argument and result locations, then inlining
+## PERF-012 - Call-site residue: CALL then MOVE continuation, argument-guarded helper specialization
 
-Raised by the codegen hunter (its second rewrite).
+Raised by the codegen hunter (its second rewrite). Narrowed after a spar: an
+encoding with independent callee, argument and result locations and splicing
+proven helpers into the caller were refused (reasoning at `Generator::call`
+in `codegen.rs`). Argument slots already are parameter slots; a result
+destination drops a store that is a GC root; exact inlining rebuilds a Lua
+activation. The per-activation overhead every Lua call pays (one record instead
+of `Frame` plus `CallInfo`, the per-call `Arc` clones) is the
+`optimizations.md` call-path entry, not this one.
 
-**Bottleneck:** call generation (`codegen.rs`) puts callee and arguments in a
-fresh consecutive block and the result starts at the same base, so
-`sum = f(sum)` copies locals into the window and moves the result back. The
-runtime enforces it: the call window truncates the stack after the arguments,
-the callee uses the window as its base, and return closes captures and slides
-results into the function slot before the caller's assignment move. The
-verifier requires adjacent open producers and consumers. The upside of today's
-convention is that argument slots become parameter slots, so a naive
-gather-into-buffer call would trade copies for copies.
+**Residue 1, `CALL b .. 1; MOVE x b` continuation:** a derived continuation,
+selected from admitted pairs (no opcode, no save-byte change), could finish
+the return as today (full result-count check, captures closed, caller top
+restored with the value at `b`), then write `x` and resume past the MOVE.
+Both stores stay; only the MOVE dispatch goes. Must use the actual next
+instruction, never assignment syntax (`x, y = f(), x`), and keep the
+canonical MOVE for any other incoming edge. One dispatch per call: unmeasured.
 
-**Redesign:** a call describes the callee, the argument values or ranges, and
-the result destinations. Caller storage survives independently of the callee
-window; producers coalesce with parameter storage where possible and other
-local arguments are copied during admission, not by `MOVE` dispatches; fixed
-results land in their final destinations after captures close; dynamic result
-lists are explicit ranges. Rewrite admission, return continuations and the
-open-results protocol together. Then exploit known callees (immutable local
-function bindings) and inline small proven helpers (`local function add(a, b)
-return a + b end`), which exposes the body to the caller's type and allocation
-analysis. The host boundary does not need these operands: `State::invoke`
-pushes the callee below its arguments, which already is a Lua callee's final
-window (reason at `vm/invoke.rs`).
+**Residue 2, argument-guarded specialization:** a verified prototype could
+carry a derived numeric plan selected by guards on its arguments (`x` proven
+a number skips the tag test in `return x + 1`), and a typed numeric-for
+region could then extend across such a call. Every charge, refusal point,
+entry poll and root stays canonical; a leaf body that cannot collect, call
+out or capture may skip the physical activation on success and materialize
+the logical callee and cursor only on its failure path. Belongs with the
+typed-region work (PERF-002, PERF-014); the plan is designed by that consumer.
 
-**Risks:** inlined calls keep logical call metadata: depth and stack-cap
-refusal where the original call would refuse, function-entry interruption,
-tracebacks, error and print locations naming the logical callee, captures,
-varargs, result adjustment, tail calls. Lua calls stay on the explicit frame
-stack; a Rust call per compiled Lua function would break the flat native
-stack. Closure creation and literal initialization stay until separately
-proven removable.
-
-**Classification:** rewrite, high conviction.
+**Classification:** rewrite, residue unmeasured.
 
 ## PERF-014 - Whole-function optimizing compiler
 
