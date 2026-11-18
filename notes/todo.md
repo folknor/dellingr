@@ -108,6 +108,10 @@ cost-model decision):
   native-call inventory entry; add it only if an embedder needs it.
 - Argument errors from a plain Rust helper called directly by a callback
   (not dispatched through the VM) are attributed to that callback.
+- The `safepoint-loops` script does not scan `src/vm/leaf.rs`, although its
+  leaves are native library code; its one loop (`math.min`/`max`) carries a
+  `// bounded:` comment by hand. Adding the file to the script's scope would
+  make that enforced.
 
 Cosmetic:
 

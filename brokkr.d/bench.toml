@@ -215,6 +215,10 @@ xxhash = "fc03bdf3c2faafa7c72e56ee78bab09b"
 file = "bench/library_leaves.lua"
 xxhash = "4d35f23efb6dd58a81984ab2c36b9de6"
 
+[data.workloads.bench.heap_leaves]
+file = "bench/heap_leaves.lua"
+xxhash = "f90d3c13b0d426e971474e629734f943"
+
 [data.workloads.bench.sequence_len]
 file = "bench/sequence_len.lua"
 xxhash = "93b8e0633008bb396b87f09fed52470f"
@@ -370,6 +374,10 @@ xxhash = "0a6667c4ac5e50ab10967e31497c9abe"
 [data.workloads.hotpath.library_leaves]
 file = "examples/calls/library_leaves.lua"
 xxhash = "70d4b2ae1fd0cf56753174fd5d0c3635"
+
+[data.workloads.hotpath.heap_leaves]
+file = "examples/calls/heap_leaves.lua"
+xxhash = "9842759c50eb11a2b9bf0679b344e153"
 
 [data.workloads.hotpath.sequence_len]
 file = "examples/tables/sequence_len.lua"

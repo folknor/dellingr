@@ -377,6 +377,11 @@ const LEAF_IDS: &[(&str, Leaf)] = &[
     ("rawlen", Leaf::RawLen),
     ("tonumber", Leaf::ToNumber),
     ("rawget", Leaf::RawGet),
+    ("rawset", Leaf::RawSet),
+    ("select", Leaf::Select),
+    ("table.insert", Leaf::TableInsert),
+    ("table.remove", Leaf::TableRemove),
+    ("table.pack", Leaf::TablePack),
 ];
 
 /// Each catalog entry's leaf, if it is one, indexed by catalog position.

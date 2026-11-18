@@ -196,8 +196,9 @@ tick budgets and re-record replays.
   allows. Matches, captures, errors and costs are unchanged; a host interrupt
   is observed once per such pass rather than once per byte.
 - Lua calls of the standard library's leaf functions (every `math` function,
-  `type`, `rawequal`, `rawlen`, one-argument `tonumber` and `rawget`) run in
-  the dispatch loop without entering a Rust callback, recognised by the
+  `type`, `rawequal`, `rawlen`, one-argument `tonumber`, `rawget`, `rawset`,
+  `select`, `table.pack`, and `table.insert` and `table.remove` on tables
+  without sequence metamethods) run in the dispatch loop without entering a Rust callback, recognised by the
   called value's function-table entry, so aliases such as
   `local floor = math.floor` are covered. Results, costs, errors, interrupt
   safepoints, stack-cap refusals and the random stream are unchanged.

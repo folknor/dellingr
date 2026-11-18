@@ -199,34 +199,6 @@ must still precede every handler call, so it would only move one level up into
 the `reg_*` helpers, which keep the parameter; no meter write is saved. A
 dispatch-local cached threshold was measured neutral under PERF-007.
 
-## PERF-009 - Heap-writing library functions still enter as callbacks
-
-Raised by the table-and-math-libraries hunter. Narrowed: every `math`
-function, `type`, `rawequal`, `rawlen`, one-argument `tonumber` and `rawget`
-are now library leaves executed in call dispatch by function identity
-(`vm/leaf.rs`; `library_leaves` workload 6.3 s to 3.4 s on bygg).
-
-**Residue:** `rawset`, append `table.insert`, `table.remove` and `select`
-still pay the callback ABI. They write the heap (growth, allocation, write
-barriers, metatable checks) or produce open results, so a leaf must reproduce
-more mid-operation refusal points than the pure set did; the leaf contract in
-`vm/leaf.rs` (decline before any side effect, then the callback's order of
-poll, charge, work, slot checks and writes) applies unchanged.
-`pairs`/`ipairs` loops are already special-cased in generic `for`.
-A leaf need not take the callback's argument relocation: `table.pack` can
-keep its arguments in place, run the callback's `StackSpace(1)` check at the
-same logical length, put the new table in the callee slot and truncate after,
-saving one argument move per call that grows with arity (reasoning at the
-remove in `begin_call`). The same shape fits any heap-writing leaf here.
-
-**Not pursued:** dedicated guarded opcodes (Luau FASTCALL style). Over the
-identity path they would only skip the call-site record, the call window and
-one out-of-line call; the cost flush must stay (folding the library charge
-into batched opcode cost would move a budget failure), and they would change
-persisted opcode encodings.
-
-**Classification:** rewrite, medium conviction.
-
 ## PERF-012 - Call-site residue: CALL then MOVE continuation, argument-guarded helper specialization
 
 Raised by the codegen hunter (its second rewrite). Narrowed after a spar: an
@@ -364,21 +336,6 @@ replacement call"): any new local must not grow the re-entry cycle.
 against a Lua call per match, so the payoff is small and unmeasured.
 
 **Classification:** local, low conviction.
-
-## PERF-029 - Joint sine and cosine for scripts
-
-Raised by the table-and-math-libraries hunter. The cosine re-pin landed (the
-crate now ports CORE-MATH's sin.c-based cosine); a home-grown looser fast phase
-and compiler fusion of `math.sin(a), math.cos(a)` stay refused (reasons in the
-`src/crmath/cos.rs` module doc).
-
-**Residue (user decision, unmeasured):** upstream `sincos.c` at the pin is
-rewritten on the current sin and cos, sharing the fast reduction and testing
-each output on its own (a failed output takes its own accurate reduction). Exposing it needs an explicit `math.sincos` library
-function, which is the user's call; it would also need its own cost charge and
-a golden and oracle row set.
-
-**Classification:** new library surface, user decision.
 
 ## PERF-033 - Host global and field access resolves names and tables afresh
 

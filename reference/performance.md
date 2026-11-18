@@ -385,6 +385,19 @@ the new `ErrorKind::ResultConversion` variant and its `Display` arm; moving
 the variant to the end of the enum did not change the frame. Accepted: the envelope tests pass with it, and the growth is not
 in code the change touches.
 
+### 2026-11-18: heap-writing library leaves
+
+`rawset`, `select`, `table.pack`, and raw `table.insert` and `table.remove`
+joined the leaves, keeping their arguments in place and running each
+callback stack check at the callback's length. Native bytes per level are
+unchanged in dev and release, once the new metatable predicate and the
+length-taking stack preflight were forced inline (outlined, release rows on
+the sort, remove and callable-Rust paths grew 16 bytes). `bench wall`,
+bygg, best of 3 against 42ffdee, two interleaved pairs: `heap_leaves` 5.8,
+5.7 s -> 4.1, 4.1 s; `sequence_len` 2.5, 2.5 s -> 2.3, 2.3 s; and in the second
+pair only, `closure` 2.4 -> 2.3 s and `library_leaves` 3.6 -> 3.7 s, inside
+its iteration spread (3.6 to 3.8 s on both sides).
+
 ### 2026-11-17: library leaves in call dispatch
 
 `call_from_lua` and `tail_call_from_lua` test the callee's tag inline and

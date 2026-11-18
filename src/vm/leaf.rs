@@ -1,8 +1,10 @@
 //! Library leaves: standard-library functions the dispatch loop executes
 //! directly when Lua calls them, instead of entering them as Rust callbacks.
 //!
-//! A leaf is a catalog entry (`lua_std::leaf_of`) whose work is a pure
-//! computation on its arguments: it runs no host code and no Lua, so it needs
+//! A leaf is a catalog entry (`lua_std::leaf_of`) whose success path runs no
+//! host code and no Lua: a computation on its arguments, or a raw table
+//! write (`rawset`, raw `table.insert` and `table.remove`, `table.pack`), or
+//! a cut of its own arguments (`select`). It needs
 //! none of the callback ABI `invoke_rust_fn` provides (callee-slot removal,
 //! frame-bottom and active-function bookkeeping, panic containment, the
 //! floating-point environment check at return, result relocation). The
@@ -26,8 +28,28 @@
 //!   check at each length the callback pushed at (`check_stack_slot_at`),
 //!   then the writes. Its results land where a callback's do, from the
 //!   callee's slot, and never need more slots than the call window held.
+//! - The arguments stay in place above the callee slot instead of moving
+//!   down over it, so the stack is one value longer than the callback's
+//!   until the callee slot is reused. Every check the callback makes runs
+//!   at the callback's length (`check_stack_slot_at`,
+//!   `check_stack_space_at`), and the physical stack never exceeds the
+//!   longest the callback's reached, so the stack cap refuses at the same
+//!   operation. A value a leaf allocates goes into the callee slot, where it
+//!   is rooted beside the arguments, as the callback's push roots it.
+//! - Argument guards before the commit may set floating-point status flags
+//!   (a NaN key compare, an exact-integer conversion) that the callback,
+//!   refused at its charge first, would not have; the VM ignores status
+//!   flags (`fp_env`), so that is not a difference.
 //! - The computations the callbacks and leaves share live once, in the
 //!   library (`lua_std::math`).
+//!
+//! Dedicated guarded library opcodes (Luau's FASTCALL) were weighed against
+//! this identity path and not pursued: over it they would skip only the
+//! call-site record, the call window and one out-of-line call, the cost
+//! flush before the call must stay (folding the library charge into the
+//! batched opcode cost would move a budget failure), and they would change
+//! persisted opcode encodings. A `table.insert` or `table.remove` on a table
+//! with sequence metamethods stays a callback: it calls Lua.
 //!
 //! Under the debug-only `disable-inline-caches` feature every leaf declines
 //! while cache hits are off, so the inline-cache differential compares leaf
@@ -66,6 +88,11 @@ pub(crate) enum Leaf {
     RawLen,
     ToNumber,
     RawGet,
+    RawSet,
+    Select,
+    TableInsert,
+    TableRemove,
+    TablePack,
 }
 
 impl State {
@@ -214,6 +241,11 @@ impl State {
                 self.push_unchecked(value);
                 return Ok(Some(1));
             }
+            Leaf::RawSet => return self.leaf_rawset(idx, n),
+            Leaf::Select => return self.leaf_select(idx, n),
+            Leaf::TableInsert => return self.leaf_insert(idx, n),
+            Leaf::TableRemove => return self.leaf_remove(idx, n),
+            Leaf::TablePack => return self.leaf_pack(idx, n),
         };
         let Some((charge, result)) = number else {
             return Ok(None);
@@ -307,6 +339,186 @@ impl State {
         self.push_unchecked(value);
         Ok(Some(1))
     }
+
+    /// `rawset(t, k, v)`: the key goes to the table as given (a first store
+    /// under `-0.0` keeps that spelling for iteration), and the editor is
+    /// taken after the charge even for a store that changes nothing or
+    /// fails to grow, as the callback's `set_table_raw` takes it, so a store
+    /// into `_G` moves the watched epoch on both paths.
+    fn leaf_rawset(&mut self, idx: usize, n: usize) -> Result<Option<u8>> {
+        if n < 3 {
+            return Ok(None);
+        }
+        let table = self.stack[idx + 1];
+        let Some(ptr) = table
+            .as_object_ptr()
+            .filter(|&ptr| self.heap.as_table_ref(ptr).is_some())
+        else {
+            return Ok(None);
+        };
+        let (key, value) = (self.stack[idx + 2], self.stack[idx + 3]);
+        if key.table_key().is_err() {
+            return Ok(None);
+        }
+        self.enter_leaf(Some(Charge::Rawset))?;
+        self.heap
+            .edit_table(ptr)
+            .expect("the argument is a table")
+            .insert(key, value)?;
+        self.stack[idx] = table;
+        self.stack.truncate(idx + 1);
+        Ok(Some(1))
+    }
+
+    /// `select`: the count form pushes one number, checked where the
+    /// callback's push is; the index form keeps the suffix of its arguments,
+    /// moved down once as the callback's results are, and checks nothing.
+    fn leaf_select(&mut self, idx: usize, n: usize) -> Result<Option<u8>> {
+        if n == 0 {
+            return Ok(None);
+        }
+        let selector = self.stack[idx + 1];
+        let varargs = n - 1;
+        if selector
+            .as_string(&self.heap)
+            .is_some_and(|bytes| bytes.first() == Some(&b'#'))
+        {
+            self.enter_leaf(None)?;
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "select reports a count as a Lua number, as its callback does."
+            )]
+            let count = Val::Num(varargs as f64);
+            self.leaf_result(idx, count)?;
+            return Ok(Some(1));
+        }
+        let Some(raw) = (match selector {
+            Val::Num(x) => exact_i64(x),
+            _ => None,
+        }) else {
+            return Ok(None);
+        };
+        // At most 254 varargs: the call passed at most 255 arguments.
+        let Ok(varargs_u8) = u8::try_from(varargs) else {
+            return Ok(None);
+        };
+        let varargs_i64 = i64::from(varargs_u8);
+        let resolved = if raw < 0 { varargs_i64 + raw + 1 } else { raw };
+        if raw == 0 || (raw < 0 && resolved < 1) {
+            return Ok(None);
+        }
+        if raw > varargs_i64 {
+            self.enter_leaf(None)?;
+            self.stack.truncate(idx);
+            return Ok(Some(0));
+        }
+        // 1 <= resolved <= varargs here, so both conversions succeed.
+        let (Ok(index), Ok(count)) = (
+            usize::try_from(resolved),
+            u8::try_from(varargs_i64 - resolved + 1),
+        ) else {
+            return Ok(None);
+        };
+        self.enter_leaf(None)?;
+        self.stack.copy_within(idx + 1 + index..idx + 1 + n, idx);
+        self.stack.truncate(idx + usize::from(count));
+        Ok(Some(count))
+    }
+
+    /// A position argument as the callbacks' `arg_integer` reads it on
+    /// success: a number holding an exact non-negative integer.
+    fn exact_position(value: Val) -> Option<usize> {
+        let Val::Num(x) = value else {
+            return None;
+        };
+        // A negative integer is not a position: the caller declines.
+        let Ok(pos) = usize::try_from(exact_i64(x)?) else {
+            return None;
+        };
+        Some(pos)
+    }
+
+    /// The table argument of `table.insert` or `table.remove` when the raw
+    /// storage path applies (a table whose metatable, if any, defines none
+    /// of `__len`, `__index`, `__newindex`), with its border.
+    fn plain_sequence(&self, value: Val) -> Option<(super::object::ObjectPtr, usize)> {
+        let ptr = value.as_object_ptr()?;
+        let table = self.heap.as_table_ref(ptr)?;
+        if self.has_sequence_metafields(table.get_metatable()) {
+            return None;
+        }
+        Some((ptr, table.array_len()))
+    }
+
+    /// `table.insert` on the raw path: one storage shift, no pushes.
+    fn leaf_insert(&mut self, idx: usize, n: usize) -> Result<Option<u8>> {
+        if n != 2 && n != 3 {
+            return Ok(None);
+        }
+        let Some((ptr, len)) = self.plain_sequence(self.stack[idx + 1]) else {
+            return Ok(None);
+        };
+        let pos = if n == 2 {
+            len + 1
+        } else {
+            match Self::exact_position(self.stack[idx + 2]) {
+                Some(pos) if (1..=len + 1).contains(&pos) => pos,
+                _ => return Ok(None),
+            }
+        };
+        let value = self.stack[idx + n];
+        self.enter_leaf(Some(Charge::TableInsert))?;
+        self.heap
+            .edit_table(ptr)
+            .expect("the argument is a table")
+            .array_insert_at_len(pos, len, value)?;
+        self.stack.truncate(idx);
+        Ok(Some(0))
+    }
+
+    /// `table.remove` on the raw path. The callback reserves its result
+    /// slot before the removal, with its stack cut to the table alone; the
+    /// leaf runs that check at the same length, one below its own.
+    fn leaf_remove(&mut self, idx: usize, n: usize) -> Result<Option<u8>> {
+        if n == 0 {
+            return Ok(None);
+        }
+        let Some((ptr, len)) = self.plain_sequence(self.stack[idx + 1]) else {
+            return Ok(None);
+        };
+        let pos = match (n > 1).then(|| self.stack[idx + 2]) {
+            None | Some(Val::Nil) => len,
+            Some(value) => match Self::exact_position(value) {
+                Some(pos)
+                    if (len == 0 && pos <= 1) || (len > 0 && (1..=len + 1).contains(&pos)) =>
+                {
+                    pos
+                }
+                _ => return Ok(None),
+            },
+        };
+        self.enter_leaf(Some(Charge::TableRemove))?;
+        self.stack.truncate(idx + 2);
+        self.check_stack_space_at(idx + 1, 1)?;
+        let removed = self
+            .heap
+            .edit_table(ptr)
+            .expect("the argument is a table")
+            .array_remove_at_len(pos, len)?;
+        self.stack[idx] = removed;
+        self.stack.truncate(idx + 1);
+        Ok(Some(1))
+    }
+
+    /// `table.pack`: the arguments stay in place and the new table goes to
+    /// the callee slot (`State::pack_values`), saving the callback's
+    /// argument move.
+    fn leaf_pack(&mut self, idx: usize, n: usize) -> Result<Option<u8>> {
+        self.enter_leaf(Some(Charge::TablePack))?;
+        self.pack_values(idx + 1, n, Some(idx))?;
+        self.stack.truncate(idx + 1);
+        Ok(Some(1))
+    }
 }
 
 #[cfg(test)]
@@ -368,6 +580,54 @@ mod tests {
         "return rawget(1, 1)",
         "return rawget({})",
         "local o = {} o.t = type return o:t(), select('#', o:t())",
+        "local t = {} local r = rawset(t, 'a', 1) rawset(t, 1, 2) rawset(t, -0.0, 3) rawset(t, 'a', nil) local k = next(t) return r == t, t.a, t[1], k, 1 / k, rawset(t, 2, 4, 5) == t",
+        "local z = {} rawset(z, -0.0, 1) local k = next(z) return 1 / k",
+        "rawset(_G, 'leaf_g', 7) local v = leaf_g rawset(_G, 'leaf_g', 8) return v, leaf_g",
+        "local p = print local a = type(print) rawset(_G, 'print', false) local b = print rawset(_G, 'print', p) return a, b, print == p",
+        "return table.remove(1)",
+        "return table.remove({1, 2}, 1.5)",
+        "local t = setmetatable({1}, {__newindex = rawset}) table.insert(t, 2) return table.remove(t), #t",
+        "local o = {i = table.insert, r = table.remove, s = select} return o:i('bad', 1)",
+        "local o = {r = table.remove} return o:r('x')",
+        "local o = {s = select} return o.s(o, 1)",
+        "local t = setmetatable({}, {__newindex = function() error('no') end}) rawset(t, 'x', 1) return t.x",
+        "return rawset({}, nil, 1)",
+        "return rawset({}, 0/0, 1)",
+        "return rawset({}, 'k')",
+        "return rawset(1, 'k', 2)",
+        "return select('#'), select('#', 1, nil, 3), select('#x', nil), select(2, 'a', 'b', 'c'), select(-1, 'a', 'b'), select(5, 'a')",
+        "local a, b = select(2, 'x', 'y', nil, 'z') local c = select(3, 1, 2) return a, b, c, select(1, nil, nil)",
+        "local function f(...) return select('#', ...), select(-2, ...) end return f(1, 2, 3)",
+        "local function f(...) return select(2, ...) end return f(1, 2, 3)",
+        "return select()",
+        "return select(0, 1)",
+        "return select(-3, 1)",
+        "return select(1.5, 1)",
+        "return select('2', 'a', 'b')",
+        "local t = {} table.insert(t, 'a') table.insert(t, 1, 'b') table.insert(t, 3, 'c') local r = table.insert(t, 'd') return r, #t, t[1], t[2], t[3], t[4], table.concat(t)",
+        "local t = setmetatable({1}, {__tostring = tostring}) table.insert(t, 2) return #t, t[2]",
+        "local t = setmetatable({}, {__len = false}) table.insert(t, 1) return rawlen(t)",
+        "local t = {1, 2} table.insert(t, 5, 3) return #t",
+        "local t = {1, 2} table.insert(t, 0, 3) return #t",
+        "local t = {1, 2} table.insert(t, 1.5, 3) return #t",
+        "local t = {1, 2} table.insert(t, '1', 3) return #t",
+        "return table.insert({})",
+        "return table.insert({}, 1, 2, 3)",
+        "return table.insert(1, 2)",
+        "local t = {1, 2, 3, 4} local a = table.remove(t) local b = table.remove(t, 1) local c = table.remove(t, #t + 1) local d = table.remove(t, nil) return a, b, c, d, #t, t[1]",
+        "local t = {[0] = 'x'} return table.remove(t), t[0], table.remove({}), table.remove({}, 0), table.remove({}, 1), table.remove({1}, 1, 'extra')",
+        "local function f(t) return table.remove(t) end return f({5, 6})",
+        "local t = setmetatable({1, 2}, {__index = function() return 9 end}) return table.remove(t), #t",
+        "return table.remove({1}, 3)",
+        "return table.remove({}, 2)",
+        "return table.remove({1}, 0)",
+        "return table.remove({1}, 'x')",
+        "return table.remove()",
+        "local p = table.pack() local q = table.pack(1, nil, 3) local r = table.pack(nil) return p.n, q.n, q[1], q[2], q[3], #q, r.n, next(table.pack())",
+        "local function f(...) return table.pack(...) end local p = f('a', 'b') return p.n, p[1], p[2]",
+        "local o = {p = table.pack, s = select, i = table.insert, r = table.remove, w = rawset} local t = {} o:i(1) o.i(t, 2) return o:p(1).n, o.s(1, o), o.r(t), o:w(1, 2) == o",
+        "local o = {s = select} return o:s(1)",
+        "local o = {i = table.insert} return o:i(1, 2, 3)",
     ];
 
     const SHOW: &str = "local function show(...) \

@@ -20,6 +20,7 @@ examples! {
     calls_fixedarg: "examples/calls/fixedarg.lua",
     calls_general: "examples/calls/general.lua",
     calls_global: "examples/calls/global.lua",
+    calls_heap_leaves: "examples/calls/heap_leaves.lua",
     calls_library_leaves: "examples/calls/library_leaves.lua",
     calls_local: "examples/calls/local.lua",
     calls_loop_beside_closure: "examples/calls/loop_beside_closure.lua",

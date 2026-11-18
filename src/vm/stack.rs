@@ -573,7 +573,15 @@ impl State {
     /// Check that we have room for `n` more values on the stack.
     /// Returns an error if adding `n` values would exceed the stack limit.
     pub(crate) fn check_stack_space(&self, n: usize) -> Result<()> {
-        let new_size = self.stack.len().saturating_add(n);
+        self.check_stack_space_at(self.stack.len(), n)
+    }
+
+    /// The check `check_stack_space(n)` makes when the stack holds `len`
+    /// values, same fault-injection site included, for a library leaf whose
+    /// callee slot keeps the stack one value longer than its callback's.
+    #[inline(always)]
+    pub(super) fn check_stack_space_at(&self, len: usize, n: usize) -> Result<()> {
+        let new_size = len.saturating_add(n);
         #[cfg(not(feature = "fault-injection"))]
         let injected = false;
         #[cfg(feature = "fault-injection")]

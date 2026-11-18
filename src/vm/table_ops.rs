@@ -688,14 +688,21 @@ impl State {
     /// functions (lua_geti/lua_seti/luaL_len) differ from raw access. A raw
     /// heap read, so it needs no stack room.
     pub(crate) fn has_sequence_metamethods(&self, idx: isize) -> Result<bool> {
-        use super::MetaName::{Index, Len, NewIndex};
         let (_, mt) = self.sequence_operand(idx)?;
+        Ok(self.has_sequence_metafields(mt))
+    }
+
+    /// Whether metatable `mt` defines `__len`, `__index` or `__newindex`
+    /// (any non-nil value, `false` included).
+    #[inline(always)]
+    pub(super) fn has_sequence_metafields(&self, mt: Option<super::object::ObjectPtr>) -> bool {
+        use super::MetaName::{Index, Len, NewIndex};
         if mt.is_none() {
-            return Ok(false);
+            return false;
         }
-        Ok([Len, Index, NewIndex]
+        [Len, Index, NewIndex]
             .into_iter()
-            .any(|name| !matches!(self.metatable_field(mt, name), Val::Nil)))
+            .any(|name| !matches!(self.metatable_field(mt, name), Val::Nil))
     }
 
     /// The raw value of `t[key]` for the table at `idx`, or `None` when that
@@ -734,13 +741,42 @@ impl State {
     /// value's checks, so a refusal at the stack cap and the collection point
     /// of that intern fall where the pushes put them.
     pub(crate) fn pack_arguments(&mut self) -> Result<()> {
+        self.check_usable()?;
         let count = self.get_top();
         let first = self.stack.len() - count;
-        self.new_table()?;
-        let len = self.stack.len();
-        let ptr = self.stack[len - 1]
-            .as_object_ptr()
-            .expect("new_table pushed a table");
+        self.pack_values(first, count, None)
+    }
+
+    /// The body of [`State::pack_arguments`] for the `count` values from
+    /// `first`, which end the stack. With `table_slot` `None` the new table
+    /// is pushed after them; with `Some(slot)` (the `table.pack` leaf, whose
+    /// callee slot sits just below `first`) it is written there instead, the
+    /// stack length after that write equalling the callback's after its
+    /// push. Either way the table's own preflight runs at the length the
+    /// callback's stack held before the push, one less than the leaf's.
+    pub(super) fn pack_values(
+        &mut self,
+        first: usize,
+        count: usize,
+        table_slot: Option<usize>,
+    ) -> Result<()> {
+        debug_assert_eq!(first + count, self.stack.len());
+        // The stack length once the table is in place, on both paths.
+        let len = match table_slot {
+            Some(slot) => {
+                debug_assert_eq!(slot + 1, first);
+                first + count
+            }
+            None => first + count + 1,
+        };
+        self.check_stack_space_at(len - 1, 1)?;
+        let table = self.alloc_table();
+        match table_slot {
+            Some(slot) => self.stack[slot] = table,
+            None => self.push_unchecked(table),
+        }
+        debug_assert_eq!(self.stack.len(), len);
+        let ptr = table.as_object_ptr().expect("alloc_table made a table");
         if count > 0 {
             self.check_stack_slot_at(len)?;
             self.check_stack_slot_at(len + 1)?;
