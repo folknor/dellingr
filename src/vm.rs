@@ -20,6 +20,7 @@ mod leaf;
 mod lua_val;
 mod meta_name;
 mod metamethod;
+mod numeric_loop;
 mod object;
 mod raw_field;
 mod registers;
@@ -195,8 +196,12 @@ impl State {
 /// of that chunk for the State's closures.
 ///
 /// Execution runs the chunk's own `code`: there is no separate derived
-/// execution plan, and one is not built ahead of an optimization that needs
-/// it. A plan copied 1:1 from `code` removes no fetch, decode or dispatch.
+/// execution stream, and one is not built ahead of an optimization that
+/// needs it. A plan copied 1:1 from `code` removes no fetch, decode or
+/// dispatch. The one derived form so far is `numeric_loops`, typed regions
+/// keyed by the canonical `FOR_PREP` pc (`vm/numeric_loop.rs`): it needs no
+/// stream, because the canonical instructions stay in place as its fallback
+/// and every boundary it exposes names a canonical pc.
 /// Changed save bytes alone do not motivate one either: compiler output may
 /// change save bytes within a format (docs/save-state.md, "Format release
 /// policy"). A derived form earns its place when an optimization benefits
@@ -212,6 +217,10 @@ struct BytecodeRuntime {
     bytecode: Arc<Bytecode>,
     literals: Box<[Val]>,
     caches: RuntimeCaches,
+    /// Numeric `for` loops that run as typed regions, with this State's
+    /// fixed weights. Plain data: building it allocates nothing on the heap
+    /// the collector paces.
+    numeric_loops: numeric_loop::NumericLoops,
 }
 
 /// The main interface into the Lua VM.
@@ -1140,6 +1149,7 @@ impl State {
                 bytecode: Arc::clone(bytecode),
                 literals: literals.into_boxed_slice(),
                 caches: RuntimeCaches::new(bytecode),
+                numeric_loops: numeric_loop::NumericLoops::new(bytecode, &self.cost),
             });
             self.bytecode_caches.insert(identity, Arc::clone(&runtime));
             Ok(runtime)
@@ -1164,6 +1174,7 @@ impl State {
             bytecode: Arc::clone(bytecode),
             literals,
             caches: RuntimeCaches::new(bytecode),
+            numeric_loops: numeric_loop::NumericLoops::new(bytecode, &self.cost),
         });
         self.bytecode_caches.insert(identity, Arc::clone(&runtime));
         runtime

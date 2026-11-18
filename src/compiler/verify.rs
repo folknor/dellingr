@@ -857,7 +857,11 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
                 // already `f64`, and then it must cover the successful
                 // `FOR_PREP` edge dominating the loop, every register write
                 // in it (open-result spills included) and writes through an
-                // open upvalue a child closure took on a control slot.
+                // open upvalue a child closure took on a control slot. The
+                // typed handler that exists (`vm/numeric_loop.rs`) needs no
+                // such proof: it is entered only from a successful FOR_PREP,
+                // checks its reads are numbers at entry, and admits only
+                // bodies that run no other code.
                 check_registers(pc, a, 4, frame)?;
             }
             Instr::OP_TFOR_CALL => {

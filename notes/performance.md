@@ -66,27 +66,26 @@ and region accounting need not wait on such a stream: proof
 metadata keyed by canonical pc, an IR emitting existing opcodes, or canonical
 block boundaries priced per State are each candidate shapes for them.
 
-**Numeric-for loop regions.** The per-iteration tag check of the three hidden
-`FOR_LOOP` controls is not removable on its own: a verifier proof is invisible
-to the `Val` payload match in the canonical handler, and admitted bytecode
-must never reach a panic (comments at `instr_for_loop` and the verifier's
-`FOR_LOOP` arm). Its payoff comes only here, as a typed region that runs a
-whole proven loop with the controls, induction value and accumulators as
-`f64` locals: `bench/arithmetic`'s `for i = 1, 50000 do sum = sum + i * 2.5 -
-i / 3.0 end` drops five dispatches per iteration, the control tag checks, the
-duplicate induction write and the boxed temporaries. The proof that selects
-the region (canonical handler as fallback for anything it does not cover)
-must show the successful `FOR_PREP` edge dominates it, cover every register
-write in it including open-result spills, exclude writes through an open
-upvalue a child closure took on a control slot, and account for reads of any
-slot whose write is elided, after the loop included. Numeric-only locals add
-no GC roots and no snapshot fields (saves are quiescent). A guarded exact
-countdown is sound for step exactly `1.0` with finite integral endpoints
-within 2^53 - 1: count `limit - start` in `i64`, keep the original `f64` start
-for the first iteration (`-0.0`), poll at the canonical `FOR_LOOP` pc before
-publishing the next value, and leave a reassigned visible variable alone; all
-other inputs take the general float path, so docs/compatibility.md's f64 loop
-semantics hold.
+**Landed part: numeric-for loop regions** (`src/vm/numeric_loop.rs`). A
+numeric `for` whose body is straight-line arithmetic, `UNM`, `MOVE` and
+`LOAD_NUM` runs as a typed region keyed by its canonical `FOR_PREP` pc,
+selected by an entry guard on every register read before written (no static
+proof, no stream, no persisted opcode). `bench/arithmetic` went from 2.9 s to
+2.0 s wall on bygg. What it taught the residue: canonical-pc metadata with the
+canonical instructions left in place as the fallback needs no position map;
+deferred register writes are exact once the first checkpoint has published
+every written slot (stale numbers root nothing); an iteration's charges can be
+added at once when their sum stays below the flush threshold, with a
+per-operation path otherwise. The exact `i64` countdown was not built: the
+f64 add and compare are not where the loop's time went.
+
+**Residue:** everything outside such loops. Loop bodies with a compare-branch,
+an upvalue read, a field read or a call still run canonically (an `if` inside
+the body is the next most common shape); straight-line chains outside loops
+(fib's `SUB_RK; CALL` gives nothing, `sum + i * 2 - 1` in a loop with a call
+does); field-read-and-add (`same_obj_read`: `GET_UPVAL` + `GET_FIELD` + `ADD`
+per read) and field updates. None of these has had its benefit established;
+each needs a workload whose loop the region does not already take.
 
 **Payoff:** removes dispatches, ip updates, operand decode, temporary
 store/reload and repeated type checks together; the mixed workloads contain
@@ -356,8 +355,9 @@ operations that can call Lua or Rust; operations that can fail, allocate or
 expose state; original charge sites, source locations and interrupt points),
 then propagation, copy coalescing, CSE, loop analysis and destination
 allocation before instruction selection. A nested-function analysis can prove
-many captures immutable. Feeds the typed fused forms of PERF-002, its
-numeric-for loop regions included.
+many captures immutable. Feeds the typed fused forms of PERF-002; the
+numeric-for regions that landed select by an entry guard instead, so a proof
+would widen them only to bodies the guard cannot cover.
 
 **Risks:** a dead result can still owe a charge or type error; hoisting cannot
 hoist a charge or a failure; an eliminated computation keeps the charged

@@ -103,6 +103,33 @@ fn every_loop_shape_stops_at_its_next_back_edge() {
     }
 }
 
+/// A numeric loop whose body is plain arithmetic runs as a typed region.
+/// Its back edge is still the safepoint: an interrupt raised before the loop
+/// stops it after one iteration, at its `FOR_LOOP`, with the captured locals
+/// holding exactly that iteration's values and the visible counter not
+/// advanced.
+#[test]
+fn a_typed_numeric_loop_stops_at_its_first_back_edge() {
+    let source = "local s, last = 0, 0
+                  peek = function() return s, last end
+                  stop()
+                  for i = 1, 10 do
+                    s = s + i * 2
+                    last = i
+                  end";
+    let mut state = state();
+    let error = assert_interrupted(support::try_run(&mut state, source), source);
+    // FOR_LOOP carries the line of the loop's `end`.
+    assert!(error.to_string().starts_with("7:"), "{error}");
+    state.interrupt().reset();
+    state.get_global("peek").expect("peek is defined");
+    state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(2))
+        .expect("peek runs once the interrupt is reset");
+    assert_eq!(state.to_number(-2).expect("s is a number"), 2.0);
+    assert_eq!(state.to_number(-1).expect("last is a number"), 1.0);
+}
+
 #[test]
 fn recursion_without_loops_stops_at_the_next_call() {
     let source = "local function f(k) n = k if k == 3 then stop() end return f(k + 1) + 1 end

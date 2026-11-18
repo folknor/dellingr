@@ -272,6 +272,27 @@ workload measures 2.5 s best of 3 (run `b0083be9`, dirty tree). Stall
 cycles in `insert` and the hash push also rose by about 0.5G. They were
 left alone because the fixed build beats the baseline.
 
+## Typed numeric loop regions, 2026-11-18
+
+`src/vm/numeric_loop.rs` runs a numeric `for` with a straight-line
+arithmetic body as one native loop over an `f64` mirror. Measured on bygg
+with `brokkr bench wall`, best of three, A at `341813c` (`--commit`), B the
+same tree plus the region (dirty), in A B A order for `arithmetic` and B A
+for the controls:
+
+| Workload | A | B | A |
+|---|---:|---:|---:|
+| `arithmetic` | 2.9 s (2f267db4) | 2.0 s (9991db01) | 2.9 s (82d082e4) |
+| `same_obj_read` | | 2.4 s (907cd5eb) | 2.4 s (6599563c) |
+| `benchmark` | | 4.1 s (bc2de4e0) | 4.5 s (27446959) |
+
+`same_obj_read` has no qualifying loop (its body reads fields) and does not
+move. `benchmark`'s section 1 loop (`sum = sum + i * 2 - 1`) qualifies.
+`native_bytes_per_level` is unchanged in dev and release, default and
+snapshot: the `FOR_PREP` arm only passes two more arguments to its helper,
+and the region runs in an outlined function that is never live across a
+native re-entry.
+
 ## Native stack frames and cycles
 
 The log behind reference/native-calls.md's current table: the frame-size

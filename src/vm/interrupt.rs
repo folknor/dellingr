@@ -12,7 +12,9 @@
 //! - every taken backward jump, before the cursor moves (and, for a `for`
 //!   loop, before the loop counters or the generic-for control are
 //!   written). `JMP`, the compare-and-branch and test opcodes, `FOR_LOOP`
-//!   and `TFOR_LOOP` (the generic `for`'s back edge) poll; admission refuses
+//!   and `TFOR_LOOP` (the generic `for`'s back edge) poll, and so does the
+//!   typed numeric loop region at each `FOR_LOOP` it runs
+//!   (`vm/numeric_loop.rs`); admission refuses
 //!   a backward `FOR_PREP`, so bytecode of any provenance has no unpolled
 //!   cycle;
 //! - the admission of every Lua function call, from Lua or from Rust (a host

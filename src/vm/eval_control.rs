@@ -11,13 +11,17 @@ impl State {
     /// Numeric-for setup over the registers from `slot`: start, limit and
     /// step, then the visible variable. Checks the step, then the limit, then
     /// the start, and moves the dispatch cursor `ip` past the loop when it
-    /// does not run.
+    /// does not run. A loop that runs and has a numeric region
+    /// (`vm/numeric_loop.rs`) continues there, which returns with `ip` past
+    /// the loop, or unchanged for canonical dispatch to run the body.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(super) fn instr_for_prep(
         &mut self,
+        frame: &Frame,
         slot: usize,
         ip: &mut usize,
         body_len: i32,
+        local_cost: &mut u64,
     ) -> Result<()> {
         let start_val = self.stack[slot];
         let end_val = self.stack[slot + 1];
@@ -34,6 +38,9 @@ impl State {
         if check_numeric_for_condition(start, end, step) {
             for (local_slot, n) in (slot..).zip([start, end, step, start]) {
                 self.stack[local_slot] = Val::Num(n);
+            }
+            if let Some(region) = frame.runtime.numeric_loops.get(*ip - 1) {
+                self.run_numeric_loop(region, frame.stack_bottom, ip, local_cost)?;
             }
         } else {
             // Admission requires a forward offset here, so this jump is
@@ -58,8 +65,10 @@ impl State {
         // This fallible match stays even under a stronger admission proof:
         // the proof is invisible to the `Val` payload read, and the panic it
         // could license is what admitted bytecode must never reach. Faster
-        // numeric loops come from a typed loop region holding the controls
-        // as `f64` locals, with this handler as the fallback.
+        // numeric loops come from the typed loop region (`vm/numeric_loop.rs`)
+        // holding the controls as `f64` locals, selected at FOR_PREP by an
+        // entry guard rather than a static proof, with this handler as the
+        // fallback.
         let (Some(mut var), Some(limit), Some(step)) = (
             self.stack[slot].as_num(),
             self.stack[slot + 1].as_num(),
@@ -265,7 +274,7 @@ impl State {
     }
 }
 
-fn check_numeric_for_condition(var: f64, limit: f64, step: f64) -> bool {
+pub(super) fn check_numeric_for_condition(var: f64, limit: f64, step: f64) -> bool {
     // Deliberate divergence: a zero step (including -0.0) skips the loop in
     // both directions. Lua 5.4 raises "'for' step is zero"; Lua 5.2 skips an
     // ascending range but loops forever on a descending one. The skip rules

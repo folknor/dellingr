@@ -749,7 +749,7 @@ impl Frame {
                 // `for` loops
                 Instr::OP_FOR_PREP => {
                     fixed_cost!(Instr::OP_FOR_PREP);
-                    state.instr_for_prep(ra, ip, inst.sj())?;
+                    state.instr_for_prep(frame, ra, ip, inst.sj(), local_cost)?;
                 }
                 Instr::OP_FOR_LOOP => {
                     fixed_cost!(Instr::OP_FOR_LOOP);

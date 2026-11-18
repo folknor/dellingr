@@ -191,6 +191,12 @@ tick budgets and re-record replays.
   plain value buffer instead of a scratch table: the new `sort_proxy`
   workload (2000 elements, Lua handlers, default comparison) went from 9.7 s
   to 4.8 s on bygg.
+- A numeric `for` whose body is only arithmetic, negation, local moves and
+  number literals runs as one typed loop once its reads are numbers at
+  entry, without dispatching each instruction: `bench/arithmetic` went from
+  2.9 s to 2.0 s on bygg. Results, costs and the charged prefix at a budget
+  refusal, error locations, interrupt safepoints and collection timing are
+  unchanged; bytecode and saves are untouched.
 
 ## [0.7.1] - 2026-11-06
 
