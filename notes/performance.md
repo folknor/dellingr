@@ -98,6 +98,12 @@ and at `State::try_numeric_leaf`; numbers in `reference/performance.md`):
   compare-branches and `JMP`s, and raw element reads of a table read once
   at entry, exiting to canonical dispatch at a non-number element
   (`State::run_control_region`). bench/cull 1.28 s to 0.77 s.
+- Method calls and field leaves in straight-line regions: `SELF` on a
+  loop-invariant receiver, field leaves, calls keeping no result; method,
+  route and field slots resolved once at entry, declined when a leaf store
+  key meets a key the region resolved (`State::resolve_callees`).
+  bench/method 1.6 s to 0.54 s, method_chain_counter 1.5 s to 0.57 s;
+  global about 5% slower, read as layout (reference/performance.md).
 
 What the landed work taught: canonical-pc metadata with the canonical
 instructions as the fallback needs no position map or execution stream;
@@ -109,16 +115,17 @@ went.
 
 **Residue:** loop bodies with a store, a nested loop (cull's outer loop),
 a non-number branch (truth test, string or nil compare), a branch beside a
-leaf call, or a call to anything but a numeric leaf (nested `f(g(x))`, a
-method call, open arguments or results) still run canonically.
-Straight-line chains in functions that are not leaves (fib's `n - 1`,
-`n - 2`, `+` around its calls) still dispatch per instruction. Field updates
-outside a leaf (in a function that branches or calls, or in a loop body
-such as object_fields' `u.x = u.x + u.speed` beside `units[i]` and a method
-call) still dispatch; inside a loop region a store would need slot identity
+leaf call, a call to anything but a numeric leaf (nested `f(g(x))`, open
+arguments or results), or a method call on a receiver read inside the loop
+(method_polymorphic's `shapes[i]:area()`, object_fields' `units[i]`) still
+run canonically. Straight-line chains in functions that are not leaves
+(fib's `n - 1`, `n - 2`, `+` around its calls) still dispatch per
+instruction. Field updates outside a leaf (in a function that branches or
+calls, or in a loop body such as object_fields' `u.x = u.x + u.speed`)
+still dispatch; inside a loop region a store would need slot identity
 hoisted and every value it can reach reloaded, not the region's read-once
-fields, and a region still calls neither a field leaf nor a method. Each
-needs a workload whose loop or call the landed forms do not already take.
+fields. Each needs a workload whose loop or call the landed forms do not
+already take.
 One stable shape for a two-op fusion: after a handler, test the actual next
 opcode and enter its body directly inside the dispatch loop. That is the
 predecessor-specific dispatch threaded dispatch was after, without its

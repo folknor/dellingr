@@ -12,8 +12,8 @@
 //!   body may also read and store string-keyed fields of receiver tables (a
 //!   parameter used only as a receiver, or an upvalue), the method shape
 //!   `self.count = self.count + n`; such a field leaf runs when every field
-//!   is raw present in its table. Only a leaf with no field and one result
-//!   may be called from a loop region.
+//!   is raw present in its table. A loop region may call either kind,
+//!   through a global, an upvalue or a method of a loop-invariant receiver.
 //!
 //! Both are derived metadata built per State from admitted bytecode (fresh
 //! compiles and snapshot loads alike), so nothing here is persisted or
@@ -26,8 +26,8 @@
 //! - Types. A body holds only arithmetic, `UNM`, `MOVE`, `LOAD_NUM`,
 //!   loop-invariant field reads and calls to numeric leaves, so numbers in
 //!   give numbers out, and nothing else runs while the region does: no
-//!   other call, store, allocation, upvalue
-//!   write or handler. The only foreign code is the back-edge checkpoint
+//!   other call, allocation, upvalue write or handler, and no store but a
+//!   field leaf's number into a slot already live. The only foreign code is the back-edge checkpoint
 //!   (`State::poll_gc_checkpoint`), which polls the interrupt and may
 //!   collect, and runs no Lua or host code. A guard at entry on every
 //!   register read before it is written in one pass of the body and the loop
@@ -38,7 +38,9 @@
 //!   reused as the destination) and `GET_FIELD d s k` with `s` a register
 //!   the body never writes read a receiver that cannot change while the
 //!   region runs: nothing in it writes an upvalue, a register outside the
-//!   mirror or a table, a running closure's upvalues never alias its own
+//!   mirror or a table field under the read's key (a called field leaf's
+//!   store keys are checked against it at entry), a running closure's
+//!   upvalues never alias its own
 //!   frame's registers, and a collection frees dead objects without
 //!   changing a live table's contents (the VM has no weak tables). So the
 //!   field is read once at entry, through the site's own field cache as
@@ -64,21 +66,28 @@
 //!   completed prefix. Zero weights are skipped as dispatch skips them. A
 //!   fused field read's two instructions are both free, so no refusal falls
 //!   between them.
-//! - Calls. A body may call numeric leaves: `GET_GLOBAL r k` or `GET_UPVAL
-//!   r u`, then `CALL r` with fixed arguments and one result, nothing else
-//!   touching `r` in between. The callee is read once at entry and must be
-//!   a Lua closure with a leaf plan; nothing the region or a leaf runs can
-//!   rebind a global or upvalue, so no pass needs to check it again, and the
-//!   binding keeps the closure reachable. Each call runs the leaf on the
-//!   mirror, writes nil into every register above `r` up to the frame's
-//!   top as a fixed-result call leaves them, and records its call site. A
-//!   register read before written must lie below every `r`, or the second
-//!   pass would read that nil. Each call reads the poll flag first, as its
-//!   admission would poll, and when the flag is set, or in a
-//!   per-operation pass when the leaf's charges might be refused, the
-//!   region exits at the `CALL` with the callee back in `r` (installed
-//!   after the mirror is published) and canonical dispatch makes the call.
-//!   A fast pass adds the charges of the operations before the exit only.
+//! - Calls. A body may call numeric leaves: `GET_GLOBAL r k`, `GET_UPVAL
+//!   r u`, or a method lookup `SELF r s k` on a receiver the body never
+//!   writes (an upvalue read by the `GET_UPVAL s u` before it, with `s` one
+//!   of `SELF`'s destinations, or a register), then `CALL r` with fixed
+//!   arguments and zero or one result, nothing else touching `r` (or a
+//!   method's receiver copy in `r + 1`) in between. The callee, a method's
+//!   receiver and route, and a field leaf's slots are resolved once at
+//!   entry (`State::resolve_callees`, which says why each stays valid);
+//!   the callee must be a Lua closure with a leaf plan, and the binding
+//!   keeps it reachable. Each call runs the leaf on the mirror, a field
+//!   leaf reloading and overwriting its slots, writes nil into every
+//!   register the call clears up to the frame's top (above `r`, and `r`
+//!   too for no result) as a fixed-result call leaves them, and records
+//!   its call site. A register read before written must lie below every
+//!   cleared one, or the second pass would read that nil. Each call reads
+//!   the poll flag first, as its admission would poll, and when the flag
+//!   is set, or in a per-operation pass when the leaf's charges might be
+//!   refused, the region exits at the `CALL` with the callee back in `r`
+//!   and a method's receiver in `r + 1` (installed after the mirror is
+//!   published) and canonical dispatch makes the call, so no leaf effect
+//!   happens before every one of its charges is admitted. A fast pass adds
+//!   the charges of the operations before the exit only.
 //! - The loop step reads the mirror's controls, which a body may have
 //!   written, computes the next value into a temporary, polls on the taken
 //!   back edge with the cursor past `FOR_LOOP`, and only then writes the
@@ -102,7 +111,7 @@ use super::table::SlotRef;
 use crate::compiler::Bytecode;
 use crate::cost_meter::CostState;
 use crate::instr::{ArgCount, ArithOp, ArithOperands, CompareOp, Instr, RetCount};
-use crate::limits::{MAX_CALL_DEPTH, MAX_STACK_SIZE};
+use crate::limits::{MAX_CALL_DEPTH, MAX_METAMETHOD_DEPTH, MAX_STACK_SIZE};
 use crate::numeral::{lua_add, lua_div, lua_modulo, lua_mul, lua_sub};
 
 /// Mirror slots per region or leaf: registers first, then constants. Code
@@ -163,18 +172,23 @@ const MAX_INDEXED: usize = 8;
 /// Calls one loop body may make to numeric leaves.
 const MAX_CALLS: usize = 4;
 
-/// A loop body's `GET_GLOBAL r k` or `GET_UPVAL r u`, then its `CALL r` with
-/// fixed arguments and one result, made to a numeric leaf read once at entry.
+/// A loop body's `GET_GLOBAL r k`, `GET_UPVAL r u` or method lookup into
+/// `r`, then its `CALL r` with fixed arguments and zero or one result, made
+/// to a numeric leaf read once at entry.
 #[derive(Debug)]
 struct CallSite {
     callee: Callee,
     /// The function register `r`.
     register: u16,
-    /// `r`'s mirror slot, which holds the call's result.
+    /// `r`'s mirror slot, which holds the call's result when it has one.
     slot: u8,
-    /// The argument registers' mirror slots, `r + 1` upwards.
+    /// The argument registers' mirror slots, upwards from `r + 1`. A method
+    /// call's first, the receiver in `r + 1`, is a placeholder 0.
     args: Box<[u8]>,
-    /// Mirror slots of the registers above `r`, which the call leaves nil.
+    /// Results the call keeps: 0 or 1.
+    results: u8,
+    /// Mirror slots of the registers the call leaves nil: above `r`, and
+    /// `r` itself when it keeps no result.
     above: u32,
     /// The `CALL` pc.
     pc: usize,
@@ -182,10 +196,33 @@ struct CallSite {
     op: usize,
 }
 
+impl CallSite {
+    /// The first register the call leaves nil.
+    fn cleared(&self) -> u16 {
+        self.register + u16::from(self.results)
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Callee {
-    Global { name: u16, cache: Option<u8> },
+    Global {
+        name: u16,
+        cache: Option<u8>,
+    },
     Upvalue(u16),
+    /// `SELF r s k` (after `GET_UPVAL s u` when the receiver is an upvalue):
+    /// method `k` of a loop-invariant receiver table, with the receiver in
+    /// `r + 1` as the call's first argument.
+    Method {
+        receiver: Receiver,
+        key: u16,
+    },
+}
+
+impl Callee {
+    fn method(self) -> bool {
+        matches!(self, Callee::Method { .. })
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -217,6 +254,9 @@ enum TableSource {
 
 /// Most distinct field sites one leaf may touch.
 const MAX_FIELD_SITES: usize = 16;
+
+/// A field leaf's sites resolved to live slots, in site order.
+type FieldSlots = [Option<(ObjectPtr, SlotRef)>; MAX_FIELD_SITES];
 
 /// One field a leaf reads or stores: a receiver source and a key literal,
 /// shared by every `GET_FIELD` and `SET_FIELD` of the body that names both.
@@ -343,12 +383,19 @@ struct Layout {
     /// A callee loaded into its register and not yet called: no other
     /// operation may touch that register in between.
     loading: Option<(u16, Callee)>,
-    /// The lowest function register called so far. A fixed-result call
-    /// leaves every register above its function register nil, so a register
-    /// above this floor reads nil unless it is in `revived`.
-    nil_floor: Option<u16>,
-    /// Registers above `nil_floor` written since the call that cleared them.
+    /// The lowest function register called so far: the loop controls must
+    /// lie below it.
+    call_floor: Option<u16>,
+    /// The lowest register a call leaves nil: above its function register,
+    /// and the function register itself when the call keeps no result. A
+    /// register at or above it reads nil unless it is in `revived`.
+    nil_from: Option<u16>,
+    /// Registers at or above `nil_from` written since the call that cleared
+    /// them.
     revived: Vec<u16>,
+    /// Registers a method lookup writes (`SELF`'s function register and
+    /// receiver copy): a field or indexed receiver must not be one.
+    method_writes: Vec<u16>,
     /// A leaf's registers whose reaching definition is a table, with its
     /// source. A numeric read of one refuses the plan.
     tables: Vec<(u16, TableSource)>,
@@ -377,8 +424,8 @@ impl Layout {
         if self.untouchable(register)
             || self.tables.iter().any(|&(r, _)| r == register)
             || self
-                .nil_floor
-                .is_some_and(|floor| register > floor && !self.revived.contains(&register))
+                .nil_from
+                .is_some_and(|from| register >= from && !self.revived.contains(&register))
         {
             return None;
         }
@@ -397,16 +444,18 @@ impl Layout {
         self.written |= 1 << slot;
         self.must |= 1 << slot;
         self.tables.retain(|&(r, _)| r != register);
-        if self.nil_floor.is_some_and(|floor| register > floor) && !self.revived.contains(&register)
-        {
+        if self.nil_from.is_some_and(|from| register >= from) && !self.revived.contains(&register) {
             self.revived.push(register);
         }
         Some(slot)
     }
 
-    /// The register of a callee loaded and not yet called.
+    /// The register of a callee loaded and not yet called, and a method
+    /// call's receiver copy above it.
     fn untouchable(&self, register: u16) -> bool {
-        self.loading.is_some_and(|(loaded, _)| loaded == register)
+        self.loading.is_some_and(|(loaded, callee)| {
+            loaded == register || (callee.method() && loaded.checked_add(1) == Some(register))
+        })
     }
 
     /// The table source `register` holds where a leaf uses it as a field
@@ -467,9 +516,10 @@ impl Layout {
         Some(index as u8)
     }
 
-    /// `GET_GLOBAL r k` or `GET_UPVAL r u` loading a callee into `r`. Off
-    /// under fault injection, whose call-depth and stack-space sites count
-    /// every admission.
+    /// `GET_GLOBAL r k`, `GET_UPVAL r u` or a method lookup loading a
+    /// callee into `r` (and a method's receiver into `r + 1`). Off under
+    /// fault injection, whose call-depth and stack-space sites count every
+    /// admission.
     fn load(&mut self, register: u16, callee: Callee) -> Option<LoopOp> {
         if cfg!(feature = "fault-injection")
             || self.loading.is_some()
@@ -477,6 +527,10 @@ impl Layout {
             || self.untouchable(register)
         {
             return None;
+        }
+        if callee.method() {
+            let copy = register.checked_add(1)?;
+            self.method_writes.extend([register, copy]);
         }
         self.register(register)?;
         self.loading = Some((register, callee));
@@ -488,7 +542,8 @@ impl Layout {
         })
     }
 
-    /// `CALL r` of the loaded callee, with fixed arguments and one result.
+    /// `CALL r` of the loaded callee, with fixed arguments and zero or one
+    /// result.
     fn call_site(&mut self, inst: Instr, pc: usize) -> Option<LoopOp> {
         // An exit at the call leaves canonical dispatch to charge `CALL`
         // again, which only a free `CALL` makes exact.
@@ -499,28 +554,48 @@ impl Layout {
         let ArgCount::Fixed(count) = inst.call_args() else {
             return None;
         };
-        if inst.a() != register
-            || inst.call_results() != RetCount::Fixed(1)
-            || inst.call_is_method()
-        {
+        let results = match inst.call_results() {
+            RetCount::Fixed(0) => 0,
+            RetCount::Fixed(1) => 1,
+            _ => return None,
+        };
+        let method = callee.method();
+        if inst.a() != register || inst.call_is_method() != method || (method && count == 0) {
             return None;
         }
+        // A method call's first argument is the receiver copy, which is a
+        // table, not a mirror slot: its entry is a placeholder no leaf reads
+        // (`State::resolve_callees` refuses a numeric read of parameter 0).
         let mut args = Vec::with_capacity(usize::from(count));
         for offset in 1..=u16::from(count) {
-            args.push(self.read(register.checked_add(offset)?)?);
+            args.push(if method && offset == 1 {
+                0
+            } else {
+                self.read(register.checked_add(offset)?)?
+            });
         }
         self.loading = None;
-        // Everything above `r` is nil after the call.
-        let floor = self.nil_floor.map_or(register, |floor| floor.min(register));
-        self.nil_floor = Some(floor);
-        self.revived.retain(|&revived| revived <= register);
-        let a = self.write(register)?;
+        // Everything above `r`, and `r` too without a result, is nil after
+        // the call.
+        let cleared = register.checked_add(u16::from(results))?;
+        self.call_floor = Some(
+            self.call_floor
+                .map_or(register, |floor| floor.min(register)),
+        );
+        self.nil_from = Some(self.nil_from.map_or(cleared, |from| from.min(cleared)));
+        self.revived.retain(|&revived| revived < cleared);
+        let a = if results == 1 {
+            self.write(register)?
+        } else {
+            self.register(register)?
+        };
         let index = self.calls.len() as u8;
         self.calls.push(CallSite {
             callee,
             register,
             slot: a,
             args: args.into_boxed_slice(),
+            results,
             above: 0,
             pc,
             op: self.ops.len(),
@@ -745,6 +820,55 @@ impl Layout {
                         pc += 2;
                         continue;
                     }
+                    // `GET_UPVAL t u; SELF r t k` with `t` one of `SELF`'s
+                    // own destinations, so after the pair `t` holds nothing
+                    // but what `SELF` wrote there.
+                    Instr::OP_GET_UPVAL
+                        if fields
+                            && end.is_some_and(|end| pc + 1 < end)
+                            && code.get(pc + 1).is_some_and(|lookup| {
+                                lookup.opcode() == Instr::OP_SELF
+                                    && lookup.b() == inst.a()
+                                    && (lookup.a() == inst.a()
+                                        || lookup.a().checked_add(1) == Some(inst.a()))
+                            }) =>
+                    {
+                        let lookup = code[pc + 1];
+                        // Both are free, so an exit before the pair owes no
+                        // charge and none falls between its halves.
+                        const {
+                            assert!(Instr::fixed_charge(Instr::OP_GET_UPVAL).is_none());
+                            assert!(Instr::fixed_charge(Instr::OP_SELF).is_none());
+                        }
+                        let op = self.load(
+                            lookup.a(),
+                            Callee::Method {
+                                receiver: Receiver::Upvalue(inst.b()),
+                                key: lookup.c(),
+                            },
+                        )?;
+                        self.ops.push(op);
+                        self.charges.push((pc + 2, 0));
+                        pc += 2;
+                        continue;
+                    }
+                    // `SELF r s k` on a register the body never writes.
+                    Instr::OP_SELF if fields => {
+                        const {
+                            assert!(Instr::fixed_charge(Instr::OP_SELF).is_none());
+                        }
+                        if self.untouchable(inst.b()) {
+                            return None;
+                        }
+                        self.receivers.push(inst.b());
+                        self.load(
+                            inst.a(),
+                            Callee::Method {
+                                receiver: Receiver::Register(inst.b()),
+                                key: inst.c(),
+                            },
+                        )?
+                    }
                     Instr::OP_GET_TABLE if fields => {
                         const {
                             assert!(Instr::fixed_charge(Instr::OP_GET_TABLE).is_none());
@@ -889,27 +1013,32 @@ impl Layout {
             {
                 return None;
             }
+            if self.method_writes.contains(&receiver) {
+                return None;
+            }
         }
-        if let Some(floor) = self.nil_floor {
-            // A call clears every register above its function register, so a
-            // register read before written above the lowest one would read
-            // nil from the second pass on; the loop controls and a field
-            // receiver must survive every pass.
+        if let (Some(floor), Some(from)) = (self.call_floor, self.nil_from) {
+            // A call writes its function register and clears every register
+            // above it (and the function register too when it keeps no
+            // result), so a register read before written at or above the
+            // lowest cleared one would read nil from the second pass on; the
+            // loop controls and a receiver must survive every pass.
             let reserved_above = self.registers[..reserved].iter().any(|&r| r >= floor);
             let guard_above = self
                 .registers
                 .iter()
                 .enumerate()
-                .any(|(slot, &r)| self.guards & (1 << slot) != 0 && r > floor);
-            if reserved_above || guard_above || self.receivers.iter().any(|&r| r > floor) {
+                .any(|(slot, &r)| self.guards & (1 << slot) != 0 && r >= from);
+            if reserved_above || guard_above || self.receivers.iter().any(|&r| r >= from) {
                 return None;
             }
             for site in &mut self.calls {
+                let cleared = site.cleared();
                 site.above = self
                     .registers
                     .iter()
                     .enumerate()
-                    .filter(|&(_, &r)| r > site.register)
+                    .filter(|&(_, &r)| r >= cleared)
                     .fold(0, |mask, (slot, _)| mask | 1 << slot);
             }
         }
@@ -1089,12 +1218,27 @@ impl NumericLeaf {
             max_stack: usize::from(bytecode.max_stack),
         })
     }
+}
 
-    /// Whether a typed loop region may call this leaf: no field site, whose
-    /// store could change a value the region read at entry, and one result
-    /// for its mirror.
-    fn pure(&self) -> bool {
-        self.sites.is_empty() && self.result.is_some()
+/// A loop region's call site resolved at entry: the callee, its runtime
+/// (which holds the leaf plan), a method call's receiver and the leaf's
+/// field sites resolved to live slots.
+struct Resolved {
+    callee: Val,
+    runtime: Arc<BytecodeRuntime>,
+    receiver: Val,
+    /// A field leaf's sites; `None` for a leaf without any. Boxed so a
+    /// region calling only leaves without fields keeps its resolved callees
+    /// small.
+    fields: Option<Box<FieldSlots>>,
+}
+
+impl Resolved {
+    fn leaf(&self) -> &NumericLeaf {
+        self.runtime
+            .numeric_leaf
+            .as_ref()
+            .expect("resolve_callees found a leaf plan for every call site")
     }
 }
 
@@ -1147,15 +1291,43 @@ impl State {
         if !self.load_mirror(body, frame, base, &mut x) {
             return Ok(());
         }
-        let mut callees: [Option<(Val, Arc<BytecodeRuntime>)>; MAX_CALLS] = Default::default();
+        let mut callees: [Option<Resolved>; MAX_CALLS] = Default::default();
         if CALLS && !self.resolve_callees(body, frame, &mut callees) {
             return Ok(());
         }
+        if CALLS
+            && callees
+                .iter()
+                .flatten()
+                .any(|resolved| resolved.fields.is_some())
+        {
+            self.run_passes::<CALLS, true>(region, frame, ip, local_cost, x, &callees)
+        } else {
+            self.run_passes::<CALLS, false>(region, frame, ip, local_cost, x, &callees)
+        }
+    }
+
+    /// `run_region`'s passes, with the mirror loaded and the callees
+    /// resolved; compiled apart for bodies calling field leaves (`FIELDS`),
+    /// so a body calling only leaves without fields keeps its calls free of
+    /// the field-site test.
+    #[inline(always)]
+    fn run_passes<const CALLS: bool, const FIELDS: bool>(
+        &mut self,
+        region: &NumericLoop,
+        frame: &Frame,
+        ip: &mut usize,
+        local_cost: &mut u64,
+        mut x: [f64; MIRROR_SLOTS],
+        callees: &[Option<Resolved>; MAX_CALLS],
+    ) -> Result<()> {
+        let base = frame.stack_bottom;
+        let body = &region.body;
         let leaf = |index: usize| {
             callees[index]
                 .as_ref()
-                .and_then(|(_, runtime)| runtime.numeric_leaf.as_ref())
-                .expect("resolve_callees found a leaf plan for every call site")
+                .expect("resolve_callees resolved every call site")
+                .leaf()
         };
         let weight = body
             .calls
@@ -1239,8 +1411,21 @@ impl State {
                                 *ip = site.pc;
                                 break 'pass Ok(());
                             }
-                            let result =
-                                callee.eval(|register| x[at(site.args[usize::from(register)])]);
+                            // Leaf parameter `p` is argument `p`;
+                            // `resolve_callees` checked every guarded one is
+                            // a number passed.
+                            let argument = |register: u16| x[at(site.args[usize::from(register)])];
+                            let fields = if FIELDS {
+                                callees[usize::from(op.b)]
+                                    .as_ref()
+                                    .and_then(|resolved| resolved.fields.as_deref())
+                            } else {
+                                None
+                            };
+                            let result = match fields {
+                                None => callee.eval(argument),
+                                Some(fields) => self.run_leaf_fields(callee, fields, argument),
+                            };
                             if !fast {
                                 for &(cursor, charge) in callee
                                     .body
@@ -1256,10 +1441,12 @@ impl State {
                                     }
                                 }
                             }
+                            // Without a result `above` holds `r`'s own slot,
+                            // so the write is dropped again.
                             x[at(op.a)] = result;
                             written = (written | 1 << op.a) & !site.above;
-                            let function = base + usize::from(site.register);
-                            self.stack[function + 1..frame.top].fill(Val::Nil);
+                            let cleared = base + usize::from(site.cleared());
+                            self.stack[cleared..frame.top].fill(Val::Nil);
                             self.record_call_site(site.pc + 1);
                             loaded = None;
                         }
@@ -1312,9 +1499,13 @@ impl State {
         // Last, so no published number overwrites it.
         if CALLS
             && let Some(site) = loaded
-            && let Some((callee, _)) = &callees[site]
+            && let Some(resolved) = &callees[site]
         {
-            self.stack[base + usize::from(body.calls[site].register)] = *callee;
+            let function = base + usize::from(body.calls[site].register);
+            self.stack[function] = resolved.callee;
+            if body.calls[site].callee.method() {
+                self.stack[function + 1] = resolved.receiver;
+            }
         }
         result
     }
@@ -1458,20 +1649,35 @@ impl State {
     /// Read every call site's callee into `callees` and check what the
     /// canonical admission of each of its calls would check that the region
     /// cannot change: the callee is a Lua closure with a leaf plan whose
-    /// parameter reads are all arguments, the call depth, the frame
+    /// parameter reads are all number arguments, the call depth, the frame
     /// reservation under the stack cap, and no open upvalue in a call window.
     /// The stack must also end at the frame's top, where a fixed-result call
-    /// leaves it. `false` declines the region.
+    /// leaves it. A call keeping a result needs a leaf that returns one.
+    /// `false` declines the region.
     ///
-    /// Read once: nothing the region or a leaf runs stores to a table or an
-    /// upvalue, and a collection changes no live table, so the global or
-    /// upvalue names the same closure, which it also keeps reachable, on
-    /// every pass.
+    /// A method call's receiver must be a table and its method is found
+    /// through `__index` tables only (`State::region_method`). A field
+    /// leaf's sites are resolved here, once (`State::resolve_sites`): its
+    /// receiver sources are the method receiver and the callee's upvalues.
+    /// An upvalue open on this frame's registers, which the region writes,
+    /// declines; one open on an enclosing frame's names a slot nothing in
+    /// the region writes.
+    ///
+    /// Read once: the region and its leaves store only numbers, only into
+    /// slots already live, under keys that are not `__index` (checked by
+    /// `resolve_sites`) and, checked here, that are neither a method key, a
+    /// callee's global name nor the key of a field the region reads at entry.
+    /// No key is created or removed and no table version moves, so every
+    /// lookup made here (a global, an upvalue, a receiver, each raw miss,
+    /// `__index` and metatable link of a method route, each field slot and
+    /// each read-once field) answers the same on every pass, and a
+    /// collection changes no live table. The bindings keep the callees and
+    /// receivers reachable.
     fn resolve_callees(
         &self,
         body: &Body,
         frame: &Frame,
-        callees: &mut [Option<(Val, Arc<BytecodeRuntime>)>; MAX_CALLS],
+        callees: &mut [Option<Resolved>; MAX_CALLS],
     ) -> bool {
         let base = frame.stack_bottom;
         if self.stack.len() != frame.top || self.in_flight.call_depth >= MAX_CALL_DEPTH {
@@ -1487,9 +1693,19 @@ impl State {
             {
                 return false;
             }
-            let value = match site.callee {
-                Callee::Global { name, cache } => self.read_global(frame, name, cache),
-                Callee::Upvalue(index) => self.upvalue_value(frame, index),
+            let (value, receiver) = match site.callee {
+                Callee::Global { name, cache } => (self.read_global(frame, name, cache), Val::Nil),
+                Callee::Upvalue(index) => (self.upvalue_value(frame, index), Val::Nil),
+                Callee::Method { receiver, key } => {
+                    let receiver = match receiver {
+                        Receiver::Upvalue(index) => self.upvalue_value(frame, index),
+                        Receiver::Register(register) => self.stack[base + usize::from(register)],
+                    };
+                    let Some(method) = self.region_method(receiver, frame.literal(key)) else {
+                        return false;
+                    };
+                    (method, receiver)
+                }
             };
             let Val::Obj(ptr) = value else {
                 return false;
@@ -1497,14 +1713,14 @@ impl State {
             let Some(closure) = self.heap.as_lua_function_ref(ptr) else {
                 return false;
             };
-            let Some(leaf) = closure
-                .runtime
-                .numeric_leaf
-                .as_ref()
-                .filter(|leaf| leaf.pure())
-            else {
+            let Some(leaf) = closure.runtime.numeric_leaf.as_ref() else {
                 return false;
             };
+            if site.results == 1 && leaf.result.is_none() {
+                return false;
+            }
+            // Parameter 0 of a method call is the receiver, a table.
+            let skip = usize::from(site.callee.method());
             let arguments = site.args.len();
             let parameters_are_arguments =
                 leaf.body
@@ -1512,16 +1728,111 @@ impl State {
                     .iter()
                     .enumerate()
                     .all(|(slot, &register)| {
-                        leaf.body.guards & (1 << slot) == 0 || usize::from(register) < arguments
+                        let register = usize::from(register);
+                        leaf.body.guards & (1 << slot) == 0
+                            || (register >= skip && register < arguments)
                     });
             if !parameters_are_arguments
                 || function + 1 + leaf.max_stack + FRAME_HEADROOM > MAX_STACK_SIZE
             {
                 return false;
             }
-            callees[index] = Some((value, Arc::clone(&closure.runtime)));
+            let fields = if leaf.sites.is_empty() {
+                None
+            } else {
+                let mut fields = Box::new([None; MAX_FIELD_SITES]);
+                let param = |register: u16| (skip == 1 && register == 0).then_some(receiver);
+                if !self.resolve_sites(closure, leaf, param, base, &mut fields) {
+                    return false;
+                }
+                Some(fields)
+            };
+            callees[index] = Some(Resolved {
+                callee: value,
+                runtime: Arc::clone(&closure.runtime),
+                receiver,
+                fields,
+            });
         }
-        true
+        self.region_keys_disjoint(body, frame, callees)
+    }
+
+    /// Whether no leaf of `callees` stores under a key some resolution of
+    /// the region relies on: a method key, a callee's global name or a field
+    /// the region reads at entry. Keys are interned, so equal keys are equal
+    /// values.
+    fn region_keys_disjoint(
+        &self,
+        body: &Body,
+        frame: &Frame,
+        callees: &[Option<Resolved>; MAX_CALLS],
+    ) -> bool {
+        let read_keys = body
+            .calls
+            .iter()
+            .filter_map(|site| match site.callee {
+                Callee::Global { name, .. } => Some(name),
+                Callee::Method { key, .. } => Some(key),
+                Callee::Upvalue(_) => None,
+            })
+            .chain(
+                body.constants
+                    .iter()
+                    .filter_map(|&(_, constant)| match constant {
+                        Constant::Field { key, .. } => Some(key),
+                        Constant::Number(_) => None,
+                    }),
+            );
+        // bounded: at most MAX_CALLS sites of MAX_FIELD_SITES each, against
+        // the body's own sites and constants
+        let mut stored = callees.iter().flatten().flat_map(|resolved| {
+            let runtime = &resolved.runtime;
+            resolved
+                .leaf()
+                .sites
+                .iter()
+                .filter(|site| site.store)
+                .map(|site| runtime.literals[usize::from(site.key)])
+        });
+        let read_keys: Vec<Val> = read_keys.map(|key| frame.literal(key)).collect();
+        stored.all(|key| !read_keys.contains(&key))
+    }
+
+    /// The method `key` of `receiver` as `SELF` would find it, when that
+    /// lookup runs nothing and cannot fail: `receiver` is a table, and each
+    /// raw miss continues through a metatable whose `__index` is a table,
+    /// until a raw hit. Every continuing step past the receiver's own lookup
+    /// takes a metamethod depth unit (`State::resolve_index`), so the walk
+    /// must fit under the limit from the depth in flight. `None` declines:
+    /// any other handler, a nil answer, or too deep a walk.
+    fn region_method(&self, receiver: Val, key: Val) -> Option<Val> {
+        let index_key = self.meta_names.get(MetaName::Index);
+        let Val::Obj(mut table) = receiver else {
+            return None;
+        };
+        let mut depth = self.in_flight.metamethod_depth;
+        let mut first = true;
+        // bounded: each continuing step past the first takes a depth unit,
+        // and the walk stops at MAX_METAMETHOD_DEPTH
+        loop {
+            let tbl = self.heap.as_table_ref(table)?;
+            let value = tbl.get(&key);
+            if !matches!(value, Val::Nil) {
+                return Some(value);
+            }
+            let metatable = self.heap.as_table_ref(tbl.get_metatable()?)?;
+            let Val::Obj(next) = metatable.get(&index_key) else {
+                return None;
+            };
+            if !first {
+                if depth >= MAX_METAMETHOD_DEPTH {
+                    return None;
+                }
+                depth += 1;
+            }
+            first = false;
+            table = next;
+        }
     }
 
     /// Load `body`'s guarded registers of the frame at `base` and its
@@ -1690,7 +2001,11 @@ impl State {
             (leaf.result.map(|result| x[at(result)]), body.weight)
         } else {
             let mut fields = [None; MAX_FIELD_SITES];
-            if !self.resolve_sites(closure, leaf, idx, num_args, &mut fields) {
+            let param = |register: u16| {
+                (register < u16::from(num_args))
+                    .then(|| self.stack[idx + 1 + usize::from(register)])
+            };
+            if !self.resolve_sites(closure, leaf, param, usize::MAX, &mut fields) {
                 return false;
             }
             // The stores need the heap mutably, so hold the plan through its
@@ -1719,12 +2034,13 @@ impl State {
     }
 
     /// Resolve every field site of field leaf `leaf`, called through
-    /// `closure` at function slot `idx` with `num_args` arguments, to the
-    /// live slot of its receiver table, into `fields`. `false`, changing
-    /// nothing a later lookup could answer differently, when the call must
-    /// run canonically: a receiver is not a table, a key is not raw present
-    /// in it, a read field does not hold a number, or a stored key is
-    /// `__index`.
+    /// `closure` with `param(p)` the value passed as parameter `p` (`None`
+    /// when not passed), to the live slot of its receiver table, into
+    /// `fields`. `false`, changing nothing a later lookup could answer
+    /// differently, when the call must run canonically: a receiver is not a
+    /// table, a key is not raw present in it, a read field does not hold a
+    /// number, a stored key is `__index`, or an upvalue source is open on a
+    /// stack slot at or above `open_below`.
     ///
     /// Why that makes the body exact: a store writes a number into a slot
     /// already live, which creates or removes no key, moves no slot and no
@@ -1737,8 +2053,8 @@ impl State {
         &self,
         closure: &super::object::Closure,
         leaf: &NumericLeaf,
-        idx: usize,
-        num_args: u8,
+        param: impl Fn(u16) -> Option<Val>,
+        open_below: usize,
         fields: &mut [Option<(ObjectPtr, SlotRef)>; MAX_FIELD_SITES],
     ) -> bool {
         // The inline-cache differential compares leaves with the canonical
@@ -1752,17 +2068,20 @@ impl State {
         for (site, field) in leaf.sites.iter().zip(fields.iter_mut()) {
             let receiver = match site.source {
                 TableSource::Param(register) => {
-                    if register >= u16::from(num_args) {
+                    let Some(value) = param(register) else {
                         return false;
-                    }
-                    self.stack[idx + 1 + usize::from(register)]
+                    };
+                    value
                 }
                 TableSource::Upvalue(index) => {
                     let Some(&uv_ref) = closure.upvalues.as_slice().get(usize::from(index)) else {
                         return false;
                     };
                     match self.upvalue_pool.get(uv_ref) {
-                        Upvalue::Open(stack_idx) => self.stack[*stack_idx],
+                        Upvalue::Open(stack_idx) if *stack_idx < open_below => {
+                            self.stack[*stack_idx]
+                        }
+                        Upvalue::Open(_) => return false,
                         Upvalue::Closed(value) => *value,
                     }
                 }
@@ -1814,6 +2133,33 @@ impl State {
             *field = Some((table, slot));
         }
         true
+    }
+
+    /// A loop region's call of field leaf `leaf` with its sites resolved to
+    /// `fields` and `argument(p)` as each number parameter it reads; its
+    /// result, or 0 when it returns nothing (a call keeping a result
+    /// declines such a leaf at entry).
+    #[inline(never)]
+    fn run_leaf_fields(
+        &mut self,
+        leaf: &NumericLeaf,
+        fields: &[Option<(ObjectPtr, SlotRef)>; MAX_FIELD_SITES],
+        argument: impl Fn(u16) -> f64,
+    ) -> f64 {
+        let body = &leaf.body;
+        let mut y = [0.0f64; MIRROR_SLOTS];
+        for (slot, &register) in body.registers.iter().enumerate() {
+            if body.guards & (1 << slot) != 0 {
+                y[slot] = argument(register);
+            }
+        }
+        for &(slot, constant) in &body.constants {
+            if let Constant::Number(value) = constant {
+                y[at(slot)] = value;
+            }
+        }
+        self.run_fields(body, fields, &mut y);
+        leaf.result.map_or(0.0, |result| y[at(result)])
     }
 
     /// Run a field leaf's body over `x` with its sites resolved to
@@ -1921,8 +2267,8 @@ impl NumericLeaf {
         for op in &body.ops {
             y[at(op.a)] = eval(op, &y);
         }
-        // A region calls only pure leaves, which return one value.
-        y[at(self.result.unwrap_or(0))]
+        // A call keeping a result declines a leaf that returns nothing.
+        self.result.map_or(0.0, |result| y[at(result)])
     }
 }
 
@@ -2003,24 +2349,26 @@ mod tests {
 
     #[test]
     fn regions_take_calls_with_one_result_and_no_nil_reads() {
-        // A global or upvalue callee, called with fixed arguments for one
-        // result. Calls are off under fault injection.
+        // A global or upvalue callee, or a method of a receiver the body
+        // never writes, called with fixed arguments for zero or one result.
+        // Calls are off under fault injection.
         let taken = usize::from(!cfg!(feature = "fault-injection"));
-        assert_eq!(
-            regions("local function f() local s = 0 for i = 1, 9 do s = g(s, i) end end"),
-            taken
-        );
-        assert_eq!(
-            regions("local h local function f() local s = 0 for i = 1, 9 do s = h(s) + 1 end end"),
-            taken
-        );
-        // A nested call has two callees loaded at once; a statement call
-        // wants no result; a method call and open arguments are refused.
         for source in [
-            "local function f() local s = 0 for i = 1, 9 do s = g(h(s)) end end",
+            "local function f() local s = 0 for i = 1, 9 do s = g(s, i) end end",
+            "local h local function f() local s = 0 for i = 1, 9 do s = h(s) + 1 end end",
             "local function f() local s = 0 for i = 1, 9 do g(s) end end",
             "local function f(o) local s = 0 for i = 1, 9 do s = o:m(s) end end",
+            "local o local function f() for i = 1, 9 do o:m(i) end end",
+            "local o local function f() local s = 0 for i = 1, 9 do s = s + o:m(i, 2) end end",
+        ] {
+            assert_eq!(regions(source), taken, "{source}");
+        }
+        // A nested call has two callees loaded at once; open arguments are
+        // refused; a method receiver must not change.
+        for source in [
+            "local function f() local s = 0 for i = 1, 9 do s = g(h(s)) end end",
             "local function f(...) local s = 0 for i = 1, 9 do s = g(...) end end",
+            "local function f(o) local s = 0 for i = 1, 9 do s = o:m(s); o = i end end",
             // A callee loaded and never called holds a non-number.
             "local function f() local s = 0 for i = 1, 9 do s = s + 1 local _ = g end end",
         ] {

@@ -513,8 +513,9 @@ parameter or an upvalue table, and may return nothing: the method shape
 `self.count = self.count + n`. Every field site is resolved to a live slot at
 entry, and the call runs canonically unless every one is raw present (a
 number where it is read) and no stored key is `__index`; the body then reads
-and overwrites those slots in order. A loop region calls only leaves with no
-field and one result. The candidates weighed were next-opcode fusion of
+and overwrites those slots in order. At this step a loop region called only
+leaves with no field and one result (method calls from regions are the
+section after next). The candidates weighed were next-opcode fusion of
 `GET_FIELD`, arithmetic and `SET_FIELD` in the dispatch loop, and a
 persisted fused opcode; both keep the activation and remove two dispatches
 of a method call's ten, where the leaf removes the activation, the return
@@ -566,6 +567,44 @@ three, A at `803c19a`, B the same tree plus the change (dirty):
 inner pair loop runs as a region. `frame.rs` and every path live across a
 native re-entry are untouched (the runner is outlined below
 `run_numeric_loop`).
+
+## Method calls and field leaves in typed loop regions, 2026-11-18
+
+A straight-line region may also call a method of a receiver the body never
+writes (`GET_UPVAL s u; SELF r s k`, or `SELF` on a register), call field
+leaves, and make calls that keep no result. At entry the receiver must be a
+table, the method is found through `__index` tables only, with no handler
+call and within the metamethod depth, and each field leaf's slots are
+resolved; a pass then runs the leaf over those slots with no lookup. The
+resolution holds for the whole loop because the leaves store only numbers
+into live slots, and the region declines when a store key equals a method
+key, a callee's global name or a field the region reads once at entry
+(`State::resolve_callees`). The alternatives weighed were next-opcode fusion
+of `SELF` and `CALL` in the dispatch loop, which keeps the lookup and the
+site resolution on every call and saves two of about six dispatches, and
+resolving a varying receiver on every pass, which would make the region the
+canonical lookup minus its dispatch. Measured on bygg with `brokkr bench
+wall`, best of three, A at `0ab6e1c` (`--commit`), B the same tree plus the
+change (dirty):
+
+| Workload | A | B |
+|---|---:|---:|
+| `method` | 1.6 s (ece37dc2) | 536 ms (b74e3ae0) |
+| `method_chain_counter` | 1.5 s (2c3f87cb) | 565 ms (1b5073b8) |
+| `method_chain` | 1.2 s (c0681bc7) | 432 ms (c18d1876) |
+| `method_chain_wide` | 1.2 s (128c79e2) | 433 ms (99ccaa61) |
+| `method_polymorphic` | 2.1 s (807febf3) | 2.2 s (24081cf4) |
+| `object_fields` | 3.4 s (d2362146) | 3.5 s (7eddc69a) |
+| `global` | 884 ms, best of 5 (52372b22) | 932 ms (c2785e05) |
+
+`method`, `method_chain`, `method_chain_wide` and `method_chain_counter` call
+a method of one object per iteration, so under this change they measure the
+region call, not a lookup per call. `method_polymorphic` and `object_fields`
+read their receiver inside the loop and still look the method up on every
+call. `global` runs pure leaves, whose per-call path gained only
+compile-time-specialized branches; four rounds of trimming it moved the wall
+from 1.1 s to the figure above, and an instrumented kernel pair ran 21 ms on
+both binaries, so the remaining 5% is read as layout, unattributed.
 
 ## Host field descriptors, 2026-11-18
 

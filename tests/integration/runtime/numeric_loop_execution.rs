@@ -484,8 +484,8 @@ fn field_leaf_declines_to_canonical_semantics() {
     "##,
     );
     assert_eq!(n, 5.0);
-    // A typed loop does not call a leaf that stores: the store would change
-    // what the loop reads.
+    // A typed loop calling a leaf that stores reads each field from its slot
+    // on every call.
     let n = eval_number(
         r#"
         acc = { v = 0 }
@@ -515,6 +515,133 @@ fn field_leaf_declines_to_canonical_semantics() {
         "#,
     );
     assert!(error.to_string().contains("number value"), "{error}");
+}
+
+/// A typed loop making method calls to field leaves, one inherited two
+/// `__index` levels up and kept for one result, one dropping its result,
+/// and a plain call of a global field leaf for no result. `{twin}` is
+/// spliced at the top of each callee: a free boolean load makes it no leaf,
+/// which keeps the whole loop canonical without changing any charge.
+fn method_region_program(twin: &str) -> String {
+    format!(
+        r#"
+        local stats = {{ calls = 0 }}
+        local Base = {{}}
+        Base.__index = Base
+        function Base:inc(n)
+            {twin}
+            stats.calls = stats.calls + 1
+            self.count = self.count + n * 2
+            return self.count
+        end
+        local Sub = setmetatable({{}}, {{ __index = Base }})
+        Sub.__index = Sub
+        function Sub:damage(n)
+            {twin}
+            self.hp = self.hp - n
+        end
+        function bump(x)
+            {twin}
+            stats.calls = stats.calls + x
+        end
+        local c = setmetatable({{ count = 0.5, hp = 100 }}, Sub)
+        peek = function() return c.count + stats.calls, c.hp, stats.calls end
+        function run()
+            local sum, k = 0, 0
+            for i = 1, 30 do
+                sum = c:inc(i)
+                c:damage(i * 0.5)
+                bump(1)
+                k = k + c:inc(1) - sum
+            end
+            return sum + k
+        end
+        "#
+    )
+}
+
+#[test]
+fn numeric_loop_region_with_method_calls_matches_canonical_dispatch_at_every_budget() {
+    let region = method_region_program("");
+    let canonical = method_region_program("local _u = false");
+    let models = [
+        CostModel::default(),
+        CostModel::default()
+            .with(Charge::TableWrite, 4)
+            .with(Charge::Mul, 0)
+            .with(Charge::Sub, 5),
+        CostModel::zero(),
+    ];
+    for model in &models {
+        for budget in -1..=1200 {
+            assert_eq!(
+                region_outcome(model, &region, budget),
+                region_outcome(model, &canonical, budget),
+                "budget {budget} under {model:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn numeric_loop_region_method_calls_decline_what_a_store_could_change() {
+    // `hit` stores a number under the key the next call looks its method up
+    // by, so the region declines and the second call fails as a call does.
+    let error = support::run_error(
+        r#"
+        local M = {}
+        M.__index = M
+        function M:hit() self.f = 1 end
+        local o = setmetatable({}, M)
+        o.f = function(self) end
+        for i = 1, 3 do
+            o:hit()
+            o:f()
+        end
+        "#,
+    );
+    assert!(error.to_string().contains("attempt to call"), "{error}");
+    // A method found through a function `__index`, a method that is no
+    // leaf, and a receiver that is not a table run canonically.
+    let n = eval_number(
+        r#"
+        local calls = 0
+        local P = setmetatable({}, { __index = function(t, k)
+            calls = calls + 1
+            return function(self, x) return x + 1 end
+        end })
+        local s = 0
+        for i = 1, 4 do s = P:m(s) end
+        local Q = { v = 0 }
+        function Q:m(x) if x then self.v = self.v + x end return self.v end
+        for i = 1, 4 do s = s + Q:m(i) end
+        return s * 100 + calls
+    "#,
+    );
+    assert_eq!(n, 2404.0);
+    // A method capturing a local of the chunk that is still running: the
+    // capture is open on the chunk's frame, below the looping function's.
+    let n = eval_number(
+        r#"
+        local stats = { calls = 0 }
+        local C = {}
+        C.__index = C
+        function C:inc(n) stats.calls = stats.calls + 1 self.v = self.v + n end
+        local o = setmetatable({ v = 0 }, C)
+        local function loop() for i = 1, 10 do o:inc(i) end end
+        loop()
+        loop()
+        return o.v * 100 + stats.calls
+    "#,
+    );
+    assert_eq!(n, 11020.0);
+    let error = support::run_error(
+        r#"
+        local o = 5
+        for i = 1, 3 do o:m(i) end
+        "#,
+    );
+    assert!(error.to_string().contains("attempt to index"), "{error}");
 }
 
 #[test]
