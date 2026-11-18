@@ -29,7 +29,8 @@ are listed at the end.
 ## PERF-002 - Fused execution ops with intermediates in native locals
 
 Raised by the dispatch hunter (its lead rewrite) and the codegen hunter
-(typed numeric execution inside its PERF-014 optimizer).
+(typed numeric execution inside its whole-function optimizer, refused as a
+compiler pass; the reasoning is at the `codegen.rs` header).
 
 **Bottleneck:** every arithmetic instruction independently fetches, selects a
 handler, addresses operands, checks types and writes a tagged result to
@@ -61,10 +62,10 @@ reservation and refusal point (`eval.rs` call admission plus
 register change GC roots and so later `%p` rendering; and a fused op that can
 fail or run out of budget at either constituent must identify the
 constituent reached and its charged prefix. `CallInfo.ip` can stay canonical
-if the executor records the canonical call site at the boundary. PERF-014
-and region accounting need not wait on such a stream: proof
+if the executor records the canonical call site at the boundary. Region
+accounting need not wait on such a stream: proof
 metadata keyed by canonical pc, an IR emitting existing opcodes, or canonical
-block boundaries priced per State are each candidate shapes for them.
+block boundaries priced per State are each candidate shapes for it.
 
 **Landed part: numeric-for loop regions** (`src/vm/numeric_loop.rs`). A
 numeric `for` whose body is straight-line arithmetic, `UNM`, `MOVE` and
@@ -84,7 +85,11 @@ an upvalue read, a field read or a call still run canonically (an `if` inside
 the body is the next most common shape); straight-line chains outside loops
 (fib's `SUB_RK; CALL` gives nothing, `sum + i * 2 - 1` in a loop with a call
 does); field-read-and-add (`same_obj_read`: `GET_UPVAL` + `GET_FIELD` + `ADD`
-per read) and field updates. None of these has had its benefit established;
+per read; 6 of the loop's 19 dispatches are `GET_UPVAL` of one capture,
+and a fused `GET_UPVAL`+`GET_FIELD` that still reads the cell and stores the
+scratch register at each site removes them with every root kept; compiler-side
+caching of the capture was refused, see the `codegen.rs` header) and field
+updates. None of these has had its benefit established;
 each needs a workload whose loop the region does not already take.
 
 **Payoff:** removes dispatches, ip updates, operand decode, temporary
@@ -245,47 +250,31 @@ region could then extend across such a call. Every charge, refusal point,
 entry poll and root stays canonical; a leaf body that cannot collect, call
 out or capture may skip the physical activation on success and materialize
 the logical callee and cursor only on its failure path. Belongs with the
-typed-region work (PERF-002, PERF-014); the plan is designed by that consumer.
+typed-region work (PERF-002); the plan is designed by that consumer.
 
 **Classification:** rewrite, residue unmeasured.
 
-## PERF-014 - Whole-function optimizing compiler
+## PERF-039 - Root-preserving codegen peepholes
 
-Raised by the codegen hunter (its lead rewrite).
+Raised while refusing the whole-function optimizer (reasoning at the
+`codegen.rs` header). Seen in `--dump-bytecode`, benefit unestablished: none
+of these sits in a registered workload's hot loop.
 
-**Bottleneck:** storage is committed too early. The parser assigns physical
-local slots, the AST carries them, and the generator walks statements once
-with declaration-ordered locals and a LIFO temporary allocator (`codegen.rs`,
-`ast.rs`, `parser.rs` function finalization). `Val` descriptors delay some
-decisions within an expression but stop at statement boundaries, and there is
-no dataflow or register-allocation pass. Consequences: no constant or type
-propagation through locals and joins; aliases occupy distinct slots; multiple
-assignment always stages in fresh registers then stores (`a, b = a + 1, b + 1`
-emits two arithmetic ops and two moves); every upvalue read is a new
-`GET_UPVAL`; repeated pure computations stay separate; no loop-invariant
-treatment; captures have one conservative `captured` property. `may_execute`
-(`ast.rs`) treats every suffix chain conservatively, and operand preparation
-treats every captured local as writable by later code.
+- Adjacent `local a` `local b` emit `LOAD_NIL 2 1; LOAD_NIL 3 1`; one
+  `LOAD_NIL 2 2` writes the same slots when no jump enters the second.
+- A `repeat` with a captured body local emits `CLOSE` before the condition
+  branch and again on fall-through; the second has nothing open to close
+  (a `break` closes on its own path).
+- Multiple assignment stages into scratch and `MOVE`s back; writing the
+  targets directly (last first) keeps roots only where the scratch slots are
+  known to hold no heap value and no target is read by a later value. The
+  numeric-loop executor's "publish before the first checkpoint" rule is the
+  model for which skipped writes are unobservable.
 
-**Redesign:** a CFG with SSA values and explicit effects (values with known
-types/constants; reads and writes of mutable cells including upvalues;
-operations that can call Lua or Rust; operations that can fail, allocate or
-expose state; original charge sites, source locations and interrupt points),
-then propagation, copy coalescing, CSE, loop analysis and destination
-allocation before instruction selection. A nested-function analysis can prove
-many captures immutable. Feeds the typed fused forms of PERF-002; the
-numeric-for regions that landed select by an entry guard instead, so a proof
-would widen them only to bodies the guard cannot cover.
+Each keeps every register's value at every GC checkpoint; one that does not
+is the refused class.
 
-**Risks:** a dead result can still owe a charge or type error; hoisting cannot
-hoist a charge or a failure; an eliminated computation keeps the charged
-prefix under every cost model; captured values reflect the completed prefix
-when an error closes upvalues; unboxed values materialize at calls, escapes and
-diagnostic boundaries.
-
-**Classification:** rewrite, the codegen hunter's highest-conviction broad
-investment. `optimizations.md` "Compile-time table-shape prediction" (b)
-defers on the absence of exactly this analysis.
+**Classification:** local, unmeasured.
 
 ## PERF-015 - Inherited reads re-resolve every table on the path
 

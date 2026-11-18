@@ -13,6 +13,24 @@
 //! that some closure captures is copied before a later sibling that may run
 //! code, and the place operands of a multiple assignment are always copied.
 //! Calls, concatenations and constructors copy their operands in order.
+//!
+//! Storage is committed in one walk, with no dataflow, SSA or register
+//! allocation pass, on purpose. What such an optimizer would remove is either
+//! a charged operation, which keeps its charge and failure point, or a
+//! register write, and a running function's registers are GC roots
+//! (docs/limits.md): a removed or relocated write can leave a dead value
+//! rooted at a later collection, moving `object_count` and `%p` ids. The
+//! call-site comment on `Generator::call` refuses a result destination
+//! operand for that reason. Caching a never-reassigned capture in a register
+//! was refused the same way: the capture's value is stable (a local written
+//! only by its declaration holds one value per binding), but each `GET_UPVAL`
+//! it replaces also overwrote a scratch register, and in
+//! `do local dead = {} end sink = obj.flag; local t = {}` that overwrite is
+//! what frees `dead` at the constructor. Those dispatches go instead through
+//! execution-side fusion that reads the cell and stores the scratch register
+//! at each site. A compile-time rewrite is still open when it leaves every
+//! register's value at every collection point unchanged, such as merging
+//! adjacent `LOAD_NIL`s.
 
 use super::Bytecode;
 use super::ast::{
