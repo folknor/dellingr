@@ -63,14 +63,14 @@ fn add_pinned_regression_inputs(f: Func, inputs: &mut Vec<(f64, f64)>) {
 /// corpus only, not the rest of the checkout.
 const CORPUS_PINS: [(Func, usize, u64); 11] = [
     (Func::Sin, 1_975_927, 0x05c2_721b_324a_6166),
-    (Func::Cos, 1_090_161, 0x6585_e470_0478_ad85),
-    (Func::Tan, 1_077_363, 0xa6c8_6f1c_c0a8_e821),
+    (Func::Cos, 1_107_744, 0x717e_4a43_7923_b9e8),
+    (Func::Tan, 1_098_260, 0x6e4c_55eb_1ecd_43a1),
     (Func::Asin, 249_134, 0xa09f_812d_8056_8269),
     (Func::Acos, 264_099, 0x0329_d56d_91fe_eab9),
     (Func::Atan, 55_770, 0x2929_b7e6_6cb1_9ae8),
     (Func::Atan2, 28_123, 0x875c_2f65_d98c_b1f8),
     (Func::Exp, 1_129_433, 0x2c00_671a_5a8a_4d0d),
-    (Func::Ln, 134_957, 0x9b65_4b99_4a74_718d),
+    (Func::Ln, 134_960, 0x1392_bae2_a458_e245),
     (Func::Log10, 65_528, 0x1dfe_c613_b579_eff3),
     (Func::Pow, 1_003_179, 0xafc4_e01e_0616_8eff),
 ];
@@ -96,16 +96,16 @@ fn corpus_digest(inputs: &[(f64, f64)]) -> u64 {
 
 #[cfg(test)]
 const GOLDEN_COUNTS: [(Func, usize); 11] = [
-    (Func::Sin, 1_144),
-    (Func::Cos, 1_144),
-    (Func::Tan, 1_144),
-    (Func::Asin, 1_144),
-    (Func::Acos, 1_144),
-    (Func::Atan, 1_146),
+    (Func::Sin, 1_155),
+    (Func::Cos, 1_155),
+    (Func::Tan, 1_155),
+    (Func::Asin, 1_155),
+    (Func::Acos, 1_155),
+    (Func::Atan, 1_157),
     (Func::Atan2, 1_544),
-    (Func::Exp, 1_144),
-    (Func::Ln, 1_145),
-    (Func::Log10, 1_144),
+    (Func::Exp, 1_155),
+    (Func::Ln, 1_156),
+    (Func::Log10, 1_155),
     (Func::Pow, 1_543),
 ];
 
@@ -220,6 +220,20 @@ fn special_inputs() -> Vec<f64> {
         f64::MAX,
         -f64::MAX,
         hf("0x1p-27"),
+        hf("0x1.fffffffffffffp-28"),
+        // Cosine: the old tiny-input cutoff and its successor, which straddle
+        // the rounding boundary below 1, and upstream's exception list.
+        hf("0x1.6a09e667f3bccp-27"),
+        hf("0x1.6a09e667f3bcdp-27"),
+        hf("0x1.8000000000009p-23"),
+        hf("0x1.8000000000024p-22"),
+        hf("0x1.800000000009p-21"),
+        hf("0x1.20000000000f3p-20"),
+        // Logarithm: the edges of the near-one fast path.
+        hf("0x1.ffp-1"),
+        hf("0x1.fefffffffffffp-1"),
+        hf("0x1.007ffffffffffp+0"),
+        hf("0x1.008p+0"),
         hf("0x1p-54"),
         hf("0x1p-1022"),
         hf("0x1.fffffffffffffp-1"),

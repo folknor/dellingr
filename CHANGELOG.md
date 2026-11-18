@@ -183,6 +183,13 @@ tick budgets and re-record replays.
 
 ### Performance
 
+- The deterministic math port moves to a newer CORE-MATH commit: `math.cos`
+  uses upstream's new cosine, built on the sine's tables with a cheaper fast
+  phase (about a fifth faster on a cosine-only probe), and `math.log` gains
+  upstream's fast path for arguments within 2^-9 of 1. Results stay
+  correctly rounded: no input in the previous golden fixture changes its
+  result, and the port matches the oracle on every CORE-MATH worst case at
+  the new commit.
 - The pattern matcher scans greedy class runs, runs of single atoms, start
   positions that must fail, `%b` and backreferences in one pass each and
   charges their steps in one batch, stopping at the same step a budget

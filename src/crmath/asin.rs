@@ -146,7 +146,7 @@ macro_rules! kernel {
             let dv = (big_ch * dsl + big_cl * dsh) - (big_sh * dcl + big_sl * dch) - (d_sc - d_cs);
             let (v, dv) = fasttwosum(v, dv);
             let sgn = copysign(1.0, x);
-            let jt = jf * sgn; // 0 <= |jt| <= 64
+            let jt = jf * sgn; // the signed table index, -32 <= jt <= 32
             let (v2, dv2) = muldd(v, dv, v, dv);
             let v = v * sgn;
             let dv = dv * sgn;
@@ -166,9 +166,8 @@ macro_rules! kernel {
             let th = bits(ph);
             let tl = bits(pl) & (!0u64 >> 1);
             let tn = (th & (0x7ffu64 << 52)).wrapping_sub(53u64 << 52);
-            let dn = (tl as i64).wrapping_sub(tn as i64);
-            let de = (tn.wrapping_sub(tl) >> 52) as i64;
-            let hard = (-2..=0).contains(&dn) || de > 47;
+            let gap = tn.wrapping_sub(tl);
+            let hard = gap <= 2 || (gap >> 52) > 47;
             let res = ph + pl;
             if hard {
                 return asin_database(x, res);

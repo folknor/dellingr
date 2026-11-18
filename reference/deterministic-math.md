@@ -135,6 +135,11 @@ rendering").
   pinned upstream commit and source files, the table registry, and every
   generated table byte for byte (a manual command, not part of `brokkr
   check`); `--generate` rewrites the tables from that same pinned checkout.
+  Only the source files the registry names are checked. Where upstream
+  carries identical copies of a table in several files, the registry names
+  one: `cos` uses `sin.c`'s tables and helpers (upstream `cos.c` copies
+  them), and the older double-double trig tables come from `tan.c`. The
+  other copies are not compared.
   `reference/core-math-pin.toml` single-sources the commit, clone URL and
   reviewed table SHA-256 digests. The ordinary, checkout-free
   `crmath-table-pins` pre-clippy script check runs

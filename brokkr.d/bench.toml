@@ -84,6 +84,10 @@ xxhash = "468576a94bddba291b96b604288b988c"
 file = "bench/math.lua"
 xxhash = "3f1ae9f39d8bc1d7a5136967d7d46900"
 
+[data.workloads.bench.cos]
+file = "bench/cos.lua"
+xxhash = "7fb876cbba7493839aff99aaecc0d460"
+
 [data.workloads.bench.pairs]
 file = "bench/pairs.lua"
 xxhash = "40f694a23ec14829b96e0403b9a0b6dd"
@@ -238,6 +242,10 @@ xxhash = "04a3cab7b19967cd1f71ad224c5a5ea6"
 [data.workloads.hotpath.math]
 file = "examples/numerics/math.lua"
 xxhash = "ae2f33864c810825e2b6ec753ece6b21"
+
+[data.workloads.hotpath.cos]
+file = "examples/numerics/cos.lua"
+xxhash = "061e0ee13eb8db17b9da6ca0a41a0d65"
 
 [data.workloads.hotpath.pairs]
 file = "examples/iter/pairs.lua"

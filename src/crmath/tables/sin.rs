@@ -30,19 +30,19 @@ pub(in crate::crmath) static T: [u64; 20] = [
 
 /// `PS` from CORE-MATH `sin/sin.c`.
 pub(in crate::crmath) static PS: [u128; 4] = [
-    u128_lh(0xffffffffffffc396, 0xffffffffffffffff),
-    u128_lh(0xaaaaa9646e8f872e, 0x2aaaaaaaaaaaaaaa),
-    u128_lh(0x467b898367fb1249, 0x222222222222220),
-    u128_lh(0xd00d00bfff5ee, 0),
+    u128_lh(0xc4c6628b80dbed80, 0xc90fdaa22168c234),
+    u128_lh(0xabb8e5506ca45b03, 0x14abbce625be52be),
+    u128_lh(0x44c54995bb97635, 0xa335e33bad570e),
+    u128_lh(0x265a5999d06c4, 0),
 ];
 
 /// `PC` from CORE-MATH `sin/sin.c`.
 pub(in crate::crmath) static PC: [u128; 5] = [
     u128_lh(0xffffffffffffffff, 0xffffffffffffffff),
-    u128_lh(0xfffffffffa998bf0, 0x7fffffffffffffff),
-    u128_lh(0xaaa2caecc94962c7, 0xaaaaaaaaaaaaaaa),
-    u128_lh(0x642013bc289028b6, 0x5b05b05b05ac1a),
-    u128_lh(0x1a0193d9a550c, 0),
+    u128_lh(0x2b71366cbcf0b096, 0x4ef4f326f9177969),
+    u128_lh(0xd4c9076e3db78fed, 0x40f07c206d6b0ec),
+    u128_lh(0xeec6962368fb7c41, 0x155d3c7e3cbef9),
+    u128_lh(0x3c3e845b5510, 0),
 ];
 
 /// `U1` from CORE-MATH `sin/sin.c`.

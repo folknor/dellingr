@@ -14,7 +14,7 @@ macro_rules! kernel {
         #[$inline]
         $(#[$feature])*
         fn log_fast(e: i32, v: u64) -> (f64, f64) {
-            let m = 0x10000000000000 + (v & 0xfffffffffffff);
+            let m = 0x10000000000000 | (v & 0xfffffffffffff);
             // If x > sqrt(2), halve it to avoid cancellation.
             let c = usize::from(m >= 0x16a09e667f3bcd);
             let e = e + c as i32;
@@ -82,6 +82,40 @@ macro_rules! kernel {
             dint_tod(&y)
         }
 
+        /// Fast path for 1 - 2^-9 <= x < 1 + 2^-9 (upstream `cr_log_tiny`; the
+        /// Gappa proof is logtiny.g): a degree-7 polynomial in r = x - 1 with a
+        /// rounding test relative to |r|.
+        #[$inline]
+        $(#[$feature])*
+        fn log_tiny(x: f64) -> f64 {
+            if x == 1.0 {
+                return 0.0;
+            }
+            const C: [f64; 6] = [
+                h!("-0x1p-1"),
+                h!("0x1.5555555555555p-2"),
+                h!("-0x1.fffffffff7999p-3"),
+                h!("0x1.9999999a0bbcfp-3"),
+                h!("-0x1.5555b5558ae3p-3"),
+                h!("0x1.24915abb06a9p-3"),
+            ];
+            let r = x - 1.0;
+            let r2 = r * r;
+            let p6 = C[4] + r * C[5];
+            let p4 = C[2] + r * C[3];
+            let p2 = C[0] + r * C[1];
+            let p4 = p4 + r2 * p6;
+            let p2 = p2 + r2 * p4;
+            let (h, l) = fasttwosum(r, r2 * p2);
+            let eps = h!("0x1.d1p-61");
+            let lb = h + (l - eps * r);
+            let ub = h + (l + eps * r);
+            if lb == ub {
+                return lb;
+            }
+            log_accurate(x)
+        }
+
         /// Correctly rounded natural logarithm.
         $(#[$feature])*
         pub(crate) fn ln(x: f64) -> f64 {
@@ -106,11 +140,11 @@ macro_rules! kernel {
                 v = bits(from_bits(v) * h!("0x1p52"));
                 e = (v >> 52) as i32 - 0x3ff - 52;
             }
+            if (0x3feff00000000000..0x3ff0080000000000).contains(&v) {
+                return log_tiny(x);
+            }
             // Normalise v to [1, 2).
             v = (0x3ffu64 << 52) | (v & 0xfffffffffffff);
-            if v == 0x3ff0000000000000 && e == 0 {
-                return 0.0; // x = 1
-            }
             let (h, l) = log_fast(e, v);
             let err = h!("0x1.b6p-69");
             let left = h + (l - err);

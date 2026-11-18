@@ -4,14 +4,15 @@ https://gitlab.inria.fr/core-math/core-math), taken at the upstream commit
 recorded in reference/core-math-pin.toml. The upstream sources carry these
 notices:
 
-sin.c            Copyright (c) 2022-2026 Paul Zimmermann and Tom Hubrecht and Alexei Sibidanov
-cos.c, tan.c     Copyright (c) 2022-2025 Paul Zimmermann and Tom Hubrecht
+sin.c            Copyright (c) 2026 Paul Zimmermann and Alexei Sibidanov
+cos.c            Copyright (c) 2026 Paul Zimmermann
+tan.c            Copyright (c) 2022-2025 Paul Zimmermann and Tom Hubrecht
 asin.c, exp.c    Copyright (c) 2022-2026 Alexei Sibidanov <sibid@uvic.ca>.
 acos.c           Copyright (c) 2024-2025 Alexei Sibidanov.
 atan.c           Copyright (c) 2023-2026 Alexei Sibidanov <sibid@uvic.ca>.
 atan2.c          Copyright (c) 2024-2025 Paul Zimmermann and Alexei Sibidanov
 atan2/tint.h     Copyright (c) 2023-2024 Paul Zimmermann and Alexei Sibidanov
-log.c            Copyright (c) 2022 INRIA and CERN. Authors: Paul Zimmermann and Tom Hubrecht.
+log.c            Copyright (c) 2022-2026 INRIA and CERN. Authors: Paul Zimmermann and Tom Hubrecht.
 log/dint.h       Copyright (c) 2022 CERN. Author: Tom Hubrecht
 log10.c          Copyright (c) 2022-2025 INRIA and CERN. Authors: Paul Zimmermann and Tom Hubrecht.
 pow.c, pow.h     Copyright (c) 2022-2025 CERN and Inria. Authors: Tom Hubrecht and Paul Zimmermann

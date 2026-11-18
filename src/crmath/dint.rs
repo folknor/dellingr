@@ -280,8 +280,7 @@ pub(crate) mod v1 {
     }
 }
 
-/// The arithmetic of `pow/dint.h`, whose operations `cos.c` and `tan.c`
-/// also copy.
+/// The arithmetic of `pow/dint.h`, whose operations `tan.c` also copies.
 pub(crate) mod v2 {
     use super::{Dint, cmp_i64, cmp_u64, cmp_u128, fast_extract};
 

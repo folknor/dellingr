@@ -1,5 +1,5 @@
-//! Code that CORE-MATH's `cos.c` and `tan.c` share (each carries its own
-//! copy upstream; the copies are identical, so the port keeps one): the
+//! Code from CORE-MATH's `tan.c` (an older cosine carried an identical copy;
+//! the current one is built on sin.c instead, see `cos.rs`): the
 //! 128-bit `dint64_t` arithmetic in their convention, where a value is
 //! `(-1)^sgn * (hi:lo / 2^128) * 2^ex` (the binary point is before the top
 //! bit, unlike `pow`'s), the Payne-Hanek reduction by 1/(2 pi), and the

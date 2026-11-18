@@ -1,250 +1,197 @@
-//! `cos`, ported from CORE-MATH `src/binary64/cos/cos.c` (Paul Zimmermann
-//! and Tom Hubrecht).
+//! `cos`, ported from CORE-MATH `src/binary64/cos/cos.c` (Paul Zimmermann).
+//! Upstream adapts it from sin.c and copies sin.c's tables and helpers, so
+//! this port takes them from the `sin` kernel of the same backend. The proof
+//! of the fast paths is upstream's cos.pdf.
+//!
+//! The fast phase is CORE-MATH's own, with its proved bound. Two cheaper
+//! alternatives were refused: a home-grown, looser "common input" phase (no
+//! proof, and a wider bound sends more calls to the accurate path), and
+//! fusing `math.sin(a), math.cos(a)` in the compiler (it would have to keep
+//! both lookups, both charges, the poll and the failure point). A joint
+//! sine and cosine belongs in an explicit library function, if anywhere.
 
 macro_rules! kernel {
     ($backend:ident, $fma:path, $test_cfg:meta, $inline:meta, $(#[$feature:meta])*) => {
         use $fma as fma;
-        use crate::crmath::dint::v2::add_dint;
-        use crate::crmath::tables::trig::{C, S, SC, T};
-        use crate::crmath::trig_dint::$backend::{
-            MAGIC, a_mul, dint_fromd, dint_tod, eval_pc, eval_pc_fast, eval_ps, eval_ps_fast,
-            floor_nonnegative, mul_dint, reduce, reduce2, s_mul, set_dd,
+        use crate::crmath::sin::$backend::{
+            PIH, PIL, SGN, eval_pc, eval_ps, fastsum, mh_uu, muldd, reduce_large,
+            reduce_large_acc, scaled_powers, u128_tod,
         };
-        use crate::crmath::{bits, fabs, fasttwosum, from_bits};
+        use crate::crmath::tables::sin::{C2U, S1U, S2U, U1, U2};
+        use crate::crmath::{bits, fabs, roundeven_finite};
 
-        /// For 0x1.6a09e667f3bccp-27 < x < inf: `(i, h, l, err1)` with
-        /// i/2^11 + h + l approximating frac(x/(2 pi)) within absolute error err1.
+        /// Whether the accurate path's low limb is in the window upstream
+        /// checks against its exception list.
         #[$inline]
         $(#[$feature])*
-        fn reduce_fast(x: f64) -> (u32, f64, f64, f64) {
-            let (mut h, l, err1);
-            if x <= h!("0x1.921fb54442d17p+2") {
-                // x < 2 pi; |CH + CL - 1/(2 pi)| < 2^-110.523.
-                let (hh, ll) = a_mul(h!("0x1.45f306dc9c883p-3"), x); // exact
-                h = hh;
-                l = fma(h!("-0x1.6b01ec5417056p-57"), x, ll);
-                err1 = h!("0x1.d9p-105") * h; // error < 2^-104.116 * h
-            } else {
-                let u = bits(x);
-                let mut e = ((u >> 52) & 0x7ff) as i32; // 1025 <= e <= 2046
-                let m = (1u64 << 52) | (u & 0xfffffffffffff);
-                let mut c = [0u64; 3];
-                if e <= 1074 {
-                    // 2^2 <= x < 2^52
-                    let mut w = (m as u128) * (T[1] as u128);
-                    c[0] = w as u64;
-                    c[1] = (w >> 64) as u64;
-                    w = (m as u128) * (T[0] as u128);
-                    c[1] = c[1].wrapping_add(w as u64);
-                    c[2] = ((w >> 64) as u64).wrapping_add(u64::from(c[1] < w as u64));
-                    e = 1075 - e; // 1 <= e <= 50
-                } else {
-                    // 2^52 <= x < 2^1024
-                    let i = ((e - 1138 + 63) / 64) as usize; // 0 <= i <= 15
-                    let mut w = (m as u128) * (T[i + 2] as u128);
-                    c[0] = w as u64;
-                    c[1] = (w >> 64) as u64;
-                    w = (m as u128) * (T[i + 1] as u128);
-                    c[1] = c[1].wrapping_add(w as u64);
-                    c[2] = ((w >> 64) as u64).wrapping_add(u64::from(c[1] < w as u64));
-                    w = (m as u128) * (T[i] as u128);
-                    c[2] = c[2].wrapping_add(w as u64);
-                    e = 1139 + ((i as i32) << 6) - e; // 1 <= e <= 64
-                }
-                if e == 64 {
-                    c[0] = c[1];
-                    c[1] = c[2];
-                } else {
-                    c[0] = (c[1] << (64 - e)) | (c[0] >> e);
-                    c[1] = (c[2] << (64 - e)) | (c[1] >> e);
-                }
-                let (hh, ll) = set_dd(c[1], c[0]);
-                h = hh;
-                l = ll;
-                err1 = h!("0x1.01p-76");
-            }
-            let i = floor_nonnegative(h * h!("0x1p11"));
-            h = fma(i, h!("-0x1p-11"), h);
-            (i as u32, h, l, err1)
+        pub(crate) fn exception_window(c1u: u128) -> bool {
+            (c1u as u64).wrapping_add(5) <= 3
         }
 
-        /// Fast path for regular x > 0x1.6a09e667f3bccp-27: `(h, l, err)` with
-        /// |h + l - cos(x)| < err.
-        ///
-        /// This is the older CORE-MATH cosine design. Newer upstream ships a
-        /// cosine in the style of `sin_moderate`, with its own proof, so the way
-        /// to make this cheaper is a literal re-port at a newer pin. Two other
-        /// options were considered and refused. A home-grown, looser "common
-        /// input" phase is one: it has no proof, and a wider bound sends more
-        /// calls to `cos_accurate`. Fusing `math.sin(a), math.cos(a)` in the
-        /// compiler is the other: it would have to keep both lookups, both
-        /// charges, the poll and the failure point. A joint result belongs in an
-        /// explicit library function, if anywhere.
+        /// Inputs whose cosine the accurate path cannot settle, with the
+        /// correctly rounded result as an unevaluated sum.
         #[$inline]
         $(#[$feature])*
-        fn cos_fast(x: f64) -> (f64, f64, f64) {
-            let (mut i, mut h, mut l, err1) = reduce_fast(x);
-            let mut neg = 0;
-            let mut is_cos = 1;
-            // i >= 2^10: pi <= x <= 2 pi, cos(pi + x) = -cos(x).
-            neg ^= i >> 10;
-            i &= 0x3ff;
-            // i >= 2^9: pi/2 <= x <= pi, cos(pi/2 + x) = -sin(x).
-            is_cos ^= i >> 9;
-            neg ^= i >> 9;
-            i &= 0x1ff;
-            if i & 0x100 != 0 {
-                // pi/4 <= x_red <= pi/2: cos(pi/2 - x) = sin(x). The subtraction is
-                // exact (see upstream).
-                is_cos = u32::from(is_cos == 0);
-                i = 0x1ff - i;
-                h = h!("0x1p-11") - h;
-                l = -l;
+        fn exceptions(x: f64, ret: f64) -> f64 {
+            let ax = fabs(x);
+            if ax == h!("0x1.8000000000009p-23") {
+                return h!("0x1.fffffffffff7p-1") + h!("0x1.b56666666666cp-143");
             }
-            let i = i as usize;
-            // SC[] is evaluated at i/2^11 + SC[i][0]; this subtraction is exact.
-            h -= SC[i][0];
-            let (uh, ul) = a_mul(h, h);
-            let ul = fma(h + h, l, ul);
-            let (mut sh, mut sl) = eval_ps_fast(h, l, uh, ul);
-            let (mut ch, mut cl) = eval_pc_fast(uh, ul);
-            let err;
-            if is_cos == 0 {
-                (sh, sl) = s_mul(SC[i][2], sh, sl);
-                (ch, cl) = s_mul(SC[i][1], ch, cl);
-                let (hh, ll) = fasttwosum(ch, sh);
-                h = hh;
-                l = ll + (sl + cl);
-                err = h!("0x1.55p-69");
-            } else {
-                (ch, cl) = s_mul(SC[i][2], ch, cl);
-                (sh, sl) = s_mul(SC[i][1], sh, sl);
-                let (hh, ll) = fasttwosum(ch, -sh);
-                h = hh;
-                l = ll + (cl - sl);
-                err = h!("0x1.81p-69");
+            if ax == h!("0x1.8000000000024p-22") {
+                return h!("0x1.ffffffffffdcp-1") + h!("0x1.b56666666667ep-137");
             }
-            const SGN: [f64; 2] = [1.0, -1.0];
-            h *= SGN[neg as usize];
-            l *= SGN[neg as usize];
-            (h, l, err + err1)
+            if ax == h!("0x1.800000000009p-21") {
+                return h!("0x1.ffffffffff7p-1") + h!("0x1.b5666666666c4p-131");
+            }
+            if ax == h!("0x1.20000000000f3p-20") {
+                return h!("0x1.fffffffffebcp-1") + h!("0x1.37642666666fdp-127");
+            }
+            ret
         }
 
-        /// Accurate path for regular x > 0x1.6a09e667f3bccp-27.
+        /// Accurate path for 2^-27 <= x (all-integer, 128-bit fixed point).
         #[cold]
         #[inline(never)]
         $(#[$feature])*
-        fn cos_accurate(x: f64) -> f64 {
-            let mut xd = dint_fromd(x);
-            reduce(&mut xd);
-            let mut neg = false;
-            let mut is_cos = true;
-            let mut i = reduce2(&mut xd); // exact
-            if i & 0x400 != 0 {
-                // pi <= x < 2 pi: cos(x) = -cos(x - pi)
-                neg = true;
-                i &= 0x3ff;
+        fn cos_large_accurate(x: f64) -> f64 {
+            let (c1u, sbit) = accurate_magnitude(x);
+            let ret = u128_tod(c1u, sbit);
+            if exception_window(c1u) {
+                return exceptions(x, ret);
             }
-            if i & 0x200 != 0 {
-                // pi/2 <= x < pi: cos(x) = -sin(x - pi/2)
-                neg = !neg;
-                is_cos = false;
-                i &= 0x1ff;
-            }
-            if i & 0x100 != 0 {
-                // pi/4 <= x < pi/2: cos(x) = sin(pi/2 - x)
-                is_cos = !is_cos;
-                xd.sgn = 1;
-                xd = add_dint(&MAGIC, &xd); // X becomes 2^-11 - X
-                i = 0x1ff - i;
-            }
-            let i = i as usize;
-            let x2 = mul_dint(&xd, &xd);
-            let mut u = eval_pc(&x2); // cos2pi(X)
-            let mut v = eval_ps(&xd, &x2); // sin2pi(X)
-            if is_cos {
-                u = mul_dint(&C[i], &u);
-                v = mul_dint(&S[i], &v);
-                v.sgn = 1 - v.sgn;
+            ret
+        }
+
+        /// The accurate path before rounding: `(m, s)` with cos(x) about
+        /// `(-1)^s * m / 2^128`.
+        #[$inline]
+        $(#[$feature])*
+        pub(crate) fn accurate_magnitude(x: f64) -> (u128, usize) {
+            let (k, r, neg) = reduce_large_acc(x);
+            let (r, u2, u2h, u4) = scaled_powers(r);
+            // With rho the signed residual (|r| / 2^128 in magnitude, sign `neg`):
+            // cos(x) = (-1)^s [cos(t1 + t2) cos(2 pi rho) - sin(t1 + t2) sin(2 pi rho)]
+            // with k = 2^12 s + 2^6 i1 + i2, t1 = pi i1/2^6, t2 = pi i2/2^12.
+            let mut sbit = ((k >> 12) & 1) as usize;
+            let i1 = ((k >> 6) & 0x3f) as usize;
+            let i2 = (k & 0x3f) as usize;
+            let s1 = if i1 <= 32 { S1U[i1] } else { S1U[64 - i1] };
+            let c1 = if i1 <= 32 { S1U[32 - i1] } else { S1U[i1 - 32] };
+            let mut s1u = mh_uu(s1, C2U[i2]);
+            let t = mh_uu(c1, S2U[i2]);
+            s1u = if i1 < 32 {
+                s1u.wrapping_add(t)
             } else {
-                u = mul_dint(&S[i], &u);
-                v = mul_dint(&C[i], &v);
+                s1u.wrapping_sub(t)
+            };
+            let mut c1u = mh_uu(c1, C2U[i2]);
+            let t = mh_uu(s1, S2U[i2]);
+            c1u = if i1 < 32 {
+                c1u.wrapping_sub(t)
+            } else {
+                c1u.wrapping_add(t)
+            };
+            let sr = eval_ps(r, u2, u2h, u4);
+            let cr = eval_pc(u2, u2h, u4);
+            c1u = mh_uu(c1u, cr);
+            s1u = mh_uu(s1u, sr);
+            // c1u is |cos(z) cos(r)| (cos(z) <= 0 for i1 >= 32), s1u is
+            // |sin(z) sin(r)| with the sign of r.
+            if (i1 >= 32) ^ neg {
+                c1u = c1u.wrapping_add(s1u);
+            } else if c1u <= s1u {
+                c1u = s1u - c1u;
+                sbit ^= 1;
+            } else {
+                c1u -= s1u;
             }
-            let mut u = add_dint(&u, &v);
-            // The error is below 41 ulps of U.lo; check whether the upper 54 bits
-            // are determined.
-            let err = 41u64;
-            let lo0 = u.lo.wrapping_sub(err);
-            let hi0 = u.hi.wrapping_sub(u64::from(lo0 > u.lo));
-            let lo1 = u.lo.wrapping_add(err);
-            let hi1 = u.hi.wrapping_add(u64::from(lo1 < u.lo));
-            if (hi0 >> 10) != (hi1 >> 10) {
-                const EXCEPTIONS: [[f64; 3]; 5] = [
-                    [
-                        h!("0x1.8000000000009p-23"),
-                        h!("0x1.fffffffffff7p-1"),
-                        h!("0x1.b56666666666cp-143"),
-                    ],
-                    [
-                        h!("0x1.8000000000024p-22"),
-                        h!("0x1.ffffffffffdcp-1"),
-                        h!("0x1.b56666666667ep-137"),
-                    ],
-                    [
-                        h!("0x1.800000000009p-21"),
-                        h!("0x1.ffffffffff7p-1"),
-                        h!("0x1.b5666666666c4p-131"),
-                    ],
-                    [
-                        h!("0x1.20000000000f3p-20"),
-                        h!("0x1.fffffffffebcp-1"),
-                        h!("0x1.37642666666fdp-127"),
-                    ],
-                    [
-                        h!("0x1.800000000024p-20"),
-                        h!("0x1.fffffffffdcp-1"),
-                        h!("0x1.b5666666667ddp-125"),
-                    ],
-                ];
-                for exception in &EXCEPTIONS {
-                    if fabs(x) == exception[0] {
-                        return exception[1] + exception[2];
-                    }
-                }
-                // Otherwise a hard-to-round case; upstream reports all known ones
-                // pass.
+            (c1u, sbit ^ usize::from(i1 >= 32))
+        }
+
+        /// Fast path for 2^-27 <= x < 2^31.
+        #[$inline]
+        $(#[$feature])*
+        fn cos_moderate(x: f64) -> f64 {
+            let invpi = h!("0x1.45f306dc9c883p+12");
+            let k = roundeven_finite(invpi * x);
+            let rh = fma(k, PIH, x); // exact
+            let rl = k * PIL;
+            let r = rh + rl;
+            let r2 = r * r;
+            let j = k as i64;
+            let sbit = ((j >> 14) & 1) as usize; // odd multiple of pi?
+            let i1 = ((j >> 7) & 0x7f) as usize;
+            let i2 = (j & 0x7f) as usize;
+            let (big_ch, big_cl, big_sh) = table_sum(i1, i2);
+            let sh = r * (1.0 - h!("0x1.55555553068fp-3") * r2);
+            let ch = r2 * (-0.5 + h!("0x1.55555553bfd3p-5") * r2);
+            let fh = big_ch;
+            let fl = big_cl + big_ch * ch - big_sh * sh;
+            let fh = SGN[sbit] * fh;
+            let fl = SGN[sbit] * fl;
+            let eps = h!("0x1.dep-64");
+            let lb = fh + (fl - eps);
+            let ub = fh + (fl + eps);
+            if ub == lb {
+                return lb;
             }
-            if neg {
-                u.sgn = 1 - u.sgn;
+            cos_large_accurate(x)
+        }
+
+        /// The table step shared by the two fast paths: `(Ch, Cl, Sh)` for the
+        /// reduced index, Ch + Cl approximating cos(t1 + t2) and Sh
+        /// sin(t1 + t2).
+        #[$inline]
+        $(#[$feature])*
+        fn table_sum(i1: usize, i2: usize) -> (f64, f64, f64) {
+            let (c1h, c1l) = muldd(U1[i1][2], U1[i1][3], U2[i2][2], U2[i2][3]);
+            let (c2h, c2l) = muldd(U2[i2][0], U2[i2][1], U1[i1][0], U1[i1][1]);
+            let (ch, cl) = fastsum(c1h, c1l, -c2h, -c2l);
+            let sh = U1[i1][0] * U2[i2][2] + U1[i1][2] * U2[i2][0];
+            (ch, cl, sh)
+        }
+
+        /// Fast path for x >= 2^31.
+        #[inline(never)]
+        $(#[$feature])*
+        fn cos_large(x: f64) -> f64 {
+            let (j, r) = reduce_large(x);
+            let r2 = r * r;
+            let sbit = (j >> 14) as usize;
+            let i1 = ((j >> 7) & 0x7f) as usize;
+            let i2 = (j & 0x7f) as usize;
+            let (big_ch, big_cl, big_sh) = table_sum(i1, i2);
+            let sh = r * (h!("0x1.921fb54442d18p2") - h!("0x1.4abbcdb6b26d1p5") * r2);
+            let ch = r2 * (h!("-0x1.3bd3cc9be45dep4") + h!("0x1.03c1eee483083p6") * r2);
+            let fh = big_ch;
+            let fl = big_cl + big_ch * ch - big_sh * sh;
+            let fh = SGN[sbit] * fh;
+            let fl = SGN[sbit] * fl;
+            let eps = h!("0x1.01p-63");
+            let lb = fh + (fl - eps);
+            let ub = fh + (fl + eps);
+            if lb == ub {
+                return lb;
             }
-            dint_tod(&u)
+            cos_large_accurate(x)
         }
 
         /// Correctly rounded cosine.
         $(#[$feature])*
         pub(crate) fn cos(x: f64) -> f64 {
-            let u = bits(x);
-            let e = ((u >> 52) & 0x7ff) as i32;
+            let z = fabs(x);
+            let e = (bits(z) >> 52) as i32;
+            if e < 0x3ff - 27 {
+                // |x| < 2^-27: cos(x) rounds to 1.
+                return fma(x, -x, 1.0);
+            }
+            if e < 0x3ff + 31 {
+                return cos_moderate(z);
+            }
             if e == 0x7ff {
-                // NaN or infinity.
-                if (u << 1) == 0x7ffu64 << 53 {
-                    return f64::NAN;
-                }
-                return x + x;
+                return f64::NAN; // NaN or infinity
             }
-            let ax_bits = u & 0x7fffffffffffffff;
-            let ax = from_bits(ax_bits);
-            if ax_bits <= 0x3e46a09e667f3bcc {
-                // |x| <= 0x1.6a09e667f3bccp-27: cos(x) rounds to 1 - 2^-28 |x|.
-                return fma(ax, h!("-0x1p-28"), 1.0);
-            }
-            let (h, l, err) = cos_fast(ax);
-            let left = h + (l - err);
-            let right = h + (l + err);
-            if left == right {
-                return left;
-            }
-            cos_accurate(ax)
+            cos_large(z)
         }
     };
 }
@@ -282,4 +229,43 @@ pub(crate) fn cos(x: f64) -> f64 {
     #[cfg(test)]
     crate::crmath::tests::record_kernel_backend(false);
     software::cos(x)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::software;
+    use crate::crmath::hf;
+
+    /// The four inputs on upstream's exception list land in the trigger window
+    /// on the accurate path, and the public result is correct. Round to
+    /// nearest settles them on the fast path, so the result check alone would
+    /// not see a broken trigger; the lookup call itself is not observed.
+    #[test]
+    fn accurate_path_exceptions_hit_the_window() {
+        for (x, expected) in [
+            ("0x1.8000000000009p-23", "0x1.fffffffffff7p-1"),
+            ("0x1.8000000000024p-22", "0x1.ffffffffffdcp-1"),
+            ("0x1.800000000009p-21", "0x1.ffffffffff7p-1"),
+            ("0x1.20000000000f3p-20", "0x1.fffffffffebcp-1"),
+        ] {
+            let x = hf(x);
+            let (magnitude, _) = software::accurate_magnitude(x);
+            if !software::exception_window(magnitude) {
+                panic!("cos({x:e}) misses the exception window");
+            }
+            for x in [x, -x] {
+                if software::cos(x).to_bits() != hf(expected).to_bits() {
+                    panic!("cos({x:e}) gave {:e}", software::cos(x));
+                }
+            }
+        }
+        if software::exception_window(0) || !software::exception_window(u128::from(u64::MAX - 1)) {
+            panic!("exception window bounds");
+        }
+        if !software::exception_window(u128::from(u64::MAX - 4))
+            || software::exception_window(u128::from(u64::MAX))
+        {
+            panic!("exception window edges");
+        }
+    }
 }

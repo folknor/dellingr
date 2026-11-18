@@ -1,6 +1,7 @@
-//! `sin`, ported from CORE-MATH `src/binary64/sin/sin.c` (Paul Zimmermann,
-//! Tom Hubrecht and Alexei Sibidanov). The proof of the fast paths is
-//! upstream's sin.pdf; the hard-to-round cases come from Lefèvre, Ly and
+//! `sin`, ported from CORE-MATH `src/binary64/sin/sin.c` (Paul Zimmermann
+//! and Alexei Sibidanov). The proof of the fast paths is upstream's sin.pdf.
+//! The helpers marked `pub(crate)` are shared with `cos`, whose upstream
+//! source copies them and the tables from sin.c; the hard-to-round cases come from Lefèvre, Ly and
 //! Zimmermann, "Computing hard-to-round cases of sin, cos, tan in double
 //! precision", ARITH 2026.
 
@@ -10,12 +11,15 @@ macro_rules! kernel {
         use crate::crmath::tables::sin::{C2U, PC, PS, S1U, S2U, T, U1, U2};
         use crate::crmath::{bits, fabs, fasttwosum, from_bits, roundeven_finite, u128_lh};
 
-        /// Rounds `(-1)^s * r / 2^128` to binary64, for nonzero `r` outside the
-        /// subnormal range (`r >> 64` is nonzero for every reduced argument, since
-        /// no binary64 lies closer than 2^-60.888 to a multiple of pi/2).
+        /// `(-1)^s * r / 2^128` as binary64: the upper 53 nonzero bits plus a
+        /// guard-bit nudge to one side, so the result is the rounding only when
+        /// the caller's error analysis rules out `r` sitting at a midpoint (the
+        /// sin.pdf and cos.pdf argument; hard cases are in the worst-case files).
+        /// `r >> 64` must be nonzero, which holds for every reduced argument
+        /// since no binary64 lies closer than 2^-60.888 to a multiple of pi/2.
         #[$inline]
         $(#[$feature])*
-        fn u128_tod(r: u128, s: usize) -> f64 {
+        pub(crate) fn u128_tod(r: u128, s: usize) -> f64 {
             let sh = u64::from(((r >> 64) as u64).leading_zeros());
             let h = (r >> (75 - sh)) as u64; // upper 53 nonzero bits
             let rbit = ((r >> (74 - sh)) & 1) as usize; // round bit
@@ -30,7 +34,7 @@ macro_rules! kernel {
         /// High 128 bits of the 256-bit product, ignoring the low-by-low term.
         #[$inline]
         $(#[$feature])*
-        fn mh_uu(a: u128, b: u128) -> u128 {
+        pub(crate) fn mh_uu(a: u128, b: u128) -> u128 {
             let ah = (a >> 64) as u64;
             let al = a as u64;
             let bh = (b >> 64) as u64;
@@ -41,10 +45,24 @@ macro_rules! kernel {
             ahbh.wrapping_add((ahbl >> 64) + (albh >> 64))
         }
 
-        /// sin(2 pi r) in fixed point for 0 <= r < 2^-14.
+        /// `(u, u2, u2h, u4)` for the accurate-path polynomials: u = 8 r (the
+        /// scale `PS` and `PC` are fitted for), its square and fourth power, and
+        /// the upper limb of the square. Kept beside the polynomials so the
+        /// scale cannot drift from the coefficients.
         #[$inline]
         $(#[$feature])*
-        fn eval_ps(u: u128, u2: u128, u2h: u128, u4: u128) -> u128 {
+        pub(crate) fn scaled_powers(r: u128) -> (u128, u128, u128, u128) {
+            let u = r << 3;
+            let u2 = mh_uu(u, u);
+            let u4 = mh_uu(u2, u2);
+            (u, u2, u2 >> 64, u4)
+        }
+
+        /// sin(2 pi r) in fixed point for 0 <= r < 2^-14, from the
+        /// [`scaled_powers`] of r.
+        #[$inline]
+        $(#[$feature])*
+        pub(crate) fn eval_ps(u: u128, u2: u128, u2h: u128, u4: u128) -> u128 {
             let sh = PS[2].wrapping_sub(PS[3].wrapping_mul(u2h));
             let sh = mh_uu(sh, u4);
             let s = mh_uu(PS[1], u2);
@@ -56,7 +74,7 @@ macro_rules! kernel {
         /// cos(2 pi r) in fixed point for 0 <= r < 2^-14.
         #[$inline]
         $(#[$feature])*
-        fn eval_pc(u2: u128, u2h: u128, u4: u128) -> u128 {
+        pub(crate) fn eval_pc(u2: u128, u2h: u128, u4: u128) -> u128 {
             let sh = PC[3].wrapping_sub(u2h.wrapping_mul(PC[4]));
             let sh = PC[2].wrapping_sub(mh_uu(sh, u2));
             let s = mh_uu(PC[1], u2);
@@ -64,11 +82,12 @@ macro_rules! kernel {
             s.wrapping_add(mh_uu(sh, u4))
         }
 
-        /// Argument reduction for |x| >= 2^31: `(k, r)` with
-        /// x/(2 pi) mod 1 = k/2^15 + r + s, 0 <= r < 2^-15, 0 <= s < 2^-67.988.
+        /// Argument reduction for positive x >= 2^31 (callers pass |x|): `(k, r)`
+        /// with x/(2 pi) mod 1 = k/2^15 + r + s, the residual r signed in
+        /// [-2^-16, 2^-16) and |s| < 2^-68.988.
         #[$inline]
         $(#[$feature])*
-        fn reduce_large(x: f64) -> (u64, f64) {
+        pub(crate) fn reduce_large(x: f64) -> (u64, f64) {
             let u = bits(x);
             let e = ((u >> 52) & 0x7ff) as i32; // 1054 <= e <= 2046
             let m = (1u64 << 52) | (u & 0xfffffffffffff);
@@ -94,26 +113,26 @@ macro_rules! kernel {
 
         #[$inline]
         $(#[$feature])*
-        fn fastsum(xh: f64, xl: f64, yh: f64, yl: f64) -> (f64, f64) {
+        pub(crate) fn fastsum(xh: f64, xl: f64, yh: f64, yl: f64) -> (f64, f64) {
             let (sh, sl) = fasttwosum(xh, yh);
             (sh, (xl + yl) + sl)
         }
 
         #[$inline]
         $(#[$feature])*
-        fn muldd(xh: f64, xl: f64, ch: f64, cl: f64) -> (f64, f64) {
+        pub(crate) fn muldd(xh: f64, xl: f64, ch: f64, cl: f64) -> (f64, f64) {
             let ahhh = xh * ch;
             (ahhh, (xh * cl + xl * ch) + fma(xh, ch, -ahhh))
         }
 
-        const PIH: f64 = h!("-0x1.921fb54442d18p-13");
-        const PIL: f64 = h!("-0x1.1a62633145c07p-67");
+        pub(crate) const PIH: f64 = h!("-0x1.921fb54442d18p-13");
+        pub(crate) const PIL: f64 = h!("-0x1.1a62633145c07p-67");
 
-        /// Argument reduction for the accurate path: `(k, r, neg)` with
-        /// x/(2 pi) mod 1 = k/2^13 + r/2^128 + eps, |r/2^128| <= 2^-14,
-        /// 0 <= eps < 2^-127.999, and `neg` the sign of r.
+        /// Argument reduction of |x| for the accurate path: `(k, r, neg)` with
+        /// |x|/(2 pi) mod 1 = k/2^13 + (-1)^neg r/2^128 + eps, the magnitude
+        /// r/2^128 <= 2^-14 unsigned and its sign in `neg`, 0 <= eps < 2^-127.999.
         $(#[$feature])*
-        fn reduce_large_acc(x: f64) -> (u64, u128, bool) {
+        pub(crate) fn reduce_large_acc(x: f64) -> (u64, u128, bool) {
             let u = bits(x);
             let e = ((u >> 52) & 0x7ff) as i32;
             let m = (1u64 << 52) | (u & 0xfffffffffffff);
@@ -150,12 +169,7 @@ macro_rules! kernel {
         $(#[$feature])*
         fn sin_large_accurate(x: f64) -> f64 {
             let (k, r, neg) = reduce_large_acc(x);
-            // twopi / 2^128 approximates 2 pi / 2^3.
-            let twopi: u128 = u128_lh(0xc4c6628b80dc1cd1, 0xc90fdaa22168c234);
-            let r = mh_uu(twopi, r << 3); // r becomes 2 pi r
-            let u2 = mh_uu(r, r);
-            let u4 = mh_uu(u2, u2);
-            let u2h = u2 >> 64;
+            let (r, u2, u2h, u4) = scaled_powers(r);
             let mut sbit = usize::from(x <= 0.0);
             sbit ^= (k >> 12) as usize;
             let i1 = ((k >> 6) & 0x3f) as usize;
@@ -226,9 +240,9 @@ macro_rules! kernel {
             (sh, sl, ch)
         }
 
-        const SGN: [f64; 2] = [1.0, -1.0];
+        pub(crate) const SGN: [f64; 2] = [1.0, -1.0];
 
-        /// Fast path for 0x1.7137449123ef6p-26 < |x| < 2^31.
+        /// Fast path for 2^-26 <= |x| < 2^31.
         #[$inline]
         $(#[$feature])*
         fn sin_moderate(x: f64, sbit: usize) -> f64 {
