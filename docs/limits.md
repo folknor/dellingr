@@ -179,8 +179,10 @@ threshold of `usize::MAX` disables automatic collection; explicit
 `gc_collect` calls still work.
 
 A running Lua function's registers are roots. A register whose value is no
-longer used keeps that value reachable until the function overwrites the
-register or returns.
+longer used keeps that value reachable until the register is overwritten or
+leaves the live stack. The function returning is one way out; preparing a
+call, or producing open results, also drops the registers above the call's
+or the results' window, before the callee's admission can collect.
 
 GC policy is State-local and changes collection timing. Collection timing
 affects when dead heap objects and interned strings are reclaimed, and can

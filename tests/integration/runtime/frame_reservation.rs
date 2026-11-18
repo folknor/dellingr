@@ -168,3 +168,59 @@ fn a_handler_call_can_still_be_refused_at_the_cap() {
         "{outcome:?}"
     );
 }
+
+#[test]
+fn a_handler_call_after_a_call_in_a_wide_frame_is_refused_where_it_was() {
+    // A return restores only what the code after the call needs, except
+    // before an instruction that can open a handler window: that window
+    // must start at the frame top, or its callee would pass the cap here.
+    let wide = (1..=30)
+        .map(|i| format!("w{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut state = state_with(
+        "by_function = setmetatable({}, {__index = function(_, k) return k end})
+         function noop() end",
+    );
+    let body = format!(
+        "local o, call = by_function, noop
+         if armed == 'never' then local {wide} end
+         call() local v = o.greet"
+    );
+    let outcome = run_at_cap(&mut state, &body);
+    assert!(
+        matches!(&outcome, Outcome::Failed(message) if message.contains("stack overflow")),
+        "{outcome:?}"
+    );
+}
+
+#[test]
+fn a_constructor_of_call_results_keeps_every_result_and_pads_missing_ones() {
+    let mut state = State::new();
+    let fields = (1..=64)
+        .map(|i| format!("f({i})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    support::run(
+        &mut state,
+        format!(
+            "local function f(x) return x end
+             local function none() end
+             local t = {{{fields}}}
+             for i = 1, 64 do
+                 if t[i] ~= i then error('slot ' .. i .. ' holds ' .. tostring(t[i])) end
+             end
+             local function g()
+                 local a, b, c = none()
+                 local d = math.floor(2.5)
+                 local e, h = f(7)
+                 return a, b, c, d, e, h
+             end
+             local a, b, c, d, e, h = g()
+             if a ~= nil or b ~= nil or c ~= nil or d ~= 2 or e ~= 7 or h ~= nil then
+                 error('padding: ' .. tostring(a) .. tostring(b) .. tostring(c)
+                     .. tostring(d) .. tostring(e) .. tostring(h))
+             end"
+        ),
+    );
+}

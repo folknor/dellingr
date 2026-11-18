@@ -219,38 +219,6 @@ persisted opcode encodings.
 
 **Classification:** rewrite, medium conviction.
 
-## PERF-010 - Register window nil-filled on every call and return
-
-Raised by the calls hunter.
-
-**Bottleneck:** at CALL `call_window` (`frame.rs`) truncates the caller's
-suffix after the arguments; admission (`eval.rs`) nil-fills the callee's whole
-remaining window; a fixed-result return resizes back to the caller's top and
-nil-fills the restored suffix again. A small call pays initialization in
-proportion to callee frame width and the caller suffix it replaced. The value
-vector serves as register storage, active extent, native argument/result area
-and GC root list at once. Varargs are copied into a shared arena
-(`collect_varargs`) and copied back on use (`reg_vararg`).
-
-**Redesign:** separate backing capacity, logical height for limit behaviour,
-observable register ranges, and initialization/GC-root state. Derive an
-initialization plan from compiler/admission dataflow: initialize missing
-parameters and registers readable before assignment only; restore the
-caller's logical extent without writing nil across it. Use derived execution
-metadata, not the persisted instruction stream. Varargs could stay as a rooted
-span, but locals need distinct storage and hidden varargs live outside the
-capped stack today, so this needs a full layout and accounting design.
-
-**Risks:** stale storage must stay semantically nil and must not become an
-extra GC root (the collector visits the whole live stack slice,
-`inventory.rs`); clearing fewer roots can collect objects earlier; both are
-observable. The verifier does not establish definite initialization, and
-snapshot bytecode can read an untouched register and get nil today.
-
-**Classification:** calling-convention rewrite, lower conviction than the
-activation and continuation rewrites; real frame shapes decide whether the
-metadata beats the bulk writes.
-
 ## PERF-012 - Calls with independent callee, argument and result locations, then inlining
 
 Raised by the codegen hunter (its second rewrite).

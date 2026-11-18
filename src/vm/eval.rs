@@ -1001,6 +1001,13 @@ impl State {
         // the frame by open results (`...`, a call's or return's open
         // count), which that growth checks. Missing arguments and every
         // other register start nil; the headroom is checked, not filled.
+        // Compiled code needs only the missing parameters from this fill (it
+        // emits LOAD_NIL for every declared local); the rest keeps admitted
+        // snapshot bytecode that reads an untouched register reading nil,
+        // which no verifier proof replaces. Skipping it would need a
+        // definite-initialization dataflow plus a logical height apart from
+        // the vector length, and the matching return-side fill, measured at
+        // `return_to_caller`, saved nothing.
         let frame_top = frame_bottom + max_stack;
         let grow = (frame_top + FRAME_HEADROOM).saturating_sub(self.stack.len());
         if let Err(e) = self.check_stack_space(grow) {
@@ -1190,6 +1197,22 @@ impl State {
         // A fixed result count resumes ordinary execution at the caller's
         // frame top, the missing results and every register above them nil;
         // all results stay open for the consuming instruction.
+        //
+        // Restoring only what the code after the call needs was built and
+        // measured, and refused. A per-function table keyed by resume pc gave
+        // the length the straight-line run up to the next fixed call or
+        // return names (any branch, handler-capable instruction, CLOSURE,
+        // VARARG or open consumer fell back to the frame top, since a window
+        // opened lower would move the stack cap its callee sees). The fill
+        // grows with the caller's register high-water mark, quadratically in
+        // a constructor of call results, so a 128-field `{f(i), ...}` was
+        // the best case: about 8,000 nil stores saved per construction. On
+        // bygg against de60b60 the same binary with the table filled with
+        // full tops versus short ones ran the host-entered warm calls 54.9
+        // against 61.5 ms and the Lua-entered setup 1.62 against 1.50 s:
+        // offset-sensitive swings either way, no net saving. The fill is
+        // independent tag stores that the store buffer absorbs behind the
+        // call machinery, so its store count is not its cost.
         if let RetCount::Fixed(_) = expected {
             let top = caller.top;
             self.stack.resize(top, Val::Nil);
