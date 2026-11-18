@@ -156,7 +156,6 @@ pub use native_call_trace::{active_path, is_observing, with_native_call_trace};
 pub use vm::Anchor;
 pub use vm::Interrupt;
 pub use vm::LuaType;
-pub use vm::RawField;
 pub use vm::RustFnHandle;
 pub use vm::RustFunc;
 pub use vm::State;
@@ -164,6 +163,7 @@ pub use vm::StateBuilder;
 #[cfg(feature = "fault-injection")]
 #[doc(hidden)]
 pub use vm::{FaultEvent, FaultSite};
+pub use vm::{FieldKey, FieldName, RawField};
 pub use vm::{InvokeArg, InvokeArgs, InvokeResult, InvokeResults};
 #[cfg(feature = "snapshot")]
 pub use vm::{LoadError, SaveDiagnostics, SaveError, SaveState, SnapshotError, TableLoadLocation};

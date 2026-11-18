@@ -10,6 +10,11 @@
 //!   - warm    N further invocations on the same State, controlled by
 //!     `--iterations N`
 //!
+//! A script carrying the line `-- Harness host: records` gets the host
+//! function `_host_decode` installed as a global before the parse phase, so
+//! a workload can drive host callbacks reading its tables; every other
+//! script runs on a plain `State::new()`.
+//!
 //! A script path is required and is resolved from the caller's working
 //! directory. brokkr passes the bound workload's pinned file path.
 //!
@@ -47,7 +52,7 @@ use std::path::{Path, PathBuf};
 use std::process::exit;
 use std::time::{Duration, Instant};
 
-use dellingr::{ArgCount, LuaType, Program, RetCount, State};
+use dellingr::{ArgCount, FieldName, LuaType, Program, RetCount, State};
 
 // Install the counting allocator in this instrumented binary so
 // hotpath-alloc runs observe allocation traffic. Without it, allocations use
@@ -341,6 +346,53 @@ fn emit_metrics(metrics: &[Metric]) {
     }
 }
 
+/// The line a workload carries to have the harness install its host
+/// functions before the chunk runs. Workloads without it see the plain
+/// `State::new()` environment, so their globals and costs are unchanged.
+const HOST_RECORDS_DIRECTIVE: &[u8] = b"-- Harness host: records";
+
+fn wants_host_records(source: &[u8]) -> bool {
+    source
+        .split(|&b| b == b'\n')
+        .any(|line| line.trim_ascii_end() == HOST_RECORDS_DIRECTIVE)
+}
+
+/// The fields `_host_decode` reads, one descriptor per field: the way a
+/// host decodes the same fields of many records.
+static X: FieldName = FieldName::new("x");
+static Y: FieldName = FieldName::new("y");
+static VX: FieldName = FieldName::new("vx");
+static VY: FieldName = FieldName::new("vy");
+static HP: FieldName = FieldName::new("hp");
+static PLAYER: FieldName = FieldName::new("player");
+static KIND: FieldName = FieldName::new("kind");
+static ALIVE: FieldName = FieldName::new("alive");
+
+/// `_host_decode(e)`: the host side of a record-decoding workload. Reads
+/// eight own fields of the entity table with `State::raw_field` through
+/// `FieldName` descriptors and returns the sum the workload's Lua fallback
+/// computes.
+fn host_decode(state: &mut State) -> dellingr::Result<u8> {
+    let x: f64 = state.raw_field(1, &X)?;
+    let y: f64 = state.raw_field(1, &Y)?;
+    let vx: f64 = state.raw_field(1, &VX)?;
+    let vy: f64 = state.raw_field(1, &VY)?;
+    let hp: f64 = state.raw_field(1, &HP)?;
+    let player: u32 = state.raw_field(1, &PLAYER)?;
+    let kind: &str = state.raw_field(1, &KIND)?;
+    let kind_len = kind.len() as f64;
+    let alive: bool = state.raw_field(1, &ALIVE)?;
+    let sum = x + y + vx + vy + hp + f64::from(player) + kind_len + f64::from(u8::from(alive));
+    state.push_number(sum)?;
+    Ok(1)
+}
+
+fn install_host_records(state: &mut State) -> dellingr::Result<()> {
+    let handle = state.add_rust_fn("_host_decode", host_decode)?;
+    state.push_rust_fn(handle)?;
+    state.set_global("_host_decode")
+}
+
 fn find_bench(state: &mut State, script_path: &std::path::Path, phase: &str) -> Result<(), String> {
     state.get_global(BENCH_FUNCTION).map_err(|error| {
         format!(
@@ -423,6 +475,12 @@ fn main() {
     let state_start = Instant::now();
     let mut state = State::new();
     let state_new_us = state_start.elapsed().as_micros();
+    if wants_host_records(&source)
+        && let Err(e) = install_host_records(&mut state)
+    {
+        eprintln!("Failed to install host functions: {e}");
+        exit(1);
+    }
 
     // Phase 1: parse + codegen.
     emit_marker("PARSE_START");
@@ -535,7 +593,10 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{RunMetrics, chunk_name, find_bench, parse_args_from, run_metrics, write_kvs};
+    use super::{
+        RunMetrics, chunk_name, find_bench, install_host_records, parse_args_from, run_metrics,
+        wants_host_records, write_kvs,
+    };
     use dellingr::State;
     use std::path::PathBuf;
 
@@ -560,6 +621,34 @@ mod tests {
             chunk_name(std::path::Path::new("bench/arithmetic.lua")),
             b"bench/arithmetic.lua"
         );
+    }
+
+    #[test]
+    fn host_records_directive_must_be_a_whole_line() {
+        assert!(wants_host_records(
+            b"-- Probe: x\n-- Harness host: records\nlocal a = 1\n"
+        ));
+        assert!(wants_host_records(b"-- Harness host: records\r\n"));
+        assert!(!wants_host_records(b"-- Probe: x\nlocal a = 1\n"));
+        assert!(!wants_host_records(b"-- see -- Harness host: records\n"));
+    }
+
+    #[test]
+    fn host_decode_matches_the_lua_fallback() {
+        let mut state = State::new();
+        install_host_records(&mut state).expect("host functions install");
+        let program = dellingr::Program::compile(
+            br#"local e = {x = 1, y = 2, vx = 1, vy = -1, hp = 100, player = 3, kind = "unit", alive = true}
+            result = _host_decode(e)"#,
+            None,
+        )
+        .expect("compiles");
+        state.load(&program).expect("loads");
+        state
+            .call(dellingr::ArgCount::Fixed(0), dellingr::RetCount::Fixed(0))
+            .expect("runs");
+        state.get_global("result").expect("reads the result");
+        assert_eq!(state.to_number(-1).expect("a number"), 111.0);
     }
 
     #[test]

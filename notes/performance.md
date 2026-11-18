@@ -222,31 +222,29 @@ workload's loop.
 
 **Classification:** rewrite, unmeasured.
 
-## PERF-033 - Host global and field access resolves names and tables afresh
+## PERF-042 - Host field reads pay admission and argument resolution per field
 
-Raised by the host-boundary hunter.
+Raised while landing `FieldName` slot hints for `State::raw_field`.
 
-Narrowed: borrowed `&str`/`&[u8]` field reads landed; global-binding
-descriptors and a record view were refused (reasons at `read_name` and
-`raw_field`). What remains is unmeasured.
+**Bottleneck (hypothesis):** a callback decoding N fields of one table calls
+`raw_field` N times, and each call runs `check_usable` (an out-of-line
+MXCSR read for host code on x86-64), checks the argument index and resolves
+the table. With descriptors the lookups are cheap; the `host_records`
+workload still spends about 150 ns of process wall per eight-field decode
+(6.7 s over about 46 million decodes, bygg, Lua call overhead included);
+how much of it is per-field admission is unmeasured.
 
-**Bottleneck (hypothesis):** each `raw_field` hashes the field name, probes the
-string pool and probes the table. A callback decoding many scalar fields of
-consistently laid-out records (more than the inline capacity, so a map probe)
-pays all three per field per call.
+**Redesign:** a sealed batch read, `raw_fields::<(f64, u32, &str)>(arg,
+(&X, &PLAYER, &KIND))`, resolving the table and checking the environment
+once, converting in tuple order and reporting the first failing field with
+the scalar read's error. Sound within one call: no host code runs between
+the reads (the per-read check exists because host code may change the
+floating-point environment between separate calls). The tuple machinery has
+a precedent in `State::invoke`'s sealed tuples.
 
-**Redesign:** a prepared field descriptor holding the name's bytes plus a
-`Cell` slot-index hint, kept in user data (`user_data` hands out `&T`). A hit
-reads the key at the hinted index and compares its bytes with the name; a miss
-takes today's lookup and refreshes the hint. Sound across States, snapshot
-loads and fresh tables without rooting the name. `check_usable` stays per
-read.
+**Measure on:** `host_records`, scalar against batch in one binary.
 
-**Precondition:** a registered host-traffic workload (the bench harness
-registers no Rust function today) that shows the lookups. Without it the
-saving is one short hash and two probes per field.
-
-**Classification:** micro, low conviction until measured.
+**Classification:** local, unmeasured.
 
 ## Accounts added to existing entries
 
@@ -276,4 +274,4 @@ them:
 - `todo.md` "Sparse storage for the array part's stragglers": table hunter's
   numeric storage separated from the logical array boundary.
 - `todo.md` "Grow the brokkr workload registry": host hunter's note that the
-  harness warm path exercises no host traffic.
+  harness warm path exercises no Rust-to-Lua argument or result traffic.

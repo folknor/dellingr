@@ -4,7 +4,7 @@
 //! leaves the stack and the cost meter alone.
 
 use dellingr::error::{ArgDetail, Error, ErrorKind};
-use dellingr::{ArgCount, LuaType, RetCount, State};
+use dellingr::{ArgCount, FieldName, LuaType, RetCount, State};
 
 use crate::support;
 use crate::support::PushNewRustFn;
@@ -600,4 +600,115 @@ fn field_errors_report_the_calling_script_line() {
         error.to_string().lines().next(),
         Some("map.lua:3: bad argument #1 to 'read_u8' (field 'v': number expected, got string)")
     );
+}
+
+// A descriptor holds only a slot hint, which every read validates, so a hint
+// left by another test changes no result.
+// process-global: a validated slot hint only, see above.
+static HINTED_V: FieldName = FieldName::new("v");
+// process-global: as above.
+static HINTED_ONE: FieldName = FieldName::new("1");
+
+/// Reads fields `v` and `"1"` of its first argument through shared
+/// descriptors and by plain name, fails unless the two agree, and returns
+/// the reading of `v`.
+fn hinted_agrees(state: &mut State) -> dellingr::Result<u8> {
+    let hinted: Option<f64> = state.raw_field(1, &HINTED_V)?;
+    let plain: Option<f64> = state.raw_field(1, "v")?;
+    let hinted_one: Option<f64> = state.raw_field(1, &HINTED_ONE)?;
+    let plain_one: Option<f64> = state.raw_field(1, "1")?;
+    if hinted != plain || hinted_one != plain_one {
+        return Err(Error::without_location(ErrorKind::HostError(
+            format!(
+                "descriptor read {hinted:?}/{hinted_one:?}, plain read {plain:?}/{plain_one:?}"
+            )
+            .into(),
+        )));
+    }
+    match hinted {
+        Some(value) => state.push_number(value)?,
+        None => state.push_nil()?,
+    }
+    Ok(1)
+}
+
+/// A descriptor's hint goes stale as tables differ, lose the field, regain
+/// it and rebuild; every read still matches the plain name.
+#[test]
+fn a_descriptor_reads_what_the_plain_name_reads_across_layouts() {
+    let mut state = State::new();
+    state
+        .push_named_rust_fn("check", hinted_agrees)
+        .expect("function fits");
+    state.set_global("check").expect("global is set");
+    support::load(
+        &mut state,
+        r#"
+        local sum = 0
+        local function read(t)
+            local v = check(t)
+            if v then sum = sum + v end
+        end
+        local a = {a = 1, b = 2, c = 3, d = 4, e = 5, v = 10}
+        local b = {v = 20, a = 1, b = 2, c = 3, d = 4, e = 5}
+        for _ = 1, 3 do read(a) read(b) end
+        -- The hint points at a's slot for v when it becomes a tombstone.
+        read(a)
+        a.v = nil
+        read(a)
+        a.v = 30
+        read(a)
+        for i = 1, 64 do a["k" .. i] = i end
+        read(a)
+        -- Enough tombstones that the next insert compacts, moving v to
+        -- another slot under a warm hint.
+        local c = {a = 1, b = 2, c = 3, d = 4, e = 5, v = 40}
+        read(c)
+        c.a, c.b, c.c, c.d, c.e = nil, nil, nil, nil, nil
+        c.z = 1
+        read(c)
+        read({v = 1})
+        read({w = 1})
+        read({5, 6, 7})
+        read({["1"] = 8, v = 2})
+        read({1, 2, v = 3})
+        return sum
+        "#,
+    );
+    state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(1))
+        .expect("descriptor and plain reads agree");
+    assert_eq!(state.to_number(-1).expect("a number"), 246.0);
+}
+
+/// Reads field `v` as `f64` through a descriptor.
+fn read_hinted_f64(state: &mut State) -> dellingr::Result<u8> {
+    let value: f64 = state.raw_field(1, &HINTED_V)?;
+    state.push_number(value)?;
+    Ok(1)
+}
+
+/// A failed descriptor read raises the error the plain name raises.
+#[test]
+fn a_descriptor_fails_with_the_plain_name_error() {
+    let mut state = State::new();
+    install(&mut state);
+    state
+        .push_named_rust_fn("read_hinted_f64", read_hinted_f64)
+        .expect("function fits");
+    state.set_global("read_hinted_f64").expect("global is set");
+    let mut message = |source: &str| {
+        support::load(&mut state, source);
+        let error = state
+            .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+            .expect_err("the read fails");
+        let ErrorKind::ArgError(argument) = error.kind() else {
+            panic!("{source} must raise an argument error, got {error}");
+        };
+        argument.to_string()
+    };
+    let hinted = message("read_hinted_f64({v = 'x', a = 1, b = 2, c = 3, d = 4})");
+    let plain = message("read_f64({v = 'x', a = 1, b = 2, c = 3, d = 4})");
+    assert_eq!(hinted.replace("read_hinted_f64", "read_f64"), plain);
+    assert!(plain.contains("field 'v'"), "{plain}");
 }

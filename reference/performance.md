@@ -520,6 +520,30 @@ unchanged in dev and release default; release with snapshot moved
 `error_tostring` up 16 bytes and the `gsub_pattern_*` rows down 80, which no
 changed function is live across (reference/native-calls.md has the table).
 
+## Host field descriptors, 2026-11-18
+
+`State::raw_field` takes a `FieldName` as well as a `&str`. A descriptor
+keeps the slot index where its field was last found; a read whose table has
+a live key spelling the name at that index skips the name hash, the
+string-pool probe and the table probe. The `host_records` workload measures
+it: a host callback (`_host_decode`, installed by the bench harness when the
+script asks for it) reads eight scalar fields of persistent eight-field,
+map-stored records. Measured on bygg with `brokkr bench wall`, best of
+three, one dirty library build at `352a11a` with the harness callback
+switched between the two key forms, run interleaved:
+
+| Key form | Wall |
+|---|---:|
+| `&str` | 8.6 s (5663064c), 8.6 s (4ee6763b) |
+| `&FieldName` | 7.0 s (b96c3715), 6.7 s (4c0818d1) |
+
+The `&str` path matches the `raw_field` it replaced (8.6 to 8.8 s with the
+same callback) only with its lookup marked `#[inline]`; without it the plain
+arm ran at 10.0 s. Marking the descriptor lookup `#[inline]` too moved the
+descriptor arm to 8.0 s, so it stays out of line. Both are layout effects
+of the kind `AGENTS.md` warns about, and the reason those two attributes
+are where they are.
+
 ## Native stack frames and cycles
 
 The log behind reference/native-calls.md's current table: the frame-size

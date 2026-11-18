@@ -1099,7 +1099,7 @@ impl Table {
     }
 
     #[inline]
-    fn get_index(&self, index: usize) -> Option<(Val, Val)> {
+    pub(super) fn get_index(&self, index: usize) -> Option<(Val, Val)> {
         if index & ARRAY_SLOT_TAG != 0 {
             let slot = index & !ARRAY_SLOT_TAG;
             return self.window_position(slot).and_then(|position| {

@@ -252,13 +252,15 @@ building one State per script or per tick pays.
 Also open (2026-11-17 performance hunt, host-boundary scope): the harness's
 warm path (`run_warm_block`, `src/bin/dellingr-bench.rs`) reuses a function
 already rooted on the stack and calls it with zero arguments and zero
-expected results, so no registered workload exercises argument pushing,
-result reading, record exchange or host callbacks against game data.
+expected results, so no registered workload exercises Rust-to-Lua argument
+pushing or result reading. Host callbacks reading records are covered by
+`host_records` (a script carrying `-- Harness host: records` gets the
+harness's `_host_decode` installed; the scripts fall back to a Lua decode
+elsewhere); the same directive mechanism can install more host functions.
 `State::invoke` (one usability check per call instead of one per stack
-operation, no callee insert) landed on that theoretical saving alone; an
-entity-tick bench driving it and the push/`call_anchor`/`to_number`/`pop`
-sequence side by side, with host callbacks reading option tables, would
-measure it and the field-lookup residue in `performance.md` together.
+operation, no callee insert) landed on that theoretical saving alone; a
+harness mode driving it and the push/`call_anchor`/`to_number`/`pop`
+sequence side by side would measure it.
 
 Why deferred: the registry is live with the curated workloads;
 porting the rest before those have proven the recipe would be

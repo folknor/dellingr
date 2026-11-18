@@ -14,6 +14,7 @@ examples/calls/fixedarg.lua|3f10a6a9186212512d5919045adb81d6|5002000
 examples/calls/general.lua|3444aa21fbbdaf89982d3e5b0ef4649d|2880000
 examples/calls/global.lua|c2dbedfee234dd0fef1acb770d658e5b|1501000
 examples/calls/heap_leaves.lua|9842759c50eb11a2b9bf0679b344e153|903602
+examples/calls/host_records.lua|6d707a7823d6642d3cc7b270ceec4322|298433
 examples/calls/library_leaves.lua|70d4b2ae1fd0cf56753174fd5d0c3635|2048305
 examples/calls/local.lua|1945c6489a496413eb486104826222e2|1501000
 examples/calls/loop_beside_closure.lua|7dcad64f975e95ca6305fb01738c91db|1505602

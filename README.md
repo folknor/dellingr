@@ -298,7 +298,8 @@ point.
   reads a typed field of a table argument (an options table such as
   `spawn{x = 1}`), free of cost and without metamethods, and reports a bad
   field as an argument error naming it; `&str` and `&[u8]` borrow the
-  string in place.
+  string in place. A `static` `FieldName` in place of the name remembers
+  the field's slot, for a callback decoding the same fields of many records.
 - Typed errors - `ErrorKind::ScriptError` carries the value a script passed to
   `error()` (`ErrorValue`: nil, boolean, number, exact string bytes, or a
   table/function's type and rendering); library, syntax, argument and limit

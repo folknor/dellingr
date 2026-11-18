@@ -94,6 +94,11 @@ tick budgets and re-record replays.
   `State::raw_field` reads into `&str`, `&[u8]` and their `Option`s,
   borrowing the string instead of copying it. `&str` keeps the invalid-UTF-8
   field error. A bound written `T: RawField` becomes `T: RawField<'s>`.
+- `State::raw_field` takes its name as `impl FieldKey`: a `&str` as before,
+  or a `&FieldName`, a descriptor (usually a `static`) whose slot hint skips
+  the name hash, string-pool probe and table probe while the field stays
+  where it was last found. Values and errors are the same either way. Code
+  passing a `&String` writes `.as_str()`.
 
 - `State` is unsized and owned as `Box<State>`: `State::new`, `State::raw`,
   `StateBuilder::build` and `State::load_state` return `Box<State>`, and

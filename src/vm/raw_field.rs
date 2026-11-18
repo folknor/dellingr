@@ -9,6 +9,7 @@ use super::lua_val::Val;
 use super::{LuaType, Result, State};
 use crate::error::{ArgDetail, ArgError, ErrorKind};
 use sealed::{FieldFailure, FieldValue};
+use std::sync::atomic::AtomicUsize;
 
 // Public items in a private module: nameable only inside this crate, which
 // is what seals the trait. `State::invoke` reuses the conversions for its
@@ -208,6 +209,144 @@ impl<'s, T: RawField<'s>> sealed::Convert<'s> for Option<T> {
 }
 impl<'s, T: RawField<'s>> RawField<'s> for Option<T> {}
 
+/// A field name for [`State::raw_field`] that remembers where it was last
+/// found, for a callback that reads the same fields of consistently laid-out
+/// tables over and over.
+///
+/// ```
+/// use dellingr::FieldName;
+///
+/// static X: FieldName = FieldName::new("x");
+/// # fn read(state: &dellingr::State) -> dellingr::Result<f64> {
+/// let x: f64 = state.raw_field(1, &X)?;
+/// # Ok(x)
+/// # }
+/// ```
+///
+/// It reads exactly what the plain name reads. The hint is a slot index
+/// checked on every read: a hit needs the table's live key at that index to
+/// spell the name, so the hint holds no VM value and is sound across
+/// States, threads, snapshot loads, collections and tables of any layout.
+/// A stale or foreign hint costs one failed check before the ordinary
+/// lookup, which then refreshes it. One descriptor shared by sites that
+/// read differently laid-out tables keeps missing; give each decode site
+/// its own.
+//
+// The hint is a relaxed atomic rather than a `Cell` so a descriptor can be
+// a plain `static`: it publishes one speculative integer that every read
+// validates, so no ordering is needed. A hint that holds an interned key
+// instead of an index was refused: the key would have to be rooted, which
+// changes later string identity.
+pub struct FieldName {
+    name: &'static str,
+    hint: AtomicUsize,
+}
+
+// Shows the name only: the hint is whatever slot the last read through the
+// descriptor found, possibly in another State, and must not leak into
+// anything a script or replay can see.
+impl std::fmt::Debug for FieldName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FieldName")
+            .field("name", &self.name)
+            .finish()
+    }
+}
+
+impl FieldName {
+    /// A descriptor for field `name`, with no hint yet.
+    #[must_use]
+    pub const fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            hint: AtomicUsize::new(usize::MAX),
+        }
+    }
+
+    /// The field's name.
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        self.name
+    }
+}
+
+/// The field name [`State::raw_field`] takes: a `&str`, or a
+/// [`FieldName`] that remembers the field's slot. Sealed.
+pub trait FieldKey: sealed_key::Key + Copy {}
+
+mod sealed_key {
+    use super::super::lua_val::Val;
+    use super::super::object::GcHeap;
+    use super::super::table::Table;
+    use super::FieldName;
+    use super::sealed::FieldValue;
+    use std::sync::atomic::Ordering;
+
+    /// A table to look a field up in, with the heap that holds its keys.
+    pub struct Lookup<'a> {
+        pub(in super::super) heap: &'a GcHeap,
+        pub(in super::super) table: &'a Table,
+    }
+
+    pub trait Key {
+        fn name(&self) -> &str;
+        /// The table's own value for this name, nil when absent.
+        fn lookup<'a>(&self, at: Lookup<'a>) -> FieldValue<'a>;
+    }
+
+    impl Key for &str {
+        fn name(&self) -> &str {
+            self
+        }
+
+        // Inline here and not on the descriptor's lookup: measured both
+        // ways on `host_records` (reference/performance.md, "Host field
+        // descriptors").
+        #[inline]
+        fn lookup<'a>(&self, Lookup { heap, table }: Lookup<'a>) -> FieldValue<'a> {
+            // A key no live string spells cannot be in any table: reachable
+            // keys keep their interned strings alive.
+            let val = heap
+                .find_string(self.as_bytes())
+                .map_or(Val::Nil, |key| table.get(&Val::Str(key)));
+            FieldValue { val, heap }
+        }
+    }
+
+    impl Key for &FieldName {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn lookup<'a>(&self, Lookup { heap, table }: Lookup<'a>) -> FieldValue<'a> {
+            let name = self.name.as_bytes();
+            // A string key is interned by content and a table holds at most
+            // one slot for it, so a live slot whose key spells the name is
+            // the one the lookup would find. An array slot's key is a number
+            // and never matches; `get_index` filters vacant and nil slots.
+            if let Some((key, value)) = table.get_index(self.hint.load(Ordering::Relaxed))
+                && key.as_string(heap) == Some(name)
+            {
+                return FieldValue { val: value, heap };
+            }
+            let val = match heap
+                .find_string(name)
+                .and_then(|key| table.get_with_index(&Val::Str(key)))
+            {
+                Some((index, value)) => {
+                    self.hint.store(index, Ordering::Relaxed);
+                    value
+                }
+                None => Val::Nil,
+            };
+            FieldValue { val, heap }
+        }
+    }
+}
+
+impl FieldKey for &str {}
+impl FieldKey for &FieldName {}
+
 impl State {
     /// Reads field `name` of the table at argument `table_arg` into `T`,
     /// without metamethods: only the table's own fields are seen, so a field
@@ -243,18 +382,15 @@ impl State {
     /// take the exact bytes. `&str` and `&[u8]` borrow the string in place
     /// instead of copying it, so the State stays borrowed while they live.
     //
-    // Prepared field descriptors were weighed for repeated reads and not
-    // added. A descriptor holding an interned key would have to root it,
-    // which changes later string identity; one holding the name's bytes plus
-    // a slot-index hint (hit: the key at that index spells the name) is sound
-    // across States, snapshot loads and fresh tables, and can live in a
-    // `Cell` in user data, but a hit still compares the name and saves only
-    // the name hash, one string-pool probe and the table probe per field.
-    // Small option tables are inline and scan at most a few handles. Add it
-    // when a registered host-traffic workload decoding many fields of
-    // consistently laid-out records shows those lookups. Per-field
-    // `check_usable` stays either way: host code can change the
-    // floating-point environment between reads.
+    ///
+    /// `name` is a `&str` or a [`FieldName`]; the descriptor skips the name
+    /// hash, the string-pool probe and the table probe while its hint holds,
+    /// and reads the same value and error either way.
+    //
+    // Per-field `check_usable` stays: host code can change the
+    // floating-point environment between reads. The `host_records` workload
+    // (eight fields of persistent map-stored records per callback) is the
+    // one that measures descriptors against plain names.
     ///
     /// The read is free, leaves the stack unchanged, and never runs Lua.
     ///
@@ -266,7 +402,11 @@ impl State {
     /// `bad argument #1 to 'spawn' (field 'x': number expected, got string)`.
     /// [`ErrorKind::InvalidStackIndex`] for argument 0, and the usual refusal
     /// of a poisoned State. Argument numbers follow [`State::check_type`].
-    pub fn raw_field<'s, T: RawField<'s>>(&'s self, table_arg: isize, name: &str) -> Result<T> {
+    pub fn raw_field<'s, T: RawField<'s>>(
+        &'s self,
+        table_arg: isize,
+        name: impl FieldKey,
+    ) -> Result<T> {
         self.check_usable()?;
         if table_arg == 0 {
             return Err(self.error(ErrorKind::InvalidStackIndex { index: table_arg }));
@@ -289,18 +429,14 @@ impl State {
                 received,
             ))));
         };
-        // A key no live string spells cannot be in any table: reachable keys
-        // keep their interned strings alive.
-        let val = self
-            .heap
-            .find_string(name.as_bytes())
-            .map_or(Val::Nil, |key| table_ref.get(&Val::Str(key)));
-        let received = val.typ(&self.heap);
-        T::convert(FieldValue {
-            val,
+        let value = name.lookup(sealed_key::Lookup {
             heap: &self.heap,
-        })
-        .map_err(|failure| {
+            table: table_ref,
+        });
+        let val = value.val;
+        T::convert(value).map_err(|failure| {
+            let received = val.typ(&self.heap);
+            let name = name.name();
             let (detail, expected) = match failure {
                 FieldFailure::Type(expected) => (ArgDetail::TypeMismatch, Some(expected)),
                 FieldFailure::NoInteger => (ArgDetail::NoInteger, Some(LuaType::Number)),
