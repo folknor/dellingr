@@ -181,7 +181,7 @@ impl<'a> Parser<'a> {
         self.level_up();
 
         // Check what follows the first identifier to determine loop type
-        let mut stmt = match self.input.peek_type()? {
+        let stmt = match self.input.peek_type()? {
             TokenKind::Assign => {
                 // Numeric for: for i = start, stop [, step] do
                 self.input.next()?; // consume '='
@@ -196,12 +196,8 @@ impl<'a> Parser<'a> {
                 return Err(self.err_near(tok, |found| SyntaxError::ForSeparatorExpected { found }));
             }
         };
-        let close = self.level_down()?;
-        if let Stmt::NumericFor { scope_close, .. } | Stmt::GenericFor { scope_close, .. } =
-            &mut stmt
-        {
-            *scope_close = close;
-        }
+        // Every exit already closed the loop scope (see `Stmt::While`).
+        self.level_down()?;
         Ok(stmt)
     }
 
@@ -253,7 +249,6 @@ impl<'a> Parser<'a> {
             loop_line,
             body_close,
             break_close,
-            scope_close: None,
         })
     }
 
@@ -339,7 +334,6 @@ impl<'a> Parser<'a> {
             call_line,
             body_close,
             break_close,
-            scope_close: None,
         })
     }
 
@@ -390,13 +384,13 @@ impl<'a> Parser<'a> {
         .then_some(body_locals_start);
 
         let break_close = self.exit_loop()?;
-        let scope_close = self.level_down()?;
+        // Every exit already closed the loop scope (see `Stmt::While`).
+        self.level_down()?;
         Ok(Stmt::Repeat {
             body,
             cond,
             body_close,
             break_close,
-            scope_close,
         })
     }
 
@@ -420,14 +414,14 @@ impl<'a> Parser<'a> {
         .then_some(body_locals_start);
 
         let break_close = self.exit_loop()?;
-        let scope_close = self.level_down()?;
+        // Every exit already closed the loop scope (see `Stmt::While`).
+        self.level_down()?;
 
         Ok(Stmt::While {
             cond,
             body,
             body_close,
             break_close,
-            scope_close,
         })
     }
 

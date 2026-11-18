@@ -1803,6 +1803,58 @@ fn block_exit_closes_a_shadowed_capture_slot() {
 }
 
 #[test]
+fn adjacent_nil_loads_share_one_instruction() {
+    let chunk = parse_unfinalized("local a; local b; local c, d = nil, nil; f(nil, nil)")
+        .expect("compiles");
+    assert_eq!(
+        opcodes(&chunk, Instr::OP_LOAD_NIL),
+        vec![Instr::load_nil(0, 4), Instr::load_nil(5, 2)]
+    );
+}
+
+#[test]
+fn a_nil_load_at_a_jump_target_is_not_merged_into_its_predecessor() {
+    let chunk =
+        parse_unfinalized("local outer; repeat local x; x = g() until x").expect("compiles");
+    assert_eq!(
+        opcodes(&chunk, Instr::OP_LOAD_NIL),
+        vec![Instr::load_nil(0, 1), Instr::load_nil(1, 1)]
+    );
+    // The back edge re-nils `x` on every iteration.
+    let n = eval_number(
+        "local n = 0; local outer; repeat local x; \
+         if x then error('stale x') end; x = true; n = n + 1 until n == 2; return n",
+    );
+    assert_eq!(n, 2.0);
+}
+
+#[test]
+fn loops_close_their_body_locals_only_on_the_paths_that_need_it() {
+    for (source, closes) in [
+        ("while c do local x; f = function() return x end end", 1),
+        ("repeat local x; f = function() return x end until c", 1),
+        ("for i = 1, 2 do f = function() return i end end", 1),
+        ("for k in pairs(t) do f = function() return k end end", 1),
+        (
+            "while c do local x; f = function() return x end if d then break end end",
+            2,
+        ),
+    ] {
+        let chunk = parse_unfinalized(source).expect("compiles");
+        assert_eq!(opcodes(&chunk, Instr::OP_CLOSE).len(), closes, "{source}");
+    }
+    let n = eval_number(
+        "local fs = {}; local i = 0; \
+         repeat local x = i; fs[#fs + 1] = function() return x end; i = i + 1 until i == 3; \
+         while true do local y = i; fs[#fs + 1] = function() return y end; \
+         i = i + 1; if i == 5 then break end end; \
+         for j = 5, 6 do fs[#fs + 1] = function() return j end end; \
+         local sum = 0; for _, f in ipairs(fs) do sum = sum * 10 + f() end; return sum",
+    );
+    assert_eq!(n, 123456.0);
+}
+
+#[test]
 fn fallible_closures_and_varargs_have_their_own_line_stamps() {
     for declaration in [
         "local function f()\nend",

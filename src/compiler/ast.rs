@@ -331,6 +331,15 @@ pub(super) enum Stmt {
     /// A call statement (a suffixed expression ending in a call).
     Call(Expr),
     Do(Block),
+    /// No loop carries a close for its own scope's exit: every path out of
+    /// a loop has already closed every slot at or above the loop's first
+    /// local. A `while` condition runs on entry, before any body local
+    /// exists, or after the previous iteration's `body_close`; `repeat`
+    /// closes after its condition and before the branch; a numeric `for`
+    /// that skips its body opened nothing, and its `FOR_LOOP` and the generic
+    /// `TFOR_LOOP` fall through after the body close; a `break` closes from
+    /// the loop base on its own path. The hidden `for` control slots are
+    /// never captured. An exit close would find no open upvalue.
     While {
         cond: Expr,
         body: Vec<Stmt>,
@@ -339,8 +348,6 @@ pub(super) enum Stmt {
         body_close: Option<u8>,
         /// The loop's breaks close upvalues from this register.
         break_close: Option<u8>,
-        /// The scope around the condition and body.
-        scope_close: Option<u8>,
     },
     Repeat {
         body: Vec<Stmt>,
@@ -348,7 +355,6 @@ pub(super) enum Stmt {
         /// Close the body locals after the condition, before looping.
         body_close: Option<u8>,
         break_close: Option<u8>,
-        scope_close: Option<u8>,
     },
     If {
         arms: Vec<IfArm>,
@@ -367,7 +373,6 @@ pub(super) enum Stmt {
         loop_line: u32,
         body_close: bool,
         break_close: Option<u8>,
-        scope_close: Option<u8>,
     },
     GenericFor {
         /// The first of the three hidden registers; the visible variables
@@ -380,7 +385,6 @@ pub(super) enum Stmt {
         call_line: u32,
         body_close: bool,
         break_close: Option<u8>,
-        scope_close: Option<u8>,
     },
     /// `function target() end` assigning a closure.
     Function {

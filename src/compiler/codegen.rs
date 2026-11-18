@@ -28,9 +28,10 @@
 //! `do local dead = {} end sink = obj.flag; local t = {}` that overwrite is
 //! what frees `dead` at the constructor. Those dispatches go instead through
 //! execution-side fusion that reads the cell and stores the scratch register
-//! at each site. A compile-time rewrite is still open when it leaves every
-//! register's value at every collection point unchanged, such as merging
-//! adjacent `LOAD_NIL`s.
+//! at each site. A compile-time rewrite is open when it leaves every
+//! register's value at every collection point unchanged: `load_nil` widens
+//! an adjacent `LOAD_NIL`, and loops emit no exit `CLOSE` (`Stmt::While`
+//! says why none is needed).
 
 use super::Bytecode;
 use super::ast::{
@@ -72,6 +73,7 @@ pub(super) fn generate(chunk: &mut Bytecode, body: &FunctionBody) -> Result<()> 
         max_stack: u16::from(body.num_params),
         locals: &body.locals,
         loops: Vec::new(),
+        label: 0,
     };
     generator.stmts(&body.body)?;
     generator.line = body.end_line;
@@ -133,6 +135,9 @@ struct Generator<'f> {
     max_stack: u16,
     locals: &'f [LocalDecl],
     loops: Vec<LoopGen>,
+    /// The highest address known to be a jump target, so `load_nil` never
+    /// widens an instruction that a jump enters after.
+    label: usize,
 }
 
 impl Generator<'_> {
@@ -140,6 +145,24 @@ impl Generator<'_> {
         self.code.push(instr);
         self.lines.push(self.line);
         self.code.len() - 1
+    }
+
+    /// Nil `count` registers from `first`, widening the previous instruction
+    /// when it is a `LOAD_NIL` ending at `first` and no jump enters here.
+    /// Every register holds the same value at every collection point either
+    /// way: `LOAD_NIL` neither allocates nor polls, so nothing observes the
+    /// state between the two writes.
+    fn load_nil(&mut self, first: u16, count: u16) {
+        if self.label < self.code.len()
+            && let Some(prev) = self.code.last_mut()
+            && prev.opcode() == Instr::OP_LOAD_NIL
+            && u32::from(prev.a()) + u32::from(prev.b()) == u32::from(first)
+        {
+            // Both ranges lie inside the frame, so their union does too.
+            *prev = Instr::load_nil(prev.a(), prev.b() + count);
+            return;
+        }
+        self.emit(Instr::load_nil(first, count));
     }
 
     fn emit_at(&mut self, instr: Instr, line: u32) -> usize {
@@ -236,7 +259,7 @@ impl Generator<'_> {
     fn discharge_into(&mut self, val: Val, dst: u16) {
         match val {
             Val::Nil => {
-                self.emit(Instr::load_nil(dst, 1));
+                self.load_nil(dst, 1);
             }
             Val::True => {
                 self.emit(Instr::load_bool(dst, true));
@@ -337,7 +360,18 @@ impl Generator<'_> {
         self.emit(Instr::jump(0))
     }
 
+    /// Mark the next instruction's address as a jump target and return it.
+    /// A backward target is marked here, when its address is captured,
+    /// because the jump to it is patched only after the loop body has been
+    /// emitted, too late to stop `load_nil` widening across it.
+    fn label(&mut self) -> usize {
+        self.label = self.code.len();
+        self.label
+    }
+
     fn patch(&mut self, pc: usize, target: usize) -> Result<()> {
+        // Every target is at or below the next address when it is patched.
+        self.label = self.label.max(target);
         let offset = Self::checked_jump_offset(pc, target)?;
         self.code[pc] = self.code[pc].with_offset(offset);
         Ok(())
@@ -405,7 +439,7 @@ impl Generator<'_> {
                 let count = *count;
                 if values.is_empty() {
                     let reg = self.reserve(count as u16)?;
-                    self.emit(Instr::load_nil(reg, count as u16));
+                    self.load_nil(reg, count as u16);
                 } else {
                     self.explist_to_regs(values, count)?;
                 }
@@ -446,10 +480,9 @@ impl Generator<'_> {
                 body,
                 body_close,
                 break_close,
-                scope_close,
             } => {
                 let saved = self.nactive;
-                let start = self.code.len();
+                let start = self.label();
                 let exits = self.cond_false(cond)?;
                 self.loops.push(LoopGen {
                     breaks: Vec::new(),
@@ -463,17 +496,16 @@ impl Generator<'_> {
                 self.patch(back, start)?;
                 self.patch_here(&exits)?;
                 self.finish_loop()?;
-                self.close_scope(*scope_close, saved);
+                self.close_scope(None, saved);
             }
             Stmt::Repeat {
                 body,
                 cond,
                 body_close,
                 break_close,
-                scope_close,
             } => {
                 let saved = self.nactive;
-                let start = self.code.len();
+                let start = self.label();
                 self.loops.push(LoopGen {
                     breaks: Vec::new(),
                     break_close: *break_close,
@@ -494,7 +526,7 @@ impl Generator<'_> {
                     self.patch(pc, start)?;
                 }
                 self.finish_loop()?;
-                self.close_scope(*scope_close, saved);
+                self.close_scope(None, saved);
             }
             Stmt::If { arms, else_block } => self.if_stmt(arms, else_block.as_ref())?,
             Stmt::NumericFor {
@@ -507,7 +539,6 @@ impl Generator<'_> {
                 loop_line,
                 body_close,
                 break_close,
-                scope_close,
                 ..
             } => {
                 self.error_line = *prep_line;
@@ -521,6 +552,7 @@ impl Generator<'_> {
                 self.reserve(1)?;
                 self.nactive = self.freereg;
                 let prep = self.emit_at(Instr::for_prep(base, 0), *prep_line);
+                self.label();
                 self.loops.push(LoopGen {
                     breaks: Vec::new(),
                     break_close: *break_close,
@@ -533,7 +565,7 @@ impl Generator<'_> {
                 self.patch(lp, prep + 1)?;
                 self.patch(prep, lp + 1)?;
                 self.finish_loop()?;
-                self.close_scope(*scope_close, saved);
+                self.close_scope(None, saved);
             }
             Stmt::GenericFor {
                 base,
@@ -543,7 +575,6 @@ impl Generator<'_> {
                 call_line,
                 body_close,
                 break_close,
-                scope_close,
             } => {
                 self.error_line = *call_line;
                 let saved = self.nactive;
@@ -558,7 +589,7 @@ impl Generator<'_> {
                 // structure rather than three. The body's CLOSE runs before
                 // the next call overwrites the visible variables.
                 let entry = self.emit_at(Instr::jump(0), *call_line);
-                let body_start = self.code.len();
+                let body_start = self.label();
                 self.loops.push(LoopGen {
                     breaks: Vec::new(),
                     break_close: *break_close,
@@ -572,7 +603,7 @@ impl Generator<'_> {
                 let back = self.emit_at(Instr::tfor_loop(base, 0), *call_line);
                 self.patch(back, body_start)?;
                 self.finish_loop()?;
-                self.close_scope(*scope_close, saved);
+                self.close_scope(None, saved);
             }
             Stmt::Function {
                 target,
@@ -655,7 +686,7 @@ impl Generator<'_> {
         if have < want {
             let missing = want - have;
             let reg = self.reserve(missing)?;
-            self.emit(Instr::load_nil(reg, missing));
+            self.load_nil(reg, missing);
         } else if have > want {
             self.freereg = base + want;
         }
@@ -720,6 +751,16 @@ impl Generator<'_> {
     /// is copied before the right-hand side runs and every value lands in a
     /// fresh register, so the stores, last target first, see the operands
     /// and values as they were evaluated.
+    ///
+    /// Writing local targets directly instead of staging and moving back is
+    /// refused: staging overwrites the scratch registers, and they are GC
+    /// roots. In `local a, b; do local dead = {} end; a, b = 1, 2; local t,
+    /// pad = {}` the staged value is what frees `dead` at the constructor;
+    /// direct writes leave it rooted there. Equal roots would need proof that
+    /// the scratch slots are overwritten identically before any collection
+    /// point on every path, which is the dataflow this generator does not do.
+    /// Fusing the trailing moves while doing the same writes in order is the
+    /// shape that keeps roots unchanged.
     fn multi_assign(&mut self, targets: &[Place], values: &[Expr], line: u32) -> Result<()> {
         self.error_line = line;
         let operands_base = self.freereg;
@@ -1347,6 +1388,7 @@ mod tests {
             max_stack: freereg,
             locals: &[],
             loops: Vec::new(),
+            label: 0,
         }
     }
 

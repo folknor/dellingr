@@ -232,28 +232,6 @@ typed-region work (PERF-002); the plan is designed by that consumer.
 
 **Classification:** rewrite, residue unmeasured.
 
-## PERF-039 - Root-preserving codegen peepholes
-
-Raised while refusing the whole-function optimizer (reasoning at the
-`codegen.rs` header). Seen in `--dump-bytecode`, benefit unestablished: none
-of these sits in a registered workload's hot loop.
-
-- Adjacent `local a` `local b` emit `LOAD_NIL 2 1; LOAD_NIL 3 1`; one
-  `LOAD_NIL 2 2` writes the same slots when no jump enters the second.
-- A `repeat` with a captured body local emits `CLOSE` before the condition
-  branch and again on fall-through; the second has nothing open to close
-  (a `break` closes on its own path).
-- Multiple assignment stages into scratch and `MOVE`s back; writing the
-  targets directly (last first) keeps roots only where the scratch slots are
-  known to hold no heap value and no target is read by a later value. The
-  numeric-loop executor's "publish before the first checkpoint" rule is the
-  model for which skipped writes are unobservable.
-
-Each keeps every register's value at every GC checkpoint; one that does not
-is the refused class.
-
-**Classification:** local, unmeasured.
-
 ## PERF-015 - Inherited reads re-resolve every table on the path
 
 Raised by the lookup hunter; narrowed after a build and measurement.

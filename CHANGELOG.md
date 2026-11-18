@@ -65,6 +65,13 @@ tick budgets and re-record replays.
   or `ipairs` loop ends is now observed at the next safepoint after the
   loop rather than before the final step. Old binaries reject saves
   containing the new opcodes as invalid bytecode.
+- **Replay-visible:** adjacent nil loads (consecutive value-less `local`
+  statements, `nil` arguments or values side by side, nil padding after a
+  `nil` value) compile to one `LOAD_NIL` when no jump enters between them,
+  and a loop whose body locals are captured no longer emits a `CLOSE` after
+  its exit, which every exit path had already done. Costs, results and
+  register contents at every collection point are unchanged; save bytes and
+  `--dump-bytecode` listings change.
 - `string.gmatch` iterator state no longer carries the `compile_charged`
   flag, so `GmatchStateFault::CompileFlagKeyMissing` and `CompileFlagInvalid`
   are removed. A `string.format` literal run that crosses the string size cap
