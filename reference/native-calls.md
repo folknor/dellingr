@@ -227,7 +227,7 @@ marker, which is the quickest way to see what a change touched.
 The recurring native stack of each scenario's cycle, as printed by the
 on-demand probe `brokkr test native_bytes_per_level`, which covers dev and
 release through the sweeps configured in `brokkr.toml`. Measured on the tree
-of the commit that makes `State` unsized (parent bea3fdd), on bygg (x86-64
+of the commit that appends `gsub` callback results in place (parent 6a6c2b2), on bygg (x86-64
 Linux),
 `rustc 1.101.0-nightly (249c1e4e3 2026-11-05)`, with that host's global
 cargo configuration. Release is Cargo's default release profile (the
@@ -251,65 +251,66 @@ separately.
 |---|---|---|---|
 | `index_field` | 10592 | 608 | 608 |
 | `index_method` | 10592 | 608 | 608 |
-| `index_key` | 10560 | 688 | 688 |
-| `index_rust` | 12784 | 1072 | 1072 |
+| `index_key` | 10560 | 672 | 672 |
+| `index_rust` | 12816 | 1088 | 1088 |
 | `newindex_field` | 10816 | 720 | 720 |
 | `newindex_key` | 10592 | 704 | 704 |
-| `newindex_rust` | 13008 | 1184 | 1184 |
+| `newindex_rust` | 13040 | 1200 | 1200 |
 | `length` | 10448 | 496 | 496 |
 | `string_index_field` | 10592 | 608 | 608 |
-| `string_index_key` | 10560 | 688 | 688 |
+| `string_index_key` | 10560 | 672 | 672 |
 | `index_string_handler` | 10592 | 608 | 608 |
 | `string_library_index` | 10592 | 608 | 608 |
-| `host_get_table` | 12288 | 976 | 976 |
-| `host_get_table_string` | 12288 | 976 | 976 |
-| `host_set_table` | 12400 | 976 | 992 |
-| `host_call` | 11824 | 912 | 912 |
-| `host_anchor` | 12416 | 1088 | 1088 |
-| `host_invoke` | 12384 | 960 | 960 |
-| `host_tostring_bytes` | 12912 | 1264 | 1264 |
-| `host_to_string_with_meta` | 13088 | 1312 | 1312 |
-| `tostring` | 12032 | 1088 | 1088 |
-| `print` | 12544 | 1264 | 1264 |
-| `format` | 13872 | 1536 | 1536 |
-| `error_tostring` | 12736 | 1376 | 1376 |
-| `sort_comparator` | 13840 | 1392 | 1392 |
-| `sort_comparator_right` | 13840 | 1392 | 1392 |
-| `sort_comparator_sortdown` | 13840 | 1392 | 1392 |
-| `callable_rust` | 14032 | 1472 | 1472 |
-| `tail_rust` | 12032 | 896 | 896 |
-| `tail_callable_rust` | 12224 | 976 | 976 |
-| `sort_metamethods_comparator` | 13568 | 1520 | 1520 |
-| `sort_metamethods_length` | 11824 | 1120 | 1120 |
-| `sort_metamethods_read` | 13024 | 1280 | 1280 |
-| `sort_metamethods_write` | 13136 | 1280 | 1296 |
-| `insert_length` | 12064 | 1152 | 1152 |
-| `insert_shift_read` | 12352 | 1136 | 1136 |
-| `insert_shift_write` | 12480 | 1136 | 1152 |
-| `insert_value` | 12480 | 1136 | 1152 |
-| `remove_length` | 12032 | 1104 | 1104 |
-| `remove_read` | 12320 | 1088 | 1088 |
-| `remove_shift_read` | 12320 | 1088 | 1088 |
-| `remove_shift_write` | 12448 | 1088 | 1104 |
-| `remove_clear` | 12448 | 1088 | 1104 |
-| `concat_length` | 12560 | 1120 | 1120 |
-| `concat_read` | 12848 | 1104 | 1104 |
-| `move_read` | 12640 | 1136 | 1136 |
-| `move_write` | 12768 | 1072 | 1088 |
-| `unpack_length` | 11984 | 1056 | 1056 |
-| `unpack_read` | 12272 | 1040 | 1040 |
-| `gsub_empty_function` | 13536 | 1504 | 1504 |
-| `gsub_plain_function` | 13392 | 1504 | 1504 |
-| `gsub_pattern_function` | 16800 | 3104 | 3168 |
-| `gsub_pattern_captures` | 16800 | 3104 | 3168 |
-| `gsub_empty_table` | 13424 | 1440 | 1440 |
-| `gsub_plain_table` | 13280 | 1440 | 1440 |
-| `gsub_pattern_table` | 16688 | 3040 | 3104 |
-| `tfor_lua` | 10608 | 736 | 736 |
-| `tfor_ipairs` | 12432 | 1120 | 1120 |
-| `tfor_host_iterator` | 12288 | 1008 | 1008 |
+| `host_get_table` | 12368 | 992 | 992 |
+| `host_get_table_string` | 12368 | 992 | 992 |
+| `host_set_table` | 12480 | 992 | 992 |
+| `host_call` | 11904 | 928 | 928 |
+| `host_anchor` | 12496 | 1104 | 1104 |
+| `host_invoke` | 12464 | 976 | 976 |
+| `host_tostring_bytes` | 12992 | 1280 | 1280 |
+| `host_to_string_with_meta` | 13168 | 1328 | 1328 |
+| `tostring` | 12112 | 1104 | 1104 |
+| `print` | 12624 | 1280 | 1280 |
+| `format` | 13952 | 1552 | 1552 |
+| `error_tostring` | 12816 | 1392 | 1392 |
+| `sort_comparator` | 13920 | 1408 | 1408 |
+| `sort_comparator_right` | 13920 | 1408 | 1408 |
+| `sort_comparator_sortdown` | 13920 | 1408 | 1408 |
+| `callable_rust` | 14112 | 1488 | 1488 |
+| `tail_rust` | 12112 | 912 | 912 |
+| `tail_callable_rust` | 12304 | 992 | 992 |
+| `sort_metamethods_comparator` | 13648 | 1536 | 1536 |
+| `sort_metamethods_length` | 11904 | 1136 | 1136 |
+| `sort_metamethods_read` | 13104 | 1296 | 1296 |
+| `sort_metamethods_write` | 13216 | 1296 | 1296 |
+| `insert_length` | 12144 | 1168 | 1168 |
+| `insert_shift_read` | 12432 | 1152 | 1152 |
+| `insert_shift_write` | 12560 | 1152 | 1152 |
+| `insert_value` | 12560 | 1152 | 1152 |
+| `remove_length` | 12112 | 1120 | 1120 |
+| `remove_read` | 12400 | 1104 | 1104 |
+| `remove_shift_read` | 12400 | 1104 | 1104 |
+| `remove_shift_write` | 12528 | 1104 | 1104 |
+| `remove_clear` | 12528 | 1104 | 1104 |
+| `concat_length` | 12640 | 1136 | 1136 |
+| `concat_read` | 12928 | 1120 | 1120 |
+| `move_read` | 12720 | 1152 | 1152 |
+| `move_write` | 12848 | 1088 | 1088 |
+| `unpack_length` | 12064 | 1072 | 1072 |
+| `unpack_read` | 12352 | 1056 | 1056 |
+| `gsub_empty_function` | 13136 | 1520 | 1520 |
+| `gsub_plain_function` | 12992 | 1520 | 1520 |
+| `gsub_pattern_function` | 16400 | 3104 | 3184 |
+| `gsub_pattern_captures` | 16400 | 3104 | 3184 |
+| `gsub_empty_table` | 13264 | 1456 | 1456 |
+| `gsub_plain_table` | 13120 | 1456 | 1456 |
+| `gsub_pattern_table` | 16528 | 3040 | 3120 |
+| `tfor_lua` | 10608 | 720 | 720 |
+| `tfor_ipairs` | 12464 | 1120 | 1120 |
+| `tfor_host_iterator` | 12320 | 1008 | 1008 |
 | `chain_index` | 0 | 0 | 0 |
 | `chain_newindex` | 0 | 0 | 0 |
 
-The largest recurring cycle is `gsub_pattern_function` (and its equals) in
-every column. No metamethod chain step costs native stack in any setting.
+The largest recurring cycle is `gsub_pattern_table` in dev and
+`gsub_pattern_function` (and its equal `gsub_pattern_captures`) in both
+release columns. No metamethod chain step costs native stack in any setting.

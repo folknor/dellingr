@@ -277,7 +277,7 @@ String library (the rule and its reasoning are under "String costs" above):
 - `find`, `match`, `gsub`: 1 per call, plus 1 per matcher step on the
   Lua-pattern path, or per substring-scan comparison on the plain path. A call
   that runs no step (an empty pattern or needle, `init` past the end, a `gsub`
-  limit of zero) costs 1. Captures, `gsub` output and replacement templates
+  limit of zero) costs 1. Captures, `gsub` output and reading the replacement
   are free.
 - `gmatch`: 1 when the iterator is created, then the matcher steps of each
   call. A leading `^`, which `gmatch` matches as a literal byte, runs the same

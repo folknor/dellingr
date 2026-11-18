@@ -830,6 +830,21 @@ impl State {
         })
     }
 
+    /// Appends a `gsub` replacement result, rooted on top of the stack, to
+    /// `out` without an owned copy: a string from the pool, a number in its
+    /// default spelling. Any other type comes back as `Err(type)`, before the
+    /// size cap is checked. Out of line so the number rendering's scratch is
+    /// not part of the replacement frames, which stay live across the
+    /// replacement call's native re-entry. The stack is unchanged.
+    #[inline(never)]
+    pub(crate) fn append_gsub_result_top(
+        &self,
+        out: &mut Vec<u8>,
+    ) -> Result<std::result::Result<(), super::LuaType>> {
+        let val = self.at_index(-1)?;
+        self.append_concat_value(val, out)
+    }
+
     /// Pushes element `key` of the table at `idx` for `unpack` and returns
     /// true, or returns false with nothing pushed when the element needs an
     /// `__index` handler (see `sequence_raw_get`). The push makes the same

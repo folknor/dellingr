@@ -353,6 +353,7 @@ host and compiler, so its row does not compare with the one above it); the
 | bygg, same `rustc`: library leaves in call dispatch, on top of 5e7a743 | 16576 | 3040 | 2992 |
 | bygg, same `rustc`: typed `State::invoke`, on top of b6da85b (b6da85b itself measured 3008 / 3056 in release; dev not re-measured) | 16576 | 3024 | 3072 |
 | bygg, same `rustc`: unsized `State`, on top of bea3fdd (bea3fdd itself measured 16576 / 3024 / 3072) | 16800 | 3104 | 3168 |
+| bygg, same `rustc`: `gsub` callback results appended in place, on top of 6a6c2b2 (6a6c2b2 itself measured 16880 / 3120 / 3184) | 16528 | 3104 | 3184 |
 
 ### 2026-11-18: unsized `State`
 

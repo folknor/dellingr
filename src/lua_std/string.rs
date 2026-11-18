@@ -825,17 +825,19 @@ fn append_function_replacement(
             StringPatternFunction::Gsub,
         )?;
     } else {
-        let t = state.typ(-1);
-        if !matches!(t, LuaType::String | LuaType::Number) {
-            return Err(
-                state.library_error(LibraryError::InvalidGsubReplacementValue { value_type: t })
-            );
-        }
-        let val = state.bytes_with_default_string_coercion(-1)?;
-        state.pop(1)?;
-        append_bytes(out, &val)?;
+        append_gsub_result(state, out, 1)?;
     }
     Ok(())
+}
+
+/// Append the replacement value on top of the stack, read in place while it
+/// is still rooted there, then pop `pop` slots. A value that is neither a
+/// string nor a number raises before the size cap is checked.
+fn append_gsub_result(state: &mut State, out: &mut Vec<u8>, pop: isize) -> Result<()> {
+    if let Err(value_type) = state.append_gsub_result_top(out)? {
+        return Err(state.library_error(LibraryError::InvalidGsubReplacementValue { value_type }));
+    }
+    state.pop(pop)
 }
 
 fn append_gsub_replacement(
@@ -872,17 +874,7 @@ fn append_gsub_replacement(
                     StringPatternFunction::Gsub,
                 )?;
             } else {
-                let t = state.typ(-1);
-                if !matches!(t, LuaType::String | LuaType::Number) {
-                    return Err(
-                        state.library_error(LibraryError::InvalidGsubReplacementValue {
-                            value_type: t,
-                        }),
-                    );
-                }
-                let val = state.bytes_with_default_string_coercion(-1)?;
-                state.pop(2)?;
-                append_bytes(out, &val)?;
+                append_gsub_result(state, out, 2)?;
             }
         }
         _ => {
@@ -1374,6 +1366,13 @@ fn gsub_lua_pattern(
             result.reserve(s_len);
         }
         append_subject_range(state, &mut result, s, copied..range.start)?;
+        // The capture buffer is reused across matches. Both replacement arms
+        // take the same slice, and a function replacement validates all its
+        // arguments before pushing the call window. Reading captures off the
+        // matcher instead was weighed and not taken: the copy is a few Copy
+        // values beside a capture push (an intern for a byte capture) and a
+        // table read or Lua call, and a second capture source would have to
+        // reach the frames live across the replacement's native re-entry.
         captures.clear();
         captures.extend((0..matcher.num_matches()).map(|i| matcher.capture(i)));
         crate::native_call!(

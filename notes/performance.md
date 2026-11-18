@@ -314,29 +314,6 @@ cache was declined at `array_len`. What remains:
 
 **Classification:** local.
 
-## PERF-025 - Callback gsub replacements copy the returned value and captures
-
-Raised by the strings hunter. The string and number replacement half landed
-(`gsub_with_string`: one borrow for the whole scan, replacement read in
-place, no template, no plan cache); what remains is the callback half.
-
-**Bottleneck:** `append_function_replacement` and the table arm of
-`append_gsub_replacement` (`string.rs`) copy the returned string into a
-temporary `Vec` (`bytes_with_default_string_coercion(-1)`) before appending
-it, and `gsub_lua_pattern` still copies the matcher's captures into a `Vec`
-per match for those paths.
-
-**Redesign:** append the returned bytes straight from the stack slot before
-popping it, and hand the callback paths the published captures without the
-copy. Keep the matcher-live-across-callback frame cost in view
-(notes/optimizations.md, "Lua-pattern gsub keeps the matcher live across the
-replacement call"): any new local must not grow the re-entry cycle.
-
-**Risks:** callback effects survive a later failure; the copy is per match
-against a Lua call per match, so the payoff is small and unmeasured.
-
-**Classification:** local, low conviction.
-
 ## PERF-033 - Host global and field access resolves names and tables afresh
 
 Raised by the host-boundary hunter.
