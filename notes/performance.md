@@ -168,26 +168,15 @@ shows them.
 
 **Classification:** local changes, smaller ceiling.
 
-## PERF-012 - Call-site residue: CALL then MOVE continuation, argument-guarded helper specialization
+## PERF-012 - Argument-guarded helper specialization
 
-Raised by the codegen hunter (its second rewrite). Narrowed after a spar: an
-encoding with independent callee, argument and result locations and splicing
-proven helpers into the caller were refused (reasoning at `Generator::call`
-in `codegen.rs`). Argument slots already are parameter slots; a result
-destination drops a store that is a GC root; exact inlining rebuilds a Lua
-activation. The per-activation overhead every Lua call pays (one record instead
-of `Frame` plus `CallInfo`, the per-call `Arc` clones) is the
+Raised by the codegen hunter (its second rewrite). Independent call operands
+and helper splicing are refused at `Generator::call` in `codegen.rs`; running
+the MOVE after a Lua return inside `return_to_caller` was built, measured
+and refused there. The per-activation overhead every Lua call pays is the
 `optimizations.md` call-path entry, not this one.
 
-**Residue 1, `CALL b .. 1; MOVE x b` continuation:** a derived continuation,
-selected from admitted pairs (no opcode, no save-byte change), could finish
-the return as today (full result-count check, captures closed, caller top
-restored with the value at `b`), then write `x` and resume past the MOVE.
-Both stores stay; only the MOVE dispatch goes. Must use the actual next
-instruction, never assignment syntax (`x, y = f(), x`), and keep the
-canonical MOVE for any other incoming edge. One dispatch per call: unmeasured.
-
-**Residue 2, argument-guarded specialization:** a verified prototype could
+**Residue, argument-guarded specialization:** a verified prototype could
 carry a derived numeric plan selected by guards on its arguments (`x` proven
 a number skips the tag test in `return x + 1`), and a typed numeric-for
 region could then extend across such a call. Every charge, refusal point,
@@ -196,7 +185,7 @@ out or capture may skip the physical activation on success and materialize
 the logical callee and cursor only on its failure path. Belongs with the
 typed-region work (PERF-002); the plan is designed by that consumer.
 
-**Classification:** rewrite, residue unmeasured.
+**Classification:** rewrite, unmeasured; designed by PERF-002.
 
 ## PERF-015 - Inherited reads re-resolve every table on the path
 

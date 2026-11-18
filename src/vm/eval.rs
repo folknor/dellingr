@@ -1213,6 +1213,19 @@ impl State {
         // offset-sensitive swings either way, no net saving. The fill is
         // independent tag stores that the store buffer absorbs behind the
         // call machinery, so its store count is not its cost.
+        //
+        // Running the caller's next instruction here when it is the
+        // `OP_MOVE` of `x = f()` (keyed on the real next instruction, the
+        // standalone arm kept for other edges) was built and measured, and
+        // refused. It swaps a dispatch for a peek, a branch and a cursor
+        // write on every fixed-count return, hit or miss; both paths still
+        // copy. On bygg against 7be2d99, `global` (about 89 million such
+        // returns per process, so 1 ns per hit would be about 89 ms) ran
+        // 6151 and 6137 ms fused against 6168 and 5634 ms base, the base
+        // binary itself swinging 5.6 to 6.2 s between iterations;
+        // `arithmetic`, whose returns are misses, ran 1789 against 1787 ms.
+        // No repeatable net win in the measured workloads. Reopen only with
+        // a shape that removes the dispatch without a peek on misses.
         if let RetCount::Fixed(_) = expected {
             let top = caller.top;
             self.stack.resize(top, Val::Nil);
