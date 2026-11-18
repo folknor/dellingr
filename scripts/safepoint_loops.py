@@ -16,9 +16,9 @@ the scoped files, outside test code, must either
   MAX_STRING_BYTES, a table's storage, a fixed count) or `safepoint:` (where
   it polls instead, such as a callee that polls per step).
 
-Scope: the standard library, the pattern matcher, the table operations
-under src/vm/table_ops.rs and the `math.random` sampler under src/vm/rng.rs,
-which hold the native library work. Iteration
+Scope: the standard library, the pattern matcher, the dispatch leaves
+under src/vm/leaf.rs, the table operations under src/vm/table_ops.rs and
+the `math.random` sampler under src/vm/rng.rs. Iteration
 through closures (`for_each`, `fold`, `map`) is not a loop here and is not
 checked. Uses native_calls' Rust lexer, so comments and literals cannot
 supply a poll. Prints `ok` when every loop is decided.
@@ -30,7 +30,7 @@ import sys
 import native_calls as rust
 
 SCOPE_DIRS = ("src/lua_std/", "src/patterns/")
-SCOPE_FILES = ("src/lua_std.rs", "src/vm/rng.rs", "src/vm/table_ops.rs")
+SCOPE_FILES = ("src/lua_std.rs", "src/vm/leaf.rs", "src/vm/rng.rs", "src/vm/table_ops.rs")
 
 # `for` not followed by `<` (a higher-ranked bound), `while` and `loop`.
 LOOP = re.compile(r"\b(?:(for)\b(?!\s*<)|while\b|loop\b)")
