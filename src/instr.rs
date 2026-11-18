@@ -1407,18 +1407,48 @@ mod tests {
 
     #[test]
     fn comparison_opcodes_round_trip() {
-        for op in [
-            CompareOp::Lt,
-            CompareOp::Le,
-            CompareOp::Gt,
-            CompareOp::Ge,
-            CompareOp::Eq,
-            CompareOp::Ne,
+        for (op, number_opcode) in [
+            (CompareOp::Lt, Instr::OP_BR_LT_RK),
+            (CompareOp::Le, Instr::OP_BR_LE_RK),
+            (CompareOp::Gt, Instr::OP_BR_GT_RK),
+            (CompareOp::Ge, Instr::OP_BR_GE_RK),
+            (CompareOp::Eq, Instr::OP_BR_EQ_RK),
+            (CompareOp::Ne, Instr::OP_BR_NE_RK),
         ] {
             assert_eq!(CompareOp::from_value_opcode(op.value_opcode()), Some(op));
             assert_eq!(CompareOp::from_branch_opcode(op.branch_opcode()), Some(op));
+            assert_eq!(op.branch_number_opcode(), number_opcode);
+            assert_eq!(
+                CompareOp::from_branch_number_opcode(number_opcode),
+                Some(op)
+            );
+            let inst = Instr::branch_compare_number(op, 0xffff, 0xfffe, -12345);
+            assert_eq!(inst.opcode(), number_opcode);
+            assert_eq!((inst.a(), inst.b(), inst.sj()), (0xffff, 0xfffe, -12345));
+            assert!(inst.reserved_bits_zero());
         }
         assert_eq!(CompareOp::from_value_opcode(Instr::OP_JMP), None);
+    }
+
+    #[test]
+    fn string_and_nil_compare_branch_constructors() {
+        for (equal, string_opcode, nil_opcode) in [
+            (true, Instr::OP_BR_EQ_RS, Instr::OP_BR_EQ_NIL),
+            (false, Instr::OP_BR_NE_RS, Instr::OP_BR_NE_NIL),
+        ] {
+            let string = Instr::branch_equal_string(equal, 0xffff, 0xfffe, -12345);
+            assert_eq!(string.opcode(), string_opcode);
+            assert_eq!(
+                (string.a(), string.b(), string.sj()),
+                (0xffff, 0xfffe, -12345)
+            );
+            assert!(string.reserved_bits_zero());
+
+            let nil = Instr::branch_equal_nil(equal, 0xffff, 12345);
+            assert_eq!(nil.opcode(), nil_opcode);
+            assert_eq!((nil.a(), nil.b(), nil.sj()), (0xffff, 0, 12345));
+            assert!(nil.reserved_bits_zero());
+        }
     }
 
     #[test]
