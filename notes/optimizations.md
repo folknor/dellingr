@@ -448,9 +448,10 @@ Requirements the rewrite must meet:
   bring the interval below half its period: with g generation bits the
   interval must stay under 2^(g-1) collections. Any new side table holding
   weak handles needs the same pruning.
-- **Handles.** slotmap keys are 64 bits (index plus generation) and cannot
-  produce narrow keys, so objects (`GcHeap`) and the string pool need a
-  custom generational arena. Keeping a 32-bit index avoids a new limit on
+- **Handles.** Objects (`GcHeap`) and the string pool already sit in the
+  in-crate generational arena (`object/arena.rs`), whose keys are 64 bits
+  (index plus generation, slotmap's encoding) and would have to narrow.
+  Keeping a 32-bit index avoids a new limit on
   live objects; a narrower index is a new cap that needs a docs/limits.md
   entry and an error kind.
 - **Rust functions.** A `Val::RustFn` is already a 32-bit index into the
@@ -478,13 +479,12 @@ variant). The proposed shape: eight-byte tagged values; distinct table,
 closure and string tags; separate typed arenas addressed by compact indices; a
 structural split between strong values and weak handles, with generation
 metadata only in weak caches, validated before producing a strong value;
-allocation and mark metadata in pages with occupancy bitmaps. Collection
-benefits directly: `sweep` calls `SlotMap::retain`, which visits every
-historical slot including vacant ones, and the upvalue sweep likewise, so a
-temporary allocation peak raises later collection work indefinitely; typed
-pages sweep `occupied & !marked` and skip empty pages, and marking tests a side
-bitmap before fetching the payload instead of one lookup to colour and another
-to drain. Both hunters warned against squeezing the 64-bit slotmap key into the
+allocation and mark metadata in pages with occupancy bitmaps. The collector
+part of that landed on its own: the object, string and upvalue pools keep
+occupancy and mark bits beside their slots, and the sweep frees
+`occupied & !marked` over non-empty words only, so a past allocation peak no
+longer raises later collection work. What remains is typed arenas and compact
+handles. Both hunters warned against squeezing the 64-bit slotmap key into the
 payload or truncating generations (weak-cache and lifetime assumptions), and
 against a wrapper over the existing enum. The dispatch hunter suggested
 getting unboxed numeric intermediates in fused handlers first, then measuring

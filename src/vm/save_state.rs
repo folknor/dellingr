@@ -599,7 +599,7 @@ impl<'a> PathFinder<'a> {
                     _ => {}
                 },
                 PathTask::Object { ptr, path } => {
-                    let children = match &self.state.heap.get(ptr).raw {
+                    let children = match self.state.heap.get(ptr) {
                         RawObject::Table(table) => {
                             let (_, _, entries) = table.snapshot_entries();
                             PathObjectChildren::Table {
@@ -1281,7 +1281,7 @@ impl<'a> SaveBuilder<'a> {
         id: u32,
         tasks: &mut Vec<EncodeTask>,
     ) -> Result<(), SaveError> {
-        let pending = match &self.state.heap.get(ptr).raw {
+        let pending = match self.state.heap.get(ptr) {
             RawObject::Table(table) => {
                 let (array_len, array_slots, entries) = table.snapshot_entries();
                 // MAX_ARRAY_LEN keeps the logical length below 2^53.

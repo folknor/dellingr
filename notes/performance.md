@@ -568,27 +568,6 @@ saving is one short hash and two probes per field.
 
 **Classification:** micro, low conviction until measured.
 
-## PERF-038 - Sweep visits vacant slot-map slots up to the high-water mark
-
-Raised by the resident-payload pacing spar. Verified by reading the code. Not
-measured.
-
-**Bottleneck:** `GcHeap::collect` sweeps with `SlotMap::retain`, which visits
-every slot up to the map's historical high-water mark, occupied or not. A heap
-that once held K objects pays K slot visits on every later collection, even
-when few objects are live and collections come every few dozen allocations.
-Weighted pacing adds a route to a high-water mark: a large live string buys
-headroom for many small objects that then die together.
-
-**Redesign:** sweep only occupied slots, freeing in the existing slot order so
-free-list reuse and the version stepping `CACHE_PRUNE_INTERVAL` relies on stay
-the same. Related: the paged sweep in `optimizations.md` "8-byte NaN-boxed
-`Val`".
-
-**Risks:** free-list order is replay-visible through `%p` ids.
-
-**Classification:** local collector change.
-
 ---
 
 ## Accounts added to existing entries
@@ -604,7 +583,7 @@ them:
   hunter's single activation record and VM-owned continuations, with the heap,
   host and codegen hunters' overlapping points.
 - `optimizations.md` "8-byte NaN-boxed `Val`": dispatch hunter's compact value
-  and heap hunter's typed arenas and paged sweep, with the table hunter's
+  and heap hunter's typed arenas, with the table hunter's
   `TableStorage` footprint point.
 - `optimizations.md` "Shape-based polymorphic field IC": lookup and table
   hunters' shared layouts, and the lookup hunter's key-checked position reuse.
