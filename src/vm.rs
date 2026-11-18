@@ -193,6 +193,18 @@ impl State {
 
 /// State-local runtime data for one immutable bytecode chunk, and the owner
 /// of that chunk for the State's closures.
+///
+/// Execution runs the chunk's own `code`: there is no separate derived
+/// execution plan, and one is not built ahead of an optimization that needs
+/// it. A plan copied 1:1 from `code` removes no fetch, decode or dispatch.
+/// Changed save bytes alone do not motivate one either: compiler output may
+/// change save bytes within a format (docs/save-state.md, "Format release
+/// policy"). A derived form earns its place when an optimization benefits
+/// from keeping its executable form or the proof it relies on out of the
+/// persisted opcode set and out of what the snapshot verifier must admit from
+/// edited saves; that optimization then owns the proof, the fallback for code
+/// the proof does not cover, and the mapping its observable boundaries
+/// (fault lines, call-site records, cost prefixes, safepoints) need.
 #[derive(Debug)]
 struct BytecodeRuntime {
     /// The chunk. Also pins the pointer-derived `State::bytecode_caches`

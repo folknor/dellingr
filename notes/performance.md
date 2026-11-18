@@ -26,36 +26,6 @@ are listed at the end.
 
 ---
 
-## PERF-001 - Derived execution plan separate from canonical bytecode
-
-Raised as a constraint by the dispatch, cost-charging, lookup and codegen
-hunters; each of their rewrites needs it.
-
-**Bottleneck:** snapshots serialize raw instruction words, literal pools,
-templates, frame size, capture descriptors, cache counts and line
-information (`save_state.rs`, chunk serializer). Any in-place bytecode
-optimization (fusion, new operand forms, removed moves, region markers)
-changes snapshot bytes even when execution is equal, and changing emitted
-lookup instructions changes saved bytecode.
-
-**Redesign:** keep a canonical serialized program and derive a separate,
-unsaved optimized execution plan from it. Both freshly compiled programs and
-loaded snapshots enter the optimizer. `BytecodeRuntime` (`src/vm.rs`) is the
-lifecycle precedent, though immutable plans can be shared independently of
-State-local caches. Constants used only by optimized execution stay out of the
-canonical literal pools.
-
-**Constraints the plan must carry:** admission reserves the original frame
-footprint plus headroom against the global stack cap (`eval.rs` call
-admission), so a physically smaller frame must keep the logical reservation
-and refusal point. Stack slots are GC roots and rendered pointer identities
-are weak, so shortening a value's lifetime can change later identity
-rendering. Source-operation and logical-state information has to be carried
-through lowering rather than reconstructed after fusion.
-
-**Classification:** enabling rewrite; prerequisite for PERF-002, PERF-005,
-PERF-014 and the region accounting appended to `optimizations.md`.
-
 ## PERF-002 - Fused execution ops with intermediates in native locals
 
 Raised by the dispatch hunter (its lead rewrite) and the codegen hunter
@@ -79,6 +49,22 @@ information and temporary liveness. A vector of decoded micro-ops interpreted
 one by one would keep the bottleneck. The codegen hunter adds that a compiler
 can prove the induction value and an accumulator numeric through a loop, so
 the fused forms can skip tag tests.
+
+A separate unsaved execution stream (derived from verified bytecode, for
+fresh compiles and snapshot loads alike) is this entry's to build, not a
+prerequisite landed ahead of it: the comment on `BytecodeRuntime` in
+`src/vm.rs` records why. Its case here is that fused forms stay out of the
+persisted opcode set and out of what snapshot admission must accept. It owes
+what the hunt named as constraints: admission keeps the logical frame
+reservation and refusal point (`eval.rs` call admission plus
+`FRAME_HEADROOM`); values held only in native locals or in a shorter-lived
+register change GC roots and so later `%p` rendering; and a fused op that can
+fail or run out of budget at either constituent must identify the
+constituent reached and its charged prefix. `CallInfo.ip` can stay canonical
+if the executor records the canonical call site at the boundary. PERF-005,
+PERF-014 and region accounting need not wait on such a stream: proof
+metadata keyed by canonical pc, an IR emitting existing opcodes, or canonical
+block boundaries priced per State are each candidate shapes for them.
 
 **Payoff:** removes dispatches, ip updates, operand decode, temporary
 store/reload and repeated type checks together; the mixed workloads contain
