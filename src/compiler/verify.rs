@@ -849,7 +849,15 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
             // direction is admitted.
             Instr::OP_FOR_LOOP | Instr::OP_TFOR_LOOP => {
                 // No setup-dominance or hidden-control write proof here:
-                // dispatch must reject nonnumeric controls fallibly.
+                // dispatch must reject nonnumeric controls fallibly. Such a
+                // proof would not remove that check by itself: the canonical
+                // handler reads the controls out of `Val` slots, where a
+                // verifier fact is invisible to the payload match. It pays
+                // only by selecting a typed loop handler whose controls are
+                // already `f64`, and then it must cover the successful
+                // `FOR_PREP` edge dominating the loop, every register write
+                // in it (open-result spills included) and writes through an
+                // open upvalue a child closure took on a control slot.
                 check_registers(pc, a, 4, frame)?;
             }
             Instr::OP_TFOR_CALL => {

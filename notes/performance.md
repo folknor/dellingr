@@ -61,10 +61,32 @@ reservation and refusal point (`eval.rs` call admission plus
 register change GC roots and so later `%p` rendering; and a fused op that can
 fail or run out of budget at either constituent must identify the
 constituent reached and its charged prefix. `CallInfo.ip` can stay canonical
-if the executor records the canonical call site at the boundary. PERF-005,
-PERF-014 and region accounting need not wait on such a stream: proof
+if the executor records the canonical call site at the boundary. PERF-014
+and region accounting need not wait on such a stream: proof
 metadata keyed by canonical pc, an IR emitting existing opcodes, or canonical
 block boundaries priced per State are each candidate shapes for them.
+
+**Numeric-for loop regions.** The per-iteration tag check of the three hidden
+`FOR_LOOP` controls is not removable on its own: a verifier proof is invisible
+to the `Val` payload match in the canonical handler, and admitted bytecode
+must never reach a panic (comments at `instr_for_loop` and the verifier's
+`FOR_LOOP` arm). Its payoff comes only here, as a typed region that runs a
+whole proven loop with the controls, induction value and accumulators as
+`f64` locals: `bench/arithmetic`'s `for i = 1, 50000 do sum = sum + i * 2.5 -
+i / 3.0 end` drops five dispatches per iteration, the control tag checks, the
+duplicate induction write and the boxed temporaries. The proof that selects
+the region (canonical handler as fallback for anything it does not cover)
+must show the successful `FOR_PREP` edge dominates it, cover every register
+write in it including open-result spills, exclude writes through an open
+upvalue a child closure took on a control slot, and account for reads of any
+slot whose write is elided, after the loop included. Numeric-only locals add
+no GC roots and no snapshot fields (saves are quiescent). A guarded exact
+countdown is sound for step exactly `1.0` with finite integral endpoints
+within 2^53 - 1: count `limit - start` in `i64`, keep the original `f64` start
+for the first iteration (`-0.0`), poll at the canonical `FOR_LOOP` pc before
+publishing the next value, and leave a reassigned visible variable alone; all
+other inputs take the general float path, so docs/compatibility.md's f64 loop
+semantics hold.
 
 **Payoff:** removes dispatches, ip updates, operand decode, temporary
 store/reload and repeated type checks together; the mixed workloads contain
@@ -143,28 +165,6 @@ measured before and after.
 frame-size history of the `TFOR_CALL` arm.
 
 **Classification:** local changes, smaller ceiling.
-
-## PERF-005 - Numeric-for controls rechecked every iteration
-
-Raised by the dispatch and codegen hunters.
-
-**Bottleneck:** `FOR_LOOP` (`eval_control.rs`) reloads and tag-checks three
-hidden control registers each iteration. The compiler knows normal source
-cannot overwrite them, but the verifier proves bounds, not setup dominance or
-control-register integrity, and snapshot-admitted code can skip setup or
-overwrite controls.
-
-**Redesign:** stronger dataflow validation proving control-register
-integrity for optimized execution, unboxed controls and direction-specific
-loop forms; the visible loop variable shares the induction value only when
-reassignment and capture analysis allow.
-
-**Risks:** needs a proof or fallback for snapshot-admitted bytecode.
-Converting the loop to an integer trip count changes floating-point
-behaviour.
-
-**Classification:** local (dispatch hunter), part of the PERF-014 rewrite
-(codegen hunter).
 
 ## PERF-006 - Accounting owned by the invocation, not flushed at every frame transition
 
@@ -356,8 +356,8 @@ operations that can call Lua or Rust; operations that can fail, allocate or
 expose state; original charge sites, source locations and interrupt points),
 then propagation, copy coalescing, CSE, loop analysis and destination
 allocation before instruction selection. A nested-function analysis can prove
-many captures immutable. Feeds the typed fused forms of PERF-002 and the
-numeric-for proof of PERF-005.
+many captures immutable. Feeds the typed fused forms of PERF-002, its
+numeric-for loop regions included.
 
 **Risks:** a dead result can still owe a charge or type error; hoisting cannot
 hoist a charge or a failure; an eliminated computation keeps the charged

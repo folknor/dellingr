@@ -55,6 +55,11 @@ impl State {
         // Compiled bodies cannot write these hidden controls, but admission
         // proves register bounds, not setup dominance or runtime value types.
         // Edited snapshot bytecode may skip setup or overwrite a control.
+        // This fallible match stays even under a stronger admission proof:
+        // the proof is invisible to the `Val` payload read, and the panic it
+        // could license is what admitted bytecode must never reach. Faster
+        // numeric loops come from a typed loop region holding the controls
+        // as `f64` locals, with this handler as the fallback.
         let (Some(mut var), Some(limit), Some(step)) = (
             self.stack[slot].as_num(),
             self.stack[slot + 1].as_num(),
