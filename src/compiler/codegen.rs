@@ -585,8 +585,10 @@ impl Generator<'_> {
                 self.nactive = self.freereg;
                 // The iterator step sits below the body, as in Lua 5.4: an
                 // entry jump reaches it, and TFOR_LOOP is the back edge, so
-                // a continuing iteration dispatches two instructions of loop
-                // structure rather than three. The body's CLOSE runs before
+                // a continuing iteration runs two instructions of loop
+                // structure rather than three. TFOR_LOOP is emitted right after
+                // TFOR_CALL so the dispatch loop can run it from the TFOR_CALL
+                // arm as the next instruction. The body's CLOSE runs before
                 // the next call overwrites the visible variables.
                 let entry = self.emit_at(Instr::jump(0), *call_line);
                 let body_start = self.label();

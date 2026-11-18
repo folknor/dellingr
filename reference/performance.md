@@ -708,9 +708,24 @@ with snapshot; both `call_unguarded` copies 168; `begin_callable_call` 232;
 Generic-for iterator bookkeeping was tried both inside the iterator helper and
 behind a separate direct-path probe in the dispatch arm. Plain release dispatch
 grew from 776 to 792 and 808 bytes respectively, and removing the Rust
-iterator fallback's redundant error truncate did not reduce either figure. The
-eager record and flush before the iterator call stays; the comment at its site
-in `src/vm/frame.rs` points here.
+iterator fallback's redundant error truncate did not reduce either figure, so
+the eager record and flush before the iterator call stayed at the time.
+
+The idea was retried on bygg against d59e8b8, measured in bytes per scenario
+cycle (`native_bytes_per_level`) rather than `Frame::run` frame size: a
+`next`/`ipairs` step tried in the `TFOR_CALL` arm before the record and flush,
+with the following `TFOR_LOOP` run from the same arm through one outlined
+back-edge body. Release, with and without snapshot, kept every row except
+`tfor_lua` 720 to 640, `tfor_ipairs` 1120 to 1040, `tfor_host_iterator` 1008
+to 928 and `length` 496 to 480. Dev shrank every scenario cycle by 112 bytes
+(the three `tfor_` cycles by 208). Two variants were worse, in the same cycle
+measure: expanding the back edge twice as a macro cost dev 368 bytes per
+cycle, and forcing the fast step inline cost dev 48, while not forcing it cost
+release 16; so the step is forced inline only when debug assertions are off.
+That shape replaced the eager boundary. In one interleaved A-B-B-A pair of
+`wall` cells on bygg, `pairs` went from 1388 and 1385 ms at d59e8b8 to 1301
+and 1298 ms for the working tree on d59e8b8 (WARM 543.6 and 541.9 ms to 509.3
+and 507.8 ms; no same-binary control run).
 
 Removing the Rust callee from the stack at a call also stays. The contiguous
 callback ABI exposes every slot freed by removing the callee; retaining it

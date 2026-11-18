@@ -29,8 +29,12 @@ operand literals also stay in the chunk's literal pool as unused entries.
   runtime error ends a frame is charged first, so `cost_used` after a failed
   callback counts every executed costed opcode.
 - `set_cost_budget` also zeroes `cost_used`. Calling it from a Rust callback
-  mid-run is supported: pending opcode cost is flushed before every call out
-  of the dispatch loop, so the reset never races the batch.
+  mid-run is supported: pending opcode cost is flushed before every call
+  into a Rust callback, a metamethod handler or an iterator function, so the
+  reset never races the batch. (A generic `for` step that the dispatch loop
+  completes itself for `next` or the `ipairs` iterator invokes no iterator and
+  keeps the batch pending; for a step it declines, the batch is flushed before
+  the iterator call is attempted.)
 - Loading a snapshot restores the saved counters. Call `set_cost_budget`
   afterwards.
 - Stack-cap enforcement charges nothing.
@@ -73,7 +77,7 @@ extra budget), and Lua has no `pcall` to catch the error.
 - **Exposing the remaining budget to scripts.** The VM has no script-side
   accessor. A host that wants one registers its own function that returns
   `State::cost_remaining()`. Read from a Rust callback it is exact: the
-  dispatch loop flushes its batched opcode cost before every call out of it.
+  dispatch loop flushes its batched opcode cost before any Rust callback runs.
 
 ## Static opcode charges
 

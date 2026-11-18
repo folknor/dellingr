@@ -56,7 +56,7 @@ tick budgets and re-record replays.
   literal or `nil`, branches on the literal without loading it (opcodes
   70-79); `t["k"]` reads and stores like `t.k`, through the field cache;
   and the generic `for` step sits below its body, so `TFOR_LOOP` is now the
-  loop's polled back edge and a continuing iteration dispatches two loop
+  loop's polled back edge and a continuing iteration runs two loop
   instructions instead of three. Costs and results are unchanged. Frames
   can be smaller, so stack-cap refusals, register reuse and with it
   collection timing can move, and save bytes change. Bracket literal keys

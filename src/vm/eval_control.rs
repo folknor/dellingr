@@ -87,35 +87,52 @@ impl State {
         Ok(())
     }
 
-    /// TForCall: Call iterator(state, control) from the registers at `base`,
-    /// store results in the loop variable registers after them.
-    pub(super) fn instr_tfor_call(
+    /// The generic-for step for `next` and the `ipairs` iterator, done in
+    /// the dispatch loop: true when it wrote the loop variables, false when
+    /// the step needs the iterator call (`instr_tfor_call`). It recognizes
+    /// the catalog entries of `next` and the `ipairs` iterator, the same
+    /// identity `Val` equality and snapshot naming use. The fast paths are
+    /// semantically transparent: each does what its entry's function does.
+    /// They invoke no iterator or callback, read no meter, record no call
+    /// site and cannot fail, so the step needs neither a call-site record nor a
+    /// published cost batch.
+    ///
+    /// Forced inline only when debug assertions are off: measured in
+    /// `native_bytes_per_level` cycles, forcing it cost the dev build 48
+    /// bytes per cycle and not forcing it cost the release build 16.
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    pub(super) fn tfor_fast_step(
         &mut self,
         base: usize,
         num_vars: u8,
         cursor_slot: Option<u8>,
         caches: &RuntimeCaches,
-    ) -> Result<()> {
+    ) -> bool {
+        let Val::RustFn(f) = self.stack[base] else {
+            return false;
+        };
+        let state = self.stack[base + 1];
+        let control = self.stack[base + 2];
+        if f == crate::lua_std::NEXT {
+            return self.instr_tfor_call_next(base, state, control, num_vars, cursor_slot, caches);
+        }
+        if f == crate::lua_std::IPAIRS_ITER {
+            return self.instr_tfor_call_ipairs(base, state, control, num_vars);
+        }
+        false
+    }
+
+    /// TForCall: Call iterator(state, control) from the registers at `base`,
+    /// store results in the loop variable registers after them. The
+    /// dispatch arm tries `tfor_fast_step` first, then records the call site
+    /// and publishes the cost batch before this runs.
+    pub(super) fn instr_tfor_call(&mut self, base: usize, num_vars: u8) -> Result<()> {
         // Push iterator function, state, and control onto stack for call
         let iterator = self.stack[base];
         let state = self.stack[base + 1];
         let control = self.stack[base + 2];
 
         if let Val::RustFn(f) = iterator {
-            // The catalog entries of `next` and the `ipairs` iterator, the
-            // same identity `Val` equality and snapshot naming use. The fast
-            // paths are semantically transparent: each does what its entry's
-            // function does.
-            if f == crate::lua_std::NEXT
-                && self.instr_tfor_call_next(base, state, control, num_vars, cursor_slot, caches)
-            {
-                return Ok(());
-            }
-            if f == crate::lua_std::IPAIRS_ITER
-                && self.instr_tfor_call_ipairs(base, state, control, num_vars)
-            {
-                return Ok(());
-            }
             return crate::native_call!(
                 "instr_tfor_call->instr_tfor_call_rust_fn",
                 self.instr_tfor_call_rust_fn(f, base, state, control, num_vars)

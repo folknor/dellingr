@@ -120,6 +120,23 @@ impl Frame {
         Ok(())
     }
 
+    /// The generic for's back edge `step`, with `ip` already past it: the
+    /// `TFOR_LOOP` arm and the `TFOR_CALL` arm that runs it as the real next
+    /// instruction share this body. `TFOR_LOOP` is free, so neither entry
+    /// charges. Poll before the control moves, as FOR_LOOP does. A function
+    /// rather than a macro: a dev build gives each expansion's locals their
+    /// own slots in the dispatch frame, live across every native re-entry.
+    #[inline]
+    fn tfor_loop(state: &mut State, ip: &mut usize, base: usize, step: Instr) -> Result<()> {
+        const _: () = assert!(Instr::fixed_charge(Instr::OP_TFOR_LOOP).is_none());
+        let rl = base + step.a() as usize;
+        if !matches!(state.stack[rl + 3], Val::Nil) {
+            Self::branch(state, ip, step.sj())?;
+            state.stack[rl + 2] = state.stack[rl + 3];
+        }
+        Ok(())
+    }
+
     #[must_use]
     pub(super) fn nested_bytecode(&self, i: u16) -> &Arc<Bytecode> {
         &self.bytecode.nested[i as usize]
@@ -181,10 +198,12 @@ impl Frame {
         // Batch cost checking: the invocation owns one pending batch across
         // all its Lua frames. Lua calls, tail calls and returns into a Lua
         // caller carry it forward, since admission and return never touch
-        // the meter. It is published before anything that can (a Rust
-        // callee, a library leaf, a callable object, an iterator, a
-        // metamethod handler), so pending is zero whenever non-dispatch code
-        // runs, and settled here on every exit.
+        // the meter. It is published before anything (a Rust callee, a
+        // library leaf, a callable object, an iterator, a metamethod
+        // handler) can read the published balance or charge separately, and
+        // settled here on every `Result` exit. In-loop helpers that invoke
+        // nothing (cache hits, the `next`/`ipairs` generic-for steps) leave
+        // it pending.
         let mut pending: u64 = 0;
         let result = crate::native_call!(
             "run->eval_batched",
@@ -781,35 +800,34 @@ impl Frame {
                 }
                 Instr::OP_TFOR_CALL => {
                     fixed_cost!(Instr::OP_TFOR_CALL);
-                    // next/ipairs need no record or flush, but deferring this
-                    // boundary into the iterator helper, or behind a separate
-                    // fast-path probe here, grew the release Frame::run (see
-                    // reference/performance.md, "Shared vararg arena").
-                    // Removing the fallback's redundant error
-                    // truncate did not help. Keep the eager boundary rather
-                    // than grow a frame live across every native re-entry.
-                    // All call/refusal paths must record and flush before
-                    // entering the iterator.
-                    state.record_call_site(*ip);
-                    Self::flush_local_cost(state, local_cost)?;
-                    crate::native_call!(
-                        "run_frame->instr_tfor_call",
-                        state.instr_tfor_call(
-                            ra,
-                            inst.b() as u8,
-                            inst.cache_slot(),
-                            &frame.runtime.caches,
-                        )
-                    )?;
-                }
-                Instr::OP_TFOR_LOOP => {
-                    fixed_cost!(Instr::OP_TFOR_LOOP);
-                    if !matches!(state.stack[ra + 3], Val::Nil) {
-                        // Poll before the control moves, as FOR_LOOP does.
-                        Self::branch(state, ip, inst.sj())?;
-                        state.stack[ra + 2] = state.stack[ra + 3];
+                    // A next/ipairs step stays in the loop with the batch
+                    // pending. Every other step calls out, so it records the
+                    // call site and publishes the batch first.
+                    if !state.tfor_fast_step(
+                        ra,
+                        inst.b() as u8,
+                        inst.cache_slot(),
+                        &frame.runtime.caches,
+                    ) {
+                        state.record_call_site(*ip);
+                        Self::flush_local_cost(state, local_cost)?;
+                        crate::native_call!(
+                            "run_frame->instr_tfor_call",
+                            state.instr_tfor_call(ra, inst.b() as u8)
+                        )?;
+                    }
+                    // Fusion keyed on the real next instruction: compiled
+                    // code always follows TFOR_CALL with its TFOR_LOOP, so
+                    // run that free back edge here rather than dispatch it.
+                    // The cursor moves past it first, so its poll names it.
+                    if let Some(&step) = code.get(*ip)
+                        && step.opcode() == Instr::OP_TFOR_LOOP
+                    {
+                        *ip += 1;
+                        Self::tfor_loop(state, ip, base, step)?;
                     }
                 }
+                Instr::OP_TFOR_LOOP => Self::tfor_loop(state, ip, base, inst)?,
 
                 // Functions (calls and returns)
                 Instr::OP_CLOSURE => {
@@ -890,8 +908,10 @@ impl State {
     /// innermost one while a Rust function runs.
     ///
     /// Every path from a dispatch arm that can reach a call (into Lua or into
-    /// a Rust function) must record first: `OP_CALL`, `OP_TAILCALL` and
-    /// `OP_TFOR_CALL` in their arms, the table and length instructions first thing in their
+    /// a Rust function) must record first: `OP_CALL` and
+    /// `OP_TFOR_CALL` in their arms (`OP_TFOR_CALL` once its `next`/`ipairs`
+    /// step has declined), `OP_TAILCALL` at the start of
+    /// `tail_call_from_lua`, the table and length instructions first thing in their
     /// outlined handler-call functions (`index_call`, `newindex_call`,
     /// `len_call`), so the cache hits and the resolvers that call nothing do
     /// not pay for it. The innermost

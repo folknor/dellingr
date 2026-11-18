@@ -144,8 +144,8 @@ its handler directly lives under PERF-002.
 
 Raised by the codegen, dispatch and lookup hunters. Predicate lowering,
 number/string/nil literal compare-and-branch forms, `t["k"]` routed to the
-field path and the rotated generic `for` (TFOR_LOOP as the polled back edge)
-have landed; this is what was left.
+field path, the rotated generic `for` (TFOR_LOOP as the polled back edge) and
+its fused step (TFOR_LOOP run from the TFOR_CALL arm) have landed; this is what was left.
 
 **Bottleneck:**
 - A dynamic string key (`t[name]`) uses uncached `GET_TABLE` even when the
@@ -157,47 +157,16 @@ have landed; this is what was left.
   `not` in a condition) is a compare-branch over a `JMP`: two dispatches.
 - A comparison with a literal on the left (`2 < n`) still loads it; it is
   not swapped, because the type error names the operands in source order.
-- `TFOR_CALL` and `TFOR_LOOP` are still two dispatches per iteration.
-  Fusing them touches the `TFOR_CALL` arm, whose frame is live across native
-  re-entry (reference/performance.md "Shared vararg arena").
 - The register-register comparison arm still goes through `compare_vals`;
   only the number-literal arm has an inline IEEE fast path.
 
 **Redesign:** a guarded per-site key cache for dynamic string keys reusing a
 field plan; literal operand forms for the remaining sites where a workload
-shows them; a fused generic-for step only with `native_bytes_per_level`
-measured before and after.
+shows them.
 
-**Risks:** cache slots are per family and capped at 255 per function; the
-frame-size history of the `TFOR_CALL` arm.
+**Risks:** cache slots are per family and capped at 255 per function.
 
 **Classification:** local changes, smaller ceiling.
-
-## PERF-006 - Generic-for iterator steps still settle the pending batch
-
-Raised by the cost-charging hunter; narrowed when its call and return half
-landed.
-
-**Landed:** the pending batch is owned by the `Frame::run` invocation. Lua
-calls, Lua tail calls and returns into a Lua caller carry it forward (Lua
-admission and return never touch the meter); `call_from_lua` and
-`tail_call_from_lua` publish it only when the callee is not a Lua function,
-and `Frame::run` settles it on every exit. The rule: pending is zero whenever
-code outside the dispatch loop runs. No cost, prefix or golden changed.
-Interleaved wall pairs on bygg against b9becfb: method 3.2 and 3.3 s to 3.1 s
-in both pairs, arithmetic and tail_call flat (no same-binary control run).
-
-**Residue:** `TFOR_CALL` still flushes eagerly before its `next`/`ipairs` fast
-paths, so `for _, v in pairs(t) do sum = sum + v end` settles its one pending
-add every iteration. Deferring that flush into the iterator helper or behind a
-probe was measured to grow release `Frame::run` (reference/performance.md
-"Shared vararg arena"); a retry belongs with the PERF-004 residue's fused
-generic-for step, measured the same way.
-
-**Not pursued:** removing `local_cost` from the metamethod resolvers. The flush
-must still precede every handler call, so it would only move one level up into
-the `reg_*` helpers, which keep the parameter; no meter write is saved. A
-dispatch-local cached threshold was measured neutral under PERF-007.
 
 ## PERF-012 - Call-site residue: CALL then MOVE continuation, argument-guarded helper specialization
 
