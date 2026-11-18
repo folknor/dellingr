@@ -91,6 +91,12 @@ scratch register at each site removes them with every root kept; compiler-side
 caching of the capture was refused, see the `codegen.rs` header) and field
 updates. None of these has had its benefit established;
 each needs a workload whose loop the region does not already take.
+One stable shape for a two-op fusion: after a handler, test the actual next
+opcode and enter its body directly inside the dispatch loop. That is the
+predecessor-specific dispatch threaded dispatch was after, without its
+native-stack hazard (threading itself is refused at `run_frame`). The
+dispatch hunter's encoding note also lands here: redesign the 64-bit word
+around fused handlers' operand needs rather than narrowing it first.
 
 **Payoff:** removes dispatches, ip updates, operand decode, temporary
 store/reload and repeated type checks together; the mixed workloads contain
@@ -108,34 +114,6 @@ placed.
 **Classification:** rewrite, dispatch hunter's highest conviction. Subsumes
 `optimizations.md` "Compiler-recognized field-update fusion". Afterwards, if
 it works, broader instruction-description machinery is a follow-up.
-
-## PERF-003 - Threaded dispatch with guaranteed tail transfers
-
-Raised by the dispatch hunter.
-
-**Bottleneck:** one central opcode match (`frame.rs`). Threading could give
-handlers distinct dispatch sites and better opcode-transition prediction, and
-an execution stream of handler targets would remove opcode-to-handler
-selection.
-
-**Redesign:** handlers transferring by guaranteed tail call, a compact calling
-convention and a small set of live execution variables. Handler addresses stay
-internal execution data, out of Lua function identity and serialized
-bytecode.
-
-**Risks:** source cannot tell whether prediction, ip dependencies or operand
-traffic dominate. Ordinary function-pointer calls back to a loop add
-call/return; recursive handler calls without guaranteed tail transfer break
-the flat native stack, and every compiler/target combination needs the real
-constant-stack guarantee. Threading still dispatches once per instruction;
-fusion (PERF-002) reduces how often.
-
-**Classification:** rewrite, medium conviction, ranked behind PERF-002 and the
-register window. The hunter also says the 64-bit encoding should be redesigned
-around the fused handlers' operand needs, not narrowed first: the register
-limit (`limits.rs`) and literal indices exceed eight bits, `MAX_FRAME_SLOTS`
-does not bound temporaries, and a universal 32-bit word would lose programs or
-move complexity into extensions.
 
 ## PERF-004 - Remaining constant operand and loop-step forms
 

@@ -251,6 +251,23 @@ impl Frame {
     /// returns. Inlined, so `ip` stays a register for the whole run; the
     /// caller publishes it on every exit, which is why nothing here writes
     /// `Frame::ip` and every error simply propagates.
+    ///
+    /// One `match` is the dispatch on purpose. Threaded dispatch, where each
+    /// handler tail-calls the next, was considered and refused: Rust has no
+    /// guaranteed tail transfer on the supported toolchain (`become` is
+    /// unstable even on current nightly), and an ordinary call between
+    /// handlers is not guaranteed to be eliminated at any optimization level
+    /// (dev builds never do it), so one surviving non-tail edge on a handler
+    /// cycle grows the native stack per executed instruction and breaks the
+    /// flat-native-stack invariant. A table of handler pointers called from a
+    /// loop keeps one shared indirect site, so it buys no per-predecessor
+    /// prediction and adds a call and return per opcode. Reopen this only
+    /// with a guaranteed tail transfer on every supported toolchain (or
+    /// per-ISA assembly) and a current measurement attributing cost to this
+    /// branch. Predecessor-specific dispatch on stable Rust belongs here
+    /// instead: after a handler, test the actual next opcode and enter its
+    /// body directly, which is execution-side fusion keyed on the real next
+    /// instruction.
     #[inline(always)]
     fn run_frame(
         frame: &Frame,

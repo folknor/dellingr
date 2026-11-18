@@ -1079,9 +1079,9 @@ in todo.md's workload-registry entry).
   tests/integration/host/host_call_preflight.rs). Moving the callee elsewhere still shifts
   the arguments; see the comment at the remove in src/vm/eval.rs.
 - **Dispatch micro-items, verify with asm/bench first (B-O6):** opcode space
-  is 0-26, 30-55, 60-72 - only two small holes (27-29, 56-59) since the
-  fused branches filled 64-69, so a dense renumbering (or `#[repr(u8)]`
-  enum with a validated dense range) has little left to close; LLVM
+  is already dense (every opcode number up to the last is assigned), so a
+  renumbering (or `#[repr(u8)]` enum with a validated dense range) has
+  nothing left to close; LLVM
   likely already emits one jump table with a few dead slots. `get_instr`
   bounds-checks every
   fetch; with one-time validation that all jump targets are in-bounds at
