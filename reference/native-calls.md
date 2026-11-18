@@ -227,7 +227,8 @@ marker, which is the quickest way to see what a change touched.
 The recurring native stack of each scenario's cycle, as printed by the
 on-demand probe `brokkr test native_bytes_per_level`, which covers dev and
 release through the sweeps configured in `brokkr.toml`. Measured on the tree
-of the commit that appends `gsub` callback results in place (parent 6a6c2b2), on bygg (x86-64
+of the commit that skips the presence lookup for stores through a metatable
+known to hold no `__newindex` (parent f827b9f), on bygg (x86-64
 Linux),
 `rustc 1.101.0-nightly (249c1e4e3 2026-11-05)`, with that host's global
 cargo configuration. Release is Cargo's default release profile (the
@@ -254,7 +255,7 @@ separately.
 | `index_key` | 10560 | 672 | 672 |
 | `index_rust` | 12816 | 1088 | 1088 |
 | `newindex_field` | 10816 | 720 | 720 |
-| `newindex_key` | 10592 | 704 | 704 |
+| `newindex_key` | 10592 | 688 | 688 |
 | `newindex_rust` | 13040 | 1200 | 1200 |
 | `length` | 10448 | 496 | 496 |
 | `string_index_field` | 10592 | 608 | 608 |
@@ -263,7 +264,7 @@ separately.
 | `string_library_index` | 10592 | 608 | 608 |
 | `host_get_table` | 12368 | 992 | 992 |
 | `host_get_table_string` | 12368 | 992 | 992 |
-| `host_set_table` | 12480 | 992 | 992 |
+| `host_set_table` | 12224 | 976 | 976 |
 | `host_call` | 11904 | 928 | 928 |
 | `host_anchor` | 12496 | 1104 | 1104 |
 | `host_invoke` | 12464 | 976 | 976 |
@@ -282,20 +283,20 @@ separately.
 | `sort_metamethods_comparator` | 13648 | 1536 | 1536 |
 | `sort_metamethods_length` | 11904 | 1136 | 1136 |
 | `sort_metamethods_read` | 13104 | 1296 | 1296 |
-| `sort_metamethods_write` | 13216 | 1296 | 1296 |
+| `sort_metamethods_write` | 12960 | 1280 | 1280 |
 | `insert_length` | 12144 | 1168 | 1168 |
 | `insert_shift_read` | 12432 | 1152 | 1152 |
-| `insert_shift_write` | 12560 | 1152 | 1152 |
-| `insert_value` | 12560 | 1152 | 1152 |
+| `insert_shift_write` | 12304 | 1136 | 1136 |
+| `insert_value` | 12304 | 1136 | 1136 |
 | `remove_length` | 12112 | 1120 | 1120 |
 | `remove_read` | 12400 | 1104 | 1104 |
 | `remove_shift_read` | 12400 | 1104 | 1104 |
-| `remove_shift_write` | 12528 | 1104 | 1104 |
-| `remove_clear` | 12528 | 1104 | 1104 |
+| `remove_shift_write` | 12272 | 1088 | 1088 |
+| `remove_clear` | 12272 | 1088 | 1088 |
 | `concat_length` | 12640 | 1136 | 1136 |
 | `concat_read` | 12928 | 1120 | 1120 |
 | `move_read` | 12720 | 1152 | 1152 |
-| `move_write` | 12848 | 1088 | 1088 |
+| `move_write` | 12592 | 1072 | 1072 |
 | `unpack_length` | 12064 | 1072 | 1072 |
 | `unpack_read` | 12352 | 1056 | 1056 |
 | `gsub_empty_function` | 13136 | 1520 | 1520 |

@@ -7,10 +7,20 @@ use super::frame::Frame;
 use super::object::ObjectPtr;
 
 impl State {
-    /// `R[table][key] = val` without temporaries: a plain table takes the
-    /// insert, and a table with a metatable takes an update or removal of an
-    /// existing key. False leaves a key absent from a table with a metatable
-    /// to `State::store_new_key`.
+    /// `R[table][key] = val` without temporaries: a plain table, or one
+    /// whose metatable is known to hold no `__newindex`
+    /// (`State::newindex_absent`), takes the insert, and any other table
+    /// with a metatable takes an update or removal of an existing key. False
+    /// leaves a key absent from such a table to `State::store_new_key`,
+    /// whose `__newindex` lookup learns the absence for the next store.
+    ///
+    /// The absence proof is what removes the second lookup of an absent
+    /// key. A hint carried from the miss into the insert was considered and
+    /// declined: it saves only the receiver's probe (at most four compares
+    /// inline, one hash probe in a map), still pays the metatable's lookup,
+    /// and needs a second set of `insert_hash` branches keyed on whether the
+    /// miss saw a dead slot. With the proof, a warm store through a class
+    /// metatable pays neither lookup and reuses the plain insert.
     #[inline(always)]
     pub(super) fn try_insert_table_direct(
         &mut self,
@@ -19,28 +29,54 @@ impl State {
         val: Val,
     ) -> Result<bool> {
         let tbl_val = self.stack[table_idx];
-        match tbl_val
-            .as_object_ptr()
-            .and_then(|ptr| self.heap.edit_table(ptr))
-        {
+        let ptr = tbl_val.as_object_ptr();
+        match ptr.and_then(|ptr| self.heap.edit_table(ptr)) {
             Some(mut tbl) => {
-                if tbl.get_metatable().is_none() {
+                let mt = tbl.get_metatable();
+                if mt.is_none() {
                     tbl.insert(key, val)?;
                     Ok(true)
                 } else {
-                    let Some((index, _)) = tbl.get_with_index(&key) else {
-                        return Ok(false);
-                    };
-                    if matches!(val, Val::Nil) {
-                        Ok(tbl.remove_at_index(index))
-                    } else {
-                        // A live existing entry can be updated by its slot,
-                        // so the presence lookup is also the write lookup.
-                        Ok(tbl.set_at_index(index, val))
-                    }
+                    self.store_through_metatable(
+                        ptr.expect("the receiver was just edited"),
+                        mt,
+                        key,
+                        val,
+                    )
                 }
             }
             None => Err(self.type_error(TypeError::TableIndex(tbl_val.typ(&self.heap)))),
+        }
+    }
+
+    /// The metatable half of [`State::try_insert_table_direct`], outlined
+    /// so its borrows stay off the dispatch loop's native frame.
+    #[inline(never)]
+    fn store_through_metatable(
+        &mut self,
+        ptr: ObjectPtr,
+        mt: Option<ObjectPtr>,
+        key: Val,
+        val: Val,
+    ) -> Result<bool> {
+        let absent = self.newindex_absent(mt);
+        let mut tbl = self.heap.edit_table(ptr).expect("the receiver is a table");
+        if absent {
+            // A metatable known to hold no `__newindex` makes the store raw
+            // whether or not the key is present, so the insert is the only
+            // lookup.
+            tbl.insert(key, val)?;
+            return Ok(true);
+        }
+        let Some((index, _)) = tbl.get_with_index(&key) else {
+            return Ok(false);
+        };
+        if matches!(val, Val::Nil) {
+            Ok(tbl.remove_at_index(index))
+        } else {
+            // A live existing entry can be updated by its slot, so the
+            // presence lookup is also the write lookup.
+            Ok(tbl.set_at_index(index, val))
         }
     }
 

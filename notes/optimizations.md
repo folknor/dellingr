@@ -1065,11 +1065,6 @@ in todo.md's workload-registry entry).
   fetch; with one-time validation that all jump targets are in-bounds at
   load/finalize time, the fetch could use a pointer/len cursor - only if
   profiles show it; keep panics over UB.
-- **Table micro (C-O8):** remaining note only -
-  `try_insert_table_direct`'s double probe is only on the
-  metatable-present path; the no-metatable path is single-probe
-  already - fine as is. (The `get_full` single-probe and the
-  promote-to-8 capacity shipped 2026-09-03.)
 - **Stdlib micro (E):** `string.format` should format into one output buffer
   instead of per-directive Vec round-trips (invasive across ~15 helper
   functions). Literal runs and `%%` are already batched; what is left is per

@@ -9,6 +9,7 @@ mod global_table;
 mod global_write_cache;
 mod index_depth_routes;
 mod interrupt_rust_entry;
+mod newindex_absence;
 mod newindex_depth_routes;
 mod numeric_loop_execution;
 mod plain_field_miss;

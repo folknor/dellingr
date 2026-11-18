@@ -249,6 +249,25 @@ stat` against fb1081f: cycles 2.53G to 2.00G, instructions 10.44G to
 the fb1081f regression above: the code whose generation shifted no longer
 runs per construction.
 
+## Stores through a metatable without `__newindex`, 2026-11-18
+
+A store into a table with a metatable used to look the key up on the
+receiver to decide whether `__newindex` runs, read `__newindex` from the
+metatable when the key was absent, then look the key up again inside the
+insert. A metatable now carries a proof, learned from a nil `__newindex`
+lookup and forgotten whenever its hash part may gain a live key, that it
+holds no `__newindex`; a store through it is the plain table's one insert.
+New workload `object_fields` (objects built field by field after
+`setmetatable({}, Class)`). On bygg against f827b9f (release, `brokkr bench
+wall`, best of 3, the change run from a dirty tree), two interleaved pairs:
+
+| Workload | f827b9f | Change |
+|---|---|---|
+| `object_fields` | 3.8 s, 3.8 s (warm call 76.4 ms) | 3.5 s, 3.5 s (warm call 69.8 ms) |
+| `method_polymorphic` | 3.5 s | 3.6 s (warm call 70.0 ms both) |
+| `method` | 2.9 s | 2.8 s |
+| `fill` | 1.5 s | 1.5 s |
+
 ## Closure creation in one allocation, 2026-11-17
 
 A closure is stored inline in its heap slot (no `Box`), its runtime owns

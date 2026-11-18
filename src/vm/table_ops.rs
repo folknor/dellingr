@@ -540,21 +540,7 @@ impl State {
         let ptr = self.stack[idx]
             .as_object_ptr()
             .expect("table_operand_below_top validated the table");
-        let mut tbl = self
-            .heap
-            .edit_table(ptr)
-            .expect("table_operand_below_top validated the table");
-        // An existing key is written through the slot its lookup found.
-        let stored = if let Some((slot, _)) = tbl.find_slot(&key) {
-            if matches!(val, Val::Nil) {
-                tbl.remove_slot(slot);
-            } else {
-                tbl.store_slot(slot, val);
-            }
-            Ok(None)
-        } else {
-            self.store_new_key(ptr, key, val, &mut local_cost)
-        };
+        let stored = self.store_into_table(ptr, key, val, &mut local_cost);
         let result = match stored {
             Ok(Some(units)) => {
                 let called = crate::native_call!(
@@ -586,6 +572,45 @@ impl State {
                 Err(self.report_escaping(error))
             }
         }
+    }
+
+    /// The resolver half of [`State::set_table_unguarded`]: store
+    /// `key = val` into table `ptr` up to the point where a `__newindex`
+    /// function must be called (`Some(units)`, window pushed, as for
+    /// `State::resolve_newindex`). With no `__newindex` to consult
+    /// (`State::newindex_absent`) the store is one raw insert; otherwise an
+    /// existing key is written through the slot its lookup found. Outlined
+    /// and calling nothing, so its locals are off the re-entrant frame.
+    #[inline(never)]
+    fn store_into_table(
+        &mut self,
+        ptr: super::object::ObjectPtr,
+        key: Val,
+        val: Val,
+        local_cost: &mut u64,
+    ) -> Result<Option<u32>> {
+        let raw = self.newindex_absent(
+            self.heap
+                .as_table_ref(ptr)
+                .and_then(super::table::Table::get_metatable),
+        );
+        let mut tbl = self
+            .heap
+            .edit_table(ptr)
+            .expect("table_operand_below_top validated the table");
+        if raw {
+            tbl.insert(key, val)?;
+            return Ok(None);
+        }
+        if let Some((slot, _)) = tbl.find_slot(&key) {
+            if matches!(val, Val::Nil) {
+                tbl.remove_slot(slot);
+            } else {
+                tbl.store_slot(slot, val);
+            }
+            return Ok(None);
+        }
+        self.store_new_key(ptr, key, val, local_cost)
     }
 
     /// Returns the next key-value pair from a table, for use with `pairs`.

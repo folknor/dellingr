@@ -264,27 +264,18 @@ What could still pay, untested:
 
 **Classification:** local (second bullet), rewrite (first), unmeasured.
 
-## PERF-017 - Local lookup-path changes
+## PERF-041 - A map re-add probes the index twice
 
-Raised by the lookup hunter.
+Raised while closing the double lookup of stores through metatables.
 
-Residue: SET_FIELD stores, `__newindex` terminal tables and host `set_table`
-now carry their lookup's slot into the write (`Table::store_string_key`
-reports the slot a string insert wrote). Still two probes: an absent key on
-a receiver that has a metatable, outside SET_FIELD's string path. `reg_set_table`
-(`try_insert_table_direct` misses with `get_with_index`, then
-`store_absent_key` inserts) and `store_new_key`'s non-string insert look the
-key up again inside `Table::insert`. Closing it needs an insert that takes
-the miss's probe, which `__newindex` dispatch between the probe and the
-insert must not invalidate. The hash part now owns its index
-(`vm/table/hash_slots.rs`, a hashbrown `HashTable` beside the slot
-vector), so a miss could carry an insertion hint validated by the version
-and slot count, as `HashProbe` already does for absence. Unmeasured.
-
-(The 255-per-family cache cap was weighed and kept; the reasoning sits at
-`assign_cache_slots`. Key-checked position reuse across receivers is in
-`optimizations.md` "Shape-based polymorphic field IC"; literal string keys
-already take the field path; dynamic string-key sites are in PERF-004.)
+**Bottleneck (hypothesis):** re-adding a tombstoned key into map storage
+(`insert_into_map_with_tombstones`, non-compacting branch) finds the key's
+index entry with `map.find`, then `HashSlots::relocate` probes the hashbrown
+index again to retarget that entry at the new back slot. Nothing between
+the two touches the index (the slot vector grows, the index does not
+reserve), so the first probe's bucket (`HashTable::find_bucket_index`,
+`get_bucket_mut` in the pinned hashbrown) could be carried into the
+retarget. The `rekey` workload is this path. Unmeasured.
 
 **Classification:** local.
 

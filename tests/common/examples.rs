@@ -101,6 +101,7 @@ examples! {
     tables_metamethod_sequence: "examples/tables/metamethod_sequence.lua",
     tables_mixed: "examples/tables/mixed.lua",
     tables_numeric_index: "examples/tables/numeric_index.lua",
+    tables_object_fields: "examples/tables/object_fields.lua",
     tables_queue: "examples/tables/queue.lua",
     tables_rekey: "examples/tables/rekey.lua",
     tables_sequence_len: "examples/tables/sequence_len.lua",

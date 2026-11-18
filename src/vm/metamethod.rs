@@ -351,17 +351,46 @@ impl State {
     /// The `__newindex` handler of table `ptr`'s metatable, or nil.
     #[inline(always)]
     fn newindex_handler(&self, ptr: ObjectPtr) -> Val {
-        let newindex_key = self.meta_names.get(MetaName::NewIndex);
-        self.heap
+        let Some(mt) = self
+            .heap
             .as_table_ref(ptr)
             .and_then(super::table::Table::get_metatable)
             .and_then(|mt| self.heap.as_table_ref(mt))
-            .map_or(Val::Nil, |mt| mt.get(&newindex_key))
+        else {
+            return Val::Nil;
+        };
+        if mt.known_no_newindex() {
+            debug_assert!(
+                matches!(mt.get(&self.meta_names.get(MetaName::NewIndex)), Val::Nil),
+                "a metatable proven to lack __newindex holds one"
+            );
+            return Val::Nil;
+        }
+        let handler = mt.get(&self.meta_names.get(MetaName::NewIndex));
+        if matches!(handler, Val::Nil) {
+            mt.learn_no_newindex();
+        }
+        handler
+    }
+
+    /// Whether a store into table `ptr` is raw whatever its key: the table
+    /// has no metatable, or its metatable is known to hold no `__newindex`
+    /// (learned by an earlier `newindex_handler` lookup). Such a store needs
+    /// no presence lookup first; when false, presence decides whether
+    /// `__newindex` is consulted. Reads one header when a metatable is set.
+    #[inline(always)]
+    pub(super) fn newindex_absent(&self, mt: Option<ObjectPtr>) -> bool {
+        mt.is_none_or(|mt| {
+            self.heap
+                .as_table_ref(mt)
+                .is_none_or(super::table::Table::known_no_newindex)
+        })
     }
 
     /// Store `receiver.key = val` for a bytecode field write the set cache
-    /// did not answer. A receiver with no metatable takes the store raw in
-    /// one insert. Otherwise one raw lookup on the receiver (an existing key
+    /// did not answer. A receiver with no metatable, or whose metatable is
+    /// known to hold no `__newindex` (`State::newindex_absent`), takes the
+    /// store raw in one insert. Otherwise one raw lookup on the receiver (an existing key
     /// is overwritten or removed there), then `State::store_new_key`'s rule.
     /// Every raw store of a value into the receiver fills the cache with the
     /// slot it wrote. `Some(units)` is a pushed `__newindex` call window, as
@@ -376,12 +405,16 @@ impl State {
         cache: Option<&SetFieldLookupCacheSlot>,
         local_cost: &mut u64,
     ) -> Result<Option<u32>> {
-        let Some(ptr) = receiver
-            .as_object_ptr()
-            .filter(|ptr| self.heap.as_table_ref(*ptr).is_some())
-        else {
+        let Some((ptr, mt)) = receiver.as_object_ptr().and_then(|ptr| {
+            self.heap
+                .as_table_ref(ptr)
+                .map(|tbl| (ptr, tbl.get_metatable()))
+        }) else {
             return Err(self.index_handler_error(receiver));
         };
+        // With no metatable, or one known to hold no `__newindex`, there is
+        // no `__newindex` to consult, so the store needs no presence lookup.
+        let raw = self.newindex_absent(mt);
         // A string key with a value is a raw store whose insert reports the
         // slot it wrote, so the cache is filled without a second lookup.
         let raw_string = match (key, val) {
@@ -393,13 +426,13 @@ impl State {
             .heap
             .edit_table(ptr)
             .expect("checked to be a table just above");
-        // With no metatable there is no `__newindex` to consult, so the
-        // store needs no presence lookup first.
-        if let Some(name) = raw_string
-            && tbl.get_metatable().is_none()
-        {
-            let slot = tbl.store_string_key(name, val);
-            Self::fill_set_cache(cache, ptr, slot);
+        if raw {
+            if let Some(name) = raw_string {
+                let slot = tbl.store_string_key(name, val);
+                Self::fill_set_cache(cache, ptr, slot);
+            } else {
+                tbl.insert(key, val)?;
+            }
             return Ok(None);
         }
         if let Some((slot, _)) = tbl.find_slot(&key) {
@@ -513,7 +546,17 @@ impl State {
         loop {
             let calls = match handler {
                 Val::Obj(ptr) => {
-                    if self.heap.as_table_ref(ptr).is_some() {
+                    if let Some(table) = self.heap.as_table_ref(ptr) {
+                        if self.newindex_absent(table.get_metatable()) {
+                            // A terminal table step either way, and a raw
+                            // store whether or not it holds the key: the
+                            // insert is the one lookup.
+                            self.heap
+                                .edit_table(ptr)
+                                .expect("checked to be a table just above")
+                                .insert(key, val)?;
+                            return Ok(true);
+                        }
                         let existing = self
                             .heap
                             .as_table_ref(ptr)

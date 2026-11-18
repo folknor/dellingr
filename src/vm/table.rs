@@ -564,11 +564,23 @@ pub(super) struct Table {
     shape_witness: Cell<Option<ShapeWitness>>,
 }
 
-/// Two table counters in one word: `(dead << 1) | !dense`.
+/// Three table facts in one word: `(dead << 2) | (no_newindex << 1) | !dense`.
 ///
 /// `dead` is the number of occupied hash slots whose nil value makes them
 /// logically absent. It never exceeds the slots of an allocated slot vector,
 /// at most `isize::MAX / size_of::<(Val, Val)>()`, so the shift loses no bit.
+///
+/// `no_newindex` is a proof about this table's own raw contents, sound when
+/// set: no hash slot holds a live value under the key `__newindex`. A store
+/// into a receiver whose metatable carries it is a raw store, with no
+/// presence lookup on the receiver and no `__newindex` lookup on the
+/// metatable (`State::newindex_absent`). It is learned under a shared borrow
+/// (hence the `Cell`) when a `__newindex` lookup on this table answers nil,
+/// and forgotten whenever a hash slot may have turned live: every
+/// `insert_hash` call, and every tombstone revived (`sub_dead`, which every
+/// dead-to-live write goes through). Array writes cannot touch it, since
+/// `__newindex` is a string. A clear bit only costs the lookups. Never
+/// saved: a fresh, copied or rebuilt table starts without it.
 ///
 /// `dense` is a proof, sound when set: the live array keys are exactly
 /// `1..=array_live`, so `array_live` is the only border in the logical array
@@ -578,40 +590,76 @@ pub(super) struct Table {
 /// O(1): when the array empties, or a write lands at key 1 of an empty
 /// array. Never saved; a load recomputes it. The default is zero dead slots
 /// and a set proof (an empty array).
-#[derive(Debug, Default, Clone, Copy)]
-struct TombstonesAndDense(usize);
+#[derive(Debug, Default, Clone)]
+struct TombstonesAndDense(Cell<usize>);
+
+const DEAD_SHIFT: u32 = 2;
+const NOT_DENSE_BIT: usize = 1;
+const NO_NEWINDEX_BIT: usize = 2;
 
 impl TombstonesAndDense {
     #[inline]
-    fn dead(self) -> usize {
-        self.0 >> 1
+    fn word(&self) -> usize {
+        self.0.get()
+    }
+
+    #[inline]
+    fn dead(&self) -> usize {
+        self.word() >> DEAD_SHIFT
     }
 
     #[inline]
     fn add_dead(&mut self, n: usize) {
-        debug_assert!(n <= (usize::MAX >> 1) - self.dead());
-        self.0 += n << 1;
+        debug_assert!(n <= (usize::MAX >> DEAD_SHIFT) - self.dead());
+        self.0.set(self.word() + (n << DEAD_SHIFT));
     }
 
+    /// Fewer tombstones: some slot was revived or dropped, so the
+    /// `no_newindex` proof is forgotten whenever `n` is not zero.
     #[inline]
     fn sub_dead(&mut self, n: usize) {
         debug_assert!(n <= self.dead(), "tombstone count underflow");
-        self.0 -= n << 1;
+        let mut word = self.word() - (n << DEAD_SHIFT);
+        if n != 0 {
+            word &= !NO_NEWINDEX_BIT;
+        }
+        self.0.set(word);
     }
 
+    /// Set the count outright. Callers only drop tombstones this way
+    /// (compaction) or count fresh dead slots, neither of which makes a
+    /// key live, so the `no_newindex` proof is kept.
     #[inline]
     fn set_dead(&mut self, n: usize) {
-        self.0 = (n << 1) | (self.0 & 1);
+        self.0
+            .set((n << DEAD_SHIFT) | (self.word() & (NOT_DENSE_BIT | NO_NEWINDEX_BIT)));
     }
 
     #[inline]
-    fn dense(self) -> bool {
-        self.0 & 1 == 0
+    fn dense(&self) -> bool {
+        self.word() & NOT_DENSE_BIT == 0
     }
 
     #[inline]
     fn set_dense(&mut self, dense: bool) {
-        self.0 = (self.0 & !1) | usize::from(!dense);
+        self.0
+            .set((self.word() & !NOT_DENSE_BIT) | if dense { 0 } else { NOT_DENSE_BIT });
+    }
+
+    #[inline]
+    fn no_newindex(&self) -> bool {
+        self.word() & NO_NEWINDEX_BIT != 0
+    }
+
+    /// Record that a `__newindex` lookup on this table just answered nil.
+    #[inline]
+    fn learn_no_newindex(&self) {
+        self.0.set(self.word() | NO_NEWINDEX_BIT);
+    }
+
+    #[inline]
+    fn forget_no_newindex(&mut self) {
+        self.0.set(self.word() & !NO_NEWINDEX_BIT);
     }
 }
 
@@ -1825,6 +1873,9 @@ impl Table {
         value: Val,
     ) -> usize {
         debug_assert!(!matches!(value, Val::Nil), "a hash insert stores a value");
+        // Any branch but a live update makes `key` live; forgetting on
+        // every call keeps the rule in one place.
+        self.tally.forget_no_newindex();
         let key = table_key.value();
         if self.tally.dead() == 0 {
             return self.insert_without_tombstones(resident, table_key, value);
@@ -2855,6 +2906,21 @@ impl Table {
         self.metatable
     }
 
+    /// Whether this table is known to hold no live `__newindex` entry (the
+    /// `no_newindex` proof on `TombstonesAndDense`). False means unknown.
+    #[inline]
+    pub(super) fn known_no_newindex(&self) -> bool {
+        self.tally.no_newindex()
+    }
+
+    /// Record that this table's raw `__newindex` lookup just answered nil.
+    /// The caller must have read that answer from this table with no write
+    /// since.
+    #[inline]
+    pub(super) fn learn_no_newindex(&self) {
+        self.tally.learn_no_newindex();
+    }
+
     /// Sets the metatable of this table.
     pub(super) fn set_metatable(&mut self, mt: Option<ObjectPtr>) {
         self.metatable = mt;
@@ -3411,6 +3477,27 @@ mod tests {
             tally.set_dense(!dense);
             assert_eq!((tally.dead(), tally.dense()), (7, !dense));
         }
+    }
+
+    /// The `no_newindex` proof survives count additions, compaction's reset
+    /// and dense updates, and is forgotten by any tombstone revival.
+    #[test]
+    fn the_newindex_proof_is_forgotten_only_by_a_revival() {
+        let mut tally = TombstonesAndDense::default();
+        assert!(!tally.no_newindex(), "a fresh table proves nothing");
+        tally.learn_no_newindex();
+        tally.add_dead(4);
+        tally.set_dense(false);
+        tally.set_dead(2);
+        tally.sub_dead(0);
+        assert!(tally.no_newindex());
+        assert_eq!((tally.dead(), tally.dense()), (2, false));
+        tally.sub_dead(1);
+        assert!(!tally.no_newindex());
+        assert_eq!((tally.dead(), tally.dense()), (1, false));
+        tally.learn_no_newindex();
+        tally.forget_no_newindex();
+        assert!(!tally.no_newindex());
     }
 
     /// A stack driven by `t[#t + 1] = v` and `t[#t] = nil` keeps a nil tail
