@@ -339,21 +339,6 @@ cache was declined at `array_len`. What remains:
 
 **Classification:** local.
 
-## PERF-036 - One-capture closures still allocate a capture list
-
-Raised while closing the closure-allocation entry. A capturing closure now
-costs one allocation, its `Arc<[UpvalueRef]>` capture list (`reg_closure` in
-`registers.rs`). An empty / one inline `UpvalueRef` / shared slice
-representation in both `Closure` and `Frame` would remove it for the
-one-capture case (the `closure` workload's shape), with the same cell
-identity. Select the representation once on entry to `run_frame` and borrow
-the inline word as a one-element slice, so `GET_UPVAL`/`SET_UPVAL` keep
-indexing a slice. The cost is a wider `Frame` written per call and a slice
-kept live in dispatch; measure `native_bytes_per_level` and the call-heavy
-workloads against the allocation saved.
-
-**Classification:** experiment.
-
 ## PERF-037 - `CLOSURE` finds its runtime by a pointer-keyed map lookup
 
 Raised while closing the closure-allocation entry. `reg_closure` resolves the

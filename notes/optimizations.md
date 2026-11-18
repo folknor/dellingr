@@ -174,7 +174,7 @@ regions.
 
 ### `GET_UPVAL` indirection
 
-What: an upvalue read goes `frame.upvalues` (an `Arc<[UpvalueRef]>`) to a
+What: an upvalue read goes `frame.upvalues` (a `Captures`: inline for one capture, else an `Arc` slice) to a
 pool slot, then branches on open (read the stack slot) or closed (read the
 stored value). same_obj_read executes one per field read.
 
@@ -294,8 +294,9 @@ entries below; check the cross-references before starting a subsumed item.
 Lua-to-Lua calls run in one dispatch loop over a per-invocation frame stack
 since 27ee714. What B-O1 listed and is still open:
 
-- `Closure` Arc bumps per call: `admitted_frame` clones bytecode, runtime and
-  upvalues from the heap closure, plus the `CallInfo` bytecode clone. The
+- `Closure` Arc bumps per call: `admitted_frame` clones bytecode and runtime
+  from the heap closure (and the capture list, an `Arc` bump only when it
+  has two or more captures), plus the `CallInfo` bytecode clone. The
   closure is also looked up twice per call (`lua_function_bytecode` at
   admission, then `admitted_frame`); on `composite/benchmark` at afcd2f0
   (plantasjen) the two lookups' instrumented total matched c2932f8's single

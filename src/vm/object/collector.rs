@@ -1,6 +1,6 @@
 //! State collection protocol and explicit allocation modes.
 
-use super::{GcHeap, Markable, ObjectPtr, StringPtr, UpvalueRef};
+use super::{Captures, GcHeap, Markable, ObjectPtr, StringPtr};
 use crate::det_hash::IndexSet;
 use crate::vm::inventory::{GcCleanup, GcRoot};
 use crate::vm::{BytecodeRuntime, State, Val};
@@ -27,7 +27,7 @@ impl NoGcAllocator<'_> {
     pub(in crate::vm) fn alloc_lua_fn(
         self,
         runtime: Arc<BytecodeRuntime>,
-        upvalues: Arc<[UpvalueRef]>,
+        upvalues: Captures,
     ) -> ObjectPtr {
         self.heap.alloc_lua_fn_raw(runtime, upvalues)
     }

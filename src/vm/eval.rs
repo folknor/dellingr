@@ -8,7 +8,7 @@ use std::sync::Arc;
 use super::RustFnId;
 use super::frame::Frame;
 use super::lua_val::Val;
-use super::object::{Upvalue, UpvalueRef};
+use super::object::{Captures, Upvalue, UpvalueRef};
 use super::{
     Bytecode, CallInfo, ChainUnits, Error, ErrorKind, MAX_CALL_DEPTH, Result, State, TypeError,
 };
@@ -1077,7 +1077,7 @@ impl State {
         Frame::new(
             Arc::clone(closure.bytecode()),
             Arc::clone(&closure.runtime),
-            Arc::clone(&closure.upvalues),
+            closure.upvalues.clone(),
             self.in_flight.stack_bottom,
         )
     }
@@ -1399,8 +1399,7 @@ impl State {
     pub(crate) fn push_chunk(&mut self, bytecode: &Arc<Bytecode>) -> Result<()> {
         self.check_stack_space(1)?;
         let runtime = self.resolve_bytecode_runtime(bytecode)?;
-        let upvalues = self.heap.empty_upvalues();
-        let obj = self.alloc_closure(runtime, upvalues);
+        let obj = self.alloc_closure(runtime, Captures::EMPTY);
         self.push_unchecked(Val::Obj(obj));
         Ok(())
     }
@@ -1410,7 +1409,7 @@ impl State {
     pub(super) fn alloc_closure(
         &mut self,
         runtime: Arc<super::BytecodeRuntime>,
-        upvalues: Arc<[UpvalueRef]>,
+        upvalues: Captures,
     ) -> super::object::ObjectPtr {
         let identity = Arc::as_ptr(&runtime.bytecode) as usize;
         // No host callback or fallible operation occurs from this push through

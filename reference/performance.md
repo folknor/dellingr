@@ -219,6 +219,25 @@ interleaved as A B B A:
 (which now reads a closure's bytecode through its runtime) did not regress;
 the `method` step is inside the layout-noise band.
 
+## Capture lists of zero or one inline, 2026-11-18
+
+`Closure` and `Frame` hold a two-word `Captures` instead of an
+`Arc<[UpvalueRef]>`: no capture or one capture is stored inline and cloned
+by copy, two or more share one `Arc` slice as before. A one-capture closure
+now allocates nothing of its own, and admitting a call to a closure with at
+most one capture (every captureless method, every self-recursive local
+function) does no reference-count increment or decrement for its captures.
+The empty marker is `usize::MAX`, an index no pool slot can have. Native
+bytes per level were unchanged in every profile. Against its parent
+da19bdb on bygg, `brokkr bench wall` (best of 3), base and change
+interleaved as A B B A:
+
+| Workload | da19bdb | Change |
+|---|---|---|
+| `closure` | 3.1 s, 3.0 s | 2.3 s, 2.3 s |
+| `arithmetic` | 2.0 s, 2.0 s | 1.8 s, 1.8 s |
+| `method` | 3.3 s, 3.2 s | 2.9 s, 2.9 s |
+
 ## Resident-payload GC pacing, 2026-11-17
 
 Measured on bygg with `brokkr bench wall`, using the same pinned workloads

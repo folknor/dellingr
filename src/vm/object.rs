@@ -49,16 +49,80 @@ pub(crate) enum Upvalue {
 /// collection disabled. Widening costs four bytes per capture-list entry and
 /// keeps capture infallible; no pool index is serialized (snapshots assign
 /// their own dense ids).
+///
+/// Only the pool mints references outside tests, and a pool index is below
+/// the `Vec` length, so `usize::MAX` is never a real reference: `Captures`
+/// uses it as its private empty marker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct UpvalueRef(usize);
 
 impl UpvalueRef {
+    /// The value no pool index can take, reserved for `Captures`.
+    const NONE: Self = Self(usize::MAX);
+
+    #[cfg(test)]
     pub(crate) fn new(idx: usize) -> Self {
+        assert_ne!(idx, usize::MAX, "usize::MAX is the empty-capture marker");
         Self(idx)
     }
 
     pub(crate) fn index(self) -> usize {
         self.0
+    }
+}
+
+/// A closure's capture list, shared by the closure and its active frames.
+///
+/// The list is immutable once built (writes go through the `UpvaluePool`
+/// slots the refs point at), so cloning it for a call admission is enough to
+/// give the frame the same cells. Up to one capture is stored inline and
+/// cloned by copy: no allocation when the closure is made, and no reference
+/// count traffic when it is called. Longer lists share one `Arc` slice.
+/// Both forms are two words (`size_of` is pinned below), so neither
+/// `Closure` nor `Frame` widened for it.
+#[derive(Clone, Debug)]
+pub(super) struct Captures(CapturesRepr);
+
+#[derive(Clone, Debug)]
+enum CapturesRepr {
+    /// No capture when the ref is `UpvalueRef::NONE`, else exactly one.
+    Inline(UpvalueRef),
+    /// Two or more captures.
+    Shared(Arc<[UpvalueRef]>),
+}
+
+const _: () = assert!(size_of::<Captures>() == size_of::<Arc<[UpvalueRef]>>());
+
+impl Captures {
+    pub(super) const EMPTY: Self = Self(CapturesRepr::Inline(UpvalueRef::NONE));
+
+    /// Build a capture list in iteration order. An exact-size iterator, so a
+    /// list of two or more allocates once with no staging buffer.
+    pub(super) fn from_exact<I>(refs: I) -> Self
+    where
+        I: ExactSizeIterator<Item = UpvalueRef>,
+    {
+        let mut refs = refs;
+        match refs.len() {
+            0 => Self::EMPTY,
+            1 => {
+                let only = refs
+                    .next()
+                    .expect("an iterator of length one yields one item");
+                Self(CapturesRepr::Inline(only))
+            }
+            _ => Self(CapturesRepr::Shared(refs.collect())),
+        }
+    }
+
+    /// The captures as a slice, indexed by upvalue number.
+    #[inline]
+    pub(super) fn as_slice(&self) -> &[UpvalueRef] {
+        match &self.0 {
+            CapturesRepr::Inline(only) if *only == UpvalueRef::NONE => &[],
+            CapturesRepr::Inline(only) => std::slice::from_ref(only),
+            CapturesRepr::Shared(refs) => refs,
+        }
     }
 }
 
@@ -99,12 +163,12 @@ impl UpvaluePool {
         if let Some(idx) = self.free.pop() {
             self.slots[idx] = upvalue;
             self.bits.occupy(idx);
-            return UpvalueRef::new(idx);
+            return UpvalueRef(idx);
         }
         let idx = self.slots.len();
         self.slots.push(upvalue);
         self.bits.occupy(idx);
-        UpvalueRef::new(idx)
+        UpvalueRef(idx)
     }
 
     /// Mark one slot reachable during the GC mark phase, and on its first
@@ -208,12 +272,11 @@ impl UpvaluePool {
 #[derive(Clone, Debug)]
 pub(super) struct Closure {
     pub(super) runtime: Arc<BytecodeRuntime>,
-    /// `Arc<[..]>` lets admitted frames share the immutable upvalue-reference
-    /// list with the closure. Writes go through the `UpvaluePool` slots the
-    /// refs point at, so the list never needs to be copied for a call.
-    /// Captures stored inline in the heap slot would save this allocation
-    /// but force a copy into every frame (frames cannot borrow the heap).
-    pub(super) upvalues: Arc<[UpvalueRef]>,
+    /// Shared with admitted frames (see `Captures`). Up to one capture is
+    /// inline; longer lists stay one shared `Arc` slice rather than size
+    /// classes inline in the heap slot, which would force a copy of the
+    /// whole list into every frame (frames cannot borrow the heap).
+    pub(super) upvalues: Captures,
 }
 
 impl Closure {
@@ -492,10 +555,6 @@ pub(crate) struct GcHeap {
     mark_worklist: Vec<ObjectPtr>,
     /// Reused scratch space for the runtime-cache sweep's chunk retention.
     live_chunks: LiveChunks,
-    /// Shared empty upvalue list for closures without captures, so their
-    /// construction stays allocation-free (a fresh `Arc<[_]>` would pay an
-    /// Arc-header allocation where a `Vec::new` paid nothing).
-    empty_upvalues: Arc<[UpvalueRef]>,
     /// The object whose mutation `watched_epoch` counts: the global table,
     /// once the State has one (`watch`).
     watched: ObjectPtr,
@@ -520,7 +579,6 @@ impl GcHeap {
             resident: ResidentBytes::default(),
             mark_worklist: Vec::new(),
             live_chunks: LiveChunks::default(),
-            empty_upvalues: Arc::from([]),
             watched: ObjectPtr(ObjectKey(SlotKey::NULL)),
             watched_epoch: 0,
             cache_prune_countdown: CACHE_PRUNE_INTERVAL,
@@ -552,7 +610,6 @@ impl GcHeap {
             resident: ResidentBytes::default(),
             mark_worklist: Vec::new(),
             live_chunks: LiveChunks::default(),
-            empty_upvalues: Arc::from([]),
             watched: ObjectPtr(ObjectKey(SlotKey::NULL)),
             watched_epoch: 0,
             cache_prune_countdown: CACHE_PRUNE_INTERVAL,
@@ -720,18 +777,9 @@ impl GcHeap {
     // Allocation
     // ========================================================================
 
-    /// The shared capture list of every closure without captures.
-    pub(super) fn empty_upvalues(&self) -> Arc<[UpvalueRef]> {
-        Arc::clone(&self.empty_upvalues)
-    }
-
     /// Allocate a new Lua function.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    fn alloc_lua_fn_raw(
-        &mut self,
-        runtime: Arc<BytecodeRuntime>,
-        upvalues: Arc<[UpvalueRef]>,
-    ) -> ObjectPtr {
+    fn alloc_lua_fn_raw(&mut self, runtime: Arc<BytecodeRuntime>, upvalues: Captures) -> ObjectPtr {
         self.publish_object(RawObject::LuaFn(Closure { runtime, upvalues }))
     }
 
@@ -930,7 +978,7 @@ impl GcHeap {
                 closure.runtime.caches.mark_reached();
                 // Mark the upvalue slots themselves (so the pool sweep keeps
                 // them) and the values stored in closed ones.
-                for uv_ref in closure.upvalues.iter() {
+                for uv_ref in closure.upvalues.as_slice() {
                     upvalue_pool.mark(*uv_ref, self, worklist);
                 }
             }
@@ -1346,6 +1394,20 @@ impl StringPool {
 mod tests {
     use super::*;
     use crate::vm::tests::on_iterative_gc_test_stack;
+
+    #[test]
+    fn capture_lists_keep_their_refs_in_order_at_every_length() {
+        assert!(Captures::EMPTY.as_slice().is_empty());
+        for len in 0..4 {
+            let refs: Vec<UpvalueRef> = (0..len).map(|i| UpvalueRef::new(i * 7)).collect();
+            let captures = Captures::from_exact(refs.iter().copied());
+            assert_eq!(captures.as_slice(), refs.as_slice());
+            assert_eq!(captures.clone().as_slice(), refs.as_slice());
+        }
+        // Index 0 is a real reference, not the empty marker.
+        let zero = Captures::from_exact(std::iter::once(UpvalueRef::new(0)));
+        assert_eq!(zero.as_slice(), &[UpvalueRef::new(0)]);
+    }
 
     #[cfg(debug_assertions)]
     #[test]

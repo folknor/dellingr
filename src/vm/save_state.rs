@@ -477,7 +477,7 @@ enum PathObjectChildren {
         entries: Vec<(Val, Val)>,
         metatable: Option<ObjectPtr>,
     },
-    Closure(std::sync::Arc<[UpvalueRef]>),
+    Closure(super::object::Captures),
 }
 
 // Save tasks carry no path data. Rewalk a root only after finding an
@@ -608,7 +608,7 @@ impl<'a> PathFinder<'a> {
                             }
                         }
                         RawObject::LuaFn(closure) => {
-                            PathObjectChildren::Closure(std::sync::Arc::clone(&closure.upvalues))
+                            PathObjectChildren::Closure(closure.upvalues.clone())
                         }
                     };
                     match children {
@@ -646,7 +646,7 @@ impl<'a> PathFinder<'a> {
                             }
                         }
                         PathObjectChildren::Closure(upvalues) => {
-                            for (index, upvalue) in upvalues.iter().enumerate().rev() {
+                            for (index, upvalue) in upvalues.as_slice().iter().enumerate().rev() {
                                 let child_path = push_path(
                                     &mut self.breadcrumbs,
                                     Some(path),
@@ -1321,7 +1321,8 @@ impl<'a> SaveBuilder<'a> {
             }
             RawObject::LuaFn(closure) => {
                 let chunk = self.encode_bytecode(closure.bytecode())?;
-                for (idx, uv_ref) in closure.upvalues.iter().copied().enumerate().rev() {
+                let captures = closure.upvalues.as_slice();
+                for (idx, uv_ref) in captures.iter().copied().enumerate().rev() {
                     tasks.push(EncodeTask::Upvalue {
                         upvalue: uv_ref,
                         object: id,
@@ -1330,7 +1331,7 @@ impl<'a> SaveBuilder<'a> {
                 }
                 PendingObject::Closure {
                     chunk,
-                    upvalues: vec![None; closure.upvalues.len()],
+                    upvalues: vec![None; captures.len()],
                 }
             }
         };
@@ -1741,14 +1742,11 @@ fn materialize_payload(
                         SaveLocation::Bytecode,
                     )
                 })?;
-                let refs = if saved_upvalues.is_empty() {
-                    state.heap.empty_upvalues()
-                } else {
-                    saved_upvalues
-                        .iter()
-                        .map(|uv_id| upvalues_ref(&upvalues, *uv_id).copied())
-                        .collect::<Result<_, _>>()?
-                };
+                let refs = saved_upvalues
+                    .iter()
+                    .map(|uv_id| upvalues_ref(&upvalues, *uv_id).copied())
+                    .collect::<Result<Vec<_>, _>>()?;
+                let refs = super::object::Captures::from_exact(refs.into_iter());
                 let runtime = state.resolve_bytecode_runtime_no_gc(bc);
                 state.heap.no_gc_allocator().alloc_lua_fn(runtime, refs)
             }

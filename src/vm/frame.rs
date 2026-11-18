@@ -12,7 +12,7 @@ use super::Instr;
 use super::Result;
 use super::State;
 use super::Val;
-use super::object::UpvalueRef;
+use super::object::Captures;
 use crate::cost_model::Charge;
 use crate::instr::{ArgCount, CompareOp, RetCount};
 
@@ -43,10 +43,10 @@ pub(super) struct Frame {
     /// the frame, before a return, and on every error escape. A `Cell`, so
     /// the loop can hold the frame by shared reference alongside its code.
     ip: Cell<usize>,
-    /// The upvalues captured by this closure. Shared with the `Closure`
-    /// (and any other active frames on it) - never mutated through the
-    /// frame; writes go through the `UpvaluePool` slots.
-    pub(super) upvalues: Arc<[UpvalueRef]>,
+    /// The upvalues captured by this closure: a clone of the `Closure`'s
+    /// list (a copy for up to one capture, else a shared `Arc`), never
+    /// mutated through the frame; writes go through the `UpvaluePool` slots.
+    pub(super) upvalues: Captures,
     /// The frame's first register (used for closing upvalues).
     pub(super) stack_bottom: usize,
     /// One past the frame's last register.
@@ -60,7 +60,7 @@ impl Frame {
     pub(super) fn new(
         bytecode: Arc<Bytecode>,
         runtime: Arc<BytecodeRuntime>,
-        upvalues: Arc<[UpvalueRef]>,
+        upvalues: Captures,
         stack_bottom: usize,
     ) -> Self {
         let top = stack_bottom + usize::from(bytecode.max_stack);

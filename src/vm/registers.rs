@@ -16,7 +16,7 @@
 use super::super::error::{ConstructorTableOperation, ErrorKind, InternalFault, TypeError};
 use super::frame::Frame;
 use super::metamethod::{IndexOutcome, IndexStart};
-use super::object::Upvalue;
+use super::object::{Captures, Upvalue};
 use super::{Error, Result, State, Val};
 use crate::compiler::UpvalueDesc;
 use crate::instr::{ArgCount, CompareOp, Instr, RetCount};
@@ -26,7 +26,7 @@ impl State {
     /// The value of upvalue `index` of the running closure.
     #[inline(always)]
     pub(super) fn upvalue_value(&self, frame: &Frame, index: u16) -> Val {
-        let uv_ref = frame.upvalues[usize::from(index)];
+        let uv_ref = frame.upvalues.as_slice()[usize::from(index)];
         match self.upvalue_pool.get(uv_ref) {
             Upvalue::Open(stack_idx) => self.stack[*stack_idx],
             Upvalue::Closed(v) => *v,
@@ -36,7 +36,7 @@ impl State {
     /// Write upvalue `index` of the running closure.
     #[inline(always)]
     pub(super) fn set_upvalue_value(&mut self, frame: &Frame, index: u16, val: Val) {
-        let uv_ref = frame.upvalues[usize::from(index)];
+        let uv_ref = frame.upvalues.as_slice()[usize::from(index)];
         match self.upvalue_pool.get(uv_ref).clone() {
             Upvalue::Open(stack_idx) => self.stack[stack_idx] = val,
             Upvalue::Closed(_) => *self.upvalue_pool.get_mut(uv_ref) = Upvalue::Closed(val),
@@ -477,24 +477,17 @@ impl State {
     pub(super) fn reg_closure(&mut self, frame: &Frame, dst: usize, nested: u16) -> Result<()> {
         let runtime = self.resolve_bytecode_runtime(frame.nested_bytecode(nested))?;
         let descs = &runtime.bytecode.upvalues;
-        // Built straight into the closure's shared list: an exact-size
-        // iterator, so the collect allocates once with no staging buffer.
-        // Captures are made in descriptor order.
-        let upvalues = if descs.is_empty() {
-            self.heap.empty_upvalues()
-        } else {
-            descs
-                .iter()
-                .map(|desc| match desc {
-                    // A local of the running frame.
-                    UpvalueDesc::Local(idx) => {
-                        self.find_or_create_upvalue(frame.stack_bottom + *idx as usize)
-                    }
-                    // Shared with the running closure.
-                    UpvalueDesc::Upvalue(idx) => frame.upvalues[*idx as usize],
-                })
-                .collect()
-        };
+        // Built straight into the closure's list, in descriptor order: none
+        // or one capture allocates nothing, more allocate the shared slice
+        // once with no staging buffer.
+        let upvalues = Captures::from_exact(descs.iter().map(|desc| match desc {
+            // A local of the running frame.
+            UpvalueDesc::Local(idx) => {
+                self.find_or_create_upvalue(frame.stack_bottom + *idx as usize)
+            }
+            // Shared with the running closure.
+            UpvalueDesc::Upvalue(idx) => frame.upvalues.as_slice()[*idx as usize],
+        }));
         let obj = self.alloc_closure(runtime, upvalues);
         self.stack[dst] = Val::Obj(obj);
         Ok(())
