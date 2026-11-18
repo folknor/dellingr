@@ -3,7 +3,9 @@
 //! - **Typed loop regions.** A numeric `for` loop whose body is such
 //!   arithmetic runs as one region: the registers the loop touches live in an
 //!   `f64` mirror, and each iteration runs its body operations and the loop
-//!   step without going back through the dispatch loop.
+//!   step without going back through the dispatch loop. A body without
+//!   calls may also branch forward on number comparisons and read
+//!   elements of loop-invariant tables (`State::run_control_region`).
 //! - **Numeric leaves.** A Lua function whose code up to its first `RETURN`
 //!   is such arithmetic, returning one value or none, runs inside call
 //!   dispatch without an activation when its arguments are numbers. Its
@@ -99,7 +101,7 @@ use super::object::{ObjectPtr, Upvalue};
 use super::table::SlotRef;
 use crate::compiler::Bytecode;
 use crate::cost_meter::CostState;
-use crate::instr::{ArgCount, ArithOp, ArithOperands, Instr, RetCount};
+use crate::instr::{ArgCount, ArithOp, ArithOperands, CompareOp, Instr, RetCount};
 use crate::limits::{MAX_CALL_DEPTH, MAX_STACK_SIZE};
 use crate::numeral::{lua_add, lua_div, lua_modulo, lua_mul, lua_sub};
 
@@ -147,7 +149,16 @@ struct Body {
     weight: u64,
     /// A loop's calls to numeric leaves, in body order. Empty for a leaf.
     calls: Box<[CallSite]>,
+    /// A loop's indexed-read receivers, with the pc an exit at each read
+    /// resumes canonical dispatch from. Empty for a leaf.
+    indexed: Box<[(Receiver, usize)]>,
+    /// The body has forward branches or indexed reads, so it runs through
+    /// `State::run_control_region` rather than as a straight line.
+    control: bool,
 }
+
+/// Indexed reads one loop body may make.
+const MAX_INDEXED: usize = 8;
 
 /// Calls one loop body may make to numeric leaves.
 const MAX_CALLS: usize = 4;
@@ -248,6 +259,14 @@ enum OpKind {
     /// A field leaf's store of slot `c` into field site `b`: writes no
     /// mirror slot.
     Store,
+    /// A loop's forward compare-branch: when `b` compared with `c` is
+    /// false, continue at operation index `a`. Writes no mirror slot.
+    Branch(CompareOp),
+    /// A loop's forward `JMP` to operation index `a`. Writes no mirror slot.
+    Jump,
+    /// A loop's raw read of indexed receiver `b` at the key in slot `c`
+    /// into slot `a`, exiting to canonical dispatch unless it is a number.
+    Index,
 }
 
 /// What a scan admits besides arithmetic.
@@ -298,7 +317,23 @@ struct Layout {
     constants: Vec<Constant>,
     /// The literal index of each `Number` constant, for sharing.
     number_ids: Vec<Option<u16>>,
+    /// Slots some instruction of the body writes, on any path.
     written: u32,
+    /// Slots written on every path from the body's head to the instruction
+    /// being scanned: a read outside this set is guarded at entry.
+    must: u32,
+    /// The instruction being scanned is reached only by a jump: the one
+    /// before it does not fall through.
+    dead: bool,
+    /// Forward branches not yet reached: target pc, `must` at the branch.
+    pending: Vec<(usize, u32)>,
+    /// The operation index each scanned instruction starts, by pc.
+    op_at: Vec<(usize, usize)>,
+    /// Branch and jump operations with their target pcs, resolved to
+    /// operation indices when the scan ends.
+    jumps: Vec<(usize, usize)>,
+    /// Indexed-read receivers and their exit pcs.
+    indexed: Vec<(Receiver, usize)>,
     guards: u32,
     /// Registers read as field receivers; the body must never write them.
     receivers: Vec<u16>,
@@ -348,7 +383,7 @@ impl Layout {
             return None;
         }
         let slot = self.register(register)?;
-        if self.written & (1 << slot) == 0 {
+        if self.must & (1 << slot) == 0 {
             self.guards |= 1 << slot;
         }
         Some(slot)
@@ -360,6 +395,7 @@ impl Layout {
         }
         let slot = self.register(register)?;
         self.written |= 1 << slot;
+        self.must |= 1 << slot;
         self.tables.retain(|&(r, _)| r != register);
         if self.nil_floor.is_some_and(|floor| register > floor) && !self.revived.contains(&register)
         {
@@ -518,6 +554,61 @@ impl Layout {
         self.constant(Constant::Number(value), Some(index))
     }
 
+    /// Enter the instruction at `pc`: `must` becomes the intersection over
+    /// every edge reaching it, the fall-through from the instruction before
+    /// unless that one jumped away, and each forward branch targeting `pc`.
+    /// `None` for code no edge reaches.
+    fn join(&mut self, pc: usize) -> Option<()> {
+        let mut reached = !self.dead;
+        let mut must = if self.dead { u32::MAX } else { self.must };
+        self.pending.retain(|&(target, at_branch)| {
+            if target == pc {
+                reached = true;
+                must &= at_branch;
+                false
+            } else {
+                true
+            }
+        });
+        if !reached {
+            return None;
+        }
+        self.must = must;
+        self.dead = false;
+        Some(())
+    }
+
+    /// A forward branch or jump at `pc` with offset `offset`, inside a body
+    /// ending at `end`; its target joins `must` as it stands now.
+    fn branch(&mut self, pc: usize, offset: i32, end: Option<usize>) -> Option<()> {
+        let end = end?;
+        let target = Frame::jumped(pc + 1, offset);
+        if target <= pc || target > end {
+            return None;
+        }
+        self.pending.push((target, self.must));
+        self.jumps.push((self.ops.len(), target));
+        Some(())
+    }
+
+    /// An indexed read of `receiver` by `GET_TABLE` instruction `inst`,
+    /// whose exit resumes canonical dispatch at `exit`. The key is read
+    /// before the destination is written, as dispatch reads it.
+    fn index(&mut self, receiver: Receiver, exit: usize, inst: Instr) -> Option<LoopOp> {
+        if self.indexed.len() >= MAX_INDEXED {
+            return None;
+        }
+        let c = self.read(inst.c())?;
+        let a = self.write(inst.a())?;
+        self.indexed.push((receiver, exit));
+        Some(LoopOp {
+            kind: OpKind::Index,
+            a,
+            b: (self.indexed.len() - 1) as u8,
+            c,
+        })
+    }
+
     /// `opcode`'s fixed weight at the cursor past `pc`.
     fn charge(cost: &CostState, opcode: u8, pc: usize) -> (usize, u64) {
         let weight = Instr::fixed_charge(opcode).map_or(0, |charge| cost.weight(charge));
@@ -543,6 +634,8 @@ impl Layout {
         while end.is_none_or(|end| pc < end) {
             let inst = *code.get(pc)?;
             let opcode = inst.opcode();
+            self.join(pc)?;
+            self.op_at.push((pc, self.ops.len()));
             let op = if let Some((op, operands)) = ArithOp::decode(opcode) {
                 let (b, c) = match operands {
                     ArithOperands::RegReg => (self.read(inst.b())?, self.read(inst.c())?),
@@ -626,6 +719,73 @@ impl Layout {
                         pc += 1;
                         continue;
                     }
+                    // `GET_UPVAL t u; GET_TABLE t t k`, both inside the body,
+                    // with a key register other than `t`: canonical dispatch
+                    // would read the key after the table replaced it.
+                    Instr::OP_GET_UPVAL
+                        if fields
+                            && end.is_some_and(|end| pc + 1 < end)
+                            && code.get(pc + 1).is_some_and(|index| {
+                                index.opcode() == Instr::OP_GET_TABLE
+                                    && index.a() == inst.a()
+                                    && index.b() == inst.a()
+                                    && index.c() != inst.a()
+                            }) =>
+                    {
+                        let index = code[pc + 1];
+                        // Both reads are free, so an exit before the pair
+                        // owes no charge and none falls between its halves.
+                        const {
+                            assert!(Instr::fixed_charge(Instr::OP_GET_UPVAL).is_none());
+                            assert!(Instr::fixed_charge(Instr::OP_GET_TABLE).is_none());
+                        }
+                        let op = self.index(Receiver::Upvalue(inst.b()), pc, index)?;
+                        self.ops.push(op);
+                        self.charges.push((pc + 2, 0));
+                        pc += 2;
+                        continue;
+                    }
+                    Instr::OP_GET_TABLE if fields => {
+                        const {
+                            assert!(Instr::fixed_charge(Instr::OP_GET_TABLE).is_none());
+                        }
+                        self.receivers.push(inst.b());
+                        self.index(Receiver::Register(inst.b()), pc, inst)?
+                    }
+                    Instr::OP_BR_LT..=Instr::OP_BR_NE if fields => {
+                        let compare = CompareOp::from_branch_opcode(opcode)?;
+                        let b = self.read(inst.a())?;
+                        let c = self.read(inst.b())?;
+                        self.branch(pc, inst.sj(), end)?;
+                        LoopOp {
+                            kind: OpKind::Branch(compare),
+                            a: 0,
+                            b,
+                            c,
+                        }
+                    }
+                    Instr::OP_BR_LT_RK..=Instr::OP_BR_NE_RK if fields => {
+                        let compare = CompareOp::from_branch_number_opcode(opcode)?;
+                        let b = self.read(inst.a())?;
+                        let c = self.number(bytecode, inst.b())?;
+                        self.branch(pc, inst.sj(), end)?;
+                        LoopOp {
+                            kind: OpKind::Branch(compare),
+                            a: 0,
+                            b,
+                            c,
+                        }
+                    }
+                    Instr::OP_JMP if fields => {
+                        self.branch(pc, inst.sj(), end)?;
+                        self.dead = true;
+                        LoopOp {
+                            kind: OpKind::Jump,
+                            a: 0,
+                            b: 0,
+                            c: 0,
+                        }
+                    }
                     Instr::OP_GET_FIELD if fields => {
                         self.receivers.push(inst.b());
                         let b = self.constant(
@@ -695,6 +855,15 @@ impl Layout {
             self.charges.push(Self::charge(cost, opcode, pc));
             pc += 1;
         }
+        if end.is_some() {
+            // The loop step: reached by fall-through and by branches to it.
+            self.join(pc)?;
+            self.op_at.push((pc, self.ops.len()));
+        }
+        // A branch into the second half of a fused pair was never joined.
+        if !self.pending.is_empty() {
+            return None;
+        }
         Some(pc)
     }
 
@@ -703,6 +872,16 @@ impl Layout {
     fn finish(mut self, reserved: usize, tail: (usize, u64)) -> Option<(Body, Vec<u16>)> {
         if self.loading.is_some() {
             return None;
+        }
+        let control = !self.jumps.is_empty() || !self.indexed.is_empty();
+        // Calls stay on the straight-line runner, whose nil-floor reasoning
+        // assumes one path through the body; operation indices fit a `u8`.
+        if control && (!self.calls.is_empty() || self.ops.len() > usize::from(u8::MAX)) {
+            return None;
+        }
+        for &(op, target) in &self.jumps {
+            let (_, index) = self.op_at.iter().find(|&&(pc, _)| pc == target)?;
+            self.ops[op].a = *index as u8;
         }
         for &receiver in &self.receivers {
             if let Some(slot) = self.registers.iter().position(|&r| r == receiver)
@@ -770,6 +949,8 @@ impl Layout {
                 tail,
                 weight,
                 calls: self.calls.into_boxed_slice(),
+                indexed: self.indexed.into_boxed_slice(),
+                control,
             },
             registers,
         ))
@@ -831,9 +1012,10 @@ impl NumericLoop {
         }
         layout.scan(bytecode, cost, after, Some(step_pc), Mode::Region)?;
         let tail = Layout::charge(cost, Instr::OP_FOR_LOOP, step_pc);
-        // The loop step reads the three hidden controls after the body.
+        // The loop step reads the three hidden controls after the body,
+        // guarded unless every path to it writes them.
         for slot in 0..3u8 {
-            if layout.written & (1 << slot) == 0 {
+            if layout.must & (1 << slot) == 0 {
                 layout.guards |= 1 << slot;
             }
         }
@@ -939,7 +1121,9 @@ impl State {
         ip: &mut usize,
         local_cost: &mut u64,
     ) -> Result<()> {
-        if region.body.calls.is_empty() {
+        if region.body.control {
+            self.run_control_region(region, frame, ip, local_cost)
+        } else if region.body.calls.is_empty() {
             self.run_region::<false>(region, frame, ip, local_cost)
         } else {
             self.run_region::<true>(region, frame, ip, local_cost)
@@ -1132,6 +1316,142 @@ impl State {
         {
             self.stack[base + usize::from(body.calls[site].register)] = *callee;
         }
+        result
+    }
+
+    /// `run_numeric_loop` for a body with forward branches or indexed reads,
+    /// and no calls. The operations run by index, a branch or jump moving
+    /// the index forward to its target.
+    ///
+    /// Beyond the straight-line runner's argument:
+    /// - Each indexed read's receiver is read once at entry and must be a
+    ///   table: it is an upvalue or a register the body never writes, and
+    ///   nothing in the region stores, so the table and its contents stay
+    ///   fixed. Each read is a raw get with the number key, as `GET_TABLE`
+    ///   makes first; a number result is the canonical result even under a
+    ///   metatable, which only a raw nil consults. Anything else publishes
+    ///   the mirror and exits with the cursor on the read's first
+    ///   instruction, both of whose instructions are free, so canonical
+    ///   dispatch makes the read with its full semantics.
+    /// - A slot first written on a later pass is published before that
+    ///   pass's checkpoint (`published`), so every checkpoint sees numbers
+    ///   where canonical execution would have overwritten the old values.
+    /// - The pass bound is the sum of every operation's weight, which
+    ///   bounds any path, so below the flush threshold each executed
+    ///   operation's weight is added with no settlement test.
+    #[inline(never)]
+    fn run_control_region(
+        &mut self,
+        region: &NumericLoop,
+        frame: &Frame,
+        ip: &mut usize,
+        local_cost: &mut u64,
+    ) -> Result<()> {
+        let base = frame.stack_bottom;
+        let body = &region.body;
+        let mut x = [0.0f64; MIRROR_SLOTS];
+        if !self.load_mirror(body, frame, base, &mut x) {
+            return Ok(());
+        }
+        let mut tables = [None::<ObjectPtr>; MAX_INDEXED];
+        for (table, &(receiver, _)) in tables.iter_mut().zip(&body.indexed) {
+            let value = match receiver {
+                Receiver::Upvalue(index) => self.upvalue_value(frame, index),
+                Receiver::Register(register) => self.stack[base + usize::from(register)],
+            };
+            let Val::Obj(ptr) = value else {
+                return Ok(());
+            };
+            if self.heap.as_table_ref(ptr).is_none() {
+                return Ok(());
+            }
+            *table = Some(ptr);
+        }
+        let step_pc = region.step_pc;
+        let mut written: u32 = 0;
+        let mut published: u32 = 0;
+        let result = 'pass: loop {
+            let fast =
+                body.weight == 0 || body.weight < self.cost_flush_at().saturating_sub(*local_cost);
+            let mut k = 0;
+            while let Some(op) = body.ops.get(k) {
+                let (cursor, charge) = body.charges[k];
+                if charge != 0 {
+                    if fast {
+                        *local_cost += charge;
+                        #[cfg(feature = "cost-check-interval")]
+                        crate::cost_meter::interval_test::record(cursor, charge);
+                    } else {
+                        *ip = cursor;
+                        if let Err(error) = self.charge_dispatch(local_cost, cursor, charge) {
+                            break 'pass Err(error);
+                        }
+                    }
+                }
+                k += 1;
+                match op.kind {
+                    OpKind::Branch(compare) => {
+                        if !holds(compare, x[at(op.b)], x[at(op.c)]) {
+                            k = usize::from(op.a);
+                        }
+                    }
+                    OpKind::Jump => k = usize::from(op.a),
+                    OpKind::Index => {
+                        let (_, exit) = body.indexed[usize::from(op.b)];
+                        let table = tables[usize::from(op.b) % MAX_INDEXED]
+                            .expect("every indexed receiver was resolved at entry");
+                        let value = self
+                            .heap
+                            .as_table_ref(table)
+                            .map(|tbl| tbl.get(&Val::Num(x[at(op.c)])));
+                        let Some(Val::Num(n)) = value else {
+                            *ip = exit;
+                            break 'pass Ok(());
+                        };
+                        x[at(op.a)] = n;
+                        written |= 1 << op.a;
+                    }
+                    _ => {
+                        x[at(op.a)] = eval(op, &x);
+                        written |= 1 << op.a;
+                    }
+                }
+            }
+            let (cursor, charge) = body.tail;
+            if charge != 0 {
+                if fast {
+                    *local_cost += charge;
+                    #[cfg(feature = "cost-check-interval")]
+                    crate::cost_meter::interval_test::record(cursor, charge);
+                } else {
+                    *ip = cursor;
+                    if let Err(error) = self.charge_dispatch(local_cost, cursor, charge) {
+                        break Err(error);
+                    }
+                }
+            }
+
+            // FOR_LOOP, from the mirror's controls.
+            *ip = step_pc + 1;
+            let step = x[2];
+            let next = x[0] + step;
+            if !super::eval_control::check_numeric_for_condition(next, x[1], step) {
+                break Ok(());
+            }
+            let fresh = written & !published;
+            if fresh != 0 {
+                self.publish_mirror(body, base, &x, fresh);
+                published |= fresh;
+            }
+            if let Err(error) = self.poll_gc_checkpoint() {
+                break Err(error);
+            }
+            x[0] = next;
+            x[3] = next;
+            written |= 0b1001;
+            *ip = region.prep + 1;
+        };
+        self.publish_mirror(body, base, &x, written);
         result
     }
 
@@ -1537,6 +1857,24 @@ impl State {
     }
 }
 
+/// A compare-branch's comparison of two numbers, as dispatch makes it:
+/// IEEE, so every ordering and `==` are false on NaN and `~=` true.
+#[inline(always)]
+#[expect(
+    clippy::float_cmp,
+    reason = "Lua `==` on numbers is exact IEEE equality"
+)]
+fn holds(compare: CompareOp, x: f64, y: f64) -> bool {
+    match compare {
+        CompareOp::Lt => x < y,
+        CompareOp::Le => x <= y,
+        CompareOp::Gt => x > y,
+        CompareOp::Ge => x >= y,
+        CompareOp::Eq => x == y,
+        CompareOp::Ne => x != y,
+    }
+}
+
 #[inline(always)]
 fn eval(op: &LoopOp, x: &[f64; MIRROR_SLOTS]) -> f64 {
     let lhs = x[at(op.b)];
@@ -1551,7 +1889,15 @@ fn eval(op: &LoopOp, x: &[f64; MIRROR_SLOTS]) -> f64 {
         OpKind::Unm => -lhs,
         // Calls and loads are run by the region loop, and field reads and
         // stores by a field leaf, never through here.
-        OpKind::Copy | OpKind::Load | OpKind::Call | OpKind::Read | OpKind::Store => lhs,
+        // Branches, jumps and indexed reads only by `run_control_region`.
+        OpKind::Copy
+        | OpKind::Load
+        | OpKind::Call
+        | OpKind::Read
+        | OpKind::Store
+        | OpKind::Branch(_)
+        | OpKind::Jump
+        | OpKind::Index => lhs,
     }
 }
 
@@ -1677,6 +2023,27 @@ mod tests {
             "local function f(...) local s = 0 for i = 1, 9 do s = g(...) end end",
             // A callee loaded and never called holds a non-number.
             "local function f() local s = 0 for i = 1, 9 do s = s + 1 local _ = g end end",
+        ] {
+            assert_eq!(regions(source), 0, "{source}");
+        }
+    }
+
+    #[test]
+    fn regions_take_forward_branches_and_indexed_reads() {
+        for source in [
+            "local t = {} local function f() local s = 0 for i = 1, 9 do if t[i] < 3 or t[i] == 2 then s = s + 1 end end end",
+            "local function f(t) local s = 0 for i = 1, 9 do local v = t[i] if v > s then s = v else s = s - 1 end end end",
+            "local function f() local s = 0 for i = 1, 9 do if s > 4 then s = 0 end s = s + i end end",
+        ] {
+            assert_eq!(regions(source), 1, "{source}");
+        }
+        for source in [
+            // A receiver the body writes; a branch beside a call.
+            "local function f(t) local s = 0 for i = 1, 9 do s = s + t[i]; t = i end end",
+            "local function f() local s = 0 for i = 1, 9 do if s > 1 then s = g(s) end end end",
+            // A string comparison and a truth test are not number branches.
+            "local function f(t) local s = 0 for i = 1, 9 do if s == 'x' then s = 1 end end end",
+            "local function f(t) local s = 0 for i = 1, 9 do if s then s = 1 end end end",
         ] {
             assert_eq!(regions(source), 0, "{source}");
         }

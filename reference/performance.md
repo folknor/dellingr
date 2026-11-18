@@ -539,6 +539,34 @@ unchanged in dev and release default; release with snapshot moved
 `error_tostring` up 16 bytes and the `gsub_pattern_*` rows down 80, which no
 changed function is live across (reference/native-calls.md has the table).
 
+## Branches and indexed reads in typed loop regions, 2026-11-18
+
+A region body without calls may also hold forward number compare-branches
+and `JMP`s whose targets stay inside the body, and raw element reads
+(`GET_UPVAL t u; GET_TABLE t t k`, or `GET_TABLE` on a register the body
+never writes) of a table resolved once at entry. Such a body runs through
+`State::run_control_region`, which steps its operations by index. Guards come
+from a must-written dataflow over the forward edges; a slot first written on
+a later pass is published before that pass's checkpoint; an element that is
+not a number exits to canonical dispatch at the read's first instruction,
+both of which are free. The alternatives weighed were next-opcode fusion of
+the pairs in the dispatch loop, which the literal-load and branch-on-true
+experiments had already measured flat on this kind of code, and a
+whole-function lowered stream, which `cull` does not need: its hot loop
+sits inside a `FOR_PREP`. Measured on bygg with `brokkr bench wall`, best of
+three, A at `803c19a`, B the same tree plus the change (dirty):
+
+| Workload | A | B |
+|---|---:|---:|
+| `cull` | 1.28 s (82c1c96e) | 765 ms (15622729) |
+| `arithmetic` | 1.9 s (1a3b7dba) | 1.9 s (a3469a0a) |
+| `same_obj_read` | 499 ms (52fd535e) | 485 ms (35b0a8fd) |
+
+`cull`'s outer loop holds the inner loop, so it still dispatches; only the
+inner pair loop runs as a region. `frame.rs` and every path live across a
+native re-entry are untouched (the runner is outlined below
+`run_numeric_loop`).
+
 ## Host field descriptors, 2026-11-18
 
 `State::raw_field` takes a `FieldName` as well as a `&str`. A descriptor

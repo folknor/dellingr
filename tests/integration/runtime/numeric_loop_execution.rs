@@ -169,6 +169,62 @@ fn numeric_loop_region_field_reads_keep_canonical_semantics() {
     );
 }
 
+/// A loop with forward branches, a write on one arm only, and indexed reads
+/// of an upvalue table and of a local table it never writes. `ys` misses
+/// past 25 and answers through `__index`, which exits the region mid-body
+/// to canonical dispatch.
+fn control_region_program(twin: &str) -> String {
+    format!(
+        r#"
+        local up = 0
+        local xs = {{}}
+        for i = 1, 30 do xs[i] = i * 1.5 end
+        function run()
+            local sum, last, k = 0.5, 0, 0
+            peek = function() return sum, last, k end
+            local ys = setmetatable({{}}, {{ __index = function(_, key) return key * 2 end }})
+            for i = 1, 25 do ys[i] = 31 - i end
+            for i = 1, 40 do
+                local a = xs[i % 30 + 1]
+                local b = ys[i]
+                if a < b or b == 7 then
+                    sum = sum + a
+                else
+                    last = b
+                end
+                if a ~= 3 then k = k + 1 end
+                sum = -sum
+                {twin}
+            end
+            return sum
+        end
+        "#
+    )
+}
+
+#[test]
+fn numeric_loop_region_with_branches_matches_canonical_dispatch_at_every_budget() {
+    let region = control_region_program("");
+    let canonical = control_region_program("local _u = up");
+    let models = [
+        CostModel::default(),
+        CostModel::default()
+            .with(Charge::Add, 0)
+            .with(Charge::Mod, 5)
+            .with(Charge::Negate, 3),
+        CostModel::zero(),
+    ];
+    for model in &models {
+        for budget in -1..=900 {
+            assert_eq!(
+                region_outcome(model, &region, budget),
+                region_outcome(model, &canonical, budget),
+                "budget {budget} under {model:?}"
+            );
+        }
+    }
+}
+
 /// A caller looping over a numeric helper. `{twin}` is spliced at the top of
 /// the helper: a free boolean load there keeps it off the leaf path without
 /// changing any charge. (An upvalue read would not: a leaf takes one as a

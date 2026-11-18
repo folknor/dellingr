@@ -94,6 +94,10 @@ and at `State::try_numeric_leaf`; numbers in `reference/performance.md`):
   (`State::resolve_sites`). bench/method 3.1 s to 1.7 s. Fusing
   `GET_FIELD; ADD; SET_FIELD` in the dispatch loop or as a persisted opcode
   was weighed and passed over: both keep the activation, which is the cost.
+- Branches and indexed reads in regions without calls: forward number
+  compare-branches and `JMP`s, and raw element reads of a table read once
+  at entry, exiting to canonical dispatch at a non-number element
+  (`State::run_control_region`). bench/cull 1.28 s to 0.77 s.
 
 What the landed work taught: canonical-pc metadata with the canonical
 instructions as the fallback needs no position map or execution stream;
@@ -103,11 +107,11 @@ per-operation charge path with no refusal between its halves. The exact `i64`
 countdown was not built: the f64 add and compare are not where the loop's time
 went.
 
-**Residue:** loop bodies with a compare-branch, a store, or a call to
-anything but a numeric leaf (nested `f(g(x))`, a method call, open
-arguments or results) still run canonically (no registered workload has a
-numeric-for body that is a compare-branch plus region operations only; every
-one with an `if` also calls or touches a table). Straight-line chains in functions that are not leaves (fib's `n - 1`,
+**Residue:** loop bodies with a store, a nested loop (cull's outer loop),
+a non-number branch (truth test, string or nil compare), a branch beside a
+leaf call, or a call to anything but a numeric leaf (nested `f(g(x))`, a
+method call, open arguments or results) still run canonically.
+Straight-line chains in functions that are not leaves (fib's `n - 1`,
 `n - 2`, `+` around its calls) still dispatch per instruction. Field updates
 outside a leaf (in a function that branches or calls, or in a loop body
 such as object_fields' `u.x = u.x + u.speed` beside `units[i]` and a method

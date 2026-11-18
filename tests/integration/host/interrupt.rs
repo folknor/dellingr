@@ -130,6 +130,27 @@ fn a_typed_numeric_loop_stops_at_its_first_back_edge() {
     assert_eq!(state.to_number(-1).expect("last is a number"), 1.0);
 }
 
+/// A typed loop with branches and indexed reads polls at the same back edge.
+#[test]
+fn a_typed_loop_with_branches_stops_at_its_first_back_edge() {
+    let source = "local s, last, xs = 0, 0, {5, 1, 5, 1, 5, 1, 5, 1, 5, 1}
+                  peek = function() return s, last end
+                  stop()
+                  for i = 1, 10 do
+                    if xs[i] > 2 then s = s + i else last = i end
+                  end";
+    let mut state = state();
+    let error = assert_interrupted(support::try_run(&mut state, source), source);
+    assert!(error.to_string().starts_with("6:"), "{error}");
+    state.interrupt().reset();
+    state.get_global("peek").expect("peek is defined");
+    state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(2))
+        .expect("peek runs once the interrupt is reset");
+    assert_eq!(state.to_number(-2).expect("s is a number"), 1.0);
+    assert_eq!(state.to_number(-1).expect("last is a number"), 0.0);
+}
+
 /// A typed loop calling a numeric leaf keeps the call's admission as a
 /// safepoint: an interrupt raised before the loop stops it at the first
 /// call, before the callee or anything after it in the body runs.

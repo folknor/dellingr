@@ -256,6 +256,13 @@ tick budgets and re-record replays.
   Results, costs, the charged prefix at a budget refusal, error locations,
   interrupt safepoints and collection timing are unchanged; a missing field,
   a metamethod or a non-number read runs the call as before.
+- A typed loop without calls may also branch on number comparisons
+  (`if a < b or c == 7 then ... else ... end`) and read elements of a table
+  the loop never assigns (`xs[i]`): `bench/cull` went from 1.28 s to 0.77 s
+  on bygg. An element that is not a number hands the rest of the loop back
+  to ordinary dispatch at that read, so `__index` and errors behave as
+  before. Results, costs, the charged prefix at a budget refusal, error
+  locations, interrupt safepoints and collection timing are unchanged.
 
 ## [0.7.1] - 2026-11-06
 
