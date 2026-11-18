@@ -109,6 +109,13 @@ cost-model decision):
 - Argument errors from a plain Rust helper called directly by a callback
   (not dispatched through the VM) are attributed to that callback.
 
+Test gaps (2026-11-18):
+
+- `comparison_opcodes_round_trip` in `src/instr.rs` covers the value and
+  register branch families only; `CompareOp::branch_number_opcode` and
+  `from_branch_number_opcode` have no round-trip test, and no unit test builds
+  a `BR_*_RS` or `BR_*_NIL` instruction through its constructor.
+
 Cosmetic:
 
 - Tracker comments with quoting damage that `bz` cannot edit: dellingr#3

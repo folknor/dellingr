@@ -142,31 +142,34 @@ its handler directly lives under PERF-002.
 
 ## PERF-004 - Remaining constant operand and loop-step forms
 
-Raised by the codegen, dispatch and lookup hunters. Predicate lowering,
-number/string/nil literal compare-and-branch forms, `t["k"]` routed to the
-field path, the rotated generic `for` (TFOR_LOOP as the polled back edge) and
-its fused step (TFOR_LOOP run from the TFOR_CALL arm) have landed; this is what was left.
+Raised by the codegen, dispatch and lookup hunters. Predicate lowering, the
+literal compare-and-branch forms, `t["k"]` on the field path and the fused
+generic `for` step have landed. Fusing a literal load into its consumer
+(`t[1]`, and by extension `t.k = 0`, `local b = x < 2`, `2 < n`) was built,
+measured flat and refused; the reasoning and numbers are at `Generator::suffix`
+and `cond_jump` in `codegen.rs`. Each remaining item waits for a workload that
+shows it.
 
 **Bottleneck:**
-- A dynamic string key (`t[name]`) uses uncached `GET_TABLE` even when the
-  site sees one interned key every time.
-- Numeric-literal indexing (`t[1]`), literal values in field stores
-  (`t.k = 0`) and value-form comparisons (`local b = x < 2`) still load the
-  literal into a register.
+- A dynamic string key (`t[name]`) uses uncached `GET_TABLE`. Every registered
+  dynamic-string-key site is polymorphic (`rekey`, `fill`'s 3000-key store,
+  `object_fields`), so a last-key cache tied to the receiver would only miss;
+  `fill`'s one monomorphic read runs once per fresh table. If a workload shows
+  hot monomorphic dynamic reads across receivers of one layout, the shape is a
+  cached `KeyedIndex` checked with `value_if_key` against the live slot, not a
+  field plan: the field cache trusts one key per slot with no key compare.
 - An ordering comparison that must jump when true (`or`'s left operand, a
-  `not` in a condition) is a compare-branch over a `JMP`: two dispatches.
-- A comparison with a literal on the left (`2 < n`) still loads it; it is
-  not swapped, because the type error names the operands in source order.
-- The register-register comparison arm still goes through `compare_vals`;
-  only the number-literal arm has an inline IEEE fast path.
+  `not` in a condition) is a compare-branch over a `JMP`; the extra dispatch
+  runs only when the comparison holds. A branch-when-true family (RR and RK
+  orderings, eight opcodes) keeps every register; no registered workload has
+  a hot site.
+- The register-register comparison arms decode `op.ordering()` and run
+  `partial_cmp` inside the inlined `compare_vals`, where the number-literal arm
+  matches the operator directly. Whether that survives optimization needs the
+  assembly and a hot RR site; none is registered (`rust_boundary`'s `less` is
+  the nearest).
 
-**Redesign:** a guarded per-site key cache for dynamic string keys reusing a
-field plan; literal operand forms for the remaining sites where a workload
-shows them.
-
-**Risks:** cache slots are per family and capped at 255 per function.
-
-**Classification:** local changes, smaller ceiling.
+**Classification:** local changes, smaller ceiling; workload-gated.
 
 ## PERF-012 - Argument-guarded helper specialization
 

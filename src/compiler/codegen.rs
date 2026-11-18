@@ -960,6 +960,14 @@ impl Generator<'_> {
                     acc = self.compare_value(link.op, acc, &link.rhs, link.line)?;
                 }
                 self.error_line = last.line;
+                // A literal on the left (`2 < n`) is loaded into a scratch
+                // register here. A literal-left form need not swap the
+                // operands (it can compare `k < R` in source order, so the
+                // type error is unaffected); what stops it is that the
+                // scratch keeps the literal afterwards, a GC-root write a
+                // fused form must still perform, and `Abj` has no room for
+                // scratch, register, literal and jump. Fusing a literal load
+                // into its consumer was measured flat besides (`Suffix::Index`).
                 let lhs = self.operand_before(acc, last.rhs.may_execute)?;
                 let (lhs_reg, lhs) = self.operand_reg(lhs)?;
                 // The branch jumps when the comparison is false; jumping on
@@ -1227,6 +1235,22 @@ impl Generator<'_> {
                 let obj = self.operand_before(object, key.may_execute)?;
                 let (obj_reg, obj) = self.operand_reg(obj)?;
                 let k = self.expr(key)?;
+                // A number literal key (`t[1]`) stays `LOAD_NUM` plus
+                // `GET_TABLE`. Dropping the load is refused: the scratch
+                // write is a GC root change. A fused opcode that kept the
+                // write (`R[D] = K[C]; R[A] = R[B][R[D]]`, D the scratch)
+                // was built and measured on 2026-11-18 (bygg, against
+                // 649d3e5): on a probe of three literal reads of a local
+                // tuple per loop step, 7 instructions per iteration instead
+                // of 10, walls were 4563 and 4561 ms against 4588 and
+                // 4583 ms, flat; on `list_literals` its own arm was 3.4%
+                // faster but grew every dev `Frame::run` cycle by 96 bytes
+                // and some release ones by 16, while an arm shared with
+                // `GET_TABLE` (release-neutral, dev +32) was flat there too.
+                // A literal load overlaps with its consumer, so the dispatch
+                // it costs is close to free. Literal values in field stores
+                // and value-form comparisons with a literal are the same
+                // fusion and were not built for that reason.
                 let key_reg = self.any_reg(k)?;
                 self.free_two(obj, Val::Reg(key_reg));
                 Ok(Val::Reloc(
