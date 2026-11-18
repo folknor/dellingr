@@ -12,8 +12,9 @@
 //!   its position until compaction.
 //!
 //! The index holds the position of every real key, live or dead, exactly
-//! once, and never a vacant slot. That is what makes a re-add one probe: the
-//! key's index entry is retargeted to the appended slot, where an
+//! once, and never a vacant slot. That is what makes a re-add that does not compact one probe: the
+//! lookup that finds the dead key holds its index entry (`SlotMut`), and
+//! the entry is retargeted to the appended slot without a second probe, where an
 //! `IndexMap` had to rename the old slot to a synthetic key (erasing one
 //! index entry and inserting another) and then insert the real key again.
 //!
@@ -161,31 +162,15 @@ impl HashSlots {
         self.entries.push((Val::Nil, Val::Nil));
     }
 
-    /// Move the real key at `old` to a new slot at the back holding
-    /// `value`, leaving `old` vacant. One probe: the key's index entry is
-    /// retargeted, nothing is erased or inserted. Returns the new position.
-    pub(super) fn relocate(
-        &mut self,
-        old: usize,
-        value: Val,
-        resident: &mut ResidentBytes,
-    ) -> usize {
-        let key = self.entries[old].0;
-        debug_assert!(super::is_valid_table_key(&key));
-        let position = self.entries.len();
-        let capacity = self.entries.capacity();
-        // Push first: a failed allocation leaves the old binding intact.
-        self.entries.push((key, value));
-        if self.entries.capacity() != capacity {
-            resident.add((self.entries.capacity() - capacity) * size_of::<(Val, Val)>());
-        }
-        let slot = self
-            .index
-            .find_mut(hash_key(key), |&at| at == old)
-            .expect("every real key is indexed at its slot");
-        *slot = position;
-        self.entries[old] = (Val::Nil, Val::Nil);
-        position
+    /// Find real key `key`, live or dead, and hold its index entry for a
+    /// write. The handle borrows these slots, so nothing can touch the
+    /// index between this probe and a `relocate`; that is what lets the
+    /// re-add retarget the entry without probing for it again.
+    #[inline]
+    pub(super) fn find_mut(&mut self, key: Val) -> Option<SlotMut<'_>> {
+        let Self { entries, index } = self;
+        let indexed = index.find_mut(hash_key(key), |&at| entries[at].0 == key)?;
+        Some(SlotMut { entries, indexed })
     }
 
     /// Drop every nil-valued slot (dead and vacant), keeping the others in
@@ -241,5 +226,47 @@ impl HashSlots {
     pub(super) fn vacate_for_test(&mut self, position: usize) {
         self.entries[position] = (Val::Nil, Val::Nil);
         self.rebuild_index();
+    }
+}
+
+/// A found key's slot together with its index entry, from
+/// `HashSlots::find_mut`.
+pub(super) struct SlotMut<'a> {
+    entries: &'a mut Vec<(Val, Val)>,
+    indexed: &'a mut usize,
+}
+
+impl SlotMut<'_> {
+    /// The key's position.
+    #[inline]
+    pub(super) fn position(&self) -> usize {
+        *self.indexed
+    }
+
+    /// The key's value. Writing it never changes which key the slot holds,
+    /// so the index stays valid.
+    #[inline]
+    pub(super) fn value_mut(&mut self) -> &mut Val {
+        &mut self.entries[*self.indexed].1
+    }
+
+    /// Move the key to a new slot at the back holding `value`, leaving its
+    /// old slot vacant. The index entry the lookup found is retargeted in
+    /// place: nothing is probed, erased or inserted. Returns the new
+    /// position.
+    pub(super) fn relocate(self, value: Val, resident: &mut ResidentBytes) -> usize {
+        let old = *self.indexed;
+        let key = self.entries[old].0;
+        debug_assert!(super::is_valid_table_key(&key));
+        let position = self.entries.len();
+        let capacity = self.entries.capacity();
+        // Push first: a failed allocation leaves the old binding intact.
+        self.entries.push((key, value));
+        if self.entries.capacity() != capacity {
+            resident.add((self.entries.capacity() - capacity) * size_of::<(Val, Val)>());
+        }
+        *self.indexed = position;
+        self.entries[old] = (Val::Nil, Val::Nil);
+        position
     }
 }

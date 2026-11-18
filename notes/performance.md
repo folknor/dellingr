@@ -264,21 +264,6 @@ What could still pay, untested:
 
 **Classification:** local (second bullet), rewrite (first), unmeasured.
 
-## PERF-041 - A map re-add probes the index twice
-
-Raised while closing the double lookup of stores through metatables.
-
-**Bottleneck (hypothesis):** re-adding a tombstoned key into map storage
-(`insert_into_map_with_tombstones`, non-compacting branch) finds the key's
-index entry with `map.find`, then `HashSlots::relocate` probes the hashbrown
-index again to retarget that entry at the new back slot. Nothing between
-the two touches the index (the slot vector grows, the index does not
-reserve), so the first probe's bucket (`HashTable::find_bucket_index`,
-`get_bucket_mut` in the pinned hashbrown) could be carried into the
-retarget. The `rekey` workload is this path. Unmeasured.
-
-**Classification:** local.
-
 ## PERF-033 - Host global and field access resolves names and tables afresh
 
 Raised by the host-boundary hunter.

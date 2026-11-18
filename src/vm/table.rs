@@ -2327,28 +2327,6 @@ impl Table {
             unreachable!("map insertion requires map storage");
         };
         let policy = *policy;
-        // The one probe: a dead key is still indexed, so this finds a live
-        // key, a tombstone, or proves the key has no slot.
-        let found = map.find(key);
-        if let Some(index) = found {
-            let (_, slot) = map.get_mut(index).expect("the index was just found");
-            if !matches!(*slot, Val::Nil) {
-                *slot = value;
-                #[cfg(debug_assertions)]
-                self.debug_assert_invariants();
-                return index;
-            }
-            if policy.revive_in_place {
-                // The key keeps its slot and index; only the value changes,
-                // so no cached index moves and the version stays put.
-                *slot = value;
-                self.tally.sub_dead(1);
-                self.hash_migratable += usize::from(may_migrate(&key));
-                #[cfg(debug_assertions)]
-                self.debug_assert_invariants();
-                return index;
-            }
-        }
         // Both a new key and a re-added one add a slot; compacting once the
         // tombstones (a re-added key's own included) reach the live count
         // keeps the part within twice its live size at amortised O(1) per
@@ -2356,30 +2334,50 @@ impl Table {
         // has been: moving it would change when compaction runs, and with it
         // which cleared keys stay valid `next` controls and what saves hold.
         let compacts = self.tally.dead() >= map.len() - self.tally.dead() && !policy.retain_dead;
-        let index = match found {
+        // The one probe: a dead key is still indexed, so this finds a live
+        // key, a tombstone, or proves the key has no slot. The handle keeps
+        // the key's index entry, so a relocation retargets it unprobed.
+        let found = map.find_mut(key);
+        if let Some(mut slot) = found {
+            let index = slot.position();
+            let live = !matches!(*slot.value_mut(), Val::Nil);
+            if live || policy.revive_in_place {
+                *slot.value_mut() = value;
+                if !live {
+                    // The key keeps its slot and index; only the value
+                    // changes, so no cached index moves and the version
+                    // stays put.
+                    self.tally.sub_dead(1);
+                    self.hash_migratable += usize::from(may_migrate(&key));
+                }
+                #[cfg(debug_assertions)]
+                self.debug_assert_invariants();
+                return index;
+            }
             // Re-adding a tombstoned key moves it to the back of `pairs()`
             // order. Its index changes, so caches holding the old one must
-            // re-resolve: the version moves.
-            Some(old) => {
-                self.bump_version();
-                if compacts {
-                    // Compaction drops the old tombstone with every other
-                    // one, so the key has no slot left to vacate.
-                    self.compact_dead();
-                    self.map_mut().push_tracked(key, value, resident)
-                } else {
-                    // The old slot turns vacant, still a dead slot, so
-                    // `dead_count` is unchanged.
-                    self.map_mut().relocate(old, value, resident)
-                }
-            }
-            None => {
-                if compacts {
-                    self.compact_dead();
-                }
+            // re-resolve: the version moves. The version is a field apart
+            // from the storage the handle borrows.
+            self.version.set(self.version.get().wrapping_add(1));
+            let index = if compacts {
+                // Compaction drops the old tombstone with every other one,
+                // so the key has no slot left to vacate.
+                self.compact_dead();
                 self.map_mut().push_tracked(key, value, resident)
-            }
-        };
+            } else {
+                // The old slot turns vacant, still a dead slot, so
+                // `dead_count` is unchanged.
+                slot.relocate(value, resident)
+            };
+            self.hash_migratable += usize::from(may_migrate(&key));
+            #[cfg(debug_assertions)]
+            self.debug_assert_invariants();
+            return index;
+        }
+        if compacts {
+            self.compact_dead();
+        }
+        let index = self.map_mut().push_tracked(key, value, resident);
         self.hash_migratable += usize::from(may_migrate(&key));
         #[cfg(debug_assertions)]
         self.debug_assert_invariants();
