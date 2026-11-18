@@ -497,6 +497,17 @@ impl State {
             // a separate result destination adds native-live bookkeeping
             // without removing the relocation required by the stack cap.
             // Keep the single remove (zero copied values for zero arguments).
+            //
+            // A context ABI that leaves every callback's arguments in place
+            // (a retained callee under the same contiguous frame) was weighed
+            // and refused for this reason: keeping the cap exact would need a
+            // dead-slot credit carried through every nested Rust level. The
+            // relocation is only the contiguous `RustFunc` frame's need. A
+            // body selected by function identity, like a library leaf, can
+            // keep its arguments in place and write its result into the
+            // callee slot, running the callback's own stack checks at the
+            // same logical lengths (`table.pack` is the case where that saves
+            // an argument move per call); such forms belong with the leaves.
             self.stack.remove(idx);
             return crate::native_call!(
                 "begin_call->invoke_rust_fn",
@@ -749,8 +760,9 @@ impl State {
     ) -> Result<u8> {
         // Every Rust callee passes here, including library functions and
         // metamethods; a library leaf the dispatch loop executes directly is
-        // not a callback and takes the same poll in `call_leaf`. Poll before changing callback bookkeeping so a pending
-        // interrupt refuses entry and the enclosing boundary owns cleanup.
+        // not a callback and takes the same poll in `call_leaf`. Poll before
+        // changing callback bookkeeping so a pending interrupt refuses entry
+        // and the enclosing boundary owns cleanup.
         // Straight-line Lua can otherwise chain expensive native calls
         // without reaching a backward jump or another Lua admission.
         self.poll_interrupt()?;
@@ -778,9 +790,17 @@ impl State {
         // return with the thread's floating-point environment changed. Lua
         // must not resume under it: an `Ok` becomes this callback's error,
         // which the arm below unwinds like any other. A callback's own error
-        // is kept; nothing executes on the way out of an error.
+        // is kept; nothing executes on the way out of an error. A library
+        // entry audited to leave no unchecked host execution behind skips
+        // the read (`lua_std::returns_without_host_code`): every host
+        // callback it reached was checked at its own return here. `print`
+        // is not one of them. The process allocator is assumed to keep the
+        // environment, as it is for every allocating opcode.
         let mut result = result;
-        if result.is_ok() && crate::fp_env::unsupported() {
+        if result.is_ok()
+            && !crate::lua_std::returns_without_host_code(function)
+            && crate::fp_env::unsupported()
+        {
             result = Err(Self::float_environment_error());
         }
         self.in_flight.active_rust_fn = previous_rust_fn;

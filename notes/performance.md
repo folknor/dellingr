@@ -191,47 +191,6 @@ must still precede every handler call, so it would only move one level up into
 the `reg_*` helpers, which keep the parameter; no meter write is saved. A
 dispatch-local cached threshold was measured neutral under PERF-007.
 
-## PERF-008 - Rust library calls go through the host stack protocol
-
-Raised by the calls hunter (its third rewrite) and the host-boundary hunter
-(the callback half of its first rewrite).
-
-**Bottleneck:** the native ABI is `fn(&mut State) -> Result<u8>`
-(`lua_val.rs`). Before a tiny body, `begin_call` removes the function slot and
-shifts the arguments; `invoke_rust_fn` changes stack-bottom and active-function
-state; the callback reads arguments through relative stack APIs, clears or
-reshapes the stack and pushes results; `invoke_rust_fn` validates the count and
-copies the result suffix over arguments and temporaries; the caller adjusts
-result count and restores its extent. The math wrappers (`math.rs`) do
-argument checking, another indexed read, `set_top` and `push_number` around
-one arithmetic operation. `invoke_rust_fn` checks the floating-point
-environment after every successful return, including trusted leaf math
-functions, although `RustFnId::is_library` (`rust_fn.rs`) already lets
-`check_usable` skip repeated reads inside library functions. Host callbacks
-using `check_type` then `to_number` validate twice.
-
-**Redesign:** a native call context with explicit argument indices/count and a
-result destination or writer: one-value functions return a value, multi-result
-functions return a rooted span. Arguments stay where the caller put them. The
-registry keeps the same `RustFnId` identities but associates execution forms:
-trusted leaf library functions, resumable library operations, arbitrary host
-functions. Leaf entries that cannot run host code skip arbitrary-host return
-machinery (catalog membership alone is not enough: `print` is a catalog
-entry). The host hunter adds: simple host callbacks receive decoded scalars and
-borrowed string/table views and return values directly; callbacks that need
-Lua re-entry get a broader execution capability. Wrapping today's push/pop
-implementations in a context would keep most of the materialization.
-
-**Risks:** the stack cap. Removing the function slot gives callbacks one more
-usable slot today (`optimizations.md` records the retained-callee variant as
-rejected for this reason); the new context must keep logical capacity and
-exact overflow errors independent of physical placement. Also method argument
-numbering, missing-versus-nil arguments, result-count validation, poisoning,
-callback frame isolation. FP checks can be consolidated over VM-controlled
-marshalling but not hoisted across host code.
-
-**Classification:** rewrite.
-
 ## PERF-009 - Heap-writing library functions still enter as callbacks
 
 Raised by the table-and-math-libraries hunter. Narrowed: every `math`
@@ -246,6 +205,11 @@ more mid-operation refusal points than the pure set did; the leaf contract in
 `vm/leaf.rs` (decline before any side effect, then the callback's order of
 poll, charge, work, slot checks and writes) applies unchanged.
 `pairs`/`ipairs` loops are already special-cased in generic `for`.
+A leaf need not take the callback's argument relocation: `table.pack` can
+keep its arguments in place, run the callback's `StackSpace(1)` check at the
+same logical length, put the new table in the callee slot and truncate after,
+saving one argument move per call that grows with arity (reasoning at the
+remove in `begin_call`). The same shape fits any heap-writing leaf here.
 
 **Not pursued:** dedicated guarded opcodes (Luau FASTCALL style). Over the
 identity path they would only skip the call-site record, the call window and

@@ -296,6 +296,50 @@ fn a_nested_refusal_leaves_the_call_usable_once_restored() {
     });
 }
 
+/// Host callbacks whose `on_print` turns on FTZ, as engine logging that
+/// leaves the environment changed would.
+struct FlippingPrint;
+
+impl dellingr::HostCallbacks for FlippingPrint {
+    fn on_print(&mut self, _source: Option<&[u8]>, _line: u32, _message: &[u8]) {
+        write_mxcsr(DEFAULT | FTZ);
+    }
+}
+
+#[test]
+fn print_returning_after_a_changed_on_print_fails_there() {
+    // `print` is the library function that runs host code itself, so its
+    // return keeps the check every other library function skips.
+    isolated(|| {
+        let mut state = State::builder().callbacks(Box::new(FlippingPrint)).build();
+        support::run(&mut state, "reached = false");
+        let result = under(DEFAULT, || {
+            support::try_run(&mut state, "print('x') reached = true")
+        });
+        assert_refused_with(result, DEFAULT | FTZ);
+        support::eval(&mut state, "return reached", 1);
+        assert!(!state.to_boolean(-1), "Lua did not resume after print");
+    });
+}
+
+#[test]
+fn a_host_callback_reached_through_a_library_function_is_checked_at_its_return() {
+    // `table.sort` skips the check at its own return; the host comparator it
+    // calls is checked at the comparator's.
+    isolated(|| {
+        let (mut state, _recorder) = state_with_host(flip);
+        let result = under(DEFAULT, || {
+            support::try_run(
+                &mut state,
+                "sorted = false table.sort({2, 1}, function(a, b) host() return a < b end) sorted = true",
+            )
+        });
+        assert_refused_with(result, DEFAULT | FTZ);
+        support::eval(&mut state, "return sorted", 1);
+        assert!(!state.to_boolean(-1), "Lua did not resume after the sort");
+    });
+}
+
 #[cfg(feature = "snapshot")]
 #[test]
 fn save_and_load_refuse_and_load_rechecks_after_setup() {

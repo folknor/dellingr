@@ -400,6 +400,99 @@ pub(crate) fn leaf_of(function: RustFnId) -> Option<Leaf> {
     LEAVES.get(function.position()).copied().flatten()
 }
 
+/// The catalog entries whose successful return leaves no unchecked host
+/// execution behind, by id: the entry runs no host code itself (it calls no
+/// `HostCallbacks` method on the way to `Ok`), and any host Rust callback it
+/// reaches through Lua, a metamethod, a comparator or a replacement returns
+/// through `invoke_rust_fn`, which checked the floating-point environment
+/// there. `on_error` runs only on an escaping error, which every entry
+/// propagates. `invoke_rust_fn` skips the return-time environment read for
+/// these. An entry missing from the list keeps the read: `print` (it calls
+/// `on_print` and can return `Ok` right after) and any entry added to the
+/// catalog without this audit. Library leaves are listed too, for their
+/// callback fallback.
+const HOST_FREE_RETURN_IDS: &[&str] = &[
+    "ipairs.iter",
+    crate::gmatch_schema::ITERATOR_ID,
+    crate::gmatch_schema::EMPTY_ITERATOR_ID,
+    "ipairs",
+    "next",
+    "pairs",
+    "error",
+    "type",
+    "tonumber",
+    "tostring",
+    "unpack",
+    "getmetatable",
+    "setmetatable",
+    "rawget",
+    "rawset",
+    "rawequal",
+    "rawlen",
+    "select",
+    "math.sin",
+    "math.cos",
+    "math.atan2",
+    "math.sqrt",
+    "math.abs",
+    "math.min",
+    "math.max",
+    "math.floor",
+    "math.ceil",
+    "math.random",
+    "math.tan",
+    "math.acos",
+    "math.asin",
+    "math.atan",
+    "math.deg",
+    "math.rad",
+    "math.exp",
+    "math.log",
+    "math.fmod",
+    "math.modf",
+    "string.sub",
+    "string.find",
+    "string.format",
+    "string.len",
+    "string.upper",
+    "string.lower",
+    "string.reverse",
+    "string.match",
+    "string.gmatch",
+    "string.gsub",
+    "table.insert",
+    "table.remove",
+    "table.sort",
+    "table.unpack",
+    "table.pack",
+    "table.concat",
+    "table.move",
+];
+
+/// `HOST_FREE_RETURN_IDS` indexed by catalog position.
+const HOST_FREE_RETURNS: [bool; CATALOG_LEN] = {
+    let mut host_free = [false; CATALOG_LEN];
+    let mut index = 0;
+    // bounded: the fixed audited list.
+    while index < HOST_FREE_RETURN_IDS.len() {
+        let position = catalog_position(HOST_FREE_RETURN_IDS[index]);
+        assert!(!host_free[position], "an entry is listed once");
+        host_free[position] = true;
+        index += 1;
+    }
+    host_free
+};
+
+/// Whether a successful return of `function` leaves no unchecked host
+/// execution behind (`HOST_FREE_RETURN_IDS`). Host entries never do.
+#[inline(always)]
+pub(crate) fn returns_without_host_code(function: RustFnId) -> bool {
+    HOST_FREE_RETURNS
+        .get(function.position())
+        .copied()
+        .unwrap_or(false)
+}
+
 /// The handle of a segment's `index`th function.
 fn library_fn(segment: usize, index: usize) -> RustFnId {
     debug_assert!(index < CATALOG[segment].functions.len());
@@ -476,6 +569,19 @@ pub(super) fn check_optional_type_named(
         .map_err(|error| name_argument_error(error, function_name))
 }
 
+/// `check_type_named` for a number followed by `to_number`, in one pass
+/// (`State::check_number`). Only for an argument checked and read before the
+/// next one is checked: `atan2` and `fmod` check both before reading either.
+pub(super) fn check_number_named(
+    state: &mut State,
+    arg_number: isize,
+    function_name: &str,
+) -> Result<f64> {
+    state
+        .check_number(arg_number)
+        .map_err(|error| name_argument_error(error, function_name))
+}
+
 /// Builds a standard-library argument error with a named function and typed detail.
 pub(super) fn argument_error(
     state: &State,
@@ -512,8 +618,7 @@ pub(super) fn arg_integer(
     arg_number: isize,
     function_name: &str,
 ) -> Result<i64> {
-    check_type_named(state, arg_number, LuaType::Number, function_name)?;
-    let number = state.to_number(arg_number)?;
+    let number = check_number_named(state, arg_number, function_name)?;
     exact_integer_value(state, number, arg_number, function_name)
 }
 

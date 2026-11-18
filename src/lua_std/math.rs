@@ -14,7 +14,10 @@
 //! those bits: `string.format` and `tostring` both canonicalise NaN to an
 //! unsigned `nan`, and `%q` prints `(0/0)`.
 
-use super::{MATH_LIBRARY_CAPACITY, arg_integer, check_optional_type_named, check_type_named};
+use super::{
+    MATH_LIBRARY_CAPACITY, arg_integer, check_number_named, check_optional_type_named,
+    check_type_named,
+};
 use crate::LuaType;
 use crate::Result;
 use crate::State;
@@ -43,8 +46,7 @@ pub(super) const MATH_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // math.sin(x) - costs 1
     ("math.sin", |state| {
         state.charge(Charge::MathSin, 1)?;
-        check_type_named(state, 1, LuaType::Number, "sin")?;
-        let x = state.to_number(1)?;
+        let x = check_number_named(state, 1, "sin")?;
         state.set_top(0)?;
         state.push_number(crmath::sin(x))?;
         Ok(1)
@@ -52,8 +54,7 @@ pub(super) const MATH_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // math.cos(x) - costs 1
     ("math.cos", |state| {
         state.charge(Charge::MathCos, 1)?;
-        check_type_named(state, 1, LuaType::Number, "cos")?;
-        let x = state.to_number(1)?;
+        let x = check_number_named(state, 1, "cos")?;
         state.set_top(0)?;
         state.push_number(crmath::cos(x))?;
         Ok(1)
@@ -72,8 +73,7 @@ pub(super) const MATH_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // math.sqrt(x) - costs 1
     ("math.sqrt", |state| {
         state.charge(Charge::MathSqrt, 1)?;
-        check_type_named(state, 1, LuaType::Number, "sqrt")?;
-        let x = state.to_number(1)?;
+        let x = check_number_named(state, 1, "sqrt")?;
         state.set_top(0)?;
         state.push_number(x.sqrt())?;
         Ok(1)
@@ -81,8 +81,7 @@ pub(super) const MATH_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // math.abs(x) - costs 1
     ("math.abs", |state| {
         state.charge(Charge::MathAbs, 1)?;
-        check_type_named(state, 1, LuaType::Number, "abs")?;
-        let x = state.to_number(1)?;
+        let x = check_number_named(state, 1, "abs")?;
         state.set_top(0)?;
         state.push_number(x.abs())?;
         Ok(1)
@@ -91,12 +90,10 @@ pub(super) const MATH_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     ("math.min", |state| {
         state.charge(Charge::MathMin, 1)?;
         let n = state.top_isize();
-        check_type_named(state, 1, LuaType::Number, "min")?;
-        let mut result = state.to_number(1)?;
+        let mut result = check_number_named(state, 1, "min")?;
         // bounded: one step per argument, at most MAX_ARGUMENTS.
         for i in 2..=n {
-            check_type_named(state, i, LuaType::Number, "min")?;
-            result = min_step(result, state.to_number(i)?);
+            result = min_step(result, check_number_named(state, i, "min")?);
         }
         state.set_top(0)?;
         state.push_number(result)?;
@@ -106,12 +103,10 @@ pub(super) const MATH_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     ("math.max", |state| {
         state.charge(Charge::MathMax, 1)?;
         let n = state.top_isize();
-        check_type_named(state, 1, LuaType::Number, "max")?;
-        let mut result = state.to_number(1)?;
+        let mut result = check_number_named(state, 1, "max")?;
         // bounded: one step per argument, at most MAX_ARGUMENTS.
         for i in 2..=n {
-            check_type_named(state, i, LuaType::Number, "max")?;
-            result = max_step(result, state.to_number(i)?);
+            result = max_step(result, check_number_named(state, i, "max")?);
         }
         state.set_top(0)?;
         state.push_number(result)?;
@@ -120,8 +115,7 @@ pub(super) const MATH_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // math.floor(x) - costs 1
     ("math.floor", |state| {
         state.charge(Charge::MathFloor, 1)?;
-        check_type_named(state, 1, LuaType::Number, "floor")?;
-        let x = state.to_number(1)?;
+        let x = check_number_named(state, 1, "floor")?;
         state.set_top(0)?;
         state.push_number(x.floor())?;
         Ok(1)
@@ -129,8 +123,7 @@ pub(super) const MATH_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // math.ceil(x) - costs 1
     ("math.ceil", |state| {
         state.charge(Charge::MathCeil, 1)?;
-        check_type_named(state, 1, LuaType::Number, "ceil")?;
-        let x = state.to_number(1)?;
+        let x = check_number_named(state, 1, "ceil")?;
         state.set_top(0)?;
         state.push_number(x.ceil())?;
         Ok(1)
@@ -198,8 +191,7 @@ pub(super) const MATH_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // math.tan(x) - costs 1
     ("math.tan", |state| {
         state.charge(Charge::MathTan, 1)?;
-        check_type_named(state, 1, LuaType::Number, "tan")?;
-        let x = state.to_number(1)?;
+        let x = check_number_named(state, 1, "tan")?;
         state.set_top(0)?;
         state.push_number(crmath::tan(x))?;
         Ok(1)
@@ -207,8 +199,7 @@ pub(super) const MATH_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // math.acos(x) - costs 1
     ("math.acos", |state| {
         state.charge(Charge::MathAcos, 1)?;
-        check_type_named(state, 1, LuaType::Number, "acos")?;
-        let x = state.to_number(1)?;
+        let x = check_number_named(state, 1, "acos")?;
         state.set_top(0)?;
         state.push_number(crmath::acos(x))?;
         Ok(1)
@@ -216,8 +207,7 @@ pub(super) const MATH_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // math.asin(x) - costs 1
     ("math.asin", |state| {
         state.charge(Charge::MathAsin, 1)?;
-        check_type_named(state, 1, LuaType::Number, "asin")?;
-        let x = state.to_number(1)?;
+        let x = check_number_named(state, 1, "asin")?;
         state.set_top(0)?;
         state.push_number(crmath::asin(x))?;
         Ok(1)
@@ -227,8 +217,7 @@ pub(super) const MATH_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // With two args: returns atan2(y, x)
     ("math.atan", |state| {
         state.charge(Charge::MathAtan, 1)?;
-        check_type_named(state, 1, LuaType::Number, "atan")?;
-        let y = state.to_number(1)?;
+        let y = check_number_named(state, 1, "atan")?;
         let x = if check_optional_type_named(state, 2, LuaType::Number, "atan")? {
             Some(state.to_number(2)?)
         } else {
@@ -242,8 +231,7 @@ pub(super) const MATH_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // math.deg(x) - radians to degrees - costs 1
     ("math.deg", |state| {
         state.charge(Charge::MathDeg, 1)?;
-        check_type_named(state, 1, LuaType::Number, "deg")?;
-        let x = state.to_number(1)?;
+        let x = check_number_named(state, 1, "deg")?;
         state.set_top(0)?;
         state.push_number(x.to_degrees())?;
         Ok(1)
@@ -251,8 +239,7 @@ pub(super) const MATH_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // math.rad(x) - degrees to radians - costs 1
     ("math.rad", |state| {
         state.charge(Charge::MathRad, 1)?;
-        check_type_named(state, 1, LuaType::Number, "rad")?;
-        let x = state.to_number(1)?;
+        let x = check_number_named(state, 1, "rad")?;
         state.set_top(0)?;
         state.push_number(x.to_radians())?;
         Ok(1)
@@ -260,8 +247,7 @@ pub(super) const MATH_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // math.exp(x) - e^x - costs 1
     ("math.exp", |state| {
         state.charge(Charge::MathExp, 1)?;
-        check_type_named(state, 1, LuaType::Number, "exp")?;
-        let x = state.to_number(1)?;
+        let x = check_number_named(state, 1, "exp")?;
         state.set_top(0)?;
         state.push_number(crmath::exp(x))?;
         Ok(1)
@@ -269,8 +255,7 @@ pub(super) const MATH_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // math.log(x [, base]) - natural log, or log with base - costs 1
     ("math.log", |state| {
         state.charge(Charge::MathLog, 1)?;
-        check_type_named(state, 1, LuaType::Number, "log")?;
-        let x = state.to_number(1)?;
+        let x = check_number_named(state, 1, "log")?;
         let base = if check_optional_type_named(state, 2, LuaType::Number, "log")? {
             Some(state.to_number(2)?)
         } else {
@@ -295,8 +280,7 @@ pub(super) const MATH_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     // math.modf(x) - returns integer and fractional parts - costs 1
     ("math.modf", |state| {
         state.charge(Charge::MathModf, 1)?;
-        check_type_named(state, 1, LuaType::Number, "modf")?;
-        let x = state.to_number(1)?;
+        let x = check_number_named(state, 1, "modf")?;
         let (integral, fractional) = modf_of(x);
         state.set_top(0)?;
         state.push_number(integral)?;

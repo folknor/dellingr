@@ -20,6 +20,13 @@ use std::hash::{Hash, Hasher};
 /// in the frame is a host bug and fails the call with
 /// [`ErrorKind::ResultCountExceedsStack`](crate::error::ErrorKind::ResultCountExceedsStack);
 /// the missing results are not padded with nil.
+//
+// A typed callback context (decoded scalar arguments, borrowed views, a
+// result writer) in place of `&mut State` and the stack protocol was weighed
+// and refused: it changes every host and library signature, and the payoff is
+// in cheap library bodies, which are reached by identity instead (the leaves
+// in `vm/leaf.rs`, which skip the whole callback ABI). Leaving every
+// callback's arguments in place is refused at the remove in `begin_call`.
 pub type RustFunc = fn(&mut State) -> Result<u8>;
 
 const RUST_FN_DISPLAY: &str = "<function>";

@@ -333,6 +333,37 @@ impl State {
             .ok_or_else(|| self.type_error(super::TypeError::Arithmetic(val.typ(&self.heap))))
     }
 
+    /// `State::check_type` for a number followed by [`Self::to_number`], in
+    /// one pass: the same errors in the same order, one usability check, and
+    /// the number read (NaN canonical) from the slot the check found.
+    pub(crate) fn check_number(&mut self, arg_number: isize) -> Result<f64> {
+        use crate::LuaType;
+        use crate::error::ArgError;
+        self.check_usable()?;
+        if arg_number == 0 {
+            return Err(self.error(ErrorKind::InvalidStackIndex { index: arg_number }));
+        }
+        if self.get_top() < arg_number.unsigned_abs() {
+            let func_name = self.active_rust_function_name();
+            let e =
+                ArgError::type_mismatch(arg_number, func_name.as_deref(), LuaType::Number, None);
+            return Err(self.error(ErrorKind::ArgError(e)));
+        }
+        let slot = self.convert_idx(arg_number)?;
+        let value = self.stack[slot];
+        if let Some(number) = value.as_num() {
+            return Ok(crate::numeral::canonical_nan(number));
+        }
+        let func_name = self.active_rust_function_name();
+        let e = ArgError::type_mismatch(
+            arg_number,
+            func_name.as_deref(),
+            LuaType::Number,
+            Some(value.typ(&self.heap)),
+        );
+        Err(self.error(ErrorKind::ArgError(e)))
+    }
+
     /// Converts the value at the given index to a UTF-8 string.
     /// Lua strings with invalid UTF-8 bytes are converted lossily; a result
     /// that would exceed `MAX_STRING_BYTES` is rejected before conversion.
