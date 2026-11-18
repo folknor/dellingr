@@ -96,6 +96,7 @@ examples! {
     table_multivalue_nested: "examples/table_multivalue_nested.lua",
     table_multivalue_preceding_table: "examples/table_multivalue_preceding_table.lua",
     tables: "examples/tables.lua",
+    tables_deep_stack: "examples/tables/deep_stack.lua",
     tables_fill: "examples/tables/fill.lua",
     tables_metamethod_sequence: "examples/tables/metamethod_sequence.lua",
     tables_mixed: "examples/tables/mixed.lua",

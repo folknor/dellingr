@@ -223,6 +223,10 @@ xxhash = "f90d3c13b0d426e971474e629734f943"
 file = "bench/sequence_len.lua"
 xxhash = "93b8e0633008bb396b87f09fed52470f"
 
+[data.workloads.bench.deep_stack]
+file = "bench/deep_stack.lua"
+xxhash = "4e6fdc340dc07bb1a659d977754cebad"
+
 [data.workloads.bench.large_source]
 file = "examples/parse/large_source.lua"
 xxhash = "3d87b6e87edaa28e17783d5c9a89b3d3"
@@ -382,6 +386,10 @@ xxhash = "9842759c50eb11a2b9bf0679b344e153"
 [data.workloads.hotpath.sequence_len]
 file = "examples/tables/sequence_len.lua"
 xxhash = "52dfdaed38435144b82ffd50ee11342e"
+
+[data.workloads.hotpath.deep_stack]
+file = "examples/tables/deep_stack.lua"
+xxhash = "dc5dc7e1d88b81db121a650647df800a"
 
 [data.workloads.hotpath.large_source]
 file = "examples/parse/large_source.lua"

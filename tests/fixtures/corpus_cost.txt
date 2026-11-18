@@ -89,6 +89,7 @@ examples/table_multivalue.lua|dd1ba28c5bb5cd48a49a26ef497316aa|23
 examples/table_multivalue_nested.lua|189803fa5085a686e79cc8a060e57922|17
 examples/table_multivalue_preceding_table.lua|f4bb85c7e5b96db5f0b81ee8dcf09cbe|5
 examples/tables.lua|3666b4f7ff5597640e492bc67e0c39f7|559
+examples/tables/deep_stack.lua|dc5dc7e1d88b81db121a650647df800a|311098
 examples/tables/fill.lua|79bb664bac707da02ad807c7e4f71f39|1837394
 examples/tables/metamethod_sequence.lua|61159dd099badf6846209df171c4c4b4|137
 examples/tables/mixed.lua|8ccde6a97133456c22a74b063b20503b|2752394

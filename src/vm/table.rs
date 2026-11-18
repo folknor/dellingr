@@ -547,8 +547,10 @@ pub(super) struct Table {
     /// anything in the array part, whose tagged indices name absolute keys
     /// and so survive window moves.
     version: Cell<u64>,
-    /// Number of occupied hash slots whose nil value makes them logically absent.
-    dead_count: usize,
+    /// The hash part's tombstone count and the array part's `dense` proof,
+    /// sharing one word so the proof costs no table (and so no object slot)
+    /// any size.
+    tally: TombstonesAndDense,
     /// Exact number of live hash entries whose key could ever migrate into
     /// the array part (`may_migrate`). While it is zero no append can pull a
     /// key in, so appends to a table with named fields push directly and a
@@ -562,6 +564,57 @@ pub(super) struct Table {
     shape_witness: Cell<Option<ShapeWitness>>,
 }
 
+/// Two table counters in one word: `(dead << 1) | !dense`.
+///
+/// `dead` is the number of occupied hash slots whose nil value makes them
+/// logically absent. It never exceeds the slots of an allocated slot vector,
+/// at most `isize::MAX / size_of::<(Val, Val)>()`, so the shift loses no bit.
+///
+/// `dense` is a proof, sound when set: the live array keys are exactly
+/// `1..=array_live`, so `array_live` is the only border in the logical array
+/// and `array_len` returns it without searching. Push and pop at the tail
+/// keep it (`Table::note_live`); a write that might leave a hole clears it,
+/// and a clear bit only costs the search. It is recovered where that is
+/// O(1): when the array empties, or a write lands at key 1 of an empty
+/// array. Never saved; a load recomputes it. The default is zero dead slots
+/// and a set proof (an empty array).
+#[derive(Debug, Default, Clone, Copy)]
+struct TombstonesAndDense(usize);
+
+impl TombstonesAndDense {
+    #[inline]
+    fn dead(self) -> usize {
+        self.0 >> 1
+    }
+
+    #[inline]
+    fn add_dead(&mut self, n: usize) {
+        debug_assert!(n <= (usize::MAX >> 1) - self.dead());
+        self.0 += n << 1;
+    }
+
+    #[inline]
+    fn sub_dead(&mut self, n: usize) {
+        debug_assert!(n <= self.dead(), "tombstone count underflow");
+        self.0 -= n << 1;
+    }
+
+    #[inline]
+    fn set_dead(&mut self, n: usize) {
+        self.0 = (n << 1) | (self.0 & 1);
+    }
+
+    #[inline]
+    fn dense(self) -> bool {
+        self.0 & 1 == 0
+    }
+
+    #[inline]
+    fn set_dense(&mut self, dense: bool) {
+        self.0 = (self.0 & !1) | usize::from(!dense);
+    }
+}
+
 impl Default for Table {
     fn default() -> Self {
         Self {
@@ -573,7 +626,7 @@ impl Default for Table {
             storage: TableStorage::default(),
             metatable: None,
             version: Cell::new(0),
-            dead_count: 0,
+            tally: TombstonesAndDense::default(),
             hash_migratable: 0,
             #[cfg(debug_assertions)]
             shape_witness: Cell::new(None),
@@ -640,10 +693,11 @@ impl Table {
         // duplicate keys must not create phantom tombstones or underflow.
         // Template keys are verified to be strings, so none belongs in the
         // array part.
-        let dead_count = map.len();
+        let mut tally = TombstonesAndDense::default();
+        tally.set_dead(map.len());
         let table = Self {
             storage: TableStorage::Map(map, SlotPolicy::default()),
-            dead_count,
+            tally,
             ..Self::default()
         };
         #[cfg(debug_assertions)]
@@ -733,6 +787,19 @@ impl Table {
             "the sampled tail of the dead-prefix hint must contain only nil slots"
         );
         debug_assert!(self.array_live <= self.array.len() - self.lead);
+        if self.tally.dense() && self.array_live != 0 {
+            let live = self.array_live;
+            debug_assert!(
+                self.base == 0
+                    && self.array[live.saturating_sub(64)..live]
+                        .iter()
+                        .all(|value| !matches!(value, Val::Nil))
+                    && self.array[live..(live + 64).min(self.array.len())]
+                        .iter()
+                        .all(|value| matches!(value, Val::Nil)),
+                "a set dense bit must mean the live array keys are 1..=array_live"
+            );
+        }
         let assert_hash_key_outside_array = |key: &Val| {
             debug_assert!(
                 self.array_key(key).is_none() && !self.is_array_append_key(key),
@@ -770,8 +837,8 @@ impl Table {
                 // a shape from before an interval nobody observed.
                 if map.len() > crate::limits::tuning::TABLE_DEBUG_FULL_WALK_LIMIT {
                     debug_assert!(
-                        self.dead_count <= map.len()
-                            && self.hash_migratable <= map.len() - self.dead_count,
+                        self.tally.dead() <= map.len()
+                            && self.hash_migratable <= map.len() - self.tally.dead(),
                         "dead_count and hash_migratable must fit the hash slots"
                     );
                     self.shape_witness.set(None);
@@ -794,7 +861,8 @@ impl Table {
         };
 
         debug_assert_eq!(
-            self.dead_count, dead_count,
+            self.tally.dead(),
+            dead_count,
             "dead_count must equal the number of nil-valued hash slots"
         );
         debug_assert_eq!(
@@ -1037,7 +1105,8 @@ impl Table {
         let was_dead = matches!(*slot, Val::Nil);
         let now_dead = matches!(value, Val::Nil);
         *slot = value;
-        self.dead_count = self.dead_count + usize::from(now_dead) - usize::from(was_dead);
+        self.tally.add_dead(usize::from(now_dead));
+        self.tally.sub_dead(usize::from(was_dead));
         if was_dead != now_dead && may_migrate(&key) {
             if now_dead {
                 self.hash_migratable -= 1;
@@ -1404,6 +1473,13 @@ impl Table {
             .iter()
             .filter(|value| !matches!(value, Val::Nil))
             .count();
+        rebuilt.tally.set_dense(
+            rebuilt.array_live == 0
+                || base == 0
+                    && array[..rebuilt.array_live]
+                        .iter()
+                        .all(|value| !matches!(value, Val::Nil)),
+        );
         rebuilt.array = array;
         rebuilt.base = base;
         rebuilt.vlen = vlen;
@@ -1437,7 +1513,7 @@ impl Table {
                     }
                 }
             }
-            rebuilt.dead_count += usize::from(dead);
+            rebuilt.tally.add_dead(usize::from(dead));
             rebuilt.hash_migratable += usize::from(!dead && may_migrate(&key));
         }
         rebuilt.version.set(next_version);
@@ -1536,7 +1612,7 @@ impl Table {
                 return false;
             }
             *slot = Val::Nil;
-            self.dead_count += 1;
+            self.tally.add_dead(1);
             self.hash_migratable -= usize::from(may_migrate(&key));
         }
         #[cfg(debug_assertions)]
@@ -1582,11 +1658,11 @@ impl Table {
         let migratable = usize::from(may_migrate(&key));
         match (was_live, now_live) {
             (false, true) => {
-                self.dead_count -= 1;
+                self.tally.sub_dead(1);
                 self.hash_migratable += migratable;
             }
             (true, false) => {
-                self.dead_count += 1;
+                self.tally.add_dead(1);
                 self.hash_migratable -= migratable;
             }
             _ => {}
@@ -1614,17 +1690,22 @@ impl Table {
         {
             return self.vlen;
         }
-        // An all-dead array has the single border 0, which the search below
-        // would also reach after O(log vlen) steps over a long history.
+        // When the live keys are exactly `1..=array_live` (an all-dead array
+        // included), that is the only border, which the search below would
+        // also reach after O(log vlen) steps over a long history. Push/pop
+        // stacks, whose popped slots stay behind as a nil tail, keep the
+        // `dense` proof on every operation.
         //
         // A cache of the last search result was declined: it would be
         // invalidated by every nil/live transition and growth on the hot
-        // array write path, and push/pop stacks, the workload that reaches
-        // this search most, change occupancy on every operation, so it would
-        // never hit there. Any shortcut must return the border the search
-        // picks, which is replay-visible on holey tables.
-        if self.array_live == 0 {
-            return 0;
+        // array write path, and push/pop stacks change occupancy on every
+        // operation, so it would never hit there. A stateless O(1) check
+        // (base 0, slot `array_live` live, the next one nil) is no proof:
+        // live keys {3, 5, 6} in an 8-key array pass it while the search
+        // returns 0. Any shortcut must return the border the search picks,
+        // which is replay-visible on holey tables.
+        if self.tally.dense() || self.array_live == 0 {
+            return self.array_live;
         }
         // Invariant: lo == 0 or t[lo] is non-nil; t[hi] is nil (or hi == 0).
         let mut lo = 0;
@@ -1711,7 +1792,7 @@ impl Table {
     ) -> usize {
         debug_assert!(!matches!(value, Val::Nil), "a hash insert stores a value");
         let key = table_key.value();
-        if self.dead_count == 0 {
+        if self.tally.dead() == 0 {
             return self.insert_without_tombstones(resident, table_key, value);
         }
 
@@ -1745,9 +1826,9 @@ impl Table {
                         entries[shift] = std::mem::take(&mut entries[shift + 1]);
                     }
                     *len -= 1;
-                    self.dead_count -= 1;
+                    self.tally.sub_dead(1);
                     self.bump_version();
-                } else if self.dead_count >= *len as usize - self.dead_count
+                } else if self.tally.dead() >= *len as usize - self.tally.dead()
                     || *len as usize == INLINE_CAPACITY
                 {
                     self.compact_dead();
@@ -1778,12 +1859,34 @@ impl Table {
     /// dead-prefix hint a lower bound.
     #[inline]
     fn write_window(&mut self, position: usize, value: Val) {
-        self.array_live -= usize::from(!matches!(self.array[position], Val::Nil));
-        self.array_live += usize::from(!matches!(value, Val::Nil));
+        let was_live = !matches!(self.array[position], Val::Nil);
+        let is_live = !matches!(value, Val::Nil);
+        if was_live != is_live {
+            self.note_live(self.base + position + 1, is_live);
+        }
+        self.array_live -= usize::from(was_live);
+        self.array_live += usize::from(is_live);
         self.array[position] = value;
         if position <= self.lead {
             self.note_prefix_write(position, value);
         }
+    }
+
+    /// Keep the `dense` proof across array key `key` turning live (`is_live`)
+    /// or nil, before `array_live` is updated. Absolute keys make it
+    /// independent of where the window sits: a live key lands at
+    /// `array_live + 1` (a push; on an empty array, key 1 re-establishes the
+    /// proof), a nil at `array_live` (a pop; emptying the array re-establishes
+    /// it). Anything else clears it.
+    #[inline]
+    fn note_live(&mut self, key: usize, is_live: bool) {
+        let live = self.array_live;
+        let dense = self.tally.dense();
+        self.tally.set_dense(if is_live {
+            (dense || live == 0) && key == live + 1
+        } else {
+            dense && key == live || live == 1
+        });
     }
 
     /// Adjust the dead-prefix hint after a write at or below it: a live
@@ -1913,9 +2016,13 @@ impl Table {
         {
             return self.append_slow(resident, value);
         }
+        let is_live = !matches!(value, Val::Nil);
+        if is_live {
+            self.note_live(self.vlen + 1, true);
+        }
         self.vlen += 1;
         self.array.push(value);
-        self.array_live += usize::from(!matches!(value, Val::Nil));
+        self.array_live += usize::from(is_live);
         #[cfg(debug_assertions)]
         self.debug_assert_invariants();
         Ok(())
@@ -1933,9 +2040,14 @@ impl Table {
         self.check_vlen_growth(1)?;
         self.prepare_append_after_lead(resident)?;
         self.reserve_append(resident)?;
+        // After the window preparation, whose reset would set the proof.
+        let is_live = !matches!(value, Val::Nil);
+        if is_live {
+            self.note_live(self.vlen + 1, true);
+        }
         self.vlen += 1;
         self.array.push(value);
-        self.array_live += usize::from(!matches!(value, Val::Nil));
+        self.array_live += usize::from(is_live);
         self.migrate_from_hash();
         Ok(())
     }
@@ -2007,6 +2119,7 @@ impl Table {
     fn reset_window(&mut self, resident: &mut ResidentBytes, base: usize) {
         self.array.clear();
         self.array_live = 0;
+        self.tally.set_dense(true);
         self.shrink_array(EMPTIED_WINDOW_CAPACITY, resident);
         self.base = base;
         self.lead = 0;
@@ -2066,6 +2179,8 @@ impl Table {
             self.array.resize(key - self.base, Val::Nil);
             self.array[key - self.base - 1] = value;
         }
+        // After any reset above, which would otherwise overwrite it.
+        self.note_live(key, true);
         self.array_live += 1;
         #[cfg(debug_assertions)]
         self.debug_assert_invariants();
@@ -2092,6 +2207,7 @@ impl Table {
             let next = Val::Num((self.vlen + 1) as f64);
             match self.hash_remove(&next) {
                 Some(value) => {
+                    self.note_live(self.vlen + 1, true);
                     self.vlen += 1;
                     self.array.push(value);
                     self.array_live += 1;
@@ -2100,7 +2216,7 @@ impl Table {
                 None => break,
             }
         }
-        if migrated && self.dead_count >= self.hash_live_len() {
+        if migrated && self.tally.dead() >= self.hash_live_len() {
             self.compact_dead();
         }
         #[cfg(debug_assertions)]
@@ -2112,7 +2228,7 @@ impl Table {
             TableStorage::Inline { len, .. } => *len as usize,
             TableStorage::Map(map, _) => map.len(),
         };
-        occupied - self.dead_count
+        occupied - self.tally.dead()
     }
 
     fn insert_into_map_with_tombstones(
@@ -2141,7 +2257,7 @@ impl Table {
                 // The key keeps its slot and index; only the value changes,
                 // so no cached index moves and the version stays put.
                 *slot = value;
-                self.dead_count -= 1;
+                self.tally.sub_dead(1);
                 self.hash_migratable += usize::from(may_migrate(&key));
                 #[cfg(debug_assertions)]
                 self.debug_assert_invariants();
@@ -2154,7 +2270,7 @@ impl Table {
         // write. The count is taken before the slot is added, as it always
         // has been: moving it would change when compaction runs, and with it
         // which cleared keys stay valid `next` controls and what saves hold.
-        let compacts = self.dead_count >= map.len() - self.dead_count && !policy.retain_dead;
+        let compacts = self.tally.dead() >= map.len() - self.tally.dead() && !policy.retain_dead;
         let index = match found {
             // Re-adding a tombstoned key moves it to the back of `pairs()`
             // order. Its index changes, so caches holding the old one must
@@ -2249,7 +2365,7 @@ impl Table {
         new_key: TableKey,
         new_value: Val,
     ) -> usize {
-        debug_assert_eq!(self.dead_count, 0);
+        debug_assert_eq!(self.tally.dead(), 0);
         let old_storage = std::mem::take(&mut self.storage);
         let TableStorage::Inline { mut entries, len } = old_storage else {
             unreachable!("only inline storage promotes");
@@ -2325,7 +2441,7 @@ impl Table {
                     if entry_key == key {
                         let value = std::mem::replace(entry_value, Val::Nil);
                         if !matches!(value, Val::Nil) {
-                            self.dead_count += 1;
+                            self.tally.add_dead(1);
                             removed = Some(value);
                         }
                         break;
@@ -2339,7 +2455,7 @@ impl Table {
                 if matches!(removed, Val::Nil) {
                     None
                 } else {
-                    self.dead_count += 1;
+                    self.tally.add_dead(1);
                     Some(removed)
                 }
             }
@@ -2357,7 +2473,7 @@ impl Table {
     /// by another key). A retaining map (`SlotPolicy::retain_dead`) keeps
     /// them all.
     fn compact_dead(&mut self) {
-        if self.dead_count == 0
+        if self.tally.dead() == 0
             || matches!(self.storage, TableStorage::Map(_, policy) if policy.retain_dead)
         {
             #[cfg(debug_assertions)]
@@ -2383,7 +2499,7 @@ impl Table {
             }
             TableStorage::Map(map, _) => map.retain_live(),
         }
-        self.dead_count = 0;
+        self.tally.set_dead(0);
         // Before the check below, which holds the result to the version rule.
         self.bump_version();
         #[cfg(debug_assertions)]
@@ -2415,6 +2531,15 @@ impl Table {
     /// is capacity only: the per-key loop below still decides, key by key,
     /// between appending (nil included) and a hash insert, and migration after
     /// each append can extend the array past the reservation.
+    ///
+    /// Reserving a constructor's whole fixed positional total at its first
+    /// batch was declined. Only constructors with more than
+    /// `MAX_TABLE_BATCH_SIZE` positional fields have a later batch, doubling
+    /// already keeps their build linear, and the total has no operand to ride
+    /// on (SET_LIST's spare byte cannot hold it). Above all, array capacity is
+    /// resident bytes, which pace automatic collection: a different capacity
+    /// between or after the batches moves collection timing, a replay-visible
+    /// change, to save one reallocation of a one-off literal.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn set_list_tracked(
         &mut self,
@@ -2440,6 +2565,15 @@ impl Table {
                 let rest = &values[at..];
                 self.check_vlen_growth(rest.len())?;
                 self.reserve_array_tracked(resident, self.array.len().saturating_add(rest.len()))?;
+                let live = rest.iter().filter(|v| !matches!(v, Val::Nil)).count();
+                // An all-live run keeps the proof exactly when its first key
+                // would (`note_live`); a nil-only run moves no live key. A
+                // mixed run gives it up rather than locate its nils.
+                if live == rest.len() {
+                    self.note_live(self.vlen + 1, true);
+                } else if live != 0 {
+                    self.tally.set_dense(false);
+                }
                 self.vlen += rest.len();
                 // The complete batch was reserved fallibly above, so the
                 // copy needs no per-element capacity check. It is a slice
@@ -2447,7 +2581,7 @@ impl Table {
                 // iterator adapter, once outlined, spilled each `Val`
                 // through overlapping stack slots and stalled on store
                 // forwarding (bench/list_literals ran about 15% slower).
-                self.array_live += rest.iter().filter(|v| !matches!(v, Val::Nil)).count();
+                self.array_live += live;
                 self.array.extend_from_slice(rest);
                 break;
             }
@@ -2517,6 +2651,11 @@ impl Table {
         } else {
             self.reserve_array_tracked(resident, self.array.len() + extra)?;
         }
+        // The rotation opens a hole the write below fills, so the proof is
+        // held aside for the shift: a live value shifted into a dense prefix,
+        // migrated keys included, leaves it dense; a nil one leaves a hole.
+        let was_dense = self.tally.dense() && !matches!(value, Val::Nil);
+        self.tally.set_dense(false);
         if structural {
             self.vlen += 1;
             self.array.push(Val::Nil);
@@ -2538,6 +2677,7 @@ impl Table {
         } else if !matches!(value, Val::Nil) {
             self.write_outside_window(resident, pos, value)?;
         }
+        self.tally.set_dense(self.tally.dense() || was_dense);
         #[cfg(debug_assertions)]
         self.debug_assert_invariants();
         Ok(())
@@ -2563,6 +2703,12 @@ impl Table {
                 let pad = (self.base - 1).min(self.array.len().div_ceil(2));
                 self.reserve_array_tracked(resident, self.array.len() + 1 + pad)?;
             }
+            // Shifting down within a dense prefix leaves it dense. The proof
+            // is held aside while the shift passes through states the point
+            // rule does not describe; the downward branch's own write may
+            // re-establish it.
+            let was_dense = self.tally.dense();
+            self.tally.set_dense(false);
             let removed = self.array_value(pos);
             let end = len - self.base;
             if pos > self.base {
@@ -2583,6 +2729,8 @@ impl Table {
                     self.write_outside_window(resident, self.base, first)?;
                 }
             }
+            self.tally
+                .set_dense(self.tally.dense() || was_dense || self.array_live == 0);
             #[cfg(debug_assertions)]
             self.debug_assert_invariants();
             return Ok(removed);
@@ -3004,6 +3152,7 @@ mod tests {
             table.array = vec![Val::Bool(true)];
             table.base = key - 1;
             table.array_live = 1;
+            table.tally.set_dense(key == 1);
         }
         table.vlen = vlen;
         #[cfg(debug_assertions)]
@@ -3196,6 +3345,103 @@ mod tests {
         out
     }
 
+    /// A set `dense` bit must mean the logical array `logical` (key `i + 1`
+    /// at index `i`) holds live values at exactly `1..=array_live`.
+    fn assert_dense_proof(t: &Table, logical: &[Val]) {
+        if t.tally.dense() {
+            let live = t.array_live;
+            assert!(logical[..live].iter().all(|v| !matches!(v, Val::Nil)));
+            assert!(logical[live..].iter().all(|v| matches!(v, Val::Nil)));
+        }
+    }
+
+    /// The logical array `1..=vlen` of `t`, nil outside the window.
+    fn logical_array(t: &Table) -> Vec<Val> {
+        (1..=t.vlen).map(|key| t.array_value(key)).collect()
+    }
+
+    /// The tombstone count and the dense proof share a word: no count
+    /// update, compaction's reset included, may set or clear the proof.
+    #[test]
+    fn tombstone_count_updates_leave_the_dense_proof_alone() {
+        for dense in [true, false] {
+            let mut tally = TombstonesAndDense::default();
+            tally.set_dense(dense);
+            tally.add_dead(3);
+            tally.sub_dead(1);
+            assert_eq!((tally.dead(), tally.dense()), (2, dense));
+            tally.sub_dead(2);
+            tally.set_dead(0);
+            assert_eq!((tally.dead(), tally.dense()), (0, dense));
+            tally.set_dead(7);
+            tally.set_dense(!dense);
+            assert_eq!((tally.dead(), tally.dense()), (7, !dense));
+        }
+    }
+
+    /// A stack driven by `t[#t + 1] = v` and `t[#t] = nil` keeps a nil tail
+    /// after its pops, and the `dense` proof answers `#` without the search
+    /// through every push and pop. A hole drops the proof; filling it does
+    /// not restore it, but emptying the table does.
+    #[test]
+    fn stack_pushes_and_pops_keep_the_dense_proof() {
+        let mut t = Table::default();
+        for i in 1..=1000 {
+            let len = t.array_len();
+            t.insert(n(len + 1), Val::Num(i as f64)).unwrap();
+        }
+        for _ in 0..600 {
+            let len = t.array_len();
+            t.insert(n(len), Val::Nil).unwrap();
+        }
+        assert!(t.tally.dense());
+        assert_eq!((t.array_len(), t.vlen), (400, 1000));
+        for round in 0..300 {
+            let len = t.array_len();
+            if round % 3 == 2 {
+                t.insert(n(len), Val::Nil).unwrap();
+            } else {
+                t.insert(n(len + 1), Val::Bool(true)).unwrap();
+            }
+            assert!(t.tally.dense(), "round {round}");
+            assert_dense_proof(&t, &logical_array(&t));
+        }
+        let len = t.array_len();
+        assert_eq!(len, 500);
+
+        // A raw table.remove from the top and table.insert at the top keep
+        // it; one in the middle shifts a dense prefix and keeps it too.
+        t.array_remove(len).unwrap();
+        t.array_insert(len, Val::Bool(true)).unwrap();
+        t.array_remove(10).unwrap();
+        t.array_insert(10, Val::Bool(true)).unwrap();
+        assert!(t.tally.dense());
+        assert_eq!(t.array_len(), 500);
+
+        // A nil inserted in the middle punches a hole: the search answers.
+        t.array_insert(3, Val::Nil).unwrap();
+        assert!(!t.tally.dense());
+        assert_eq!(t.array_len(), 501);
+        assert_dense_proof(&t, &logical_array(&t));
+
+        // Clearing every key re-establishes the proof.
+        for key in 1..=t.vlen {
+            t.insert(n(key), Val::Nil).unwrap();
+        }
+        assert!(t.tally.dense());
+        assert_eq!(t.array_len(), 0);
+        t.insert(n(1), Val::Bool(true)).unwrap();
+        assert!(t.tally.dense());
+        assert_eq!(t.array_len(), 1);
+
+        // A live write past an all-nil window must not borrow the proof.
+        let mut u = Table::default();
+        u.set_list(1, &[Val::Nil, Val::Nil, Val::Nil]).unwrap();
+        u.insert(n(2), Val::Bool(true)).unwrap();
+        assert!(!u.tally.dense());
+        assert_eq!(u.array_len(), 0);
+    }
+
     /// Drives the table and the model through queue, deque, stack, sparse
     /// and sequence-library operations from a fixed-seed generator, and
     /// requires every observable to agree after each step.
@@ -3269,6 +3515,7 @@ mod tests {
                     }
                 }
                 assert_eq!(t.array_len(), m.border(), "round {round} step {step}");
+                assert_dense_proof(&t, &m.array);
                 assert_eq!(
                     t.array_live,
                     t.array
@@ -3420,7 +3667,7 @@ mod tests {
         assert_eq!(keys(&t), vec![n(1), n(2), n(3), Val::Bool(true), n(5)]);
         // The migrated keys left tombstones; once they outnumbered the live
         // hash entries the part was compacted, which moves hash indices.
-        assert_eq!(t.dead_count, 0);
+        assert_eq!(t.tally.dead(), 0);
         assert_eq!(t.version(), 1);
         assert_eq!(t.hash_migratable, 1);
     }
@@ -3766,7 +4013,7 @@ mod tests {
         t.set_array(&values).unwrap();
         assert_eq!(t.get(&n(1)), Val::Num(1.0));
         assert_eq!(t.get(&n(5)), Val::Num(5.0));
-        assert_eq!(t.dead_count, 0);
+        assert_eq!(t.tally.dead(), 0);
         assert_eq!(t.version(), 0);
         assert_eq!(keys(&t).last(), Some(&Val::Bool(true)));
     }
@@ -4141,7 +4388,7 @@ mod tests {
                 assert!(indexed.remove_at_index(index));
                 assert!(!indexed.remove_at_index(index));
                 keyed.insert(remove, Val::Nil).unwrap();
-                assert_eq!(indexed.dead_count, keyed.dead_count);
+                assert_eq!(indexed.tally.dead(), keyed.tally.dead());
                 assert_eq!(indexed.lead, keyed.lead);
                 assert_eq!(indexed.version(), keyed.version());
                 assert_eq!(keys(&indexed), keys(&keyed));
@@ -4365,9 +4612,9 @@ mod tests {
     fn duplicate_template_keys_do_not_create_phantom_tombstones() {
         let literals = [h(7)];
         let mut t = Table::with_template_keys(&[0, 0], &literals);
-        assert_eq!(t.dead_count, 1);
+        assert_eq!(t.tally.dead(), 1);
         t.insert(h(7), Val::Bool(true)).unwrap();
-        assert_eq!(t.dead_count, 0);
+        assert_eq!(t.tally.dead(), 0);
         t.insert(h(8), Val::Bool(true)).unwrap();
         assert_eq!(t.get(&h(8)), Val::Bool(true));
     }
@@ -4380,20 +4627,20 @@ mod tests {
         inline.insert(h(7), Val::Bool(true)).unwrap();
         inline.remove(&h(7));
         for mut t in [Table::with_template_keys(&[0], &literals), inline] {
-            assert_eq!(t.dead_count, 1);
+            assert_eq!(t.tally.dead(), 1);
             assert!(t.init_at_index(0, h(7), Val::Nil));
-            assert_eq!(t.dead_count, 1);
+            assert_eq!(t.tally.dead(), 1);
             assert!(t.init_at_index(0, h(7), Val::Bool(true)));
-            assert_eq!(t.dead_count, 0);
+            assert_eq!(t.tally.dead(), 0);
             assert!(t.init_at_index(0, h(7), Val::Nil));
-            assert_eq!(t.dead_count, 1);
+            assert_eq!(t.tally.dead(), 1);
             assert!(t.init_at_index(0, h(7), Val::Bool(true)));
-            assert_eq!(t.dead_count, 0);
+            assert_eq!(t.tally.dead(), 0);
             assert!(t.init_at_index(0, h(7), Val::Bool(false)));
-            assert_eq!(t.dead_count, 0);
+            assert_eq!(t.tally.dead(), 0);
             assert_eq!(t.get(&h(7)), Val::Bool(false));
             assert!(!t.init_at_index(0, h(8), Val::Nil));
-            assert_eq!(t.dead_count, 0);
+            assert_eq!(t.tally.dead(), 0);
         }
     }
 
@@ -4428,7 +4675,7 @@ mod tests {
                     // Key 1 keeps its appended index until compaction, even
                     // when an earlier slot is vacated.
                     let (after, _) = t.get_with_index(&h(1)).unwrap();
-                    assert!(after == before || t.dead_count == 0);
+                    assert!(after == before || t.tally.dead() == 0);
                 }
             }
             assert_eq!(keys(&t), expected);
@@ -4488,10 +4735,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "dead_count must equal the number of nil-valued hash slots")]
     fn invariant_check_detects_dead_count_mismatch() {
-        let table = Table {
-            dead_count: 1,
-            ..Table::default()
-        };
+        let mut table = Table::default();
+        table.tally.set_dead(1);
         table.debug_assert_invariants();
     }
 
@@ -4548,7 +4793,7 @@ mod tests {
             unreachable!("built as a map");
         };
         map.vacate_for_test(0);
-        table.dead_count = 1;
+        table.tally.set_dead(1);
         table.debug_assert_invariants();
     }
 

@@ -318,10 +318,11 @@ since 27ee714. What B-O1 listed and is still open:
   them needs a continuation per frame (where the results go). That would also
   take them off `MAX_NATIVE_CALL_DEPTH`.
 - The 2026-11-04 defect hunt (`vm-dispatch`) re-raised the first two bullets:
-  four atomic `Arc` clones per call (the `CallInfo` bytecode clone in
-  `lua_function_bytecode`, plus bytecode, runtime and upvalues in
-  `admitted_frame`), dropped again on return, although the closure in the
-  function slot already roots all of them. Its suggested shape is one stack:
+  Lua call admission clones the bytecode for `CallInfo` and the bytecode
+  and runtime for the frame. It also clones the capture-list `Arc` when
+  the closure has two or more captures. Shorter capture lists are copied
+  inline. The references are dropped on return, and the closure in the
+  function slot already roots them. Its suggested shape is one stack:
   merge the activation record into the frame, with records owned by
   invocations and tracebacks walking frames. Tail calls now exist
   (`State::tail_call_from_lua`; a tail admission overwrites the caller's
@@ -536,34 +537,31 @@ Signal that would promote it: a real workload where polymorphic field
 access dominates and `fields/polymorphic` measures 3-5x slower than
 `fields/same_obj_read`.
 
-Lighter-weight variant worth weighing first - more honestly described as
-a *key-position IC* than a shape IC, since it caches "this key is at
-this ordinal IndexMap index" rather than recognizing table shapes.
-Validation is a three-state ladder, not a single OR:
+A lighter-weight *key-position IC* caches the slot position of a key.
+Map storage keeps those positions in the insertion-ordered slot vector
+of `HashSlots`. Its hash index maps keys to positions in that vector.
+Validation proceeds in three steps:
 
-1. same table ptr + same `Table::version` - trust the cached index
-   (this is what `get_cached_field` already does).
-2. same ptr + bumped version, OR different ptr - re-read
-   `tbl.get_index(idx)` and accept if the key at that index matches
-   the cached key. On accept, refresh the cache.
-3. otherwise - slow path.
+1. Same table pointer and version. Read the live value at the cached
+   position, as the existing field cache does.
+2. Same table pointer with a changed version, or a different table
+   pointer. Reuse the position if it still holds the cached key with a
+   live value, then refresh the cache.
+3. Otherwise, use the slow path.
 
-Note that `Table::version` is bumped specifically when existing
-key-to-index bindings may shift: `array_insert`, `array_remove`,
-`compact_dead` sweeping tombstones out, and re-inserting a tombstoned
-key (which moves it to the back). Deleting a key only tombstones it
-(value set to nil, slot kept), and tail-appending inserts and
-value-only updates leave indices stable, so none of those bump it.
-Cross-receiver validation
-therefore *cannot* lean on version equality (different tables can both
-have version 0 with completely different layouts); the cross-receiver
-correctness guarantee comes from the key-at-index check alone.
+A table version invalidates cached positions when mutations can change
+their key bindings, for example when compaction packs the slot vector or
+reinsertion moves a tombstoned key to the back. In map storage a move to
+the back can leave a vacant slot until compaction. Tombstoning a live key
+and updating a value in place keep the position stable. Cross-receiver
+validation requires a live key match because unrelated tables can share
+the same version while holding different keys at that position.
 
 What this catches: different tables that happen to lay out the same key
-at the same ordinal (e.g. all `{id=…, value=…}` records constructed in
+at the same ordinal (e.g. all `{id=..., value=...}` records constructed in
 the same key order). What it doesn't catch: two valid layouts with the
-same logical fields in different orders (`{id=…, value=…}` vs
-`{value=…, id=…}` will thrash). If real workloads turn out polymorphic
+same logical fields in different orders (`{id=..., value=...}` vs
+`{value=..., id=...}` will thrash). If real workloads turn out polymorphic
 across multiple layouts, a small N-way PIC is the next step rather than
 a single-slot key-position cache.
 
@@ -580,7 +578,7 @@ regressed both `same_obj_read` (+11% wall time) and `polymorphic` (+9%)
 even with the cross-receiver branch extracted to a `#[cold]`
 non-inlined fn. Two reasons it didn't pan out as written:
 
-1. Polymorphic record-shaped tables (`{id=…, value=…}`, ≤4 fields)
+1. Polymorphic record-shaped tables (`{id=..., value=...}`, up to 4 fields)
    stay in `TableStorage::Inline`, whose slow path is already a
    1-2-entry pointer-compare scan. Cross-receiver validation
    (heap-deref + `get_index` + key cmp + `cache.set_field` write)
@@ -640,10 +638,11 @@ table per iteration and reads every field, so each read misses the
 identity cache and hashes; at a378895 (plantasjen, before the hash
 function was forced inline) `hash_table_key_value` and
 `IndexMap::get_index_of` were about 31% of its cycles, construction-side
-inserts included. Validation must read the live key at that slot in the current
-table (`get_index`, not the value-only `get_index_value`), treat a dead
-or nil slot as unanswered, and keep the metatable fallback. Restricting
-it to Map storage sidesteps reason 1.
+inserts included. That profile predates `HashSlots`. Validation must
+check the key and live value at the cached slot. A vacant slot, a
+tombstone or a different key leaves the lookup unanswered so normal
+resolution can still reach a metatable. Restricting this to Map storage
+sidesteps reason 1.
 
 ### Compiler-recognized field-update fusion
 
@@ -809,12 +808,10 @@ per-arm expansion out of the dev frame.
 What: `gsub_lua_pattern` calls `append_gsub_replacement` (and through it a
 function replacement or a table replacement's `__index` handler) while its
 matcher state is still on the native stack, so every level of recursion
-through such a callback carries it. `native_bytes_per_level` on plantasjen
-when the envelope tests were widened: Lua-pattern gsub with a function
-replacement 14480 bytes per level in dev and about 3.7 KB in release, with
-a table replacement 15456 and 3872, against 11072 and 2080 for the plain
-pattern path. It is the heaviest native call path, so it sets the dev
-envelope's margin (about 2.3 MB of 4 MiB at `MAX_NATIVE_CALL_DEPTH`).
+through such a callback carries it. The
+[Current native bytes per level](../reference/native-calls.md#current-native-bytes-per-level)
+table compares the recurring stack usage of Lua-pattern and plain-pattern
+function and table replacements.
 
 Sketch: collect the match result (captures as offsets) and drop the
 matcher's frame state before invoking the replacement, so the callback
@@ -944,26 +941,6 @@ loop (`self:match`, `:reverse()`, `:gsub()`, and a `:trim()` added to the
 string library), though its time is dominated by the matching itself; the
 rewrite moved it about 1.7% there (plantasjen, df80d81 against the
 rewrite), within the unrelated control's shift.
-
-### Table-library fallback IC for the hit path (merged with B-O4/C-O5)
-
-The miss-path half of this entry shipped 2026-07-26 (commit 11854a8): a
-pristine-shape gate on `push_table_library_field` returns nil for
-non-member keys without probing the library, and `bench/miss` moved 5.2s
-to ~3.0s (worktree-matched interleaved pairs, plantasjen) with
-`same_obj_read` and `cost_used` unmoved. What remains is the hit side:
-
-What: when `tbl:insert(...)` etc. do fall through to the `table` library,
-cache the resolved value at the call site - same shape as the shipped
-string-method IC. The shipped gate's cached member-name pointers and
-shape guard are reusable ingredients.
-
-Why deferred: rarer pattern than string methods, and the fallback hit
-path isn't a hot bench; the miss gate already removed the common cost
-without any per-site cache.
-
-Signal: a workload where `t:insert(...)`-style sugar fires in a tight
-loop.
 
 ### Method IC: past two classes per site, and what the second entry costs
 

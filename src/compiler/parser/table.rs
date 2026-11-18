@@ -89,7 +89,8 @@ impl Parser<'_> {
             let mut field_count = 0u8;
             // Named and computed-key fields: the hash-capacity hint. The
             // positional part needs no hint, because each SET_LIST batch
-            // reserves the array for itself.
+            // reserves the array for itself. A whole-constructor positional
+            // total was declined: the reason is at `Table::set_list_tracked`.
             let mut keyed_count = 0u8;
             let mut template_candidate = TableTemplateCandidate::new();
             let last_positional_multi = loop {

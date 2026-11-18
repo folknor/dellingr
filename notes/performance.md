@@ -288,32 +288,6 @@ already take the field path; dynamic string-key sites are in PERF-004.)
 
 **Classification:** local.
 
-## PERF-019 - Local table-storage changes
-
-Raised by the table-representation hunter.
-
-The migratable-key counter (`hash_migratable`), the probe-free nil answer for
-array keys outside the window, and the all-dead `#t` shortcut landed; a border
-cache was declined at `array_len`. What remains:
-
-- **Reserve fixed positional constructors across batches.** Only constructors
-  with more than `MAX_TABLE_BATCH_SIZE` (255) positional fields have a second
-  `SET_LIST`; geometric growth then copies about N slots and over-allocates.
-  Carry the fixed total on the first `SET_LIST` (after that batch's fields are
-  evaluated, not at `NEW_TABLE`) as a capacity-only hint: never through
-  `prepare_list_append` (which moves the window and fills nil tails), separate
-  from `vlen`, and discarded on overflow or reservation failure so no visible
-  effect or error moves. Charging and admission stay per batch; migration and
-  computed keys may still outgrow it, and `reset_window` after an all-nil
-  first batch shrinks it away (keeping it is a separate decision).
-- **O(1) `#t` for stack-shaped tables.** Push/pop leaves a structural nil tail,
-  so every `#t` binary-searches `1..=vlen`. A maintained proof that the live
-  array keys are exactly `1..=array_live` would answer `array_live` (the only
-  border, so not replay-visible); tail push/pop keeps the proof, any other
-  mutation drops it to the search, and load recomputes it.
-
-**Classification:** local.
-
 ## PERF-033 - Host global and field access resolves names and tables afresh
 
 Raised by the host-boundary hunter.
@@ -341,6 +315,23 @@ saving is one short hash and two probes per field.
 **Classification:** micro, low conviction until measured.
 
 ---
+
+## PERF-040 - Template constructors slowed about 5% with no executed-work change
+
+Raised while landing the table `dense` proof (packed with the tombstone
+count in `TombstonesAndDense`, `vm/table.rs`). `bench/record_tables`
+measured 2.4-2.5 s at 5c4f6e5 against 2.6 s with the change (bygg, three
+interleaved pairs, WARM blocks 47 ms against 50 ms in every block). The
+workload never reaches the array part. Disassembly of the two binaries
+shows `with_template_keys` now calling `HashSlots::push_new` outlined,
+staging key and value on the stack and reloading them as one 32-byte load,
+and the pinned-init decrement materialized differently. Forcing `push_new`
+inline did not recover the time, so the cause is open: code placement, or
+another code-generation change around the template constructor. Worth a
+`perf` comparison of cycles and `ex_no_retire.load_not_complete` on
+`hotpath.record_tables`.
+
+**Classification:** local.
 
 ## Accounts added to existing entries
 

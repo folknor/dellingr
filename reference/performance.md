@@ -142,12 +142,12 @@ release `gsub_pattern_function` went from 3184 (3248 with snapshot) at
 
 `string.format` appended every literal byte of its format string as its own
 growth check and atomic charge, and sent `%%` through the directive parser
-and `format_argument` to emit one byte. The change appends each run of
-literal text between `%`s in one copy charged unit-exactly
-(`append_bytes_units`, already gsub's appender for template literals), reads
-`%%` as literal text, and gives gsub's first template application the same
-batched appender its later applications had. Costs, the exhaustion point and
-the cap boundary are unchanged (pinned by
+and `format_argument` to emit one byte. The change batched each run of
+literal text between `%`s into one copy with the same per-byte charging
+semantics, using the batched appender that `gsub` used for template
+literals at the time. It also treated `%%` as literal text and batched
+literal runs on the first `gsub` template application. The change
+preserved costs, the exhaustion point and the cap boundary (pinned by
 `format_literal_bytes_stop_at_the_first_byte_that_starts_with_no_budget` and
 `format_literal_run_across_the_size_cap_charges_the_bytes_that_fit`).
 
@@ -194,6 +194,39 @@ with an unrelated metatable or a `__len` handler. Native bytes per level
 (`native_bytes_per_level`): release `remove_*` rows grew 16 bytes, the other
 release rows are unchanged; in the dev profile the `concat_*` rows shrank
 128 bytes and the `unpack_*` rows grew 48.
+
+## Dense-prefix proof for the length operator, 2026-11-18
+
+A table keeps a `dense` bit, a proof that its live array keys are exactly
+`1..=array_live`, so `array_len` returns that count instead of
+binary-searching `1..=vlen` when the last array slot is nil. Tail pushes
+and pops keep it, as do shifts of a dense prefix by `table.insert` and
+`table.remove`; other writes that might leave a hole clear it, and it
+comes back when the array empties. The answer is the border the search
+would return, so nothing replay-visible moves. The bit shares a word with
+the hash part's tombstone count (`TombstonesAndDense`), because a separate
+field grew every table, and so every object slot, by 8 bytes. Against its
+parent 5c4f6e5 on bygg, `brokkr bench wall` (best of 3), interleaved
+pairs of the packed layout:
+
+| Workload | 5c4f6e5 | Change |
+|---|---|---|
+| `deep_stack` | 441 ms | 331 ms |
+| `record_tables` | 2.4 s, 2.5 s | 2.6 s, 2.6 s |
+| `sequence_len` | 2.3 s | 2.3 s |
+| `fill`, `queue` | 1.5 s | 1.5 s |
+| `rekey` | 1.0 s | 1.0 s |
+| `list_literals` | 2.6 s | 2.6 s |
+
+`deep_stack` pushes and pops 32 entries on a stack 500 deep whose logical
+array once reached 1024 keys, taking `#s` on every operation.
+`record_tables` is about 5% slower (WARM blocks 47 ms against 50 ms, in
+every block), cause unisolated. It never reaches the array part; its
+executed differences are code generation around the template
+constructor: `with_template_keys` now calls `HashSlots::push_new` outlined
+and stages key and value through the stack, and the pinned-init decrement
+is materialized differently. Forcing `push_new` inline did not recover it
+(2.6 s), so how much is that work and how much code placement is open.
 
 ## Closure creation in one allocation, 2026-11-17
 
