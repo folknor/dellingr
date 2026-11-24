@@ -136,7 +136,9 @@ stage = "pre-clippy"
 # under different content on every check.)
 
 # `bench-harness` only adds the `dellingr-bench` bin (its unit tests and
-# lints); the library compiles as the consumer's default build.
+# lints); the library compiles as the consumer's default build. The snapshot
+# shapes carry it too, so the harness's snapshot scenario drivers (compiled
+# only under both features) are linted and tested.
 [[check]]
 name = "default"
 features = ["bench-harness"]
@@ -152,7 +154,7 @@ feature_unification = "workspace"
 
 [[check]]
 name = "snapshot"
-features = ["snapshot"]
+features = ["snapshot", "bench-harness"]
 # Selection rule: run every test admitted by this feature shape. Registration
 # changes can affect any test using the stdlib, _G or RNG names, as well as
 # saving, corpus round trips and cost goldens. New feature-sensitive tests are
@@ -166,7 +168,7 @@ feature_unification = "workspace"
 
 [[check]]
 name = "snapshot-corpus"
-features = ["snapshot"]
+features = ["snapshot", "bench-harness"]
 only = ["corpus::run_examples::standalone::"]
 parallel = {}
 feature_unification = "workspace"

@@ -1,4 +1,4 @@
--- Sibling of calls/global.lua: same loop, but the function is bound to a
+-- Probe: sibling of calls/global.lua: same loop, but the function is bound to a
 -- local up front so each call skips the globals lookup. The delta vs
 -- calls/global.lua is the cost of per-call global resolution.
 

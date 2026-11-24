@@ -87,7 +87,7 @@ restore it. See `budget.md`.
   run by the gate, and counts as unverified. musl, 32-bit targets with SSE2 and
   emulated runs are checked only if a player platform needs them. The library
   itself has no Unix dependency; only the repository's test suite and the
-  `hotpath` example harness are Unix-only, so they do not build on Windows.
+  `dellingr-bench` harness are Unix-only, so they do not build on Windows.
 - The compiler never constant-folds `^` (a folded literal would be free where
   a runtime `^` is charged), so bytecode carries no precomputed `^` results.
 

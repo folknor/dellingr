@@ -447,6 +447,9 @@ fn registered_hotpath_headers_classify_the_measured_path() {
 fn registered_workload_file_digests_match_brokkr_pins() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let pairs = workload_pairs();
+    // Every drifted pin is named at once, so a registration that adds several
+    // files is re-pinned in one pass.
+    let mut drifted = Vec::new();
 
     for pair in pairs {
         let workload_name = pair.name.as_str();
@@ -465,12 +468,18 @@ fn registered_workload_file_digests_match_brokkr_pins() {
                 )
             });
             let actual = format!("{:032x}", xxh3_128(&bytes));
-            assert_eq!(
-                actual, expected,
-                "workload registration [data.workloads.{scale}.{workload_name}].xxhash in brokkr.d/bench.toml drifted for file {file}: expected {expected}, actual {actual}. Editing a pinned file means re-registering its pin, which cuts its stored benchmark history."
-            );
+            if actual != expected {
+                drifted.push(format!(
+                    "[data.workloads.{scale}.{workload_name}] {file}: expected {expected}, actual {actual}"
+                ));
+            }
         }
     }
+    assert!(
+        drifted.is_empty(),
+        "workload pins in brokkr.d/bench.toml drifted. Editing a pinned file means re-registering its pin, which cuts its stored benchmark history.\n{}",
+        drifted.join("\n")
+    );
 }
 
 #[test]
@@ -749,4 +758,175 @@ fn registered_workload_pairs_keep_kernel_cost_fingerprints_aligned() {
             pair.hotpath_file
         );
     }
+}
+
+const SCENARIO_DIRECTIVE: &str = "-- Harness scenario: ";
+
+/// One Rust-driven scenario registration at both scales.
+#[derive(Debug)]
+struct ScenarioPair {
+    family: &'static str,
+    name: String,
+    files: [(String, String); 2],
+}
+
+/// Every scenario registered in brokkr.d/bench.toml: `data.scenarios` (built
+/// without the snapshot feature) and `data.snapshot_scenarios` (built with
+/// it), each at the `bench` and `hotpath` scales with the same names.
+fn scenario_pairs() -> Vec<ScenarioPair> {
+    let config = support::bench_config();
+    let mut pairs = Vec::new();
+    for family in ["scenarios", "snapshot_scenarios"] {
+        let scale = |scale: &str| {
+            config
+                .get("data")
+                .and_then(|data| data.get(family))
+                .and_then(|scenarios| scenarios.get(scale))
+                .and_then(toml::Value::as_table)
+                .unwrap_or_else(|| {
+                    panic!("brokkr.d/bench.toml has no [data.{family}.{scale}] table")
+                })
+        };
+        let bench = scale("bench");
+        let hotpath = scale("hotpath");
+        assert_eq!(
+            bench.keys().collect::<Vec<_>>(),
+            hotpath.keys().collect::<Vec<_>>(),
+            "data.{family}.bench and data.{family}.hotpath must register the same names"
+        );
+        for (name, registration) in bench {
+            let files = [("bench", registration), ("hotpath", &hotpath[name])].map(
+                |(scale, registration)| {
+                    (
+                        workload_string(registration, "file", scale, name),
+                        workload_string(registration, "xxhash", scale, name),
+                    )
+                },
+            );
+            pairs.push(ScenarioPair {
+                family,
+                name: name.clone(),
+                files,
+            });
+        }
+    }
+    pairs
+}
+
+fn scenario_kind_of(source: &str) -> Option<&str> {
+    let mut kinds = source
+        .lines()
+        .filter_map(|line| line.trim_end().strip_prefix(SCENARIO_DIRECTIVE));
+    let kind = kinds.next();
+    assert!(kinds.next().is_none(), "a scenario file declares one kind");
+    kind
+}
+
+/// The scenario contract the harness and brokkr.d/host.lua rely on: pins
+/// match, each file sits where its scale puts it and is named for its key
+/// (the success line names the file stem), each declares one kind the
+/// harness knows, matching its key and its feature family, and the setup
+/// runs and sets a positive integer `count`. The two invoke forms run the
+/// same Lua apart from their header, so their cells do the same work.
+#[test]
+fn registered_scenarios_are_pinned_named_and_runnable() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let pairs = scenario_pairs();
+    assert!(
+        !pairs.is_empty(),
+        "brokkr.d/bench.toml registers no scenarios"
+    );
+    let mut registered = std::collections::BTreeSet::new();
+    let mut bodies = std::collections::BTreeMap::new();
+    let mut drifted = Vec::new();
+    for pair in &pairs {
+        for ((file, expected), dir) in pair.files.iter().zip(["bench/host/", "bench/host/small/"]) {
+            assert_eq!(
+                file,
+                &format!("{dir}{}.lua", pair.name),
+                "scenario {} must live at its scale's path and carry its key as its name",
+                pair.name
+            );
+            registered.insert(file.clone());
+            let bytes = fs::read(root.join(file))
+                .unwrap_or_else(|error| panic!("cannot read {file}: {error}"));
+            let actual = format!("{:032x}", xxh3_128(&bytes));
+            if &actual != expected {
+                drifted.push(format!(
+                    "scenario {} {file}: expected {expected}, actual {actual}",
+                    pair.name
+                ));
+            }
+            let source = String::from_utf8(bytes).expect("scenario files are UTF-8");
+            let kind = scenario_kind_of(&source)
+                .unwrap_or_else(|| panic!("{file} declares no `{SCENARIO_DIRECTIVE}` kind"));
+            assert_eq!(
+                kind, pair.name,
+                "{file}: one scenario per kind, named for it"
+            );
+            assert!(
+                HOTPATH_SOURCE.contains(&format!("(\"{kind}\", ScenarioKind::")),
+                "{file}: the harness has no scenario kind {kind}"
+            );
+            assert_eq!(
+                kind.starts_with("snapshot_"),
+                pair.family == "snapshot_scenarios",
+                "{file}: snapshot kinds and only they register under data.snapshot_scenarios"
+            );
+
+            let program = Program::compile(&source, Some(file.as_bytes()))
+                .unwrap_or_else(|error| panic!("{file} does not parse: {error}"));
+            let mut state = State::new();
+            state.load(&program).expect("scenario loads");
+            state
+                .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+                .unwrap_or_else(|error| panic!("{file} setup failed: {error}"));
+            state.get_global("count").expect("reads count");
+            let count = state
+                .to_number(-1)
+                .unwrap_or_else(|_| panic!("{file} sets no numeric count"));
+            assert!(
+                count >= 1.0 && count.fract() == 0.0,
+                "{file}: count must be a positive integer"
+            );
+
+            let body = source
+                .lines()
+                .skip_while(|line| line.starts_with("--"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            bodies.insert(file.clone(), body);
+        }
+    }
+    assert!(
+        drifted.is_empty(),
+        "scenario pins in brokkr.d/bench.toml drifted:\n{}",
+        drifted.join("\n")
+    );
+    for dir in ["bench/host/", "bench/host/small/"] {
+        assert_eq!(
+            bodies[&format!("{dir}invoke_typed.lua")],
+            bodies[&format!("{dir}invoke_stack.lua")],
+            "the two invoke forms must call the same step the same number of times"
+        );
+    }
+
+    let mut on_disk = std::collections::BTreeSet::new();
+    for dir in ["bench/host", "bench/host/small"] {
+        for entry in fs::read_dir(root.join(dir)).expect("reads the scenario directory") {
+            let path = entry.expect("reads an entry").path();
+            if path.is_file() {
+                on_disk.insert(
+                    path.strip_prefix(&root)
+                        .expect("inside the repository")
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                );
+            }
+        }
+    }
+    assert_eq!(
+        on_disk, registered,
+        "every file under bench/host/ is a registered scenario"
+    );
 }

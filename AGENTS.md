@@ -82,7 +82,12 @@ brokkr bench --hotpath kernel --workload <W>         # function-level timing
 brokkr bench --hotpath alloc --workload <W>          # allocation tracking
 brokkr bench --commit <ref> wall --workload <W>      # old VM, current workload file
 brokkr bench --iterations 5 wall --workload a,b      # one stored run per workload
+brokkr bench host --scenario <S>                     # Rust-driven scenario, seconds scale
+brokkr bench --hotpath host_kernel --scenario <S>    # the same scenario, ms scale
+brokkr bench snapshot --scenario snapshot_save       # snapshot scenarios (snapshot build)
 ```
+
+Host-side work a script cannot drive (State construction, compilation, collections over many loaded chunks, `State::invoke` against the stack call sequence, snapshot save and load) is a **scenario**: a pinned `bench/host/<S>.lua` (and `bench/host/small/<S>.lua`) carrying `-- Harness scenario: <kind>` and a `count`, registered under `data.scenarios` or `data.snapshot_scenarios` and run through `brokkr.d/host.lua`. A changed driver is a new kind name, never an edit under the old one (the `bench.toml` comment above the registrations says why).
 
 - **Every measurement of dellingr's own performance goes through `brokkr bench`**: never hyperfine, `time` or a hand-rolled loop. Register a workload first. The one exception is `scripts/bench.sh`, which only regenerates the README comparison table.
 - **Never run benchmark or profiling commands in parallel.**

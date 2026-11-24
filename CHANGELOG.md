@@ -129,6 +129,12 @@ tick budgets and re-record replays.
   resolving the table once instead of per field; the first failing field in
   tuple order is the error. The `host_records` decode of eight fields went
   from 6.5 s to 4.5 s on bygg.
+- `dellingr-bench` runs Rust-driven scenarios: a file carrying
+  `-- Harness scenario: <kind>` selects a driver (State construction,
+  repeated compilation, collections over many loaded chunks, `State::invoke`
+  against the stack call sequence, snapshot save and load) instead of the
+  `_bench` workload path, registered as the `host`, `host_kernel`, `snapshot`
+  and `snapshot_kernel` brokkr benches.
 
 ### Fixed
 

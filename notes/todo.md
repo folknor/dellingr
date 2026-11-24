@@ -207,67 +207,14 @@ logical hash history; segmented access can slow dense reads, so the contiguous
 form stays. High confidence in the pathologies, medium in their weight on
 game throughput. (Performance, but filed here beside the matching entry.)
 
-### Grow the brokkr workload registry to the full candidate surface
+### Contract test for the scenario bench script
 
-What: `bench/` ports only the curated workloads registered in
-`brokkr.d/bench.toml`.
-The optimization backlogs name
-more trackers that exist in `examples/` but have no seconds-scale
-verdict port yet: the rest of the `calls/` family (`local`,
-`method_cached`, `vararg`, `fixedarg`, `general`,
-`factory_closure` - the measurement surface for the frame-flattening
-and closure-clone rewrites), `fields/polymorphic` / `same_obj_cached` /
-`same_obj_write`, `tables/numeric_index` / `mixed`, `alloc/short_tables`,
-`iter/ipairs`. Port with the same recipe (kernel + calibrated repeat
-loop, ~100ms/call, footer 30) and register both pins in
-`brokkr.d/bench.toml` (the bench/ port under `data.workloads.bench`, the
-examples/ original under `data.workloads.hotpath`).
-
-Also open: a seconds-scale parse
-workload (`large_source` at a second, larger size), and a Rust-driven
-snapshot bench (optimizations.md "Snapshot path").
-
-The Rust-driven items here are no longer blocked on brokkr: a script bench
-runs whatever binary its `[bench.*]` table builds, with any argv and params,
-so each needs only dellingr-side code (a mode of `dellingr-bench` or a bin
-of its own behind `bench-harness`) plus a bench table beside `wall`, `kernel`
-and `alloc`. Mark its call as a hotpath stage to profile it.
-
-Also open: a workload where one State holds a lot of loaded code and a small
-live heap, so that per-collection work proportional to retained runtimes
-(the runtime-cache walk, which since 2026-11-04 runs only every
-`CACHE_PRUNE_INTERVAL` collections, and the per-runtime
-`GcRoot::ChunkLiterals` visit) is what dominates. No registered workload loads
-more than one chunk, so the change that put the cache prune on a cadence was
-measured only on `gc_churn`. Scripts cannot load code, so this is a
-Rust-driven bench that loads many Programs into one State.
-
-Also open: State construction (`State::new`, `open_libs`) has no workload. The
-harness reports `state_new_us`, one cold State per launch, so the change that
-made the function table borrow the catalog's static ids (instead of copying
-them per State) was read from interleaved single launches, not a stored
-verdict. A Rust-driven bench building many States would measure what a host
-building one State per script or per tick pays.
-
-Also open (2026-11-17 performance hunt, host-boundary scope): the harness's
-warm path (`run_warm_block`, `src/bin/dellingr-bench.rs`) reuses a function
-already rooted on the stack and calls it with zero arguments and zero
-expected results, so no registered workload exercises Rust-to-Lua argument
-pushing or result reading. Host callbacks reading records are covered by
-`host_records` (a script carrying `-- Harness host: records` gets the
-harness's `_host_decode` installed; the scripts fall back to a Lua decode
-elsewhere); the same directive mechanism can install more host functions.
-`State::invoke` (one usability check per call instead of one per stack
-operation, no callee insert) landed on that theoretical saving alone; a
-harness mode driving it and the push/`call_anchor`/`to_number`/`pop`
-sequence side by side would measure it.
-
-Why deferred: the registry is live with the curated workloads;
-porting the rest before those have proven the recipe would be
-premature batch work.
-
-Signal that would promote it: active work starting on any candidate
-whose tracker is still examples/-only.
+What: `brokkr.d/host.lua` (the `host` and `snapshot` benches) is compiled
+and name-checked by `brokkr check` but never executed by it. Its refusals (no
+scenario KVs, no success line, a count that disagrees with the KV) run only
+in a real `brokkr bench`. A `bench_tests` contract file driving the script
+against scripted harness output would cover them on every check; the same
+holds for `brokkr.d/bench.lua`. Neither has one today.
 
 ### Typed `State<U>` for user-data
 

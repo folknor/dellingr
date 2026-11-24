@@ -1,4 +1,4 @@
--- Polymorphic field-read kernel.
+-- Probe: polymorphic field-read kernel.
 -- Iterates a fresh table at each step, so per-callsite IC never hits.
 -- Measures the steady-state polymorphic miss path.
 

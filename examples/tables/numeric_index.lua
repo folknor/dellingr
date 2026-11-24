@@ -1,4 +1,4 @@
--- Numeric indexing kernel.
+-- Probe: numeric indexing kernel.
 -- Same dense array shape as iter/ipairs.lua, but traversed with a numeric for loop.
 
 local arr = {}

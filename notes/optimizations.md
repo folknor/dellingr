@@ -573,8 +573,10 @@ The reasoning stays at `State::get_cached_field`. Typed loop regions keep
 the form (`State::record_slot`), where the probe is the whole access.
 Untested shape that could still promote it: an own-field sweep over many
 prebuilt wide Map records (no construction or call in the kernel) where the
-per-table hash indices lose locality; register such a workload before
-retrying.
+per-table hash indices lose locality. That workload is now registered,
+`wide_sweep` (4096 eight-field records from one constructor, four static
+field reads per record in a `while` loop so no typed region takes it); a
+retry measures there first.
 
 The 2026-11-17 performance hunt raised this from two scopes. The lookup
 hunter's lead rewrite: own-field entries hold one `ObjectPtr` and one `SlotRef`
@@ -747,7 +749,9 @@ the recommended embedding model.
 
 Signal that would promote it: a profile showing State construction
 dominating request-path latency, or a real "one State per request"
-embedder asking.
+embedder asking. The `host --scenario state_new` bench (construction plus
+teardown, about 5 us per State on bygg, 2026-11-24, dirty tree at 8b98de6)
+is where a change here is measured.
 
 ---
 
@@ -824,8 +828,9 @@ open from that work:
   then fail the stack cap while `finish_call` pads, so a retry sees the next
   match. The wrapper had the same gap; the step's own refusals leave the
   iterator unchanged, the host call's padding does not.
-- No registered workload isolates a gmatch loop over many one-byte matches;
-  `patterns` and `failed_scan` are the nearest.
+- `gmatch_bytes` (registered 2026-11-24) isolates a gmatch loop over many
+  one-byte matches; no measurement of the typed iterator on it is recorded
+  yet.
 
 ---
 
@@ -931,11 +936,49 @@ each get fewer than ~3 accesses (so warmup amortization matters).
 
 ---
 
+## Host boundary and per-State costs
+
+### Rust-to-Lua call forms
+
+`State::invoke` landed (597db95) on its theoretical saving alone: one
+usability check per call and no callee insert. The `invoke_typed` and
+`invoke_stack` scenarios now measure it against the push / `call_anchor` /
+`to_number` / `pop` sequence with the same `step(i, 0.5)` and count: 3.5 s
+against 5.0 s wall for 60 million calls (about 58 and 83 ns a call), one
+launch each on bygg, 2026-11-24, dirty tree at 8b98de6. Not yet an
+interleaved A/B pair, so the gap is a first reading, not a verdict. Open:
+whether the stack sequence's extra cost is the per-call checks or the
+callee insert, and whether `call_anchor` can shed it.
+
+### Collections over many retained runtimes
+
+The `many_chunks` scenario (1000 distinct loaded chunks, small live heap,
+automatic collection off) runs a full collection in about 27 us on bygg
+(70,000 collections in 1.9 s wall, 2026-11-24, dirty tree at 8b98de6),
+covering the per-runtime literal roots and cache sweep and at least one
+runtime-cache prune. No profile yet splits that time between the
+per-runtime walks and the rest of the collection; until one does, the
+`CACHE_PRUNE_INTERVAL` cadence change stays measured only on `gc_churn`.
+
+### `ipairs` traversal about 3x the numeric `for` over the same array
+
+Lateral from calibrating the new verdict ports (bygg, 2026-11-24, dirty
+tree at 8b98de6): `iter/ipairs` sums a 10,000-element dense array in about
+19 ns an element, `tables/numeric_index` the same array with a numeric
+`for` and `arr[i]` in about 6 ns. The numeric `for` is likely taken by a
+typed numeric region and `ipairs` is not; unconfirmed. Signal that would
+promote it: a profile of `ipairs` showing per-step overhead outside the
+loop body, on a workload where `ipairs` over arrays is hot.
+
+---
+
 ## Snapshot path
 
-Still unmeasured as a whole: snapshots are driven from Rust, not from Lua,
-so benching them needs harness work rather than a new `.lua` file (tracked
-in todo.md's workload-registry entry).
+Benched by the `snapshot` scenarios (`brokkr bench snapshot --scenario
+snapshot_save` or `snapshot_load`): a 2000-unit world graph saves in about
+2 ms and loads (this build's own save, teardown included) in about 2.8 ms on
+bygg (2026-11-24, ms-scale run, dirty tree at 8b98de6). No profile of either
+path is recorded yet; nothing here is a candidate until one is.
 
 ---
 

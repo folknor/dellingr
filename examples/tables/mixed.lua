@@ -1,4 +1,4 @@
--- Table create/get/set kernel.
+-- Workload: table create/get/set kernel.
 -- Exercises both array-style integer keys and string-keyed hash entries,
 -- plus ipairs/pairs iteration. Allocates per-call to put pressure on GC.
 

@@ -15,6 +15,13 @@
 //! a workload can drive host callbacks reading its tables; every other
 //! script runs on a plain `State::new()`.
 //!
+//! A file carrying `-- Harness scenario: <kind>` is a Rust-driven scenario
+//! instead (the `host` and `snapshot` benches): no `_bench`; its top level
+//! runs once as the fixture and sets a `count` global, then the kind's
+//! driver performs `count` host operations (`ScenarioKind` lists them),
+//! calls the file's optional `verify`, and prints KVs and a
+//! `host/<stem>: <count>: true` line.
+//!
 //! A script path is required and is resolved from the caller's working
 //! directory. brokkr passes the bound workload's pinned file path.
 //!
@@ -439,6 +446,384 @@ fn run_warm_block(
     Ok(block_start.elapsed())
 }
 
+/// The line prefix that makes a file a Rust-driven scenario rather than a
+/// `_bench` workload: `-- Harness scenario: <kind>`, exactly one whole line.
+const SCENARIO_DIRECTIVE: &str = "-- Harness scenario: ";
+/// Upper bound on a scenario's `count`, so a typo cannot run for days and
+/// the count converts to `u32` and `f64` exactly.
+const MAX_SCENARIO_COUNT: u32 = 100_000_000;
+
+/// What a scenario's driver does with `count` operations after the file's
+/// top level has run. A kind's name is part of the measurement's identity:
+/// a stored run pairs with another only through the pinned file, so a
+/// change to what a kind does is a new kind name, never an edit under the
+/// old one (an older binary would run the old work under the same name).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScenarioKind {
+    /// `State::new()` then drop: construction and teardown of a standard
+    /// State.
+    StateNew,
+    /// `Program::compile` of the `source` string the file built, dropping
+    /// each Program: parse and codegen without `State::load`.
+    Compile,
+    /// The file's `chunk_source` compiled `chunks` times as distinct
+    /// Programs and run once each (each roots a closure), then `count`
+    /// explicit full collections with automatic collection off: the
+    /// per-collection work proportional to retained runtimes.
+    ManyChunks,
+    /// `State::invoke(&step, (i, 0.5))` returning one number.
+    InvokeTyped,
+    /// The stack sequence for the same call: push two numbers,
+    /// `call_anchor`, `to_number`, `pop`.
+    InvokeStack,
+    /// `State::save_state` of the graph the file built.
+    SnapshotSave,
+    /// `State::load_state` of this build's own save of the file's graph,
+    /// dropping each restored State (teardown included).
+    SnapshotLoad,
+}
+
+const SCENARIO_KINDS: &[(&str, ScenarioKind)] = &[
+    ("state_new", ScenarioKind::StateNew),
+    ("compile", ScenarioKind::Compile),
+    ("many_chunks", ScenarioKind::ManyChunks),
+    ("invoke_typed", ScenarioKind::InvokeTyped),
+    ("invoke_stack", ScenarioKind::InvokeStack),
+    ("snapshot_save", ScenarioKind::SnapshotSave),
+    ("snapshot_load", ScenarioKind::SnapshotLoad),
+];
+
+impl ScenarioKind {
+    fn name(self) -> &'static str {
+        SCENARIO_KINDS
+            .iter()
+            .find(|(_, kind)| *kind == self)
+            .map(|(name, _)| *name)
+            .expect("every kind is listed in SCENARIO_KINDS")
+    }
+
+    fn needs_snapshot(self) -> bool {
+        matches!(self, Self::SnapshotSave | Self::SnapshotLoad)
+    }
+}
+
+/// The scenario a file declares: `None` for an ordinary `_bench` workload,
+/// an error for a malformed or repeated directive or an unknown kind (exact
+/// match only, so a renamed kind never falls through to another driver).
+fn scenario_kind(source: &[u8]) -> Result<Option<ScenarioKind>, String> {
+    let mut found = None;
+    for line in source.split(|&b| b == b'\n') {
+        let line = line.trim_ascii_end();
+        let Some(name) = line.strip_prefix(SCENARIO_DIRECTIVE.as_bytes()) else {
+            continue;
+        };
+        if found.is_some() {
+            return Err("a scenario file declares one `-- Harness scenario:` line".to_owned());
+        }
+        let name =
+            std::str::from_utf8(name).map_err(|_| "the scenario kind is not UTF-8".to_owned())?;
+        let kind = SCENARIO_KINDS
+            .iter()
+            .find(|(known, _)| *known == name)
+            .map(|(_, kind)| *kind)
+            .ok_or_else(|| format!("unknown scenario kind `{name}`"))?;
+        found = Some(kind);
+    }
+    Ok(found)
+}
+
+/// Reads and clears the file's `count` global: a positive integer no larger
+/// than `MAX_SCENARIO_COUNT`. Clearing it keeps the scale dial out of any
+/// snapshot the scenario takes.
+fn take_count(state: &mut State) -> Result<u32, String> {
+    state.get_global("count").map_err(|e| e.to_string())?;
+    let value = state
+        .to_number(-1)
+        .map_err(|_| "a scenario file sets a numeric global `count`".to_owned())?;
+    state.pop(1).map_err(|e| e.to_string())?;
+    if !(value >= 1.0 && value <= f64::from(MAX_SCENARIO_COUNT) && value.fract() == 0.0) {
+        return Err(format!(
+            "`count` must be an integer from 1 to {MAX_SCENARIO_COUNT}, got {value}"
+        ));
+    }
+    state.push_nil().map_err(|e| e.to_string())?;
+    state.set_global("count").map_err(|e| e.to_string())?;
+    Ok(value as u32)
+}
+
+fn global_bytes(state: &mut State, name: &str) -> Result<Vec<u8>, String> {
+    state.get_global(name).map_err(|e| e.to_string())?;
+    let bytes = state
+        .to_bytes(-1)
+        .map(<[u8]>::to_vec)
+        .map_err(|_| format!("this scenario needs a string global `{name}`"))?;
+    state.pop(1).map_err(|e| e.to_string())?;
+    Ok(bytes)
+}
+
+fn global_count(state: &mut State, name: &str) -> Result<u32, String> {
+    state.get_global(name).map_err(|e| e.to_string())?;
+    let value = state
+        .to_number(-1)
+        .map_err(|_| format!("this scenario needs a numeric global `{name}`"))?;
+    state.pop(1).map_err(|e| e.to_string())?;
+    if !(value >= 1.0 && value <= f64::from(MAX_SCENARIO_COUNT) && value.fract() == 0.0) {
+        return Err(format!("`{name}` must be a positive integer, got {value}"));
+    }
+    Ok(value as u32)
+}
+
+fn anchored_function(state: &mut State, name: &str) -> Result<dellingr::Anchor, String> {
+    state.get_global(name).map_err(|e| e.to_string())?;
+    state
+        .anchor_function()
+        .map_err(|_| format!("this scenario needs a global function `{name}`"))
+}
+
+/// Calls the file's `verify` function when it defines one, after setting
+/// the global `result` the driver computed (nil when it computed none). A
+/// verify that errors fails the run.
+fn run_verify(state: &mut State, result: Option<f64>) -> Result<(), String> {
+    match result {
+        Some(value) => state.push_number(value),
+        None => state.push_nil(),
+    }
+    .map_err(|e| e.to_string())?;
+    state.set_global("result").map_err(|e| e.to_string())?;
+    state.get_global("verify").map_err(|e| e.to_string())?;
+    if state.typ(-1) == LuaType::Nil {
+        return state.pop(1).map_err(|e| e.to_string());
+    }
+    state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .map_err(|e| format!("verify failed: {e}"))
+}
+
+/// Runs the chunk's top level: the scenario's fixture.
+fn run_scenario_setup(state: &mut State, source: &[u8], script_path: &Path) -> Result<(), String> {
+    let program = Program::compile(source, Some(chunk_name(script_path)))
+        .map_err(|e| format!("parse error: {e}"))?;
+    state.load(&program).map_err(|e| e.to_string())?;
+    state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .map_err(|e| format!("setup error: {e}"))
+}
+
+/// What a scenario's measured loop reports beside its time.
+struct ScenarioOutcome {
+    measured: Duration,
+    extra: Vec<Metric>,
+}
+
+#[cfg(feature = "snapshot")]
+fn snapshot_save_loop(state: &mut State, count: u32) -> Result<ScenarioOutcome, String> {
+    state.gc_collect();
+    let start = Instant::now();
+    let mut first: Option<Vec<u8>> = None;
+    let mut last = Vec::new();
+    for _ in 0..count {
+        let save = state
+            .save_state()
+            .map_err(|e| format!("save failed: {e}"))?;
+        if first.is_none() {
+            first = Some(save.bytes.clone());
+        }
+        last = save.bytes;
+    }
+    let measured = start.elapsed();
+    if first.as_deref() != Some(last.as_slice()) || last.is_empty() {
+        return Err("repeated saves of an unchanged State differ".to_owned());
+    }
+    Ok(ScenarioOutcome {
+        measured,
+        extra: vec![integer_metric("save_bytes", last.len() as u128, None)],
+    })
+}
+
+#[cfg(feature = "snapshot")]
+fn snapshot_load_loop(state: &mut State, count: u32) -> Result<ScenarioOutcome, String> {
+    state.gc_collect();
+    let bytes = state
+        .save_state()
+        .map_err(|e| format!("save failed: {e}"))?
+        .bytes;
+    let start = Instant::now();
+    let mut restored = None;
+    for _ in 0..count {
+        let loaded = State::load_state(
+            &bytes,
+            Box::new(dellingr::DefaultCallbacks),
+            |_: &mut State| Ok::<(), std::convert::Infallible>(()),
+        )
+        .map_err(|e| format!("load failed: {e}"))?;
+        // Dropping the previous State here keeps teardown inside the loop.
+        restored = Some(loaded);
+    }
+    let measured = start.elapsed();
+    let mut restored = restored.expect("count is at least 1");
+    run_verify(&mut restored, None).map_err(|e| format!("restored State: {e}"))?;
+    Ok(ScenarioOutcome {
+        measured,
+        extra: vec![integer_metric("save_bytes", bytes.len() as u128, None)],
+    })
+}
+
+fn scenario_loop(
+    kind: ScenarioKind,
+    state: &mut State,
+    count: u32,
+) -> Result<ScenarioOutcome, String> {
+    let plain = |measured| ScenarioOutcome {
+        measured,
+        extra: Vec::new(),
+    };
+    match kind {
+        ScenarioKind::StateNew => {
+            let start = Instant::now();
+            for _ in 0..count {
+                drop(std::hint::black_box(State::new()));
+            }
+            let measured = start.elapsed();
+            run_verify(state, None)?;
+            Ok(plain(measured))
+        }
+        ScenarioKind::Compile => {
+            let source = global_bytes(state, "source")?;
+            let start = Instant::now();
+            for _ in 0..count {
+                let program = Program::compile(&source, Some(b"scenario source"))
+                    .map_err(|e| format!("the scenario source does not compile: {e}"))?;
+                drop(std::hint::black_box(program));
+            }
+            let measured = start.elapsed();
+            run_verify(state, None)?;
+            Ok(ScenarioOutcome {
+                measured,
+                extra: vec![integer_metric("source_bytes", source.len() as u128, None)],
+            })
+        }
+        ScenarioKind::ManyChunks => {
+            let chunk_source = global_bytes(state, "chunk_source")?;
+            let chunks = global_count(state, "chunks")?;
+            for _ in 0..chunks {
+                // A Program compiled on its own is a runtime of its own.
+                let program = Program::compile(&chunk_source, Some(b"scenario chunk"))
+                    .map_err(|e| format!("chunk_source does not compile: {e}"))?;
+                state.load(&program).map_err(|e| e.to_string())?;
+                state
+                    .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+                    .map_err(|e| format!("chunk error: {e}"))?;
+            }
+            // Settle: free the setup's garbage before the measured loop.
+            state.gc_collect();
+            let start = Instant::now();
+            for _ in 0..count {
+                state.gc_collect();
+            }
+            let measured = start.elapsed();
+            run_verify(state, None)?;
+            Ok(ScenarioOutcome {
+                measured,
+                extra: vec![
+                    integer_metric("chunks", u128::from(chunks), None),
+                    integer_metric("final_object_count", state.object_count() as u128, None),
+                ],
+            })
+        }
+        ScenarioKind::InvokeTyped | ScenarioKind::InvokeStack => {
+            let step = anchored_function(state, "step")?;
+            let height = state.get_top();
+            let mut sum = 0.0;
+            let start = Instant::now();
+            if kind == ScenarioKind::InvokeTyped {
+                for i in 0..count {
+                    let (r,): (f64,) = state
+                        .invoke(&step, (f64::from(i), 0.5))
+                        .map_err(|e| format!("step failed: {e}"))?;
+                    sum += r;
+                }
+            } else {
+                for i in 0..count {
+                    let call = |state: &mut State| -> dellingr::Result<f64> {
+                        state.push_number(f64::from(i))?;
+                        state.push_number(0.5)?;
+                        state.call_anchor(&step, ArgCount::Fixed(2), RetCount::Fixed(1))?;
+                        let r = state.to_number(-1)?;
+                        state.pop(1)?;
+                        Ok(r)
+                    };
+                    sum += call(state).map_err(|e| format!("step failed: {e}"))?;
+                }
+            }
+            let measured = start.elapsed();
+            if state.get_top() != height {
+                return Err("the call sequence left the stack at a different height".to_owned());
+            }
+            run_verify(state, Some(sum))?;
+            Ok(plain(measured))
+        }
+        #[cfg(feature = "snapshot")]
+        ScenarioKind::SnapshotSave => snapshot_save_loop(state, count),
+        #[cfg(feature = "snapshot")]
+        ScenarioKind::SnapshotLoad => snapshot_load_loop(state, count),
+        #[cfg(not(feature = "snapshot"))]
+        ScenarioKind::SnapshotSave | ScenarioKind::SnapshotLoad => {
+            unreachable!("run_scenario refuses snapshot kinds without the snapshot feature")
+        }
+    }
+}
+
+/// The scenario's success line: `host/<file stem>: <count>: true`.
+fn scenario_verdict(script_path: &Path, count: u32) -> String {
+    let stem = script_path
+        .file_stem()
+        .map_or_else(String::new, |stem| stem.to_string_lossy().into_owned());
+    format!("host/{stem}: {count}: true")
+}
+
+/// Runs a Rust-driven scenario file: its top level (SETUP), then the kind's
+/// driver for `count` operations (WARM), then the file's `verify`. Writes
+/// its KVs to stderr and its success line to stdout.
+fn run_scenario(kind: ScenarioKind, args: &Args, source: &[u8]) -> Result<(), String> {
+    if kind.needs_snapshot() && !cfg!(feature = "snapshot") {
+        return Err(format!(
+            "scenario kind `{}` needs a build with the snapshot feature",
+            kind.name()
+        ));
+    }
+    let mut state = State::new();
+    if kind == ScenarioKind::ManyChunks {
+        // Only the measured explicit collections run, so the cadence of the
+        // runtime-cache prune inside the loop follows from `count` alone.
+        state.gc_disable_auto();
+    }
+    emit_marker("SETUP_START");
+    let setup_start = Instant::now();
+    run_scenario_setup(&mut state, source, &args.script_path)?;
+    let count = take_count(&mut state)?;
+    let setup_us = setup_start.elapsed().as_micros();
+    emit_marker("SETUP_END");
+
+    emit_marker("WARM_START");
+    let outcome = scenario_loop(kind, &mut state, count)?;
+    emit_marker("WARM_END");
+
+    let measured_us = outcome.measured.as_micros();
+    let per_op_ns = outcome.measured.as_secs_f64() * 1e9 / f64::from(count);
+    let mut metrics = vec![
+        text_metric("target", args.target.clone()),
+        text_metric("scenario", kind.name().to_owned()),
+        integer_metric("count", u128::from(count), Some(i64::from(count))),
+        integer_metric("setup_us", setup_us, None),
+        integer_metric("measured_us", measured_us, None),
+        text_metric("per_op_ns", format!("{per_op_ns:.1}")),
+    ];
+    metrics.extend(outcome.extra);
+    emit_metrics(&metrics);
+    println!("{}", scenario_verdict(&args.script_path, count));
+    Ok(())
+}
+
 fn main() {
     // Before anything else: the marker clock's origin is process start.
     process_start();
@@ -465,6 +850,25 @@ fn main() {
             exit(1);
         }
     };
+
+    match scenario_kind(&source) {
+        Ok(None) => {}
+        Ok(Some(kind)) => {
+            if let Err(error) = run_scenario(kind, &args, &source) {
+                eprintln!(
+                    "Scenario `{}` failed in {}: {error}",
+                    kind.name(),
+                    args.script_path.display()
+                );
+                exit(1);
+            }
+            return;
+        }
+        Err(error) => {
+            eprintln!("{}: {error}", args.script_path.display());
+            exit(1);
+        }
+    }
 
     let state_start = Instant::now();
     let mut state = State::new();
@@ -588,7 +992,8 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        RunMetrics, chunk_name, find_bench, install_host_records, parse_args_from, run_metrics,
+        RunMetrics, SCENARIO_KINDS, ScenarioKind, chunk_name, find_bench, install_host_records,
+        parse_args_from, run_metrics, run_scenario_setup, scenario_kind, scenario_loop, take_count,
         wants_host_records, write_kvs,
     };
     use dellingr::State;
@@ -646,6 +1051,89 @@ mod tests {
             .expect("runs");
         state.get_global("result").expect("reads the result");
         assert_eq!(state.to_number(-1).expect("a number"), 111.0);
+    }
+
+    #[test]
+    fn scenario_directive_names_one_known_kind_exactly() {
+        assert_eq!(scenario_kind(b"-- Probe: x\nlocal a = 1\n"), Ok(None));
+        assert_eq!(
+            scenario_kind(b"-- Harness scenario: compile\r\ncount = 1\n"),
+            Ok(Some(ScenarioKind::Compile))
+        );
+        assert!(scenario_kind(b"-- Harness scenario: compile2\n").is_err());
+        assert!(scenario_kind(b"-- Harness scenario: compile \n").is_ok());
+        assert!(
+            scenario_kind(b"-- Harness scenario: compile\n-- Harness scenario: compile\n").is_err()
+        );
+        for (name, kind) in SCENARIO_KINDS {
+            assert_eq!(kind.name(), *name);
+        }
+    }
+
+    fn run_tiny(kind: ScenarioKind, source: &str) -> Result<(), String> {
+        let mut state = State::new();
+        if kind == ScenarioKind::ManyChunks {
+            state.gc_disable_auto();
+        }
+        run_scenario_setup(
+            &mut state,
+            source.as_bytes(),
+            std::path::Path::new("tiny.lua"),
+        )?;
+        let count = take_count(&mut state)?;
+        state.get_global("count").map_err(|e| e.to_string())?;
+        assert_eq!(state.typ(-1), dellingr::LuaType::Nil, "count is cleared");
+        state.pop(1).map_err(|e| e.to_string())?;
+        let height = state.get_top();
+        scenario_loop(kind, &mut state, count)?;
+        assert_eq!(state.get_top(), height, "the driver keeps the stack height");
+        Ok(())
+    }
+
+    const VERIFY_INVOKE: &str = "count = 3
+function step(a, b) return a * 2 + b end
+function verify() if result ~= 7.5 then error(\"sum \" .. tostring(result)) end end";
+
+    #[test]
+    fn scenario_drivers_run_and_verify() {
+        run_tiny(ScenarioKind::StateNew, "count = 2").expect("state_new");
+        run_tiny(
+            ScenarioKind::Compile,
+            "count = 2 source = \"local x = 1 return x\"",
+        )
+        .expect("compile");
+        run_tiny(
+            ScenarioKind::ManyChunks,
+            "count = 2 chunks = 3 retained = {}
+            chunk_source = \"local t = {a = 1} local function f() return t.a end f() retained[#retained + 1] = f\"
+            function verify() if #retained ~= 3 then error(\"retained \" .. #retained) end end",
+        )
+        .expect("many_chunks");
+        run_tiny(ScenarioKind::InvokeTyped, VERIFY_INVOKE).expect("invoke_typed");
+        run_tiny(ScenarioKind::InvokeStack, VERIFY_INVOKE).expect("invoke_stack");
+        assert!(
+            run_tiny(
+                ScenarioKind::InvokeTyped,
+                &VERIFY_INVOKE.replace("7.5", "8")
+            )
+            .is_err(),
+            "a failing verify fails the run"
+        );
+        assert!(run_tiny(ScenarioKind::StateNew, "count = 0").is_err());
+        assert!(run_tiny(ScenarioKind::StateNew, "count = 1.5").is_err());
+    }
+
+    #[cfg(feature = "snapshot")]
+    #[test]
+    fn snapshot_scenario_drivers_run_and_verify() {
+        let graph = "count = 2 world = {name = \"w\", list = {1, 2, 3}}
+            function verify() if world.list[3] ~= 3 then error(\"lost the graph\") end end";
+        run_tiny(ScenarioKind::SnapshotSave, graph).expect("snapshot_save");
+        run_tiny(ScenarioKind::SnapshotLoad, graph).expect("snapshot_load");
+        assert!(
+            run_tiny(ScenarioKind::SnapshotLoad, &graph.replace("~= 3", "~= 4")).is_err(),
+            "verify runs on the restored State"
+        );
     }
 
     #[test]

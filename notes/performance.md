@@ -233,5 +233,6 @@ them:
 - `optimizations.md` "`string.format` cached plan": strings hunter's cached format plan.
 - `todo.md` "Sparse storage for the array part's stragglers": table hunter's
   numeric storage separated from the logical array boundary.
-- `todo.md` "Grow the brokkr workload registry": host hunter's note that the
-  harness warm path exercises no Rust-to-Lua argument or result traffic.
+- `optimizations.md` "Rust-to-Lua call forms": host hunter's note that the
+  harness warm path exercises no Rust-to-Lua argument or result traffic; the
+  `invoke_typed` and `invoke_stack` scenarios now carry it.

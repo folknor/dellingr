@@ -11,12 +11,12 @@ examples/alloc/short_tables.lua|e9c83a5f4ee78010eb0182c070505bb5|7206000
 examples/basic.lua|d6b50edb698f26f46baa74d35d43267c|104
 examples/calls/factory_closure.lua|ba0ce1aca4a8cd0297f00ba2c6b6b4bf|3006503
 examples/calls/fixedarg.lua|3f10a6a9186212512d5919045adb81d6|5002000
-examples/calls/general.lua|3444aa21fbbdaf89982d3e5b0ef4649d|2880000
+examples/calls/general.lua|e0da6c83a6ff16f8995ebcf96a347cc5|2880000
 examples/calls/global.lua|c2dbedfee234dd0fef1acb770d658e5b|1501000
 examples/calls/heap_leaves.lua|9842759c50eb11a2b9bf0679b344e153|903602
 examples/calls/host_records.lua|6d707a7823d6642d3cc7b270ceec4322|298433
 examples/calls/library_leaves.lua|70d4b2ae1fd0cf56753174fd5d0c3635|2048305
-examples/calls/local.lua|1945c6489a496413eb486104826222e2|1501000
+examples/calls/local.lua|a7501780f964f3c13245cf3733b1e396|1501000
 examples/calls/loop_beside_closure.lua|7dcad64f975e95ca6305fb01738c91db|1505602
 examples/calls/many_literals.lua|c2e5719005d74bfbad110836376f3d11|701000
 examples/calls/method.lua|c0c9ba6ea8af339cedc61dab0d12cc26|1002006
@@ -37,10 +37,11 @@ examples/edge_cases.lua|9f18c3afcbfe3c39a208113f2945cf1f|135
 examples/error_cases.lua|7b8c3e552cbb34705aae344fa50181cf|343
 examples/feature_test.lua|888e1e2c603d903f99464b36537688e1|521
 examples/feature_test_extended.lua|a58b6e1e011dd1eccdc308647baa3e4c|302
-examples/fields/polymorphic.lua|7e14d86d4e91fc363e77e1da3541b742|3035001
-examples/fields/same_obj_cached.lua|dcfc5d9389ea410fa530a01a3e2d5e16|15006007
+examples/fields/polymorphic.lua|731579ff0b30871e770e7af068adb337|3035001
+examples/fields/same_obj_cached.lua|baf0d2ee0c1856f7bf5a6581e8c2f5a0|15006007
 examples/fields/same_obj_read.lua|0e00bfb5521a2b4f2e9c48b48581a2e5|4806007
 examples/fields/same_obj_write.lua|e98e62564f848fd66aea021c2a1b3973|7711708
+examples/fields/wide_sweep.lua|33158346259decd0031d2f4dcbd966d8|6238209
 examples/for_control_scope.lua|645f08526fd89bc3994b511afbe68618|18
 examples/for_zero_step.lua|93a45ad12f4e811547bf629ff77709ba|1
 examples/functions.lua|d680fe72c6c75d63470bc6c5ae4a7ebf|7
@@ -82,6 +83,7 @@ examples/strings/class_membership.lua|8debd2005ba3eab6b385bdc64c23ad5d|38607
 examples/strings/failed_scan.lua|20d62957347ab59ead0ec4c6eb89a5f1|564130
 examples/strings/format_literals.lua|ab951754e92c34654003b4893b4161aa|18705
 examples/strings/g14_reference.lua|4d8b076da375ec4341f0eec591dd78e6|2
+examples/strings/gmatch_bytes.lua|68804fca7d4bb95dcc7ae7f38ca04abe|3293853
 examples/strings/gsub_replace.lua|96ec84440b1c475ed994e90e25e7011c|455310
 examples/strings/large_subject.lua|9f4c6b26f375b932a1b4df86c09ab426|14438
 examples/strings/literal_find.lua|7b6bbdcb62ed6124c1393ab54363b92b|4605606
@@ -98,8 +100,8 @@ examples/tables/column_key.lua|0201e96abe255a8931d80fff77ee9626|3964992
 examples/tables/deep_stack.lua|dc5dc7e1d88b81db121a650647df800a|311098
 examples/tables/fill.lua|79bb664bac707da02ad807c7e4f71f39|1837394
 examples/tables/metamethod_sequence.lua|61159dd099badf6846209df171c4c4b4|137
-examples/tables/mixed.lua|8ccde6a97133456c22a74b063b20503b|2752394
-examples/tables/numeric_index.lua|91aec619d8cfcd8dbc1c564b6ffc2b57|2520001
+examples/tables/mixed.lua|6e1fda379524dfc494ccfb5ea41cb501|2752394
+examples/tables/numeric_index.lua|9ab22bb480ade0beb44f3b314555ac85|2520001
 examples/tables/object_fields.lua|30b3541ea3934620dec10059be53db3b|1797072
 examples/tables/queue.lua|0a3e2b4117a7ba5dfbb360c72feba99f|443874
 examples/tables/rekey.lua|81aeb2c8ccbefc52f292ada961f5c363|474950

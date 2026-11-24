@@ -68,6 +68,41 @@ features = ["bench-harness"]
 hotpath_features = ["hotpath-alloc"]
 params.workload = { from = "data.workloads.hotpath", required = true, help = "ms-scale workload from examples/" }
 
+# Rust-driven scenarios (brokkr.d/host.lua; registrations below). `host` and
+# `snapshot` time the seconds-scale files and carry no `hotpath_features`;
+# the `_kernel` tables bind only the ms-scale files. The snapshot scenarios
+# need the `snapshot` feature, which slows ordinary execution, so they have
+# tables of their own and the other tables never build with it.
+[bench.host]
+script_file = "host.lua"
+target = "dellingr-bench"
+profile = "release"
+features = ["bench-harness"]
+params.scenario = { from = "data.scenarios.bench", required = true, help = "seconds-scale scenario from bench/host/" }
+
+[bench.host_kernel]
+script_file = "host.lua"
+target = "dellingr-bench"
+profile = "release"
+features = ["bench-harness"]
+hotpath_features = ["hotpath"]
+params.scenario = { from = "data.scenarios.hotpath", required = true, help = "ms-scale scenario from bench/host/small/" }
+
+[bench.snapshot]
+script_file = "host.lua"
+target = "dellingr-bench"
+profile = "release"
+features = ["bench-harness", "snapshot"]
+params.scenario = { from = "data.snapshot_scenarios.bench", required = true, help = "seconds-scale snapshot scenario from bench/host/" }
+
+[bench.snapshot_kernel]
+script_file = "host.lua"
+target = "dellingr-bench"
+profile = "release"
+features = ["bench-harness", "snapshot"]
+hotpath_features = ["hotpath"]
+params.scenario = { from = "data.snapshot_scenarios.hotpath", required = true, help = "ms-scale snapshot scenario from bench/host/small/" }
+
 [data.workloads.bench.benchmark]
 file = "bench/benchmark.lua"
 xxhash = "14bf617d8736c9c3fa6f93242cd231f5"
@@ -267,6 +302,67 @@ xxhash = "e9eed60defdf4ce926c63fa12697c922"
 file = "bench/upvalue_bounce.lua"
 xxhash = "c68057f92cf97b94b928135afc1b1f43"
 
+[data.workloads.bench.local]
+file = "bench/local.lua"
+xxhash = "2489b23acb047b4a8b7066f03e5eabf2"
+
+[data.workloads.bench.method_cached]
+file = "bench/method_cached.lua"
+xxhash = "987ab0c930f8561aece836ca96fde15b"
+
+[data.workloads.bench.vararg]
+file = "bench/vararg.lua"
+xxhash = "2ca38194b700a96625a77efd7daec8d3"
+
+[data.workloads.bench.fixedarg]
+file = "bench/fixedarg.lua"
+xxhash = "a94e846c95c3b72956acfb6f02c875a5"
+
+[data.workloads.bench.general]
+file = "bench/general.lua"
+xxhash = "898b0836d0de079fe41e338f711bb723"
+
+[data.workloads.bench.factory_closure]
+file = "bench/factory_closure.lua"
+xxhash = "ac8276e6e1fbd412d40af0648bc05c07"
+
+[data.workloads.bench.polymorphic]
+file = "bench/polymorphic.lua"
+xxhash = "de5b0b483bd8b95d847e52139624e545"
+
+[data.workloads.bench.same_obj_cached]
+file = "bench/same_obj_cached.lua"
+xxhash = "71b65bc995a6b709f91a2e0fdb9c0e3f"
+
+[data.workloads.bench.same_obj_write]
+file = "bench/same_obj_write.lua"
+xxhash = "8af0dd74bb029b454bce92966967880b"
+
+[data.workloads.bench.numeric_index]
+file = "bench/numeric_index.lua"
+xxhash = "f3c4c31cc002eb6afa196e31c36a7ea1"
+
+# `tables/mixed`; the name `mixed` is the strings workload.
+[data.workloads.bench.table_mixed]
+file = "bench/table_mixed.lua"
+xxhash = "ec8723aa2fc55a6f47cc97c126285911"
+
+[data.workloads.bench.short_tables]
+file = "bench/short_tables.lua"
+xxhash = "6a250ed9c87281705bfbd765d4d22e2e"
+
+[data.workloads.bench.ipairs]
+file = "bench/ipairs.lua"
+xxhash = "4e40448227144ba7e5534db07cff7027"
+
+[data.workloads.bench.wide_sweep]
+file = "bench/wide_sweep.lua"
+xxhash = "fb93e1b1addad5f3e36e0a505bbda654"
+
+[data.workloads.bench.gmatch_bytes]
+file = "bench/gmatch_bytes.lua"
+xxhash = "128ab7e16521ded779a23c4d0a0488d7"
+
 [data.workloads.hotpath.benchmark]
 file = "examples/composite/benchmark.lua"
 xxhash = "fd1b898cc308645a3135b078c4fd180a"
@@ -462,3 +558,130 @@ xxhash = "0201e96abe255a8931d80fff77ee9626"
 [data.workloads.hotpath.upvalue_bounce]
 file = "examples/numerics/upvalue_bounce.lua"
 xxhash = "54b58a70753a3b334d8f22db1c8e6e51"
+
+[data.workloads.hotpath.local]
+file = "examples/calls/local.lua"
+xxhash = "a7501780f964f3c13245cf3733b1e396"
+
+[data.workloads.hotpath.method_cached]
+file = "examples/calls/method_cached.lua"
+xxhash = "f5a9c71d0c190f56d748d789bdff789c"
+
+[data.workloads.hotpath.vararg]
+file = "examples/calls/vararg.lua"
+xxhash = "9698e9b1d879799d1eebea02be3ce6b4"
+
+[data.workloads.hotpath.fixedarg]
+file = "examples/calls/fixedarg.lua"
+xxhash = "3f10a6a9186212512d5919045adb81d6"
+
+[data.workloads.hotpath.general]
+file = "examples/calls/general.lua"
+xxhash = "e0da6c83a6ff16f8995ebcf96a347cc5"
+
+[data.workloads.hotpath.factory_closure]
+file = "examples/calls/factory_closure.lua"
+xxhash = "ba0ce1aca4a8cd0297f00ba2c6b6b4bf"
+
+[data.workloads.hotpath.polymorphic]
+file = "examples/fields/polymorphic.lua"
+xxhash = "731579ff0b30871e770e7af068adb337"
+
+[data.workloads.hotpath.same_obj_cached]
+file = "examples/fields/same_obj_cached.lua"
+xxhash = "baf0d2ee0c1856f7bf5a6581e8c2f5a0"
+
+[data.workloads.hotpath.same_obj_write]
+file = "examples/fields/same_obj_write.lua"
+xxhash = "e98e62564f848fd66aea021c2a1b3973"
+
+[data.workloads.hotpath.numeric_index]
+file = "examples/tables/numeric_index.lua"
+xxhash = "9ab22bb480ade0beb44f3b314555ac85"
+
+[data.workloads.hotpath.table_mixed]
+file = "examples/tables/mixed.lua"
+xxhash = "6e1fda379524dfc494ccfb5ea41cb501"
+
+[data.workloads.hotpath.short_tables]
+file = "examples/alloc/short_tables.lua"
+xxhash = "e9c83a5f4ee78010eb0182c070505bb5"
+
+[data.workloads.hotpath.ipairs]
+file = "examples/iter/ipairs.lua"
+xxhash = "1f76763948be94b1f947304ac85c82ff"
+
+[data.workloads.hotpath.wide_sweep]
+file = "examples/fields/wide_sweep.lua"
+xxhash = "33158346259decd0031d2f4dcbd966d8"
+
+[data.workloads.hotpath.gmatch_bytes]
+file = "examples/strings/gmatch_bytes.lua"
+xxhash = "68804fca7d4bb95dcc7ae7f38ca04abe"
+
+# Rust-driven scenarios (brokkr.d/host.lua): one pinned file per kind and
+# scale under bench/host/ (seconds scale) and bench/host/small/ (ms scale,
+# the only one the profilable tables bind). The file's
+# `-- Harness scenario: <kind>` line picks the harness driver, its `count`
+# global the scale; both are in the pin. A kind's name is part of the
+# measurement's identity: a change to what a driver does is a new kind (and
+# file) name, never an edit under the old one, since an older binary that
+# knows the old name would run the old work. A binary older than the
+# scenario harness fails these files instead of mis-measuring them, so
+# `--commit` baselines start at the commit that added it.
+
+[data.scenarios.bench.state_new]
+file = "bench/host/state_new.lua"
+xxhash = "3f1f99a69c4ddb081030f47f5d418274"
+
+[data.scenarios.bench.compile]
+file = "bench/host/compile.lua"
+xxhash = "6ff4e38e94351cbb294b6953afdaec26"
+
+[data.scenarios.bench.many_chunks]
+file = "bench/host/many_chunks.lua"
+xxhash = "8c0355ce2f92a618e0b895cd722bbc29"
+
+[data.scenarios.bench.invoke_typed]
+file = "bench/host/invoke_typed.lua"
+xxhash = "76687c55837def03250e1b4a8ac713c6"
+
+[data.scenarios.bench.invoke_stack]
+file = "bench/host/invoke_stack.lua"
+xxhash = "c1d6dc98f7de666177fd32a617bb5cdf"
+
+[data.scenarios.hotpath.state_new]
+file = "bench/host/small/state_new.lua"
+xxhash = "53ba1d8eb8f79a0f7791825ccee0ef89"
+
+[data.scenarios.hotpath.compile]
+file = "bench/host/small/compile.lua"
+xxhash = "1747dd93b484bb378485c39afb34b4db"
+
+[data.scenarios.hotpath.many_chunks]
+file = "bench/host/small/many_chunks.lua"
+xxhash = "ba19da37a360dccbe62eb6a4cd2bc6d2"
+
+[data.scenarios.hotpath.invoke_typed]
+file = "bench/host/small/invoke_typed.lua"
+xxhash = "d50d4c7e47d06f8ec7f2804f4520d05e"
+
+[data.scenarios.hotpath.invoke_stack]
+file = "bench/host/small/invoke_stack.lua"
+xxhash = "63b416060ddad6eea2af75aeae5d2c99"
+
+[data.snapshot_scenarios.bench.snapshot_save]
+file = "bench/host/snapshot_save.lua"
+xxhash = "92f50a68117e8808c4c5e3bfe7949364"
+
+[data.snapshot_scenarios.bench.snapshot_load]
+file = "bench/host/snapshot_load.lua"
+xxhash = "07ed017e0f13af9e9b9caff74abedadc"
+
+[data.snapshot_scenarios.hotpath.snapshot_save]
+file = "bench/host/small/snapshot_save.lua"
+xxhash = "93b62c97e36839ee27c8bc98400a8c23"
+
+[data.snapshot_scenarios.hotpath.snapshot_load]
+file = "bench/host/small/snapshot_load.lua"
+xxhash = "64d8b6d223a34aa6ae781723bd72fe1d"

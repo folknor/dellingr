@@ -1,4 +1,4 @@
--- Function-call kernel.
+-- Probe: function-call kernel.
 -- Exercises Lua closure calls, stack frame setup/teardown, and return balancing
 -- with minimal allocation and table traffic.
 
