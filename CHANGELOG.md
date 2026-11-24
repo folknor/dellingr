@@ -311,6 +311,11 @@ tick budgets and re-record replays.
   ordinary dispatch at the method lookup. Results, costs, the charged prefix
   at a budget refusal, error locations, interrupt safepoints and collection
   timing are unchanged.
+- A typed loop now also takes an expression whose operands are two captured
+  numbers loaded one after the other, such as `floor + (floor - y)`, where
+  it used to fall back to ordinary dispatch. On bygg `bench/upvalue_bounce`
+  went from 5.1 s to 2.6 s. Results, costs and collection timing are
+  unchanged.
 
 ## [0.7.1] - 2026-11-06
 

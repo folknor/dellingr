@@ -995,6 +995,17 @@ impl Layout {
     /// fault injection, whose call-depth and stack-space sites count every
     /// admission.
     fn load(&mut self, register: u16, callee: Callee, pc: usize) -> Option<LoopOp> {
+        // An upvalue load still open when another load starts is no callee
+        // of a supported call: the call of that register would come after
+        // the second load's own call, or with the second load as its
+        // argument register, and `call_site` refuses both. So it is a number
+        // read once at entry, as `Layout::read` would make it at its first
+        // read; were it a callee after all, the `CALL` of its register finds
+        // no open load and refuses the region. This takes the operands of
+        // `up + (up - x)`, which codegen loads back to back.
+        if let Some((loaded, Callee::Upvalue(index))) = self.loading {
+            self.hoist_upvalue(loaded, index)?;
+        }
         if cfg!(feature = "fault-injection")
             || self.loading.is_some()
             || self.calls.len() >= MAX_CALLS
@@ -4017,21 +4028,48 @@ mod tests {
     fn regions_take_nested_loops_and_method_calls_on_records() {
         // A nested loop runs inside its enclosing region, and is a region of
         // its own too; a number upvalue read inside a body is read at entry.
-        for source in [
-            "local function f() local s = 0 for i = 1, 9 do for j = 1, i do s = s + j end end end",
-            "local n = 5 local function f() local s = 0 for i = 1, 9 do for j = i, n do if j > 2 then s = s + j end end s = s - i end end",
+        // Under fault injection every load refuses, so the outer loop, which
+        // loads `n`, is no region there.
+        let taken = usize::from(!cfg!(feature = "fault-injection"));
+        for (source, expected) in [
+            (
+                "local function f() local s = 0 for i = 1, 9 do for j = 1, i do s = s + j end end end",
+                2,
+            ),
+            (
+                "local n = 5 local function f() local s = 0 for i = 1, 9 do for j = i, n do if j > 2 then s = s + j end end s = s - i end end",
+                1 + taken,
+            ),
         ] {
-            assert_eq!(regions(source), 2, "{source}");
+            assert_eq!(regions(source), expected, "{source}");
         }
         // A method call on a record read per pass, beside a branch and
         // record stores; a branch beside a call.
-        let taken = usize::from(!cfg!(feature = "fault-injection"));
         for source in [
             "local function f(us) local s = 0 for i = 1, 9 do s = s + us[i]:m() end return s end",
             "local function f(us) for i = 1, 9 do local u = us[i] u:m(i % 5) u.x = u.x + u.speed end end",
             "local function f() local s = 0 for i = 1, 9 do if s > 1 then s = g(s) end end end",
         ] {
             assert_eq!(regions(source), taken, "{source}");
+        }
+        // Number upvalues loaded back to back, as both operands of one
+        // expression and beside a call; a captured callee whose call comes
+        // after another load's still refuses.
+        for (source, expected) in [
+            (
+                "local a, b = 1, 2 local function f() local s = 0 for i = 1, 9 do s = a + (b - s) end return s end",
+                taken,
+            ),
+            (
+                "local a, b = 1, 2 local function f() local s = 0 for i = 1, 9 do s = a - (b - g(s)) end return s end",
+                taken,
+            ),
+            (
+                "local g, h = 1, 2 local function f() local s = 0 for i = 1, 9 do s = g(h(s)) end return s end",
+                0,
+            ),
+        ] {
+            assert_eq!(regions(source), expected, "{source}");
         }
         // A record copied as a number, and a record carried into the
         // next pass through a nested loop's head.

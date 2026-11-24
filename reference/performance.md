@@ -862,6 +862,18 @@ self.x + self.vx * dt`, are why a fused `GET_FIELD`, arithmetic,
 `SET_FIELD` opcode was not built: it would cover only adjacent updates and
 keep the activation. `frame.rs` is untouched.
 
+## Upvalue loads back to back in typed regions, 2026-11-24
+
+A `GET_UPVAL` load still open (not yet read, so not yet known to be a number
+or a callee) when another load starts is now hoisted as a number read at
+entry, where it used to refuse the region. Codegen loads both operands of
+`up + (up - x)` back to back, so `upvalue_bounce`'s loop was declined at
+`y = floor + (floor - y)`; a captured callee whose call comes after the
+second load's still refuses at its `CALL`. Measured on bygg with `brokkr
+bench wall --workload upvalue_bounce`, best of three: A `1b783c4`
+(`--commit`) 5.1 s (dd67fe71), B the same tree plus the change (dirty) 2.6
+s (2c1cbcdd). No corpus cost row moved. `frame.rs` is untouched.
+
 ## Key-position hints for dynamic string keys, 2026-11-24
 
 A `GET_TABLE` site with a string key keeps the position its key last sat

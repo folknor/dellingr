@@ -193,18 +193,23 @@ regions.
 
 What: an upvalue read goes `frame.upvalues` (a `Captures`: inline for one capture, else an `Arc` slice) to a
 pool slot, then branches on open (read the stack slot) or closed (read the
-stored value). same_obj_read no longer runs them: its loop is a typed region
-that reads each upvalue field once on entry. Loops a typed region declines
-(stores other than number fields of a record, non-number branches, calls
-other than leaves or invariant-receiver methods) still read upvalues per
-instruction.
+stored value). Typed regions read number upvalues, upvalue fields and
+upvalue callees once at entry, so `same_obj_read` and `upvalue_bounce` (since
+back-to-back number loads are hoisted, 5.1 s to 2.6 s on bygg at 1b783c4)
+no longer run them. Loops a typed region declines still read upvalues per
+instruction: a `SET_UPVAL` in the body (`queue`'s `tail = tail + 1`), stores
+other than number fields of a record, non-number branches, calls other than
+leaves or invariant-receiver methods, and a captured leaf called on a
+captured argument, `f(a)`: the argument's load hoists the callee as a
+number, so `CALL f` refuses. Taking that last shape needs the pending loads
+kept per register (each resolved at first use as a number or a callee).
 
-Sketch: measure first on `upvalue_bounce`, an integer loop reading four
-closed scalar captures every step (a captured number used as a number
-keeps the region out); candidates are caching the upvalue slice pointer per activation (as the code
-slice now is) and a closed-upvalue fast path. Hoisting the read into a
-register at compile time is refused (codegen.rs header: it drops scratch
-register overwrites that free dead values).
+Sketch: no registered workload isolates canonical `GET_UPVAL` dispatch any
+more; register one (a declined loop reading closed captures) before
+measuring. Candidates are caching the upvalue slice pointer per activation
+(as the code slice now is) and a closed-upvalue fast path. Hoisting the read
+into a register at compile time is refused (codegen.rs header: it drops
+scratch register overwrites that free dead values).
 
 ### 16-byte `Val` copies that miss store forwarding
 

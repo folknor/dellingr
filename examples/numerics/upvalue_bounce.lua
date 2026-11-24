@@ -1,7 +1,7 @@
 -- Workload: an integer bounce simulation reading its tuning constants as
 -- upvalues. Every step reads several captured numbers (gravity, drag, the
--- floor and the ceiling), and a typed loop region does not take a loop that
--- uses a captured number as a number, so each read dispatches a GET_UPVAL.
+-- floor and the ceiling), some as both operands of one expression, which
+-- loads them back to back. A typed loop region reads each once at entry.
 -- The captures are declared in a block that ends before the footer, so they
 -- are closed whenever `_bench` runs, as tuning constants in a loaded module
 -- are.

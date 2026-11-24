@@ -557,7 +557,7 @@ xxhash = "0201e96abe255a8931d80fff77ee9626"
 
 [data.workloads.hotpath.upvalue_bounce]
 file = "examples/numerics/upvalue_bounce.lua"
-xxhash = "54b58a70753a3b334d8f22db1c8e6e51"
+xxhash = "c4180a1ce8302d2da27bb62d3a56f09a"
 
 [data.workloads.hotpath.local]
 file = "examples/calls/local.lua"
