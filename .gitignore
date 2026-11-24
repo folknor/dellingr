@@ -16,6 +16,8 @@ target
 __pycache__/
 
 .scratch/
+# Orchestration loop reports and ledgers; unlike .scratch/, the gate leaves it alone.
+.spar/
 .brokkr/*
 !.brokkr/results.db
 overnight.sh

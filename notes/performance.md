@@ -124,8 +124,11 @@ instruction. Field updates outside a leaf (in a function that branches or
 calls, or in a loop body such as object_fields' `u.x = u.x + u.speed`)
 still dispatch; inside a loop region a store would need slot identity
 hoisted and every value it can reach reloaded, not the region's read-once
-fields. Each needs a workload whose loop or call the landed forms do not
-already take.
+fields. The store loop has its own workload, `store_loop` (object_fields'
+update pass alone, map-storage receivers read from an array), and the
+non-leaf update has `method_step` (a guarded `Body:step`); the other forms
+still need a workload whose loop or call the landed forms do not already
+take.
 One stable shape for a two-op fusion: after a handler, test the actual next
 opcode and enter its body directly inside the dispatch loop. That is the
 predecessor-specific dispatch threaded dispatch was after, without its
@@ -182,17 +185,18 @@ have landed or were measured flat and refused (reasons at `Generator::suffix`,
 `cond_jump` in `codegen.rs` and the compare-branch arm in `frame.rs`).
 
 **Bottleneck:** a dynamic string key (`t[name]`) reads through uncached
-`GET_TABLE`. The only registered dynamic-key reads give a last-key cache
-nothing to hit: `rekey` reads one receiver at one site with the key cycling
-over 64 names, and `fill` reads once per freshly built table. `fill`'s
-3000-key site and `object_fields`' tag site are stores. If a workload shows
-hot reads repeating one key across receivers of one layout, the shape is a
+`GET_TABLE`. `column_key` is the workload: one `us[i][key]` site sums a
+column over 64 six-field (map storage) records of one constructor, so each
+key repeats across 64 receivers before it changes. (`rekey` reads one
+receiver with the key cycling over 64 names and `fill` reads once per fresh
+table, so neither gives a last-key cache anything to hit.) The shape is a
 cached `KeyedIndex` checked with `value_if_key` against the live table and
 key, not a field plan (the field cache trusts one key per slot with no key
 compare); a missing or cleared slot still takes the ordinary lookup so
 `__index` can answer.
 
-**Classification:** local change, smaller ceiling; workload-gated.
+**Classification:** local change, smaller ceiling; its workload is
+registered.
 
 ## Accounts added to existing entries
 

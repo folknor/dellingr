@@ -251,6 +251,22 @@ xxhash = "488c7cc9b818ba7a69cdede59b518cfd"
 file = "bench/host_records.lua"
 xxhash = "7a1d35f5ba905be00f80aaca3e1bad90"
 
+[data.workloads.bench.method_step]
+file = "bench/method_step.lua"
+xxhash = "381dd103bd1e217a665c95795df88e23"
+
+[data.workloads.bench.store_loop]
+file = "bench/store_loop.lua"
+xxhash = "5b5ddf60401b616fbf11fa4cdb011366"
+
+[data.workloads.bench.column_key]
+file = "bench/column_key.lua"
+xxhash = "e9eed60defdf4ce926c63fa12697c922"
+
+[data.workloads.bench.upvalue_bounce]
+file = "bench/upvalue_bounce.lua"
+xxhash = "c68057f92cf97b94b928135afc1b1f43"
+
 [data.workloads.hotpath.benchmark]
 file = "examples/composite/benchmark.lua"
 xxhash = "fd1b898cc308645a3135b078c4fd180a"
@@ -430,3 +446,19 @@ xxhash = "0443637fb717226cb1239958b85ee341"
 [data.workloads.hotpath.host_records]
 file = "examples/calls/host_records.lua"
 xxhash = "6d707a7823d6642d3cc7b270ceec4322"
+
+[data.workloads.hotpath.method_step]
+file = "examples/calls/method_step.lua"
+xxhash = "60bec06777e6b9dd9b5a8b49926775d7"
+
+[data.workloads.hotpath.store_loop]
+file = "examples/tables/store_loop.lua"
+xxhash = "2534e8e5d077df22afa96eadba19de50"
+
+[data.workloads.hotpath.column_key]
+file = "examples/tables/column_key.lua"
+xxhash = "0201e96abe255a8931d80fff77ee9626"
+
+[data.workloads.hotpath.upvalue_bounce]
+file = "examples/numerics/upvalue_bounce.lua"
+xxhash = "54b58a70753a3b334d8f22db1c8e6e51"

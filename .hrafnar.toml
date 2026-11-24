@@ -1,0 +1,11 @@
+# Consumed by hrafnar and the repository review tool; Cargo excludes this file from packages.
+[_audit]
+id = "40c9"
+
+# Fallback spar partner for when codex's safeguards refuse VM, JIT or IR work.
+# Claude entries carry no sandbox: the brief keeps it read-only.
+[profiles.spar-fable]
+comment = "Spar partner on Fable 5.2, for when codex's safeguards refuse the work. Read-only by brief."
+
+[profiles.spar-fable.claude]
+model = "claude-fable-5-2"

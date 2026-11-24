@@ -181,8 +181,9 @@ that reads each upvalue field once on entry. Loops a typed region declines
 (stores, non-number branches, calls other than leaves or invariant-receiver
 methods) still read upvalues per instruction.
 
-Sketch: measure first, on a workload whose loop the region does not take;
-candidates are caching the upvalue slice pointer per activation (as the code
+Sketch: measure first on `upvalue_bounce`, an integer loop reading four
+closed scalar captures every step (a captured number used as a number
+keeps the region out); candidates are caching the upvalue slice pointer per activation (as the code
 slice now is) and a closed-upvalue fast path. Hoisting the read into a
 register at compile time is refused (codegen.rs header: it drops scratch
 register overwrites that free dead values).
@@ -659,8 +660,8 @@ dispatches. It owes the canonical register state and cursor when the add
 succeeds and the store's `TableWrite` charge is refused, and must prove the
 receiver register still holds the same table at the store.
 
-Signal that would promote it: a workload whose hot non-leaf function does
-such updates, with the dispatches showing in profiling.
+Signal that would promote it: the dispatches showing in a profile of
+`method_step` (a `Body:step` whose updates sit behind `if self.alive`).
 
 ### Compile-time table-shape prediction
 

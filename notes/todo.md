@@ -213,8 +213,8 @@ What: `bench/` ports only the curated workloads registered in
 `brokkr.d/bench.toml`.
 The optimization backlogs name
 more trackers that exist in `examples/` but have no seconds-scale
-verdict port yet: the `calls/` family (`local`, `global`, `method`,
-`method_cached`, `method_chain`, `vararg`, `fixedarg`, `general`,
+verdict port yet: the rest of the `calls/` family (`local`,
+`method_cached`, `vararg`, `fixedarg`, `general`,
 `factory_closure` - the measurement surface for the frame-flattening
 and closure-clone rewrites), `fields/polymorphic` / `same_obj_cached` /
 `same_obj_write`, `tables/numeric_index` / `mixed`, `alloc/short_tables`,
