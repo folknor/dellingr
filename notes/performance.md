@@ -191,21 +191,19 @@ measurement attributing branch misses to the dispatch branch before work
 begins. The stable-Rust route that tests the actual next opcode and enters
 its handler directly lives under PERF-002.
 
-## PERF-006 - The `GET_TABLE` hint taxes sites whose key moves
+## PERF-044 - No registered workload exercises the `GET_TABLE` hint's hit path
 
-Matched interleaved pair (bygg, 2026-11-24, `brokkr bench --rounds 5`,
-0cc99ec against fe88e6a, invocation 3dfac6e8): `rekey` 1007 to 1050 ms,
-slower in 5 of 5 rounds. Its hot `registry[key]` read names a different
-string each time through one site, so the hint's position check fails
-every read before the keyed lookup and the refill. `fill` measured no tax
-(1547 to 1529 ms, 3 faster and 2 slower): its hot loops index by number.
+The key-position hint (`Table::string_get_hinted`) was measured at about 10
+percent of `column_key`'s wall, but that sweep has since become a typed
+region that never reads the hint, so no registered workload is
+hint-hit dominated. The fused miss path (bygg, invocation f6369874) was
+measured on `rekey`, `fill` and `numeric_index` only; its hit side is
+unmeasured. A sweep over same-constructor records that a region declines
+(for example a call in the body the region cannot admit) would be the
+workload.
 
-**Shape to try:** a hint that stops being consulted at a site that keeps
-missing (a miss count in the slot, or a refill only after a hit), measured
-against `column_key`, which the hint serves. Layout is not excluded; the
-pair is consistent but not attributed.
-
-**Classification:** local change in `vm/registers.rs` and `vm/caches.rs`.
+**Classification:** register a workload at both scales, then a matched
+`--commit` pair across the hint's next change.
 
 ## PERF-008 - Typed-region entry work repeated on every entry
 

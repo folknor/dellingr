@@ -904,6 +904,19 @@ ms, and the same string-first branch with no hint gave 5386 ms, so the gain
 is the skipped probe read as a value alone. Forcing `Table::get` and
 `HashSlots::find` inline into the handler was flat (5475 ms).
 
+The miss tax then went with a fused lookup: `Table::string_get_hinted`
+dispatches on the storage form once for the hint check and the probe,
+skips the array-key and valid-key tests a string never needs, takes the
+value from the probe's own slot, and the handler fetches the slot only for
+a string key. Matched interleaved pair on bygg, `brokkr bench --rounds 5`,
+`--commit 9cb5060` against the change committed (invocation f6369874):
+`rekey` 1024 to 977 ms (5 of 5 faster), `fill` 1510 to 1487 ms (5 of 5
+faster), `numeric_index` 4551 to 4570 ms (2 faster, 3 slower, median paired
+difference under 0.1 ms). The `index_key` native level went from 10768 to
+10704 bytes in dev and from 720 to 736 in release. No registered workload
+at this point reads through the hint on its hit path (`column_key`'s sweep
+runs in a typed region), so the hit side was not re-measured.
+
 ## Records read by a register key in typed regions, 2026-11-24
 
 A `GET_TABLE d r k` whose receiver `r` is a record of the pass and whose

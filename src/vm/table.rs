@@ -11,6 +11,7 @@ use hash_slots::HashSlots;
 use super::Error;
 use super::TypeError;
 use super::Val;
+use super::caches::TableKeySlot;
 use super::object::{GcHeap, Markable, ObjectPtr, ResidentBytes, StringPtr};
 #[cfg(feature = "snapshot")]
 use crate::error::{InternalFault, SnapshotTableFault};
@@ -1407,23 +1408,54 @@ impl Table {
         Some((KeyedIndex(index), value))
     }
 
-    /// The live value at `at` if the key there is the string `key`: the
-    /// value-only form of [`Self::value_if_key`] for keys that never take an
-    /// array-tagged position. The value alone comes back in registers (see
-    /// [`Self::get_index_value`]). A mismatch, a tombstone or a position past
-    /// the slots is `None`, and the caller looks the key up.
-    #[inline(always)]
-    pub(super) fn string_value_if_key(&self, at: KeyedIndex, key: Val) -> Option<Val> {
-        let (slot_key, value) = match &self.storage {
+    /// The raw value of the string `key`, trying the position `hint` holds
+    /// first and refilling it from the lookup when that misses: one match on
+    /// the storage form for both, and no array-key or valid-key test, which
+    /// a string never needs. Nil is a raw miss (absent or a tombstone). A
+    /// hint is refilled only from a live slot, so it only ever names an
+    /// untagged hash position.
+    #[inline]
+    pub(super) fn string_get_hinted(&self, hint: &TableKeySlot, key: Val) -> Val {
+        debug_assert!(matches!(key, Val::Str(_)));
+        let guess = hint.get();
+        match &self.storage {
             TableStorage::Inline { entries, len } => {
-                if at.0 >= *len as usize {
-                    return None;
+                let live = &entries[..usize::from(*len)];
+                if let Some((slot_key, value)) = guess.and_then(|at| live.get(at.0))
+                    && *slot_key == key
+                    && !matches!(value, Val::Nil)
+                {
+                    return *value;
                 }
-                entries[at.0]
+                // bounded: an inline part holds a fixed handful of entries.
+                for (at, (entry_key, entry_value)) in live.iter().enumerate() {
+                    if *entry_key == key {
+                        if !matches!(entry_value, Val::Nil) {
+                            hint.set(KeyedIndex(at));
+                        }
+                        return *entry_value;
+                    }
+                }
+                Val::Nil
             }
-            TableStorage::Map(map, _) => *map.get(at.0)?,
-        };
-        (slot_key == key && !matches!(value, Val::Nil)).then_some(value)
+            TableStorage::Map(map, _) => {
+                if let Some((slot_key, value)) = guess.and_then(|at| map.get(at.0))
+                    && *slot_key == key
+                    && !matches!(value, Val::Nil)
+                {
+                    return *value;
+                }
+                match map.find_slot(key) {
+                    Some((at, value)) => {
+                        if !matches!(value, Val::Nil) {
+                            hint.set(KeyedIndex(at));
+                        }
+                        value
+                    }
+                    None => Val::Nil,
+                }
+            }
+        }
     }
 
     /// The live value at `at` if the key there is `key`, whatever the version.

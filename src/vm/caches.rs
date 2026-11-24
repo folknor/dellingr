@@ -140,7 +140,7 @@ impl TforCursorSlot {
 /// A `GET_TABLE` site's guess at where its string key sits in the receiver:
 /// the position its last raw lookup found the key at, in whatever table that
 /// was. Only a guess, re-checked against the live table and key on every use
-/// (`Table::string_value_if_key`), so it needs no key, no table handle and no
+/// (`Table::string_get_hinted`), so it needs no key, no table handle and no
 /// version: a sweep over records of one constructor finds the key at the same
 /// position in each, and anything else misses into the ordinary lookup.
 #[derive(Debug, Default)]

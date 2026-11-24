@@ -168,15 +168,18 @@ impl State {
     ///
     /// A string key first tries the site's key-position hint: the position
     /// the key last sat at, checked against the live table and key, so a
-    /// sweep over records of one constructor skips the hash probe. A hint
-    /// miss is one keyed lookup that both answers and refills the hint; its
-    /// raw nil goes straight to the metatable decision. Other keys take the
-    /// plain raw lookup. Measured on `column_key` (one site, 64 records of a
-    /// constructor) at about 10 percent of wall, but only with the
-    /// value-only read (`Table::string_value_if_key`): the key/value pair
-    /// form gave 2 percent. A site whose key moves every read (`rekey`) pays
-    /// the failed check: about 4 percent of its wall in a matched pair.
-    /// `fill`, whose hot loops index by number, measured no change.
+    /// sweep over records of one constructor skips the hash probe. Check and
+    /// lookup are one table call (`Table::string_get_hinted`): a hint miss
+    /// is one string probe that both answers and refills the hint, with no
+    /// second dispatch on the storage form and none of the generic key
+    /// tests; its raw nil goes straight to the metatable decision. Other
+    /// keys take the plain raw lookup and never fetch the slot. Measured on
+    /// `column_key` before its hot loop became a typed region (one site, 64
+    /// records of a constructor) at about 10 percent of wall, but only with
+    /// a value-only read: the key/value pair form gave 2 percent. A site
+    /// whose key moves every read (`rekey`) pays the failed check; with the
+    /// check and probe as separate calls that was about 4 percent of its
+    /// wall in a matched pair.
     ///
     /// It takes the instruction rather than its decoded operands, which
     /// keeps the hint lookup's locals out of `Frame::run` in the dev profile.
@@ -191,31 +194,18 @@ impl State {
     ) -> Result<()> {
         let tbl_val = self.stack[base + inst.b() as usize];
         let key_val = self.stack[base + inst.c() as usize];
-        let hint: Option<&TableKeySlot> = frame.runtime.caches.table_key(inst.cache_slot());
         let start = match tbl_val
             .as_object_ptr()
             .and_then(|ptr| self.heap.as_table_ref(ptr))
         {
             Some(tbl) => {
+                let hint: Option<&TableKeySlot> = match key_val {
+                    Val::Str(_) => frame.runtime.caches.table_key(inst.cache_slot()),
+                    _ => None,
+                };
                 let val = match hint {
-                    Some(hint) if matches!(key_val, Val::Str(_)) => {
-                        if let Some(val) = hint
-                            .get()
-                            .and_then(|at| tbl.string_value_if_key(at, key_val))
-                        {
-                            self.stack[dst] = val;
-                            return Ok(());
-                        }
-                        match tbl.find_keyed(&key_val) {
-                            Some((at, val)) => {
-                                hint.set(at);
-                                self.stack[dst] = val;
-                                return Ok(());
-                            }
-                            None => Val::Nil,
-                        }
-                    }
-                    _ => tbl.get(&key_val),
+                    Some(hint) => tbl.string_get_hinted(hint, key_val),
+                    None => tbl.get(&key_val),
                 };
                 match tbl.get_metatable() {
                     Some(metatable) if matches!(val, Val::Nil) => {

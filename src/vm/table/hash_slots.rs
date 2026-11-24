@@ -101,6 +101,15 @@ impl HashSlots {
             .copied()
     }
 
+    /// The position and value of real key `key`, live or dead: `find`
+    /// without a second `Option` step through `get`.
+    #[inline(always)]
+    pub(super) fn find_slot(&self, key: Val) -> Option<(usize, Val)> {
+        let entries = &self.entries;
+        let at = *self.index.find(hash_key(key), |&at| entries[at].0 == key)?;
+        Some((at, entries[at].1))
+    }
+
     /// The slot at `position`.
     #[inline]
     pub(super) fn get(&self, position: usize) -> Option<&(Val, Val)> {
