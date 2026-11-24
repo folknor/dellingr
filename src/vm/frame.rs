@@ -137,6 +137,32 @@ impl Frame {
         Ok(())
     }
 
+    /// `tfor_loop` run from the `TFOR_CALL` arm. When the step continues
+    /// the loop from key 1, the first step of `ipairs(t)`, the rest may run
+    /// as a typed `ipairs` region (`State::enter_ipairs_region`); a key of
+    /// nil means the edge was not taken. Inline only without debug
+    /// assertions, as `State::tfor_fast_step` is: in a dev build its locals
+    /// stay out of the dispatch frame, which is live across every native
+    /// re-entry.
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    fn tfor_fused_loop(
+        state: &mut State,
+        frame: &Frame,
+        ip: &mut usize,
+        base: usize,
+        step: Instr,
+        local_cost: &mut u64,
+    ) -> Result<()> {
+        Self::tfor_loop(state, ip, base, step)?;
+        let rl = base + step.a() as usize;
+        if let Val::Num(key) = state.stack[rl + 3]
+            && key.to_bits() == 1.0f64.to_bits()
+        {
+            state.enter_ipairs_region(frame, ip, local_cost)?;
+        }
+        Ok(())
+    }
+
     #[must_use]
     pub(super) fn nested_bytecode(&self, i: u16) -> &Arc<Bytecode> {
         &self.bytecode.nested[i as usize]
@@ -822,7 +848,7 @@ impl Frame {
                         && step.opcode() == Instr::OP_TFOR_LOOP
                     {
                         *ip += 1;
-                        Self::tfor_loop(state, ip, base, step)?;
+                        Self::tfor_fused_loop(state, frame, ip, base, step, local_cost)?;
                     }
                 }
                 Instr::OP_TFOR_LOOP => Self::tfor_loop(state, ip, base, inst)?,

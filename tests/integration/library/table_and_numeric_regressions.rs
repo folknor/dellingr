@@ -56,6 +56,58 @@ fn ipairs_uses_index_metamethod_for_holes() {
     assert_eq!(sum, 30.0);
 }
 
+// Loops the typed ipairs region takes, each meeting a step it hands back
+// to canonical dispatch partway: a non-number value the body reads, a hole
+// read through `__index`, a value it never reads, and an inner loop.
+#[test]
+fn ipairs_regions_hand_back_steps_they_cannot_make() {
+    let sum = eval_number(
+        r#"
+        local function sum(t)
+            local s = 0
+            for _, v in ipairs(t) do
+                s = s + v
+            end
+            return s
+        end
+        local function count(t)
+            local n = 0
+            for i, v in ipairs(t) do
+                n = n + i
+            end
+            return n
+        end
+        local function grid(t)
+            local s = 0
+            for i, v in ipairs(t) do
+                for j = 1, 3 do
+                    s = s + v * j
+                end
+            end
+            return s
+        end
+        local function same(t)
+            local n = 0
+            for _, v in ipairs(t) do
+                if v == v then n = n + 1 end
+            end
+            return n
+        end
+        local plain = {}
+        for i = 1, 100 do plain[i] = i end
+        local mixed = {1, 2, 3, "4", 5, 6}
+        local holed = setmetatable({1, 2, 3}, {
+            __index = function(_, key) if key == 4 then return 40 end end,
+        })
+        local things = {1, {}, "x", false, 5}
+        local total = sum(plain) + same(mixed) + sum(holed) + count(things) + grid(plain)
+        return total
+    "#,
+    );
+    // 5050 + 6 + 46 + 15 + 5050 * 6
+    assert_eq!(sum, 5050.0 + 6.0 + 46.0 + 15.0 + 30300.0);
+}
+
 #[test]
 fn math_log_base_ten_uses_the_exact_base_ten_path() {
     assert_eq!(eval_number("return math.log(1000, 10)"), 3.0);

@@ -226,6 +226,13 @@ tick budgets and re-record replays.
 
 ### Performance
 
+- A generic `for` over `ipairs` whose body is number arithmetic (the value
+  read as a number, or not read) runs as a typed loop region, as numeric
+  `for` loops already did: summing a 10,000-element array went from about
+  19 to about 6 ns an element. Iteration order, results, charges, poll
+  points and collection points are unchanged; a value that is not a number,
+  a hole under `__index` or an invalid control hands the rest of the loop
+  back to the ordinary step.
 - Added `memchr` as a direct dependency for byte searches in string
   formatting, plain pattern searches, replacement strings, and numeral
   diagnostics. String results and charges are unchanged.

@@ -973,15 +973,19 @@ finishes. It moves work into the closure tracer and leaves the literal-root
 visit and the map `retain`, so it pays only on states whose retained
 runtimes mostly have nested prototypes; no workload has that shape.
 
-### `ipairs` traversal about 3x the numeric `for` over the same array
+### `ipairs` regions decline record values and three or more variables
 
-Lateral from calibrating the new verdict ports (bygg, 2026-11-24, dirty
-tree at 8b98de6): `iter/ipairs` sums a 10,000-element dense array in about
-19 ns an element, `tables/numeric_index` the same array with a numeric
-`for` and `arr[i]` in about 6 ns. The numeric `for` is likely taken by a
-typed numeric region and `ipairs` is not; unconfirmed. Signal that would
-promote it: a profile of `ipairs` showing per-step overhead outside the
-loop body, on a workload where `ipairs` over arrays is hot.
+Typed `ipairs` regions (`NumericLoop::recognize_ipairs`) take bodies whose
+value is a number or unread. The main game shape, `for _, u in
+ipairs(units) do u.x = u.x + u.vx end`, still runs canonically: the step
+would define the record, so it would cross the back edge, against the
+record rule (a record is defined earlier in the same pass). A candidate
+from the spar: a body-entry operation that re-establishes a fresh record
+from the yielded stack slot every pass, so no record fact rides the back
+edge. Loops with three or more variables are declined (the extra ones are
+nil every step). Not measured on a workload with records; `table_mixed`
+and `vararg` hold ipairs loops over numbers and were not re-measured
+after the region landed.
 
 ---
 

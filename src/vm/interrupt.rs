@@ -39,7 +39,9 @@
 //!   without entering a callback and skip this poll; the loop's back edge
 //!   polls instead when the iteration continues. A step that ends the loop
 //!   falls through without a poll, so a pending interrupt is observed at the
-//!   next safepoint after the loop;
+//!   next safepoint after the loop. A typed `ipairs` region
+//!   (`vm/numeric_loop.rs`) makes the same step and polls at the same back
+//!   edge;
 //! - native library work that can repeat a bounded pass without bound: each
 //!   pattern-matcher step or batch of steps (a matcher kernel that scans a
 //!   class run, a run of single atoms, skipped start positions, a balance or

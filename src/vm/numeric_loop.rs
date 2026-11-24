@@ -8,7 +8,10 @@
 //!   tables, read a record (a table element) per iteration whose number
 //!   fields it reads (by name, or by a string key held in a register the
 //!   body never writes, `us[i][key]`) and stores, call a method of that record, and hold
-//!   nested numeric loops (`State::run_control_region`).
+//!   nested numeric loops (`State::run_control_region`). A generic `for`
+//!   over the `ipairs` iterator with one or two variables runs as such a
+//!   region too, its pass ending in the iterator's step instead of
+//!   `FOR_LOOP` (`NumericLoop::recognize_ipairs`, `Head::Ipairs`).
 //! - **Numeric leaves.** A Lua function whose code up to its first `RETURN`
 //!   is such arithmetic, returning one value or none, runs inside call
 //!   dispatch without an activation when its arguments are numbers. Its
@@ -114,6 +117,19 @@
 //!   counter. A nested loop's `FOR_PREP` and `FOR_LOOP` run the same way
 //!   inside the body, its taken back edge polling with the cursor past its
 //!   own `FOR_LOOP`.
+//! - An `ipairs` region is entered at its body after a taken back edge
+//!   from key 1, the state canonical dispatch continues from, and checks
+//!   the iterator at its own registers. Its step is `State::ipairs_step`,
+//!   the canonical fast step's rule, reading the table live: a yield
+//!   writes the key and value to the stack (the control still as the body
+//!   left it), polls with the cursor past `TFOR_LOOP`, then moves the
+//!   control, as `TFOR_CALL` and `TFOR_LOOP` do; an exhausted table nils
+//!   the results and leaves the loop; a step the callback must make (a raw
+//!   nil under a metatable, an invalid control) or a value the body reads
+//!   as a number that is none resumes canonical dispatch at `TFOR_CALL`,
+//!   which only read. The value holds a mirror slot only when the body
+//!   names it; otherwise any value goes to the stack. Both instructions are
+//!   free, so charges are the body's.
 //!
 //! Why a numeric leaf is exact: see `State::try_numeric_leaf`.
 
@@ -127,6 +143,7 @@ use super::State;
 use super::Val;
 use super::caches::{FieldLookupCacheEntry, FieldLookupCacheSlot, SetFieldLookupCacheSlot};
 use super::eval::FRAME_HEADROOM;
+use super::eval_control::IpairsStep;
 use super::frame::Frame;
 use super::object::{ObjectPtr, Upvalue};
 use super::table::SlotRef;
@@ -140,19 +157,27 @@ use crate::numeral::{lua_add, lua_div, lua_modulo, lua_mul, lua_sub};
 /// touching more is left to canonical dispatch.
 const MIRROR_SLOTS: usize = 32;
 
-/// The numeric regions of one chunk, sorted by their `FOR_PREP` pc.
+/// The typed loop regions of one chunk: numeric `for` regions sorted by
+/// their `FOR_PREP` pc, and `ipairs` regions sorted by their body's first pc.
 #[derive(Debug, Default)]
 pub(super) struct NumericLoops {
     loops: Box<[NumericLoop]>,
+    ipairs: Box<[NumericLoop]>,
 }
 
 #[derive(Debug)]
 pub(super) struct NumericLoop {
-    /// The `FOR_PREP` pc.
+    /// The pc the region is found by: the `FOR_PREP` of a numeric loop, the
+    /// `TFOR_CALL` of an `ipairs` loop, where a pass that leaves the step
+    /// to canonical dispatch resumes.
     prep: usize,
-    /// The `FOR_LOOP` pc. Fused field reads make the body shorter than its
-    /// canonical instructions, so this is not `prep + 1 + ops.len()`.
+    /// The first body instruction, where each pass starts.
+    body_pc: usize,
+    /// The back edge's pc: `FOR_LOOP`, or `TFOR_LOOP` after the
+    /// `TFOR_CALL`. Fused field reads make the body shorter than its
+    /// canonical instructions, so this is not `body_pc + ops.len()`.
     step_pc: usize,
+    head: Head,
     body: Body,
     /// Entries left to decline after a run that met a method it could not
     /// call on its first pass (`State::run_control_region`): a loop whose
@@ -162,6 +187,24 @@ pub(super) struct NumericLoop {
     /// Atomic only so the runtime stays `Sync`; one State's execution is the
     /// only reader and writer.
     backoff: AtomicU8,
+}
+
+/// The loop a region's pass ends in.
+#[derive(Clone, Copy, Debug)]
+enum Head {
+    /// `FOR_LOOP` over mirror slots 0 to 3.
+    Numeric,
+    /// The `ipairs` step and its `TFOR_LOOP` over the generic for's
+    /// registers from `base`: the iterator, the table (both on the stack
+    /// only, never written by the body), then the control and the key in
+    /// mirror slots 0 and 1, then the value when `vars` is 2. The value has
+    /// mirror slot `value` when the body names it as a number, and must
+    /// then be a number; otherwise it goes to the stack as any value.
+    Ipairs {
+        base: u16,
+        vars: u8,
+        value: Option<u8>,
+    },
 }
 
 /// Entries a region declines after its first pass met a method it could
@@ -561,16 +604,37 @@ impl NumericLoops {
     pub(super) fn new(bytecode: &Bytecode, cost: &CostState) -> Self {
         let code = &bytecode.code;
         let mut loops = Vec::new();
+        let mut ipairs = Vec::new();
         // bounded: one pass over the bytecode during region plan construction
-        for (prep, inst) in code.iter().enumerate() {
+        for (pc, inst) in code.iter().enumerate() {
             if inst.opcode() == Instr::OP_FOR_PREP
-                && let Some(region) = NumericLoop::recognize(bytecode, prep, cost)
+                && let Some(region) = NumericLoop::recognize(bytecode, pc, cost)
             {
                 loops.push(region);
+            } else if inst.opcode() == Instr::OP_TFOR_CALL
+                && let Some(region) = NumericLoop::recognize_ipairs(bytecode, pc, cost)
+            {
+                ipairs.push(region);
             }
         }
+        ipairs.sort_by_key(|region| region.body_pc);
         Self {
             loops: loops.into_boxed_slice(),
+            ipairs: ipairs.into_boxed_slice(),
+        }
+    }
+
+    /// The `ipairs` region whose body starts at `body`: the cursor a taken
+    /// `TFOR_LOOP` leaves, and one loop's alone, since a body starts where
+    /// its loop's back edge goes.
+    #[inline]
+    pub(super) fn get_ipairs(&self, body: usize) -> Option<&NumericLoop> {
+        match self
+            .ipairs
+            .binary_search_by_key(&body, |region| region.body_pc)
+        {
+            Ok(index) => Some(&self.ipairs[index]),
+            Err(_) => None,
         }
     }
 
@@ -617,6 +681,12 @@ struct Layout {
     restart: bool,
     /// The facts the region's own head assumed.
     outer_entry: Facts,
+    /// Mirror slots, from 0, holding the region's own loop controls: four
+    /// for a numeric `for`, two (control and key) for `ipairs`.
+    head_slots: usize,
+    /// The region's runner follows paths (`State::run_control_region`)
+    /// whatever its body holds: an `ipairs` step can leave the loop.
+    force_control: bool,
     /// Loops open at the instruction being scanned, innermost last.
     loops: Vec<OpenLoop>,
     /// Nested loops, by `Prep` order.
@@ -885,7 +955,13 @@ impl Layout {
         }
         let c = self.read(inst.c())?;
         let register = inst.a();
-        if self.registers.iter().take(4).any(|&r| r == register) || self.untouchable(register) {
+        if self
+            .registers
+            .iter()
+            .take(self.head_slots)
+            .any(|&r| r == register)
+            || self.untouchable(register)
+        {
             return None;
         }
         let id = match self.record_id(register) {
@@ -1747,7 +1823,8 @@ impl Layout {
         if self.loading.is_some() {
             return None;
         }
-        let control = !self.jumps.is_empty()
+        let control = self.force_control
+            || !self.jumps.is_empty()
             || !self.indexed.is_empty()
             || !self.inner.is_empty()
             || self.calls.iter().any(|site| site.callee.dynamic());
@@ -1953,6 +2030,7 @@ impl NumericLoop {
         // bounded: at most MAX_SCANS scans of one region
         for scan in 0..MAX_SCANS {
             let mut layout = Layout::seeded(seed.take(), std::mem::take(&mut heads));
+            layout.head_slots = 4;
             // bounded: four numeric loop control registers
             for &register in &controls {
                 layout.register(register)?;
@@ -1983,8 +2061,118 @@ impl NumericLoop {
             let (body, _) = layout.finish(4, tail)?;
             return Some(Self {
                 prep,
+                body_pc: after,
                 step_pc,
                 body,
+                head: Head::Numeric,
+                backoff: AtomicU8::new(0),
+            });
+        }
+        None
+    }
+
+    /// The `ipairs` region of the generic `for` whose `TFOR_CALL` is at
+    /// `call`, entered after a canonical step continues the loop
+    /// (`State::enter_ipairs_region`). The same body scan as a numeric
+    /// loop's, with the `ipairs` step as the pass's end: it reads the
+    /// control (guarded unless every path writes it, so a call that clears
+    /// it refuses the plan), and its taken edge writes the control, the key
+    /// and, with two variables, the value. Which iterator runs is only known
+    /// at entry, so nothing here assumes it is `ipairs`.
+    fn recognize_ipairs(bytecode: &Bytecode, call: usize, cost: &CostState) -> Option<Self> {
+        let code = &bytecode.code;
+        let call_inst = code[call];
+        let vars = call_inst.b();
+        if !(1..=2).contains(&vars) {
+            return None;
+        }
+        // Compiled code: TFOR_CALL, then its TFOR_LOOP back to the body,
+        // which lies wholly before the TFOR_CALL.
+        let step_pc = call + 1;
+        let step_inst = *code.get(step_pc)?;
+        if step_inst.opcode() != Instr::OP_TFOR_LOOP || step_inst.a() != call_inst.a() {
+            return None;
+        }
+        let body_pc = Frame::jumped(step_pc + 1, step_inst.sj());
+        if body_pc >= call {
+            return None;
+        }
+        let base = call_inst.a();
+        let table = base.checked_add(1)?;
+        let control = base.checked_add(2)?;
+        let key = base.checked_add(3)?;
+        let value = (vars == 2).then(|| base.checked_add(4)).flatten();
+        if vars == 2 && value.is_none() {
+            return None;
+        }
+        let mut seed = None;
+        let mut heads = Vec::new();
+        // bounded: at most MAX_SCANS scans of one region
+        for scan in 0..MAX_SCANS {
+            let mut layout = Layout::seeded(seed.take(), std::mem::take(&mut heads));
+            layout.head_slots = 2;
+            layout.force_control = true;
+            layout.register(control)?;
+            layout.fact(control)?;
+            layout.register(key)?;
+            layout.fact(key)?;
+            layout.cur = layout.at_head(body_pc, Facts::ENTRY);
+            layout.outer_entry = layout.cur;
+            layout.scan(bytecode, cost, body_pc, Some(call), Mode::Region)?;
+            layout.read(control)?;
+            let mut taken = layout.written_facts(layout.cur, &[control, key])?;
+            if let Some(value) = value {
+                if layout.registers.contains(&value) {
+                    taken = layout.written_facts(taken, &[value])?;
+                } else if let Some(fact) = layout.facts.iter().position(|&r| r == value) {
+                    // Any value, not a number: no record survives it.
+                    let bit = 1u64 << fact;
+                    taken.rmust &= !bit;
+                    taken.rmay &= !bit;
+                }
+                // The step writes it: never an entry-read receiver or key.
+                layout.note_write(value);
+            }
+            let entry = layout.outer_entry;
+            layout.back_edge(body_pc, entry, taken);
+            if scan == 0 || layout.restart {
+                heads = std::mem::take(&mut layout.heads);
+                seed = Some((
+                    std::mem::take(&mut layout.registers),
+                    std::mem::take(&mut layout.facts),
+                    std::mem::take(&mut layout.records),
+                ));
+                continue;
+            }
+            // The step reads the iterator and the table from the stack: the
+            // body must leave both as the entry found them.
+            // bounded: the iterator and table registers
+            for register in [base, table] {
+                if layout.wrote.contains(&register)
+                    || layout.method_writes.contains(&register)
+                    || layout.records.contains(&register)
+                    || layout
+                        .min_cleared
+                        .is_some_and(|cleared| register >= cleared)
+                {
+                    return None;
+                }
+            }
+            let tail = Layout::charge(cost, Instr::OP_TFOR_LOOP, step_pc);
+            let (body, registers) = layout.finish(2, tail)?;
+            let value = value
+                .and_then(|value| registers.iter().position(|&r| r == value))
+                .map(mirror_slot);
+            return Some(Self {
+                prep: call,
+                body_pc,
+                step_pc,
+                body,
+                head: Head::Ipairs {
+                    base,
+                    vars: vars as u8,
+                    value,
+                },
                 backoff: AtomicU8::new(0),
             });
         }
@@ -2119,6 +2307,44 @@ fn at(slot: u8) -> usize {
 }
 
 impl State {
+    /// Run the `ipairs` region whose body `ip` is at, a generic `for` back
+    /// edge having just been taken there: the state the region's passes
+    /// start from, as `FOR_PREP` leaves a numeric region's. The step that
+    /// edge followed may be the dispatch loop's own or the iterator
+    /// callback's; either leaves the stack, the call-site record and the
+    /// batch as canonical dispatch continues from, and the region proves
+    /// at entry what it relies on (the iterator at its own registers, the
+    /// table, the guards). Returns with `ip` past `TFOR_LOOP` once the loop
+    /// ends, at the `TFOR_CALL` for a step the callback must make, or
+    /// unchanged when the entry checks refuse.
+    ///
+    /// The fused back edge calls this only when the step yielded key 1, the
+    /// first step of `ipairs(t)`: a region that hands a step back then
+    /// leaves the rest of that loop to canonical dispatch instead of being
+    /// attempted again at every element. The entry would be exact at any
+    /// step; the key only bounds the attempts.
+    #[inline(never)]
+    pub(super) fn enter_ipairs_region(
+        &mut self,
+        frame: &Frame,
+        ip: &mut usize,
+        local_cost: &mut u64,
+    ) -> Result<()> {
+        let Some(region) = frame.runtime.numeric_loops.get_ipairs(*ip) else {
+            return Ok(());
+        };
+        // The iterator the region will step, at its own registers: admitted
+        // bytecode may reach this body from another loop's back edge.
+        let Head::Ipairs { base: first, .. } = region.head else {
+            return Ok(());
+        };
+        let iterator = self.stack[frame.stack_bottom + usize::from(first)];
+        if !matches!(iterator, Val::RustFn(f) if f == crate::lua_std::IPAIRS_ITER) {
+            return Ok(());
+        }
+        self.run_numeric_loop(region, frame, ip, local_cost)
+    }
+
     /// Run the numeric region `region` of `frame` after its `FOR_PREP`
     /// entered the loop, with the cursor `ip` just past `FOR_PREP`. Returns
     /// with `ip` past `FOR_LOOP` once the loop ends, or unchanged when the
@@ -2410,7 +2636,7 @@ impl State {
             x[0] = next;
             x[3] = next;
             written |= 0b1001;
-            *ip = region.prep + 1;
+            *ip = region.body_pc;
         };
         self.publish_mirror(body, base, &x, written);
         // Last, so no published number overwrites it.
@@ -2544,6 +2770,16 @@ impl State {
         if !self.load_mirror(body, frame, base, &mut x) {
             return Ok(());
         }
+        // An `ipairs` region's table: the body never writes its register,
+        // so it is read once; its contents are read live at every step.
+        let ipairs_table = match region.head {
+            Head::Ipairs { base: first, .. } => match self.stack[base + usize::from(first) + 1] {
+                Val::Obj(ptr) if self.heap.as_table_ref(ptr).is_some() => Some(ptr),
+                _ => return Ok(()),
+            },
+            Head::Numeric => None,
+        };
+        let mut exhausted: Option<(usize, u8)> = None;
         let mut tables = [None::<ObjectPtr>; MAX_INDEXED];
         // bounded: at most MAX_INDEXED indexed reads
         for (table, &(receiver, _)) in tables.iter_mut().zip(&body.indexed) {
@@ -2909,6 +3145,62 @@ impl State {
                 }
             }
 
+            if let Head::Ipairs {
+                base: first,
+                vars,
+                value: value_slot,
+            } = region.head
+            {
+                // TFOR_CALL's step from the mirror's control, then its
+                // TFOR_LOOP. A step the callback must make resumes canonical
+                // dispatch at TFOR_CALL, which only read so far.
+                let table = ipairs_table.expect("an ipairs region resolved its table at entry");
+                let results = base + usize::from(first) + 3;
+                let (key, value) = match self.ipairs_step(table, x[0]) {
+                    IpairsStep::Yield(key, value) => (key, value),
+                    IpairsStep::Exhausted => {
+                        *ip = step_pc + 1;
+                        exhausted = Some((results, vars));
+                        break Ok(());
+                    }
+                    IpairsStep::Fallback => {
+                        *ip = region.prep;
+                        break Ok(());
+                    }
+                };
+                if let Some(slot) = value_slot {
+                    let Val::Num(n) = value else {
+                        *ip = region.prep;
+                        break Ok(());
+                    };
+                    x[at(slot)] = n;
+                    written |= 1 << slot;
+                }
+                x[1] = key;
+                written |= 0b10;
+                *ip = step_pc + 1;
+                let fresh = written & !published;
+                if fresh != 0 {
+                    self.publish_mirror(body, base, &x, fresh);
+                    published |= fresh;
+                }
+                // The stack as canonical dispatch has it at the poll: the
+                // step's results written, the control as the body left it.
+                self.stack[results - 1] = Val::Num(x[0]);
+                self.stack[results] = Val::Num(key);
+                if vars == 2 {
+                    self.stack[results + 1] = value;
+                }
+                if let Err(error) = self.poll_gc_checkpoint() {
+                    break Err(error);
+                }
+                x[0] = key;
+                written |= 0b01;
+                *ip = region.body_pc;
+                first_pass = false;
+                continue;
+            }
+
             // FOR_LOOP, from the mirror's controls.
             *ip = step_pc + 1;
             let step = x[2];
@@ -2927,10 +3219,15 @@ impl State {
             x[0] = next;
             x[3] = next;
             written |= 0b1001;
-            *ip = region.prep + 1;
+            *ip = region.body_pc;
             first_pass = false;
         };
         self.publish_mirror(body, base, &x, written);
+        // An exhausted `ipairs` step leaves nil in its results, over the
+        // published key, as canonical TFOR_CALL does.
+        if let Some((results, vars)) = exhausted {
+            self.stack[results..results + usize::from(vars)].fill(Val::Nil);
+        }
         // Last, so no published number overwrites it.
         if CALLS && let Some(index) = loaded {
             let function = base + usize::from(body.calls[index].register);
@@ -4008,6 +4305,37 @@ mod tests {
     fn regions(source: &str) -> usize {
         let chunk = crate::compiler::compile(source, None).expect("compiles");
         NumericLoops::new(&chunk.nested[0], &cost()).loops.len()
+    }
+
+    /// The generic `for` loops of the first nested function of `source`
+    /// planned as `ipairs` regions.
+    fn ipairs_regions(source: &str) -> usize {
+        let chunk = crate::compiler::compile(source, None).expect("compiles");
+        NumericLoops::new(&chunk.nested[0], &cost()).ipairs.len()
+    }
+
+    #[test]
+    fn ipairs_regions_take_number_bodies_over_one_or_two_variables() {
+        for source in [
+            "local function f(t) local s = 0 for _, v in ipairs(t) do s = s + v end return s end",
+            "local function f(t) local n = 0 for i in ipairs(t) do n = n + i end return n end",
+            // The value unread: any value goes to the stack.
+            "local function f(t) local n = 0 for i, v in ipairs(t) do n = n + 1 end return n end",
+            "local function f(t, u) local s = 0 for _, v in ipairs(t) do if v > 2 then s = s + u[v] end end return s end",
+            "local function f(t) local s = 0 for _, v in ipairs(t) do for j = 1, 3 do s = s + v * j end end return s end",
+        ] {
+            assert_eq!(ipairs_regions(source), 1, "{source}");
+        }
+        for source in [
+            // Three variables; a value used as a table, which the step
+            // replaces, so it is no receiver read once at entry.
+            "local function f(t) local s = 0 for a, b, c in ipairs(t) do s = s + b end return s end",
+            "local function f(t) local s = 0 for _, v in ipairs(t) do s = s + v.x end return s end",
+            // A break leaves the body.
+            "local function f(t) local s = 0 for _, v in ipairs(t) do if v > 3 then break end s = s + v end return s end",
+        ] {
+            assert_eq!(ipairs_regions(source), 0, "{source}");
+        }
     }
 
     fn leaf(source: &str) -> bool {

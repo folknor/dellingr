@@ -198,7 +198,8 @@ impl State {
 /// execution stream, and one is not built ahead of an optimization that
 /// needs it. A plan copied 1:1 from `code` removes no fetch, decode or
 /// dispatch. The derived forms so far are `numeric_loops`, typed regions
-/// keyed by the canonical `FOR_PREP` pc, and `numeric_leaf`, a whole-function
+/// keyed by the canonical `FOR_PREP` pc or, for `ipairs` loops, the body pc
+/// a `TFOR_LOOP` jumps to, and `numeric_leaf`, a whole-function
 /// plan selected at the call (`vm/numeric_loop.rs`): they need no stream,
 /// because the canonical instructions stay in place as their fallback and
 /// every boundary they expose names a canonical pc.
@@ -217,7 +218,7 @@ struct BytecodeRuntime {
     bytecode: Arc<Bytecode>,
     literals: Box<[Val]>,
     caches: RuntimeCaches,
-    /// Numeric `for` loops that run as typed regions, with this State's
+    /// Numeric `for` and `ipairs` loops that run as typed regions, with this State's
     /// fixed weights. Plain data: building it allocates nothing on the heap
     /// the collector paces.
     numeric_loops: numeric_loop::NumericLoops,

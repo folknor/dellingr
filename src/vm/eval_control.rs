@@ -249,32 +249,38 @@ impl State {
         control: Val,
         num_vars: u8,
     ) -> bool {
-        let Some(old_index) = control.as_num() else {
+        let (Some(old_index), Some(table)) = (control.as_num(), state.as_object_ptr()) else {
             return false;
         };
-        let Some(tbl) = state
-            .as_object_ptr()
-            .and_then(|ptr| self.heap.as_table_ref(ptr))
-        else {
-            return false;
-        };
-
-        // An invalid control falls to the callback, which raises the error.
-        let Some(new_index) = crate::lua_std::ipairs_next_index(old_index) else {
-            return false;
-        };
-        let key = Val::Num(new_index);
-        let val = tbl.get(&key);
-        if matches!(val, Val::Nil) && tbl.get_metatable().is_some() {
-            return false;
-        }
-
-        if matches!(val, Val::Nil) {
-            self.write_tfor_results(base, num_vars, Val::Nil, None);
-        } else {
-            self.write_tfor_results(base, num_vars, key, Some(val));
+        match self.ipairs_step(table, old_index) {
+            IpairsStep::Yield(key, value) => {
+                self.write_tfor_results(base, num_vars, Val::Num(key), Some(value));
+            }
+            IpairsStep::Exhausted => self.write_tfor_results(base, num_vars, Val::Nil, None),
+            IpairsStep::Fallback => return false,
         }
         true
+    }
+
+    /// One step of the `ipairs` iterator over `table` from `control`, as the
+    /// iterator callback makes it, for the steps that need no callback: the
+    /// one rule the dispatch loop's fast step and the typed ipairs region
+    /// (`vm/numeric_loop.rs`) share. `Fallback` leaves the step to the
+    /// callback: a non-table state, an invalid control (the callback raises
+    /// the error), or a raw nil on a table with a metatable (`__index`).
+    #[inline(always)]
+    pub(super) fn ipairs_step(&self, table: super::object::ObjectPtr, control: f64) -> IpairsStep {
+        let Some(tbl) = self.heap.as_table_ref(table) else {
+            return IpairsStep::Fallback;
+        };
+        let Some(key) = crate::lua_std::ipairs_next_index(control) else {
+            return IpairsStep::Fallback;
+        };
+        match tbl.get_number(key) {
+            Val::Nil if tbl.get_metatable().is_some() => IpairsStep::Fallback,
+            Val::Nil => IpairsStep::Exhausted,
+            value => IpairsStep::Yield(key, value),
+        }
     }
 
     pub(super) fn instr_tfor_call_rust_fn(
@@ -298,6 +304,16 @@ impl State {
         self.take_tfor_results(base, num_vars, call_base, usize::from(num_ret_reported));
         Ok(())
     }
+}
+
+/// What one `ipairs` step does without its callback (`State::ipairs_step`).
+pub(super) enum IpairsStep {
+    /// The next key and its non-nil value: the loop continues.
+    Yield(f64, Val),
+    /// A raw nil on a table without a metatable: the loop ends.
+    Exhausted,
+    /// The callback must make the step.
+    Fallback,
 }
 
 pub(super) fn check_numeric_for_condition(var: f64, limit: f64, step: f64) -> bool {
