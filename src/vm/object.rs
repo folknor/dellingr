@@ -1329,6 +1329,11 @@ pub(super) trait Markable {
 }
 
 impl Markable for Val {
+    // Forced inline: left to LLVM, table scans (`Table::mark_values`) and
+    // the other marking loops call it out of line once per key and value,
+    // which made a collection over many small tables about a quarter more
+    // retired instructions (bench/host/many_chunks).
+    #[inline(always)]
     fn mark_reachable(&self, heap: &GcHeap, worklist: &mut Vec<ObjectPtr>) {
         match self {
             Val::Obj(ptr) => heap.mark(*ptr, worklist),

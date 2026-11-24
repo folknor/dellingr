@@ -226,6 +226,10 @@ tick budgets and re-record replays.
 
 ### Performance
 
+- Garbage-collection marking no longer calls the per-value mark out of line
+  from table scans and the other marking loops: a collection over 1,000
+  loaded chunks retires about 24% fewer instructions (about 1.95 to 1.45 s
+  for 70,000 collections on bygg). Not replay-visible.
 - A generic `for` over `ipairs` whose body is number arithmetic (the value
   read as a number, or not read) runs as a typed loop region, as numeric
   `for` loops already did: summing a 10,000-element array went from about

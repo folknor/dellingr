@@ -952,17 +952,6 @@ each get fewer than ~3 accesses (so warmup amortization matters).
 
 ## Host boundary and per-State costs
 
-### `many_chunks` slower since the gmatch program moved into its object
-
-`many_chunks` went from about 1.9 s to 2.2 s wall (27 to 31 us a
-collection) at b85864e, bisected in interleaved `--commit` rounds on bygg,
-2026-11-24 (`reference/performance.md`, "Collections over many retained
-runtimes"). The scenario creates no gmatch iterator, so the candidates are
-the `held_patterns` prune added to every collection's cleanup, the
-`RawObject::Gmatch` shape in `mark_children`'s match, and code layout. Not
-yet separated; a same-binary control and a build reverting each piece would
-tell. The leaf-runtime flag change since took it to about 1.8 s.
-
 ### Tree expansion during closure tracing
 
 From the spar on the runtime reconcile (2026-11-24): a reached runtime with
@@ -985,13 +974,18 @@ from the yielded stack slot every pass, so no record fact rides the back
 edge. Loops with three or more variables are declined (the extra ones are
 nil every step). Not measured on a workload with records.
 
-### `numeric_index` about 4% slower after the `ipairs` region landed
+### `numeric_index` cycle residue after the head split (2026-11-24)
 
-Matched pairs 63e5a4c against 908777f on bygg (`reference/performance.md`,
-"`ipairs` loops as typed regions"): `numeric_index` 4.5 to 4.7 s, 3 of 3
-pairs, with an unchanged region shape. Unattributed; suspected layout of
-`run_control_region`'s instantiations. Needs a five-launch same-binary
-control before any mechanism is chased.
+The control runner's `IPAIRS` split (`State::run_control_shape`) took
+bench/numeric_index from 168.4G to 161.9G retired instructions, under
+63e5a4c's 162.7G, but its warm call stayed about 92.0 ms against 63e5a4c's
+90.5 (908777f 93; pinned `perf stat` launches on bygg, not a stored bench).
+Fewer instructions and more cycles: the hypothesis is placement (the
+indirect operation dispatch sits at a different offset in its cache line,
+and the `Head` field shifts several plan-field offsets by eight bytes);
+no cycle penalty from either has been shown. Unattributed. A
+layout-fixed comparison or a cycle-level profile of the two copies would
+settle it; more wall A/B will not.
 
 ---
 

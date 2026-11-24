@@ -2361,41 +2361,63 @@ impl State {
         local_cost: &mut u64,
     ) -> Result<()> {
         if region.body.control {
-            let body = &region.body;
-            match (
-                body.records.is_empty(),
-                body.calls.is_empty(),
-                body.inner.is_empty(),
-            ) {
-                (true, true, true) => {
-                    self.run_control_region::<false, false, false>(region, frame, ip, local_cost)
-                }
-                (true, true, false) => {
-                    self.run_control_region::<false, false, true>(region, frame, ip, local_cost)
-                }
-                (false, true, true) => {
-                    self.run_control_region::<true, false, false>(region, frame, ip, local_cost)
-                }
-                (false, true, false) => {
-                    self.run_control_region::<true, false, true>(region, frame, ip, local_cost)
-                }
-                (true, false, true) => {
-                    self.run_control_region::<false, true, false>(region, frame, ip, local_cost)
-                }
-                (true, false, false) => {
-                    self.run_control_region::<false, true, true>(region, frame, ip, local_cost)
-                }
-                (false, false, true) => {
-                    self.run_control_region::<true, true, false>(region, frame, ip, local_cost)
-                }
-                (false, false, false) => {
-                    self.run_control_region::<true, true, true>(region, frame, ip, local_cost)
+            match region.head {
+                Head::Numeric => self.run_control_shape::<false>(region, frame, ip, local_cost),
+                Head::Ipairs { .. } => {
+                    self.run_control_shape::<true>(region, frame, ip, local_cost)
                 }
             }
         } else if region.body.calls.is_empty() {
             self.run_region::<false>(region, frame, ip, local_cost)
         } else {
             self.run_region::<true>(region, frame, ip, local_cost)
+        }
+    }
+
+    /// The control runner instantiated for `region`'s body shape, under the
+    /// head `IPAIRS` names. The head is a parameter rather than a test in
+    /// the runner so a numeric-for region compiles without the `ipairs`
+    /// step's state. Sharing one copy changed the register allocation of the
+    /// no-records, no-calls copy (its written-slot mask moved to the stack),
+    /// a net of about seven retired instructions more per iteration of an
+    /// indexed-read loop (bench/numeric_index, 3.5%).
+    #[inline(always)]
+    fn run_control_shape<const IPAIRS: bool>(
+        &mut self,
+        region: &NumericLoop,
+        frame: &Frame,
+        ip: &mut usize,
+        local_cost: &mut u64,
+    ) -> Result<()> {
+        let body = &region.body;
+        match (
+            body.records.is_empty(),
+            body.calls.is_empty(),
+            body.inner.is_empty(),
+        ) {
+            (true, true, true) => self
+                .run_control_region::<false, false, false, IPAIRS>(region, frame, ip, local_cost),
+            (true, true, false) => {
+                self.run_control_region::<false, false, true, IPAIRS>(region, frame, ip, local_cost)
+            }
+            (false, true, true) => {
+                self.run_control_region::<true, false, false, IPAIRS>(region, frame, ip, local_cost)
+            }
+            (false, true, false) => {
+                self.run_control_region::<true, false, true, IPAIRS>(region, frame, ip, local_cost)
+            }
+            (true, false, true) => {
+                self.run_control_region::<false, true, false, IPAIRS>(region, frame, ip, local_cost)
+            }
+            (true, false, false) => {
+                self.run_control_region::<false, true, true, IPAIRS>(region, frame, ip, local_cost)
+            }
+            (false, false, true) => {
+                self.run_control_region::<true, true, false, IPAIRS>(region, frame, ip, local_cost)
+            }
+            (false, false, false) => {
+                self.run_control_region::<true, true, true, IPAIRS>(region, frame, ip, local_cost)
+            }
         }
     }
 
@@ -2750,7 +2772,12 @@ impl State {
     /// the receivers, which the entry-resolved tables hold by number keys
     /// no region store can replace, and nothing allocates.
     #[inline(never)]
-    fn run_control_region<const RECORDS: bool, const CALLS: bool, const NESTED: bool>(
+    fn run_control_region<
+        const RECORDS: bool,
+        const CALLS: bool,
+        const NESTED: bool,
+        const IPAIRS: bool,
+    >(
         &mut self,
         region: &NumericLoop,
         frame: &Frame,
@@ -2772,12 +2799,15 @@ impl State {
         }
         // An `ipairs` region's table: the body never writes its register,
         // so it is read once; its contents are read live at every step.
+        // `IPAIRS` is the head's own test (`run_control_shape`).
         let ipairs_table = match region.head {
-            Head::Ipairs { base: first, .. } => match self.stack[base + usize::from(first) + 1] {
-                Val::Obj(ptr) if self.heap.as_table_ref(ptr).is_some() => Some(ptr),
-                _ => return Ok(()),
-            },
-            Head::Numeric => None,
+            Head::Ipairs { base: first, .. } if IPAIRS => {
+                match self.stack[base + usize::from(first) + 1] {
+                    Val::Obj(ptr) if self.heap.as_table_ref(ptr).is_some() => Some(ptr),
+                    _ => return Ok(()),
+                }
+            }
+            _ => None,
         };
         let mut exhausted: Option<(usize, u8)> = None;
         let mut tables = [None::<ObjectPtr>; MAX_INDEXED];
@@ -3145,11 +3175,12 @@ impl State {
                 }
             }
 
-            if let Head::Ipairs {
-                base: first,
-                vars,
-                value: value_slot,
-            } = region.head
+            if IPAIRS
+                && let Head::Ipairs {
+                    base: first,
+                    vars,
+                    value: value_slot,
+                } = region.head
             {
                 // TFOR_CALL's step from the mirror's control, then its
                 // TFOR_LOOP. A step the callback must make resumes canonical
@@ -3225,7 +3256,7 @@ impl State {
         self.publish_mirror(body, base, &x, written);
         // An exhausted `ipairs` step leaves nil in its results, over the
         // published key, as canonical TFOR_CALL does.
-        if let Some((results, vars)) = exhausted {
+        if IPAIRS && let Some((results, vars)) = exhausted {
             self.stack[results..results + usize::from(vars)].fill(Val::Nil);
         }
         // Last, so no published number overwrites it.

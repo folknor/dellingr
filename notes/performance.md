@@ -138,10 +138,7 @@ read by a key register takes only an entry-checked string. Straight-line chains 
 are not leaves (fib's `n - 1`, `n - 2`, `+` around its calls) still
 dispatch per instruction. object_fields' remaining time is its
 construction pass (`{}`, `new_unit` calls, `SET_TABLE`), which no region
-takes. `global` measured 921 ms at f05b9ae and 931 ms at 4606d29 in one
-matched invocation (bygg, 232972d8), slower in 5 of 5, unattributed; the
-earlier 882 to 915 ms reading paired a dirty tree against a `--commit` arm.
-A same-binary control would give its launch spread.
+takes.
 One stable shape for a two-op fusion: after a handler, test the actual next
 opcode and enter its body directly inside the dispatch loop. That is the
 predecessor-specific dispatch threaded dispatch was after, without its

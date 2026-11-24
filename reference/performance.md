@@ -156,8 +156,16 @@ ms (about 26 us a collection).
 
 The scenario was about 1.9 s at 0cc99ec and moved to about 2.2 s with
 b85864e (three interleaved rounds of fe88e6a, b6e2bfa, dbf3841 and b85864e:
-1.9, 1.9, 1.9, 2.2 s). No gmatch iterator exists in the scenario, so the
-mechanism is not established; layout is not ruled out.
+1.9, 1.9, 1.9, 2.2 s). The scenario has no gmatch object to trace; the step
+was an inlining decision the commit tipped. `perf stat` retired
+instructions, identical to 0.01% across launches: dbf3841 45.92G, b85864e
+54.25G (+18%, about 119k a collection). `<Val as Markable>::mark_reachable`
+is byte-identical in both, but in b85864e `Table::mark_values` calls it out
+of line once per key and value (instruction samples 810 to 4340 in it, 2935
+to 2011 in the scan). 66a7fff still called it out of line (43.63G); forcing
+it inline drops the scenario to 33.12G, about 1.95 s to 1.45 s wall on
+pinned launches on bygg. That figure covers every marking caller (roots, anchors,
+closed upvalues), not only the historical table-scan change.
 
 ## Short interned strings inline, 2026-11-24
 
@@ -1014,9 +1022,16 @@ element. Matched interleaved pairs on bygg, `brokkr bench --rounds 3` with
 | `store_loop` | 1.5, 1.5, 1.5 s | 1.5, 1.5, 1.5 s | 1cc04ca6 |
 
 `numeric_index` runs the same region shape on both arms; its 3 of 3
-slower pairs, like `object_fields` faster and `column_key` slower, are not
-attributed (the control runner's instantiations gained the `ipairs` tail),
-and no same-binary control was run. `native_bytes_per_level` is unchanged
+slower pairs were executed work: 162.71G to 168.41G retired instructions
+(+3.5%, about seven an element), all in `run_control_region::<false, false,
+false>`, whose written-slot mask moved from a register to the stack once the
+`ipairs` head state shared the copy (store_loop +0.74% and cull +1.39%
+instructions the same way). The head is now a const parameter
+(`State::run_control_shape`, sixteen copies): numeric_index 161.89G, store_loop
+and cull back to 63e5a4c's counts, `ipairs` unchanged at 67.16G. The warm
+call recovered only partly (about 90.5 ms at 63e5a4c, 93 at 908777f, 92.0
+after, pinned launches on bygg), a cycle residue with fewer instructions, not
+attributed. `native_bytes_per_level` is unchanged
 in dev and release: the entry hook sits in `Frame::tfor_fused_loop`,
 inlined only in release, since a live bool or call-pc local in the
 `TFOR_CALL` arm cost 16 to 48 bytes a level.
@@ -1041,8 +1056,12 @@ change runs only at loop recognition, sits 2.7% above 1b783c4. The deltas do
 not accumulate: the build at the end of the series is not slower than the one
 before it began. Whether each earlier pair was code layout or a small
 executed cost hidden under a larger layout swing is not isolated (no plan or
-exit counts were compared). `global` at 4606d29 is 0.7% slower with a
-consistent sign and stays unattributed.
+exit counts were compared). `global` at 4606d29 read 0.7% slower with a
+consistent sign; 4606d29 retires the same instructions on it as its parent
+0c54d48 (33,015,183,090 against 33,015,092,604), so it added no material
+executed cost there, and the wall delta stays unattributed. f05b9ae retires
+0.55% fewer than both; the build after the `ipairs` head split retires 0.81%
+fewer than f05b9ae.
 
 ## Host field descriptors, 2026-11-18
 
