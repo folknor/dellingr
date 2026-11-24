@@ -856,7 +856,9 @@ spread (913 ms to 1.1 s within B), with signs mixed across rounds, and its
 runner's code is the one before the change. `object_fields` is 3% slower
 with a consistent sign over eight pairs and is unattributed: its region
 calls a straight-line leaf through the control runner, whose only change
-on that path is a test of the leaf's `control` flag and of a full path. A
+on that path is a test of the leaf's `control` flag and of a full path (a
+later matched run did not reproduce it; see "The session's `object_fields`
+deltas, re-measured"). A
 read and a `MUL` between an update's read and its add, as in `self.x =
 self.x + self.vx * dt`, are why a fused `GET_FIELD`, arithmetic,
 `SET_FIELD` opcode was not built: it would cover only adjacent updates and
@@ -929,7 +931,31 @@ each time) gave 3244 ms in 51846acb, so the key-checked position is about
 470 ms of the 2.2 s gained. No region of `object_fields`, `method_step` or
 `store_loop` changed shape; outlining `resolve_record_keys` put
 `object_fields` at 3179 ms, so that delta moves with layout and is not
-attributed. No corpus cost row moved. `frame.rs` is untouched.
+attributed; a later matched run did not reproduce it (next section). No
+corpus cost row moved. `frame.rs` is untouched.
+
+## The session's `object_fields` deltas, re-measured, 2026-11-24
+
+Both `object_fields` slowdowns above (the forward-branch leaves and the
+register-keyed records) did not reproduce in one matched invocation of all
+four builds on bygg: `brokkr bench --rounds 5`, every arm `--commit`,
+invocation 232972d8, medians of five single-launch cells:
+
+| Workload | f05b9ae | 1b783c4 | d6030e0 | 4606d29 |
+|---|---:|---:|---:|---:|
+| `object_fields` | 3078 ms | 2998 ms (5 of 5 faster) | 3080 ms | 3041 ms (4 of 5 faster) |
+| `store_loop` | 1477 ms | 1475 ms | 1475 ms | 1474 ms |
+| `method_step` | 5856 ms | 2280 ms | 2268 ms | 2277 ms |
+| `global` | 921 ms | 945 ms (mixed) | 922 ms | 931 ms (5 of 5 slower) |
+
+Signs are against f05b9ae. The source measured 4% slower as `d594c99`
+(identical `src/` to 1b783c4) now measures 2.6% faster, and d6030e0, whose
+change runs only at loop recognition, sits 2.7% above 1b783c4. The deltas do
+not accumulate: the build at the end of the series is not slower than the one
+before it began. Whether each earlier pair was code layout or a small
+executed cost hidden under a larger layout swing is not isolated (no plan or
+exit counts were compared). `global` at 4606d29 is 0.7% slower with a
+consistent sign and stays unattributed.
 
 ## Host field descriptors, 2026-11-18
 

@@ -138,9 +138,10 @@ read by a key register takes only an entry-checked string. Straight-line chains 
 are not leaves (fib's `n - 1`, `n - 2`, `+` around its calls) still
 dispatch per instruction. object_fields' remaining time is its
 construction pass (`{}`, `new_unit` calls, `SET_TABLE`), which no region
-takes. After this step `global` measured 882 to 915 ms on bygg,
-unattributed (hot paths canonical or unchanged; no same-binary control
-run); a five-launch control would say whether it is layout.
+takes. `global` measured 921 ms at f05b9ae and 931 ms at 4606d29 in one
+matched invocation (bygg, 232972d8), slower in 5 of 5, unattributed; the
+earlier 882 to 915 ms reading paired a dirty tree against a `--commit` arm.
+A same-binary control would give its launch spread.
 One stable shape for a two-op fusion: after a handler, test the actual next
 opcode and enter its body directly inside the dispatch loop. That is the
 predecessor-specific dispatch threaded dispatch was after, without its
@@ -206,20 +207,22 @@ pair is consistent but not attributed.
 
 **Classification:** local change in `vm/registers.rs` and `vm/caches.rs`.
 
-## PERF-007 - `object_fields` about 3 percent slower after keyed record sites
+## PERF-008 - Typed-region entry work repeated on every entry
 
-Matched pairs on bygg (2026-11-24, invocations 88ae816e and ad767d3a,
-0c54d48 against the keyed-record-site change): `object_fields` 3016-3035
-to 3115-3136 ms, slower in 6 of 6 rounds; `method_step` +21 ms and
-`store_loop` +5 to +22 ms in 3 of 3. None of these bodies has a
-register-keyed `GET_TABLE` on a record, so no region changed shape; the
-entry paths (`resolve_record_keys`, `region_keys_disjoint`) now decode a
-`SiteKey`. Outlining `resolve_record_keys` made `object_fields` slower
-still (3179 ms), so it moves with layout; the cause is not isolated. This
-sits on top of object_fields' earlier unattributed 3.1-3.2 s drift.
+`run_control_region` collects the region's relied keys into a fresh `Vec`
+twice per entry when a call site is dynamic (once inside
+`region_keys_disjoint`, once in the runner), and starts its per-site
+method caches empty, so each entry re-runs `admit_method` (site checks, an
+`Arc` clone, upvalue field resolution) for every metatable it meets.
+`object_fields`' update loop is entered about 100,000 times per run at
+roughly 30 us of passes each; not measured. Sharing the one collection
+within an entry is sound (same literals, same frame, no VM execution
+between). Keeping method entries across entries is not free: it needs a
+proof that the method lookup and cached upvalue slots still hold after
+intervening Lua or host code.
 
-**Next:** a five-launch same-binary control, then per-function profiles of
-the two arms at hotpath scale.
+**Classification:** local change in `vm/numeric_loop.rs`; measure with a
+matched `--commit` pair on `object_fields` and `method_step`.
 
 ## Accounts added to existing entries
 

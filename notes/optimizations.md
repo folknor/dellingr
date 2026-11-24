@@ -631,11 +631,6 @@ profiling.
 
 ### Branching leaves: open costs and declines (2026-11-24)
 
-- `object_fields` measured 3.1 to 3.2 s on bygg (A f05b9ae, B d594c99,
-  eight interleaved pairs, consistent sign) after leaves took forward
-  branches; unattributed. Its path changed only by a `control` flag test
-  and a full-path test in the control runner's leaf call; no same-binary
-  control was run, so layout is not ruled out.
 - The straight-line region runner (`State::run_passes`) declines a loop
   calling a leaf with branches, since it charges whole leaf weights; each
   call still runs as a leaf. Following paths there cost `global` and

@@ -319,8 +319,8 @@ tick budgets and re-record replays.
 - A typed loop may also read a number field of the element it read by a
   string key held in a local the loop never assigns
   (`sum = sum + us[i][key]`). On bygg `bench/column_key` went from 4.9 s to
-  2.8 s, and `bench/object_fields` measured about 3 percent slower,
-  unattributed. A key that is not a string declines the loop; a missing or
+  2.8 s; a first reading of `bench/object_fields` 3 percent slower did not
+  reproduce in a matched re-measure. A key that is not a string declines the loop; a missing or
   non-number field hands the rest of the loop back to ordinary dispatch at
   that read, so `__index` and errors behave as before. Results, costs, the
   charged prefix at a budget refusal, error locations, interrupt safepoints
