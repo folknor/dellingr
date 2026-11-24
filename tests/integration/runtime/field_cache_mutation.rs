@@ -173,6 +173,51 @@ fn field_cache_revalidates_after_table_mutation() {
     assert_eq!(val, 227.0);
 }
 
+/// One read site and one store site over mixed receivers keep own-field and
+/// metamethod semantics: same-order Map records, a swapped order, a
+/// tombstoned key right after a same-order record (same position, dead
+/// value) whose store reaches `__newindex`, a re-added key whose old
+/// position is vacant, an Inline record, a key answered by `__index`, and
+/// `__newindex` on receivers with and without the key.
+#[test]
+fn field_sites_answer_mixed_receivers_like_the_keyed_lookup() {
+    let val = support::eval_number(
+        r#"
+        local function rec(b) return { a = 1, b = b, c = 3, d = 4, e = 5, f = 6 } end
+        local swapped = { b = 20, a = 1, c = 3, d = 4, e = 5, f = 6 }
+        local seen = 0
+        local dead = setmetatable(rec(0),
+            { __newindex = function() seen = seen + 10000 end })
+        dead.b = nil
+        local readded = rec(0)
+        readded.b = nil
+        readded.b = 30
+        local inherited = setmetatable({ a = 1, c = 3, d = 4, e = 5, f = 6, g = 7 },
+            { __index = { b = 40 } })
+        local guarded = setmetatable(rec(50),
+            { __newindex = function() seen = seen + 1 end })
+        local absent = setmetatable({ a = 1, c = 3, d = 4, e = 5, f = 6, g = 7 },
+            { __newindex = function() seen = seen + 100 end })
+        local list = { rec(10), swapped, rec(11), dead, readded, { b = 60 },
+            inherited, guarded, absent, rec(12) }
+        local function read(t) return t.b or 0 end
+        local function write(t, v) t.b = v end
+        local sum = 0
+        for i = 1, #list do sum = sum + read(list[i]) end
+        for i = 1, #list do write(list[i], i) end
+        for i = 1, #list do sum = sum + read(list[i]) * 1000 end
+        if rawget(absent, "b") ~= nil then error("absent gained b") end
+        if rawget(dead, "b") ~= nil then error("dead revived b") end
+        if rawget(inherited, "b") ~= 7 then error("inherited store") end
+        return sum + seen * 1000000
+    "#,
+    );
+    // First pass: 10+20+11+0+30+60+40+50+0+12 = 233. Stores land raw
+    // everywhere except `dead` (handler +10000) and `absent` (+100). Second
+    // pass reads i, with `dead` (4) and `absent` (9) reading nil.
+    assert_eq!(val, 10_100.0 * 1_000_000.0 + 42_000.0 + 233.0);
+}
+
 #[test]
 fn field_cache_does_not_cache_index_metamethod_result() {
     let val = support::eval_number(

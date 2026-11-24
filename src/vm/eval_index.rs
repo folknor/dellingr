@@ -93,6 +93,16 @@ impl State {
         cache: &FieldLookupCacheSlot,
     ) -> Option<Val> {
         let entry = cache.get_field()?;
+        // A different receiver goes to the keyed lookup. Trying the cached
+        // position there first (`Table::renew_slot`, sound since it checks
+        // the key; versions alone are not, as unrelated tables share them)
+        // was built for this read, for `State::store_field` and inside the
+        // dispatch hit path, and measured at fea24a2 on bygg: no wall gain
+        // on method_step, object_fields or same_obj_read, and record_tables
+        // about 3 percent slower, although the instrumented resolver got
+        // faster. A Map probe costs about what the position check and the
+        // refill do. Typed loop regions keep the form (`record_slot`), where
+        // the probe is the whole access.
         if entry.table != ptr {
             return None;
         }

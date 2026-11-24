@@ -542,63 +542,25 @@ Signal that would promote it: a real workload where polymorphic field
 access dominates and `fields/polymorphic` measures 3-5x slower than
 `fields/same_obj_read`.
 
-A lighter-weight *key-position IC* caches the slot position of a key.
-Map storage keeps those positions in the insertion-ordered slot vector
-of `HashSlots`. Its hash index maps keys to positions in that vector.
-Validation proceeds in three steps:
-
-1. Same table pointer and version. Read the live value at the cached
-   position, as the existing field cache does.
-2. Same table pointer with a changed version, or a different table
-   pointer. Reuse the position if it still holds the cached key with a
-   live value, then refresh the cache.
-3. Otherwise, use the slow path.
-
-A table version invalidates cached positions when mutations can change
-their key bindings, for example when compaction packs the slot vector or
-reinsertion moves a tombstoned key to the back. In map storage a move to
-the back can leave a vacant slot until compaction. Tombstoning a live key
-and updating a value in place keep the position stable. Cross-receiver
-validation requires a live key match because unrelated tables can share
-the same version while holding different keys at that position.
-
-What this catches: different tables that happen to lay out the same key
-at the same ordinal (e.g. all `{id=..., value=...}` records constructed in
-the same key order). What it doesn't catch: two valid layouts with the
-same logical fields in different orders (`{id=..., value=...}` vs
-`{value=..., id=...}` will thrash). If real workloads turn out polymorphic
-across multiple layouts, a small N-way PIC is the next step rather than
-a single-slot key-position cache.
-
-How this might compare to the heavier shape-IC design depends heavily
-on workload mix and isn't yet measured. One hypothesis worth testing:
-in production scripts the bigger win comes from compile-time
-record-shape prediction (see "Compile-time table-shape prediction"
-below), which would make the runtime IC variant less load-bearing -
-but this is unsupported by dellingr's own benches today.
-
-Tried in 2026-05-06, reverted: dropping the early-exit on ptr mismatch
-in `get_cached_field` and falling through to key-at-index validation
-regressed both `same_obj_read` (+11% wall time) and `polymorphic` (+9%)
-even with the cross-receiver branch extracted to a `#[cold]`
-non-inlined fn. Two reasons it didn't pan out as written:
-
-1. Polymorphic record-shaped tables (`{id=..., value=...}`, up to 4 fields)
-   stay in `TableStorage::Inline`, whose slow path is already a
-   1-2-entry pointer-compare scan. Cross-receiver validation
-   (heap-deref + `get_index` + key cmp + `cache.set_field` write)
-   is more work than that, so it loses on Inline.
-2. Even with `#[cold]` extraction of the cross-receiver branch, the
-   extra control-flow edge in `get_cached_field` shifts LLVM's
-   inlining/register-allocation choices in the bytecode dispatch loop
-   enough to slow the same-ptr fast path. Couldn't get the hot path
-   to compile bit-exact-equal to the original.
-
-Promotion would need either (a) a real workload where polymorphic
-record-shape access is on Map-storage tables (>4 fields), where the
-slow path's hash lookup is expensive enough to amortize the extra
-work, or (b) a way to add the cross-receiver path without
-perturbing the same-ptr branch's codegen.
+Key-checked position reuse, measured and refused (fea24a2, bygg,
+2026-11-24): on a pointer mismatch, try the site's cached position in the
+new receiver (`Table::renew_slot`, which checks the key and a live value)
+before the keyed lookup. Built twice: in the outlined read and store paths
+(`get_cached_field`, `store_field`), and with the read in the dispatch
+hit path (`get_current_cached_field`). Best-of-N wall, HEAD against tree:
+outlined method_step 5707 vs 5702 ms, object_fields 3460 vs 3464,
+same_obj_read 481.6 both, method_polymorphic 2083 vs 2074, record_tables
+2155 and 2160 vs 2231 and 2234; dispatch variant record_tables 2223,
+method_step 5744, object_fields 3438. Instrumented, the resolver did get
+faster (method_step resolve_index 14 to 11 ns, store_field 21 to 16 ns), but
+no release win followed: with `HashSlots` and the forced-inline key hash a
+Map probe costs about what the position check plus the cache refill does.
+The reasoning stays at `State::get_cached_field`. Typed loop regions keep
+the form (`State::record_slot`), where the probe is the whole access.
+Untested shape that could still promote it: an own-field sweep over many
+prebuilt wide Map records (no construction or call in the kernel) where the
+per-table hash indices lose locality; register such a workload before
+retrying.
 
 The 2026-11-17 performance hunt raised this from two scopes. The lookup
 hunter's lead rewrite: own-field entries hold one `ObjectPtr` and one `SlotRef`
@@ -612,11 +574,8 @@ layouts, with a shared lookup structure for megamorphic sites. Table `version`
 cannot serve: it starts equal on unrelated tables and ignores ordinary
 additions. Risks: layout proliferation, mutation overhead, nil handling (a
 reserved nil slot needs a live check unless presence changes the guarded
-identity), and cache metadata must stay weak. Its highest-value local
-fallback is the key-checked position reuse above, through `find_keyed` and
-`value_if_key` (`table.rs`), with a checked update for writes; it insists on
-the key check, since applying a `SlotRef` to another table on a matching
-version is unsound. The table hunter's lead rewrite is the storage side:
+identity), and cache metadata must stay weak. Its local fallback,
+key-checked position reuse, is the measured refusal above. The table hunter's lead rewrite is the storage side:
 materialize each constructor's layout once in State-local runtime data, an
 instance holding a shape identity and dense values, the shape owning ordered
 names and the lookup index; small records hold values inline without repeating
@@ -633,21 +592,6 @@ positions, so conversion must preserve the logical slot history, and shared
 names need GC ownership beyond the creating bytecode's literal roots. A general
 dynamic shape-transition system is a follow-up. The host hunter noted fresh
 option tables built by hosts get nothing from identity caches either.
-
-Both conditions may now hold (2026-10-23). For (b): since f92638c the
-register VM's `reg_get_field` inlines only the same-table hit, and every
-miss goes to the outlined `State::resolve_index`, so a key-at-index check
-placed there, before the hash lookup, does not touch the hit path's
-codegen. For (a): `bench/record_tables` builds a fresh 8-field (Map)
-table per iteration and reads every field, so each read misses the
-identity cache and hashes; at a378895 (plantasjen, before the hash
-function was forced inline) `hash_table_key_value` and
-`IndexMap::get_index_of` were about 31% of its cycles, construction-side
-inserts included. That profile predates `HashSlots`. Validation must
-check the key and live value at the cached slot. A vacant slot, a
-tombstone or a different key leaves the lookup unanswered so normal
-resolution can still reach a metatable. Restricting this to Map storage
-sidesteps reason 1.
 
 ### Compiler-recognized field-update fusion
 

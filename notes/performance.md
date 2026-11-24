@@ -221,7 +221,8 @@ them:
   and heap hunter's typed arenas, with the table hunter's
   `TableStorage` footprint point.
 - `optimizations.md` "Shape-based polymorphic field IC": lookup and table
-  hunters' shared layouts, and the lookup hunter's key-checked position reuse.
+  hunters' shared layouts (the lookup hunter's key-checked position reuse
+  was measured there and refused for the field caches).
 - `optimizations.md` "Compile-time table-shape prediction": codegen hunter's
   constructor plans.
 - `optimizations.md` "Owned result buffers are copied again when interned":
