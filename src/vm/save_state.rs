@@ -74,7 +74,7 @@ use crate::det_hash::{IndexMap as DetMap, map_with_capacity};
 use super::RustFnId;
 use super::global_env::{EnvRole, SavedEnvTable};
 use super::inventory::GcRoot;
-use super::object::{GcHeap, GmatchIter, RawObject, StringPtr, Upvalue, UpvalueRef};
+use super::object::{GcHeap, GmatchIter, GmatchObject, RawObject, StringPtr, Upvalue, UpvalueRef};
 use super::rng::VmRng;
 use super::table::{InvalidTableKey, NormalizedTableKey, TableKeyInput, normalize_table_key};
 use super::{ObjectPtr, PointerIdKey, State, Val};
@@ -1378,11 +1378,15 @@ impl<'a> SaveBuilder<'a> {
                     upvalues: vec![None; captures.len()],
                 }
             }
-            RawObject::Gmatch(GmatchIter::General {
-                subject,
-                pattern,
-                pos,
-                resumed,
+            RawObject::Gmatch(GmatchObject {
+                iter:
+                    GmatchIter::General {
+                        subject,
+                        pattern,
+                        pos,
+                        resumed,
+                    },
+                ..
             }) => {
                 let (subject, pattern, pos, resumed) = (*subject, *pattern, *pos, *resumed);
                 tasks.push(EncodeTask::Value {
@@ -1406,7 +1410,10 @@ impl<'a> SaveBuilder<'a> {
                     resumed,
                 }
             }
-            RawObject::Gmatch(GmatchIter::Empty { pos, len }) => PendingObject::GmatchEmptyIter {
+            RawObject::Gmatch(GmatchObject {
+                iter: GmatchIter::Empty { pos, len },
+                ..
+            }) => PendingObject::GmatchEmptyIter {
                 pos: *pos as u64,
                 len: *len as u64,
             },
@@ -1859,7 +1866,8 @@ fn materialize_payload(
             }
             SavedObject::GmatchIter { .. } | SavedObject::GmatchEmptyIter { .. } => {
                 let iter = materialize_gmatch(obj, &strings, objects.len())?;
-                state.heap.no_gc_allocator().alloc_gmatch(iter)
+                let program = state.gmatch_program(&iter);
+                state.heap.no_gc_allocator().alloc_gmatch(iter, program)
             }
         };
         objects.push(ptr);
@@ -4544,6 +4552,38 @@ mod tests {
             max_depth,
             None,
         );
+    }
+
+    #[test]
+    fn restored_gmatch_iterators_share_one_program_per_pattern() {
+        // Load gives each iterator its program from the pattern cache, so
+        // records over one pattern share a compilation, and a leading `^`
+        // stays literal in the restored program.
+        let mut state = State::new();
+        crate::Program::compile(
+            "a = string.gmatch('x y', '%a+') b = string.gmatch('z', '%a+')
+             c = string.gmatch('^q ^r', '^%a')",
+            None,
+        )
+        .and_then(|program| state.load(&program))
+        .expect("script compiles");
+        state
+            .call(crate::ArgCount::Fixed(0), crate::RetCount::Fixed(0))
+            .expect("chunk runs");
+        let save = state.save_state().expect("state saves");
+        let mut loaded =
+            State::load_state(&save.bytes, Box::new(crate::DefaultCallbacks), no_setup)
+                .expect("save loads");
+        assert_eq!(loaded.pattern_compilations(), 2);
+        crate::Program::compile("result = a() .. b() .. c() .. c()", None)
+            .and_then(|program| loaded.load(&program))
+            .expect("script compiles");
+        loaded
+            .call(crate::ArgCount::Fixed(0), crate::RetCount::Fixed(0))
+            .expect("restored iterators run");
+        loaded.get_global("result").expect("result exists");
+        assert_eq!(loaded.to_bytes(-1).expect("string result"), b"xz^q^r");
+        assert_eq!(loaded.pattern_compilations(), 2);
     }
 
     #[test]

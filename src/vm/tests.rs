@@ -1574,6 +1574,32 @@ fn find_match_gsub_and_gmatch_share_one_compiled_pattern() {
     assert_eq!(state.pattern_compilations(), 1);
 }
 
+#[test]
+fn a_held_gmatch_program_is_shared_across_eviction() {
+    // An iterator holds its program, so evicting the cache entry neither
+    // recompiles its steps nor makes a later acquisition of the same pattern
+    // (another iterator, a find) compile a second copy.
+    let mut state = State::new();
+    // No collection may prune the cache instead of the FIFO evicting it.
+    state.gc_disable_auto();
+    let fill = crate::limits::PATTERN_CACHE_ENTRIES + 1;
+    run_lua(
+        &mut state,
+        &format!(
+            "iter = string.gmatch('a b c', '%a')
+             iter()
+             for i = 1, {fill} do string.find('x', '[x]' .. i) end
+             again = string.gmatch('a b c', '%a')
+             string.find('a', '%a')
+             iter() again()"
+        ),
+    );
+    assert_eq!(
+        state.pattern_compilations(),
+        1 + u64::try_from(fill).unwrap()
+    );
+}
+
 fn assert_argument(error: &crate::error::Error, number: isize) {
     match error.kind() {
         crate::error::ErrorKind::ArgError(arg) => assert_eq!(arg.arg_number(), number),
@@ -1598,24 +1624,10 @@ fn gmatch_string_checks_preserve_relative_indexes_in_nested_frames() {
                         .expect("non-string pattern fails"),
                     1,
                 );
-                assert_argument(
-                    &state
-                        .with_gmatch_matcher(1, 1, |_, _, _, _| ())
-                        .err()
-                        .expect("non-string subject fails"),
-                    1,
-                );
                 assert_argument(&state.to_bytes(1).unwrap_err(), 1);
                 assert_argument(&state.to_bytes(-1).unwrap_err(), -1);
                 assert_argument(&state.push_bytes_from_stack_range(1, 0..0).unwrap_err(), 1);
                 state.push_string("subject")?;
-                assert_argument(
-                    &state
-                        .with_gmatch_matcher(2, 1, |_, _, _, _| ())
-                        .err()
-                        .expect("non-string pattern fails"),
-                    1,
-                );
                 Ok(0)
             })?;
             state.push_nil()?;

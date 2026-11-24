@@ -313,6 +313,17 @@ pub(crate) enum GmatchIter {
     Empty { pos: usize, len: usize },
 }
 
+/// A gmatch iterator's heap object: the record and, for a general
+/// iterator, the compiled program of its pattern, held so a step does not
+/// resolve it again. The program is never saved; creation and load take it
+/// from the State's pattern cache, which shares one program per key among
+/// all its owners (`State::cached_pattern`). Compilation is uncharged, so
+/// holding it moves no cost.
+pub(super) struct GmatchObject {
+    pub(super) iter: GmatchIter,
+    pub(super) program: Option<crate::patterns::SharedPattern>,
+}
+
 /// The raw object data managed by GC.
 /// Tables and closures share these slots, so inline table metadata also
 /// affects closure storage. Strings use the separate StringPool and do not
@@ -329,7 +340,7 @@ pub(crate) enum GmatchIter {
 pub(super) enum RawObject {
     LuaFn(Closure),
     Table(Table),
-    Gmatch(GmatchIter),
+    Gmatch(GmatchObject),
 }
 
 impl RawObject {
@@ -770,7 +781,18 @@ impl GcHeap {
     /// The object's gmatch iterator record, if it is one.
     pub(super) fn as_gmatch(&self, ptr: ObjectPtr) -> Option<GmatchIter> {
         match self.get(ptr) {
-            RawObject::Gmatch(iter) => Some(*iter),
+            RawObject::Gmatch(object) => Some(object.iter),
+            _ => None,
+        }
+    }
+
+    /// A matcher over gmatch iterator `ptr`'s held program, if it holds one.
+    pub(super) fn gmatch_matcher(&self, ptr: ObjectPtr) -> Option<crate::patterns::LuaPattern> {
+        match self.get(ptr) {
+            RawObject::Gmatch(GmatchObject {
+                program: Some(program),
+                ..
+            }) => Some(program.matcher()),
             _ => None,
         }
     }
@@ -780,7 +802,7 @@ impl GcHeap {
     pub(super) fn set_gmatch(&mut self, ptr: ObjectPtr, iter: GmatchIter) -> bool {
         match self.get_mut(ptr).0 {
             RawObject::Gmatch(record) => {
-                *record = iter;
+                record.iter = iter;
                 true
             }
             _ => false,
@@ -908,8 +930,12 @@ impl GcHeap {
     }
 
     /// Allocate a gmatch iterator.
-    fn alloc_gmatch_raw(&mut self, iter: GmatchIter) -> ObjectPtr {
-        self.publish_object(RawObject::Gmatch(iter))
+    fn alloc_gmatch_raw(
+        &mut self,
+        iter: GmatchIter,
+        program: Option<crate::patterns::SharedPattern>,
+    ) -> ObjectPtr {
+        self.publish_object(RawObject::Gmatch(GmatchObject { iter, program }))
     }
 
     /// Allocate a new table.
@@ -1111,13 +1137,20 @@ impl GcHeap {
             RawObject::Table(tbl) => {
                 tbl.mark_values(self, worklist);
             }
-            RawObject::Gmatch(GmatchIter::General {
-                subject, pattern, ..
+            RawObject::Gmatch(GmatchObject {
+                iter:
+                    GmatchIter::General {
+                        subject, pattern, ..
+                    },
+                ..
             }) => {
                 self.mark_string(*subject);
                 self.mark_string(*pattern);
             }
-            RawObject::Gmatch(GmatchIter::Empty { .. }) => {}
+            RawObject::Gmatch(GmatchObject {
+                iter: GmatchIter::Empty { .. },
+                ..
+            }) => {}
         }
     }
 

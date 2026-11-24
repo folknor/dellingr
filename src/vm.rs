@@ -70,7 +70,7 @@ use super::error::StackFrame;
 use super::error::TypeError;
 use super::host::{DefaultCallbacks, HostCallbacks};
 use super::instr::{ArgCount, Builtin, RetCount};
-use super::patterns::{AnchorMode, LuaPattern, SharedPattern};
+use super::patterns::{AnchorMode, HeldPattern, LuaPattern, SharedPattern};
 
 use anchor::Registry;
 use global_env::{EnvRole, GlobalEnv, SuspendedEnv};
@@ -314,13 +314,18 @@ pub struct State<Tail: ?Sized = [()]> {
     /// string can need two programs. Insertion order makes eviction
     /// deterministic.
     /// It is an implementation cache only: no charge depends on residency,
-    /// a gmatch iterator holds its pattern string, not a program, and a
-    /// snapshot simply
-    /// rebuilds entries on later use. Entries are reference-counted, so an
-    /// operation that calls back into Lua (a gsub replacement function) keeps
+    /// and a snapshot rebuilds what it needs. Programs are reference-counted,
+    /// so an owner outside the cache (a gmatch iterator, which holds its
+    /// program, or a gsub matcher held across a replacement callback) keeps
     /// its program alive across GC pruning or eviction.
     patterns: IndexMap<(StringPtr, AnchorMode), PatternCacheEntry>,
     pattern_bytes: usize,
+    /// Programs that left `patterns` (evicted, or too large to enter it)
+    /// while another owner still held them, so acquiring the same key again
+    /// shares that program instead of compiling a second copy: at most one
+    /// live compilation per interned key, whatever FIFO churn does. Keys are
+    /// weak as in `patterns`, and dead entries go at the same pruning.
+    held_patterns: IndexMap<(StringPtr, AnchorMode), HeldPattern>,
     /// Test instrumentation: how many patterns the cache has compiled.
     #[cfg(test)]
     pattern_compilations: u64,
@@ -582,6 +587,7 @@ impl State {
             cost: CostState::new(costing),
             patterns: IndexMap::default(),
             pattern_bytes: 0,
+            held_patterns: IndexMap::default(),
             #[cfg(test)]
             pattern_compilations: 0,
             poisoned: false,
@@ -761,17 +767,35 @@ impl State {
     /// No caller charges for compilation itself, so residency is invisible to
     /// the cost model. Malformed pattern points are encoded in the program and
     /// raise only when a match reaches them, cached or not.
+    ///
+    /// Out of line so `gsub`, whose frame is live across its replacement
+    /// callback, does not carry the lookup's temporaries: left to the
+    /// compiler, the lookup's shape grew the release native frame of the
+    /// `gsub_pattern_*` scenarios by 32 to 48 bytes (`native_bytes_per_level`).
+    #[inline(never)]
     fn cached_pattern_at(&mut self, idx: usize, mode: AnchorMode) -> SharedPattern {
-        let val = &self.stack[idx];
-        let ptr = val
+        let ptr = self.stack[idx]
             .as_string_ptr()
             .expect("expect_string_at validated the value's string type");
-        let bytes = val
-            .as_string(&self.heap)
-            .expect("string pointer came from a string value");
+        self.cached_pattern(ptr, mode)
+    }
+
+    /// The compiled program of interned pattern `ptr` under `mode`, from
+    /// cache (see `cached_pattern_at`).
+    fn cached_pattern(&mut self, ptr: StringPtr, mode: AnchorMode) -> SharedPattern {
+        let bytes = self.heap.get_string(ptr);
         let key = (ptr, mode.effective(bytes));
         if let Some(entry) = self.patterns.get(&key) {
             return entry.pattern.clone();
+        }
+        // A program another owner still holds is shared as it is, without
+        // re-entering the FIFO: promoting it could evict the working set to
+        // keep a second reference to a program that already has an owner.
+        if let Some(held) = self.held_patterns.get(&key) {
+            if let Some(program) = held.upgrade() {
+                return program;
+            }
+            self.held_patterns.swap_remove(&key);
         }
         let pattern_len = bytes.len();
         let compiled = SharedPattern::compile(bytes, key.1);
@@ -781,17 +805,25 @@ impl State {
         }
         // The cache is only an optimization. An entry that cannot fit by
         // itself must bypass it rather than evicting every cached pattern.
+        // With the shipped tuning (the byte bound is the string-size cap and
+        // the entry bound is nonzero) no pattern string reaches this; it
+        // guards a retuned constant.
         if PATTERN_CACHE_ENTRIES == 0 || pattern_len > PATTERN_CACHE_BYTES {
+            self.held_patterns.insert(key, compiled.downgrade());
             return compiled;
         }
         while self.patterns.len() >= PATTERN_CACHE_ENTRIES
             || self.pattern_bytes.saturating_add(pattern_len) > PATTERN_CACHE_BYTES
         {
-            let (_, evicted) = self
+            let (evicted_key, evicted) = self
                 .patterns
                 .shift_remove_index(0)
                 .expect("a nonempty pattern cache has an oldest entry");
             self.pattern_bytes = self.pattern_bytes.saturating_sub(evicted.byte_len);
+            if evicted.pattern.has_other_owner() {
+                self.held_patterns
+                    .insert(evicted_key, evicted.pattern.downgrade());
+            }
         }
         self.pattern_bytes = self.pattern_bytes.saturating_add(pattern_len);
         self.patterns.insert(
@@ -812,35 +844,6 @@ impl State {
     pub(crate) fn cached_pattern_matcher(&mut self, idx: isize) -> Result<LuaPattern> {
         let idx = self.expect_string_at(idx)?;
         Ok(self.cached_pattern_at(idx, AnchorMode::Honour).matcher())
-    }
-
-    /// Run a gmatch search with the cached matcher for its pattern, in which
-    /// a leading `^` is a literal byte, as in reference `gmatch`. The matcher
-    /// is returned with the result, so the caller reads its captures in place
-    /// rather than collecting them.
-    pub(crate) fn with_gmatch_matcher<T>(
-        &mut self,
-        subject_idx: isize,
-        pattern_idx: isize,
-        operation: impl FnOnce(
-            &[u8],
-            &mut LuaPattern,
-            CostMeter<'_>,
-            &std::sync::atomic::AtomicBool,
-        ) -> T,
-    ) -> Result<(T, LuaPattern)> {
-        // Preserve the argument-type contract before touching the cache.
-        self.expect_string_at(subject_idx)?;
-        let pattern_idx = self.expect_string_at(pattern_idx)?;
-        let mut matcher = self
-            .cached_pattern_at(pattern_idx, AnchorMode::Literal)
-            .matcher();
-        let result = self.with_string_arg(
-            &StringArg::Slot(subject_idx),
-            Charge::StringGmatch,
-            |subject, meter, interrupt| operation(subject, &mut matcher, meter, interrupt),
-        )?;
-        Ok((result, matcher))
     }
 
     /// The Rust step a call of `val` runs when `val` is a `string.gmatch`
@@ -883,9 +886,45 @@ impl State {
     /// straight into the checked slot.
     pub(crate) fn push_gmatch(&mut self, iter: GmatchIter) -> Result<()> {
         self.check_stack_space(1)?;
-        let ptr = self.allocator().alloc_gmatch(iter);
+        let program = self.gmatch_program(&iter);
+        let ptr = self.allocator().alloc_gmatch(iter, program);
         self.push_unchecked(Val::Obj(ptr));
         Ok(())
+    }
+
+    /// The program a general gmatch record runs: its pattern compiled with a
+    /// leading `^` literal, from the shared cache. Uncharged, as every
+    /// compilation is.
+    pub(super) fn gmatch_program(&mut self, iter: &GmatchIter) -> Option<SharedPattern> {
+        let GmatchIter::General { pattern, .. } = *iter else {
+            return None;
+        };
+        Some(self.cached_pattern(pattern, AnchorMode::Literal))
+    }
+
+    /// Run a gmatch search of the subject at 1-based stack index
+    /// `subject_idx` with gmatch iterator `iterator`'s held program.
+    pub(crate) fn with_gmatch_program<T>(
+        &mut self,
+        iterator: ObjectPtr,
+        subject_idx: isize,
+        operation: impl FnOnce(
+            &[u8],
+            &mut LuaPattern,
+            CostMeter<'_>,
+            &std::sync::atomic::AtomicBool,
+        ) -> T,
+    ) -> Result<(T, LuaPattern)> {
+        let mut matcher = self
+            .heap
+            .gmatch_matcher(iterator)
+            .expect("a general gmatch iterator holds its program");
+        let result = self.with_string_arg(
+            &StringArg::Slot(subject_idx),
+            Charge::StringGmatch,
+            |subject, meter, interrupt| operation(subject, &mut matcher, meter, interrupt),
+        )?;
+        Ok((result, matcher))
     }
 
     /// The pushable string value of a gmatch record's string.

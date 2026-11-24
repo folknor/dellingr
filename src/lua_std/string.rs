@@ -1054,8 +1054,8 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         // is interned here, the one pattern function whose state keeps it
         // beyond the call. Both stay rooted on the stack until the iterator,
         // which roots them from then on, is published. The pattern is kept
-        // as given: a leading `^` is literal because the step compiles it
-        // under `AnchorMode::Literal`.
+        // as given: a leading `^` is literal because `push_gmatch` takes the
+        // iterator's program from the cache under `AnchorMode::Literal`.
         state.set_top(2)?;
         state.push_string_arg(&s)?;
         state.push_string_arg(&pattern)?;
@@ -1364,7 +1364,11 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
 /// checks a saved one against the bounds `GmatchIter` documents. A step
 /// stages every result first and commits the advanced record last, so a
 /// refused push or an interrupted or refused match leaves the iterator where
-/// it was and a later call retries the same match.
+/// it was and a later call retries the same match. A refusal after the step
+/// returns is not the step's: a host call with a fixed result count that
+/// fails the stack cap while padding the results (`finish_call`) leaves the
+/// committed advance, as `State::call` documents for every callee's writes,
+/// so a retry sees the next match.
 pub(super) fn gmatch_step(state: &mut State) -> Result<u8> {
     let Some((iterator, record)) = state.gmatch_at(1) else {
         return Err(state.library_error(LibraryError::NotAGmatchIterator));
@@ -1399,14 +1403,17 @@ pub(super) fn gmatch_step(state: &mut State) -> Result<u8> {
     // every accepted match leaves the iterator at its end, and a fresh one
     // has none.
     let lastmatch = resumed.then_some(pos);
-    // The subject and pattern go into slots 2 and 3 for the matcher and the
-    // capture pushes, which read them from the stack.
+    // The subject goes into slot 2 for the search and the capture pushes,
+    // which read it from the stack. The iterator holds its compiled program,
+    // so nothing reads the pattern in slot 3; it is pushed anyway so the
+    // step's stack footprint, and with it where a call at the stack cap is
+    // refused, stays as it was when the matcher looked the program up there.
     state.set_top(1)?;
     state.push_string_ptr(subject)?;
     state.push_string_ptr(pattern)?;
 
     let (matched, matcher) =
-        state.with_gmatch_matcher(2, 3, |subject, matcher, mut meter, interrupt| {
+        state.with_gmatch_program(iterator, 2, |subject, matcher, mut meter, interrupt| {
             // Lua 5.4 semantics: an empty match ending where the previous accepted
             // match ended is rejected and the scan resumes one byte later, so
             // `gmatch("abc", "%a*")` yields only "abc", not 5.2's "abc" then "".

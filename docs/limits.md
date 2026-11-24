@@ -133,7 +133,12 @@ These values preserve the current Lua library behavior and error paths:
 `PATTERN_CACHE_ENTRIES`, `PATTERN_CACHE_BYTES`, and `COST_CHECK_INTERVAL`
 are available through `dellingr::limits`. The cache values bound the per-State
 compiled-pattern cache shared by `string.find`, `string.match`, `string.gsub`
-and `string.gmatch`.
+and `string.gmatch`. A `string.gmatch` iterator also holds its own compiled
+program while it lives, outside that bound; the cache shares one program per
+pattern string and anchoring among all its holders (a pattern with a leading
+`^` can have two: literal for `gmatch`, anchored for the others), so
+iterator-held programs grow only with the distinct pattern strings live
+iterators keep.
 `COST_CHECK_INTERVAL` is the internal opcode-cost batching interval. These are
 implementation tuning values, not additional script-level resource limits.
 

@@ -133,6 +133,25 @@ moved the same way, but each delta is inside the layout noise floor, so
 this records no attributed speedup; `state_new_us` in the records fell
 from about 42 to 28 us.
 
+## gmatch iterators hold their compiled program, 2026-11-24
+
+A gmatch step used to resolve its program from the pattern cache on every
+call (a hash lookup, an Arc clone and two string checks); the iterator
+object now holds the program, taken from the cache at creation or load.
+Release wall on bygg, `brokkr bench wall` best of 3 in ms, both arms built
+with `--commit`, two interleaved pairs, against the parent dbf3841:
+
+| Workload | dbf3841 | Change |
+|---|---|---|
+| `gmatch_bytes` | 4765, 4648 | 4467, 4221 |
+| `failed_scan` | 966, 955 | 932, 925 |
+| `patterns` | 775, 779 | 769, 764 |
+
+`gmatch_bytes` is a probe of one-byte successful steps, so its ratio
+overstates the effect on real scripts. No same-binary control was run; the
+`patterns` delta is inside the layout spread. Every `native_bytes_per_level`
+row is unchanged once `cached_pattern_at` is kept out of line.
+
 ## Typed gmatch iterators, 2026-11-24
 
 A `string.gmatch` iterator became a typed heap object (`GmatchIter`) whose

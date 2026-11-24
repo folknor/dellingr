@@ -227,8 +227,8 @@ marker, which is the quickest way to see what a change touched.
 The recurring native stack of each scenario's cycle, as printed by the
 on-demand probe `brokkr test native_bytes_per_level`, which covers dev and
 release through the sweeps configured in `brokkr.toml`. Measured on the
-commit that gives `GET_TABLE` its key-position hint, on top of 0cc99ec, on
-bygg (x86-64 Linux) with
+commit that gives `string.gmatch` iterators their compiled programs, on top
+of dbf3841 (whose rows match it), on bygg (x86-64 Linux) with
 `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` and that host's global Cargo
 configuration. Release is Cargo's default release profile (the repository
 sets no overrides). Dev's default and snapshot builds agree in every row;
@@ -273,7 +273,7 @@ separately.
 | `tostring` | 12192 | 1120 | 1120 |
 | `print` | 12704 | 1296 | 1296 |
 | `format` | 13616 | 1408 | 1408 |
-| `error_tostring` | 12896 | 1408 | 1424 |
+| `error_tostring` | 12896 | 1392 | 1408 |
 | `sort_comparator` | 14016 | 1456 | 1456 |
 | `sort_comparator_right` | 14016 | 1456 | 1456 |
 | `sort_comparator_sortdown` | 14016 | 1456 | 1456 |

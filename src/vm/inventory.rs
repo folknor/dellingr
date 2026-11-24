@@ -24,7 +24,7 @@ use super::object::{GcHeap, ObjectPtr, StringPtr, UpvaluePool, UpvalueRef};
 use super::{CallInfo, IndexMap, PatternCacheEntry, PointerIdKey, RustFnId, State, Val};
 use crate::compiler::Bytecode;
 use crate::limits::tuning;
-use crate::patterns::AnchorMode;
+use crate::patterns::{AnchorMode, HeldPattern};
 
 /// Execution-lifetime state: what a call in progress holds, and nothing that
 /// outlives it. Every field is at its [`InFlight::new`] value once the
@@ -218,6 +218,7 @@ pub(super) enum WeakTable<'a> {
     Patterns {
         entries: &'a mut IndexMap<(StringPtr, AnchorMode), PatternCacheEntry>,
         byte_count: &'a mut usize,
+        held: &'a mut IndexMap<(StringPtr, AnchorMode), HeldPattern>,
     },
     /// Stable `%p` identities keyed by heap handles.
     FormatPointerIds(&'a mut IndexMap<PointerIdKey, u64>),
@@ -230,6 +231,7 @@ impl WeakTable<'_> {
             WeakTable::Patterns {
                 entries,
                 byte_count,
+                held,
             } => {
                 // Pattern keys are weak. Prune before any allocation can reuse
                 // a swept string slot; retain preserves insertion order, so
@@ -243,6 +245,11 @@ impl WeakTable<'_> {
                     live
                 });
                 *byte_count = pattern_bytes;
+                // A held program dies with its last owner; its key string
+                // may outlive it, so liveness of either ends the entry.
+                held.retain(|(ptr, _), program| {
+                    !program.is_dead() && heap.val_is_live(&Val::Str(*ptr))
+                });
             }
             WeakTable::FormatPointerIds(entries) => {
                 // These entries are deliberately not GC roots. An entry whose
@@ -288,6 +295,7 @@ impl State {
             cost: _,
             patterns,
             pattern_bytes,
+            held_patterns,
             #[cfg(test)]
                 pattern_compilations: _,
             poisoned: _,
@@ -306,6 +314,7 @@ impl State {
             WeakTable::Patterns {
                 entries: patterns,
                 byte_count: pattern_bytes,
+                held: held_patterns,
             },
             heap,
         ));
@@ -335,6 +344,7 @@ impl State {
             cost: _,         // Counters only.
             patterns: _,     // Weak: pruned by for_each_gc_cleanup after sweep.
             pattern_bytes: _,
+            held_patterns: _, // Weak twice over: pruned with `patterns`.
             #[cfg(test)]
                 pattern_compilations: _,
             poisoned: _,
@@ -409,6 +419,7 @@ impl State {
             cost: _,
             patterns: _,
             pattern_bytes: _,
+            held_patterns: _,
             #[cfg(test)]
                 pattern_compilations: _,
             poisoned: _, // Checked separately, before any rest-state question.

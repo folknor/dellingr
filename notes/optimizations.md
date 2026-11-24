@@ -808,33 +808,31 @@ allocator-call counts were taken.
 
 ### gmatch iterator residue after the typed iterator
 
-The typed iterator (`GmatchIter`, 2026-11-24, `reference/performance.md`
-"Typed gmatch iterators") replaced the wrapper chunk and state table. Left
-open from that work:
+The typed iterator (`GmatchIter`, `reference/performance.md` "Typed gmatch
+iterators") now holds its compiled program ("gmatch iterators hold their
+compiled program"). Left open:
 
 - A failed search does not record exhaustion, so calling an exhausted-by-miss
   iterator again rescans the remaining suffix and recharges its steps, as
-  reference `gmatch_aux` does. Recording it would change costs and the saved
-  record, so it is a cost-model decision, not a cleanup.
-- The pattern cache's byte limit counts source bytes; a pattern over
-  `PATTERN_CACHE_BYTES` bypasses the cache and is recompiled on every step.
-  Holding the compiled program in the iterator would fix that, but the
-  record would then carry a non-saved cache that load must rebuild.
+  reference `gmatch_aux` does. Proposal for the user (a cost-model decision,
+  not landed): commit the already-admitted exhausted state, `pos = len + 1`
+  with `resumed = false`, only on a completed miss (a terminal rejected empty
+  match included); interrupts, budget refusals and malformed-pattern errors
+  keep leaving the cursor unchanged. No snapshot format change is needed,
+  since load already admits that state, but it changes the cost of a repeat
+  call after a miss (a `COST_MODEL_VERSION` bump, folded into the unreleased
+  version 9 if that is still open) and the saved values of iterators
+  exhausted by a miss, both replay-visible.
 - The iterator's dispatch arms grew the dev-build native frame of re-entry
-  through `begin_call` and `instr_tfor_call` by 96 to 256 bytes a level
-  (release: +16 on the index-key scenarios, -16 on `host_invoke`). Outlining
-  `State::gmatch_step_of` made release worse (+16 to +48), and a second
-  `invoke_rust_fn` call site in `instr_tfor_call` cost release 160; the
-  committed shape is the best of the three tried, and the dev growth is
-  unexplained.
-- Not performance, recorded here with the rest: a host call of an iterator
-  with a fixed result count larger than its results can commit the step and
-  then fail the stack cap while `finish_call` pads, so a retry sees the next
-  match. The wrapper had the same gap; the step's own refusals leave the
-  iterator unchanged, the host call's padding does not.
-- `gmatch_bytes` (registered 2026-11-24) isolates a gmatch loop over many
-  one-byte matches; no measurement of the typed iterator on it is recorded
-  yet.
+  through `begin_call` and `instr_tfor_call` by 96 to 256 bytes a level when
+  the typed iterator landed. Outlining `State::gmatch_step_of` and a second
+  `invoke_rust_fn` site were tried and made release worse. Untried: one
+  borrowed object classification in `begin_call` (and the `__call` chain
+  path) that yields either the Lua case or the gmatch step, instead of
+  probing the object twice. The dev growth itself is unexplained.
+- The pattern cache shares one program per interned key among its owners
+  (a weak index of programs evicted while still held), but a number pattern
+  coerced to a string has no interned key and still compiles on every call.
 
 ---
 

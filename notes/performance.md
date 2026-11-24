@@ -235,8 +235,9 @@ them:
 - `optimizations.md` "Short owned string results still allocate in
   their producer": the heap hunter's checked builder residue.
 - `optimizations.md` "gmatch iterator residue after the typed iterator":
-  strings hunter's failed-search exhaustion and pattern-cache sizing (the
-  native iterator itself landed).
+  the failed-search exhaustion proposal (a cost-model decision), the
+  unexplained dev frame growth, and uncached number patterns (the native
+  iterator and its held program landed).
 - `optimizations.md` "`string.format` cached plan": strings hunter's cached format plan.
 - `todo.md` "Sparse storage for the array part's stragglers": table hunter's
   numeric storage separated from the logical array boundary.

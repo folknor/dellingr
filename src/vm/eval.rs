@@ -451,7 +451,11 @@ impl State {
     /// Adjust a completed call's results to a fixed count: surplus results
     /// are dropped, missing ones are nil, and only the padding is checked
     /// against the stack cap. Chain owners have already released their
-    /// units; any padding error propagates to the boundary or unwind.
+    /// units; any padding error propagates to the boundary or unwind. The
+    /// callee has already run, so its writes (a gmatch iterator's advance
+    /// included) survive that error, as `State::call` documents; a preflight
+    /// of the padded window was considered and not taken, since it would
+    /// change error precedence and cleanup for every fixed-count call.
     ///
     /// A matching count, the common case, skips the resize entirely. Without
     /// that test the composite `benchmark` workload measured about 2% slower

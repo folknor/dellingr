@@ -36,8 +36,12 @@ impl NoGcAllocator<'_> {
         self.heap.alloc_table_raw()
     }
 
-    pub(in crate::vm) fn alloc_gmatch(self, iter: super::GmatchIter) -> ObjectPtr {
-        self.heap.alloc_gmatch_raw(iter)
+    pub(in crate::vm) fn alloc_gmatch(
+        self,
+        iter: super::GmatchIter,
+        program: Option<crate::patterns::SharedPattern>,
+    ) -> ObjectPtr {
+        self.heap.alloc_gmatch_raw(iter, program)
     }
 
     pub(in crate::vm) fn alloc_table_with_capacity(self, capacity: usize) -> ObjectPtr {
@@ -295,5 +299,36 @@ mod tests {
         state.gc_collect();
         assert!(state.patterns.is_empty());
         assert_eq!(state.pattern_bytes, 0);
+    }
+
+    #[test]
+    fn an_evicted_program_with_another_owner_is_shared_not_recompiled() {
+        let mut state = State::new();
+        state.gc_disable_auto();
+        state.push_string("held pattern").unwrap();
+        let held = state.cached_pattern_at(0, AnchorMode::Honour);
+        let key = *state.patterns.get_index(0).unwrap().0;
+        for index in 1..=PATTERN_CACHE_ENTRIES {
+            state.push_string(format!("pattern{index}")).unwrap();
+            state.cached_pattern_at(index, AnchorMode::Honour);
+        }
+        assert!(!state.patterns.contains_key(&key));
+        assert!(state.held_patterns.contains_key(&key));
+
+        // A weak hit shares the held program and leaves the FIFO alone.
+        let keys: Vec<_> = state.patterns.keys().copied().collect();
+        let bytes = state.pattern_bytes;
+        let compilations = state.pattern_compilations();
+        state.cached_pattern_at(0, AnchorMode::Honour);
+        assert_eq!(state.pattern_compilations(), compilations);
+        assert_eq!(state.patterns.keys().copied().collect::<Vec<_>>(), keys);
+        assert_eq!(state.pattern_bytes, bytes);
+
+        // With its last owner gone the entry is pruned, though its key
+        // string is still live on the stack.
+        drop(held);
+        state.gc_collect();
+        assert!(!state.held_patterns.contains_key(&key));
+        assert!(state.held_patterns.is_empty());
     }
 }

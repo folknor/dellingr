@@ -63,6 +63,32 @@ impl SharedPattern {
     pub(crate) fn matcher(&self) -> LuaPattern {
         LuaPattern::from_compiled(Arc::clone(&self.0))
     }
+
+    /// Whether anything besides this handle owns the program (an iterator, a
+    /// matcher held across a callback).
+    pub(crate) fn has_other_owner(&self) -> bool {
+        Arc::strong_count(&self.0) > 1
+    }
+
+    /// A handle that finds this program while some other owner keeps it.
+    pub(crate) fn downgrade(&self) -> HeldPattern {
+        HeldPattern(Arc::downgrade(&self.0))
+    }
+}
+
+/// A non-owning handle on a compiled program (`SharedPattern::downgrade`).
+pub(crate) struct HeldPattern(std::sync::Weak<CompiledPattern>);
+
+impl HeldPattern {
+    /// The program, if an owner still keeps it.
+    pub(crate) fn upgrade(&self) -> Option<SharedPattern> {
+        self.0.upgrade().map(SharedPattern)
+    }
+
+    /// Whether every owner has dropped the program.
+    pub(crate) fn is_dead(&self) -> bool {
+        self.0.strong_count() == 0
+    }
 }
 
 /// A compiled Lua string pattern and the captures from the latest match.
