@@ -962,17 +962,26 @@ finishes. It moves work into the closure tracer and leaves the literal-root
 visit and the map `retain`, so it pays only on states whose retained
 runtimes mostly have nested prototypes; no workload has that shape.
 
-### `ipairs` regions decline record values and three or more variables
+### `State::invoke` computes each result's type before converting it (2026-11-24)
 
-Typed `ipairs` regions (`NumericLoop::recognize_ipairs`) take bodies whose
-value is a number or unread. The main game shape, `for _, u in
-ipairs(units) do u.x = u.x + u.vx end`, still runs canonically: the step
-would define the record, so it would cross the back edge, against the
-record rule (a record is defined earlier in the same pass). A candidate
-from the spar: a body-entry operation that re-establishes a fresh record
-from the yielded stack slot every pass, so no record fact rides the back
-edge. Loops with three or more variables are declined (the extra ones are
-nil every step). Not measured on a workload with records.
+`decode_with` (`src/vm/invoke.rs`) evaluates `val.typ(&state.heap)` on every
+decoded result, though only the error mapping uses it; for a string or
+object result that is a heap read on the success path, which the stack
+form's `to_number` does only on failure. Moving it into the `map_err` closure
+is mechanical. Unmeasured; `invoke_typed` decodes one number per call, where
+the type is a tag match, so no registered scenario would show it.
+
+### `ipairs` regions: eager record bind, three or more variables (2026-11-24)
+
+A typed `ipairs` region whose body uses the value as a record binds it at
+the pass's first operation (`OpKind::Bind`), so a value that is no table
+hands the rest of the loop back even on a pass whose path never touches
+it (`if i ~= 2 then s = s + u.x end` over `{ {x=1}, false, {x=3} }`), and
+the key-1 entry rule means no retry. A guard at the first consuming
+operation on each path would take such mixed arrays; it needs a per-path
+"bound" fact the solver lacks. No workload holds such an array. Loops with
+three or more variables are still declined (the extra ones are nil every
+step).
 
 ### `numeric_index` cycle residue after the head split (2026-11-24)
 

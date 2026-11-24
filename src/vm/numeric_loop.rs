@@ -129,7 +129,12 @@
 //!   as a number that is none resumes canonical dispatch at `TFOR_CALL`,
 //!   which only read. The value holds a mirror slot only when the body
 //!   names it; otherwise any value goes to the stack. Both instructions are
-//!   free, so charges are the body's.
+//!   free, so charges are the body's. A value the body uses as a record
+//!   (`for _, u in ipairs(us) do u.x = u.x + u.vx end`) is bound afresh
+//!   from its stack slot by the pass's first operation (`OpKind::Bind`),
+//!   so the record is defined in its own pass like any other and no record
+//!   fact crosses the back edge; a value that is no table exits there,
+//!   before the pass has run anything.
 //!
 //! Why a numeric leaf is exact: see `State::try_numeric_leaf`.
 
@@ -199,7 +204,8 @@ enum Head {
     /// only, never written by the body), then the control and the key in
     /// mirror slots 0 and 1, then the value when `vars` is 2. The value has
     /// mirror slot `value` when the body names it as a number, and must
-    /// then be a number; otherwise it goes to the stack as any value.
+    /// then be a number; otherwise it goes to the stack as any value, where
+    /// a body using it as a record binds it (`OpKind::Bind`).
     Ipairs {
         base: u16,
         vars: u8,
@@ -573,6 +579,13 @@ enum OpKind {
     /// into record `a`, exiting to canonical dispatch unless it is a table.
     /// Writes no mirror slot.
     Record,
+    /// An `ipairs` body's first operation when the body uses the value as a
+    /// record: binds record `a` to the table the step left in the value
+    /// register on the stack, exiting to canonical dispatch at the body's
+    /// first instruction unless it is a table. Free, and writes no mirror
+    /// slot, so the record is defined in its own pass and no record fact
+    /// rides the back edge.
+    Bind,
     /// A loop's raw read of record site `b` into slot `a`, exiting to
     /// canonical dispatch unless it is a live number.
     RecordRead,
@@ -2105,6 +2118,17 @@ impl NumericLoop {
         if vars == 2 && value.is_none() {
             return None;
         }
+        // A value some body instruction uses as a field receiver is bound as
+        // a record at the body's first operation (`OpKind::Bind`). The
+        // dataflow checks every use again; this only selects the form.
+        let bind = value.filter(|&value| {
+            code[body_pc..call].iter().any(|inst| match inst.opcode() {
+                Instr::OP_GET_FIELD | Instr::OP_SELF => inst.b() == value,
+                Instr::OP_SET_FIELD => inst.a() == value,
+                Instr::OP_GET_TABLE => inst.b() == value && inst.c() != value,
+                _ => false,
+            })
+        });
         let mut seed = None;
         let mut heads = Vec::new();
         // bounded: at most MAX_SCANS scans of one region
@@ -2118,7 +2142,33 @@ impl NumericLoop {
             layout.fact(key)?;
             layout.cur = layout.at_head(body_pc, Facts::ENTRY);
             layout.outer_entry = layout.cur;
+            if let Some(value) = bind {
+                // Record 0, defined here on every pass: the taken edge
+                // below kills the value's record facts, as for any record.
+                if !layout.frozen {
+                    layout.records.push(value);
+                }
+                let id = layout.record_id(value)?;
+                let fact = layout.fact(value)?;
+                let bit = 1u64 << fact;
+                layout.cur = layout.cur.wrote(fact);
+                layout.cur.rmust |= bit;
+                layout.cur.rmay |= bit;
+                layout.note_write(value);
+                layout.ops.push(LoopOp {
+                    kind: OpKind::Bind,
+                    a: id as u8,
+                    b: 0,
+                    c: 0,
+                });
+                layout.charges.push((body_pc, 0));
+            }
             layout.scan(bytecode, cost, body_pc, Some(call), Mode::Region)?;
+            // A bound value is never a number: the step must store it to
+            // the stack as any value.
+            if bind.is_some_and(|value| layout.registers.contains(&value)) {
+                return None;
+            }
             layout.read(control)?;
             let mut taken = layout.written_facts(layout.cur, &[control, key])?;
             if let Some(value) = value {
@@ -2676,7 +2726,8 @@ impl State {
     }
 
     /// `run_numeric_loop` for a body with forward branches, indexed reads,
-    /// records, nested loops or method calls on a record. The operations
+    /// records, nested loops or method calls on a record, and for every
+    /// `ipairs` region, whose step can leave the loop. The operations
     /// run by index, a branch or jump moving the index forward to its
     /// target, a nested loop's taken back edge moving it back.
     ///
@@ -2768,9 +2819,23 @@ impl State {
     /// must hold a number before the leaf runs, else the region exits at
     /// the `CALL`. In a fast segment a method's leaf weight joins the bound
     /// (`weight` still bounds what remains), else the segment turns
-    /// per-operation. Cached metatables and methods stay reachable through
-    /// the receivers, which the entry-resolved tables hold by number keys
-    /// no region store can replace, and nothing allocates.
+    /// per-operation. A cached entry is used only when its metatable handle
+    /// is the live metatable of this pass's receiver, and nothing in the
+    /// region allocates, so no handle is recycled during a run: an entry
+    /// whose metatable died can match no later receiver, and a matched one
+    /// reaches its method through the same protected route. (A receiver
+    /// need not stay reachable: an `ipairs` record bound from key 1 may
+    /// have come from the iterator callback through `__index`, owned by no
+    /// table, and dies once the step replaces it.)
+    ///
+    /// The `ipairs` head (`IPAIRS`): each pass ends in `State::ipairs_step`
+    /// on the table resolved at entry instead of `FOR_LOOP`, as the module
+    /// comment says. A body using the value as a record starts with
+    /// `OpKind::Bind`, which binds the record from the value the step left
+    /// on the stack, or exits at the body's first instruction, before
+    /// anything of the pass ran or was charged. Record stores overwrite
+    /// live string-keyed slots, so they never change an element the step
+    /// reads.
     #[inline(never)]
     fn run_control_region<
         const RECORDS: bool,
@@ -2975,6 +3040,24 @@ impl State {
                                 written &= !(1 << slot);
                                 published &= !(1 << slot);
                             }
+                        }
+                        // The step's value, already on the stack and rooted
+                        // there. A pass that cannot bind it has run and
+                        // charged nothing, so canonical dispatch runs the
+                        // whole pass from its first instruction.
+                        OpKind::Bind if RECORDS && IPAIRS => {
+                            let id = usize::from(op.a) % MAX_RECORDS;
+                            let (register, _) = body.records[id];
+                            let value = self.stack[base + usize::from(register)];
+                            let Val::Obj(record) = value else {
+                                *ip = region.body_pc;
+                                break 'pass Ok(());
+                            };
+                            if self.heap.as_table_ref(record).is_none() {
+                                *ip = region.body_pc;
+                                break 'pass Ok(());
+                            }
+                            records[id] = Some(record);
                         }
                         OpKind::RecordRead if RECORDS => {
                             let site = usize::from(op.b) % MAX_RECORD_SITES;
@@ -4220,6 +4303,7 @@ fn eval(op: &LoopOp, x: &[f64; MIRROR_SLOTS]) -> f64 {
         | OpKind::Jump
         | OpKind::Index
         | OpKind::Record
+        | OpKind::Bind
         | OpKind::RecordRead
         | OpKind::RecordStore
         | OpKind::Prep
@@ -4354,14 +4438,19 @@ mod tests {
             "local function f(t) local n = 0 for i, v in ipairs(t) do n = n + 1 end return n end",
             "local function f(t, u) local s = 0 for _, v in ipairs(t) do if v > 2 then s = s + u[v] end end return s end",
             "local function f(t) local s = 0 for _, v in ipairs(t) do for j = 1, 3 do s = s + v * j end end return s end",
+            // The value as a record, bound afresh every pass.
+            "local function f(t) local s = 0 for _, v in ipairs(t) do s = s + v.x end return s end",
+            "local function f(us) for _, u in ipairs(us) do u.x = u.x + u.vx end end",
+            "local function f(us, k) local s = 0 for i, u in ipairs(us) do if i > 1 then u.x = u[k] + i end s = s + u.x end return s end",
         ] {
             assert_eq!(ipairs_regions(source), 1, "{source}");
         }
         for source in [
-            // Three variables; a value used as a table, which the step
-            // replaces, so it is no receiver read once at entry.
+            // Three variables.
             "local function f(t) local s = 0 for a, b, c in ipairs(t) do s = s + b end return s end",
-            "local function f(t) local s = 0 for _, v in ipairs(t) do s = s + v.x end return s end",
+            // A value used both as a record and as a number.
+            "local function f(t) local s = 0 for _, v in ipairs(t) do s = s + v.x + v end return s end",
+            "local function f(t) local s = 0 for _, v in ipairs(t) do s = s + v.x v = 1 end return s end",
             // A break leaves the body.
             "local function f(t) local s = 0 for _, v in ipairs(t) do if v > 3 then break end s = s + v end return s end",
         ] {

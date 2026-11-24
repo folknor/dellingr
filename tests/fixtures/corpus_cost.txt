@@ -99,6 +99,7 @@ examples/tables.lua|3666b4f7ff5597640e492bc67e0c39f7|559
 examples/tables/column_key.lua|0201e96abe255a8931d80fff77ee9626|3964992
 examples/tables/deep_stack.lua|dc5dc7e1d88b81db121a650647df800a|311098
 examples/tables/fill.lua|79bb664bac707da02ad807c7e4f71f39|1837394
+examples/tables/ipairs_store.lua|b0f2305cd2412181deb28058d4056dc6|2627459
 examples/tables/key_sweep.lua|7221c87ea2e3167b3c095fe047770024|7878902
 examples/tables/metamethod_sequence.lua|61159dd099badf6846209df171c4c4b4|137
 examples/tables/mixed.lua|6e1fda379524dfc494ccfb5ea41cb501|2752394

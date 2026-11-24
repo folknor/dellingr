@@ -236,7 +236,10 @@ tick budgets and re-record replays.
   19 to about 6 ns an element. Iteration order, results, charges, poll
   points and collection points are unchanged; a value that is not a number,
   a hole under `__index` or an invalid control hands the rest of the loop
-  back to the ordinary step.
+  back to the ordinary step. A body using the value as a record
+  (`for _, u in ipairs(units) do u.x = u.x + u.vx end`, method calls on `u`
+  included) runs as a region too; a value that is not a table hands the
+  rest of the loop back at the start of its pass. Not replay-visible.
 - Added `memchr` as a direct dependency for byte searches in string
   formatting, plain pattern searches, replacement strings, and numeral
   diagnostics. String results and charges are unchanged.

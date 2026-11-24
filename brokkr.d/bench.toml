@@ -355,6 +355,10 @@ xxhash = "6a250ed9c87281705bfbd765d4d22e2e"
 file = "bench/ipairs.lua"
 xxhash = "4e40448227144ba7e5534db07cff7027"
 
+[data.workloads.bench.ipairs_store]
+file = "bench/ipairs_store.lua"
+xxhash = "9da9d7a6c4707e9e41fa9017b156f7d5"
+
 [data.workloads.bench.wide_sweep]
 file = "bench/wide_sweep.lua"
 xxhash = "fb93e1b1addad5f3e36e0a505bbda654"
@@ -614,6 +618,10 @@ xxhash = "e9c83a5f4ee78010eb0182c070505bb5"
 [data.workloads.hotpath.ipairs]
 file = "examples/iter/ipairs.lua"
 xxhash = "1f76763948be94b1f947304ac85c82ff"
+
+[data.workloads.hotpath.ipairs_store]
+file = "examples/tables/ipairs_store.lua"
+xxhash = "b0f2305cd2412181deb28058d4056dc6"
 
 [data.workloads.hotpath.wide_sweep]
 file = "examples/fields/wide_sweep.lua"

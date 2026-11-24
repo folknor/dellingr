@@ -34,10 +34,24 @@ fn region_program(twin: &str) -> String {
 /// Outcome of `run()` under `budget`: whether it completed, the meter, and
 /// what the captured locals hold afterwards.
 fn region_outcome(model: &CostModel, source: &str, budget: i64) -> (bool, u64, [f64; 3]) {
+    region_outcome_at(model, source, budget, None)
+}
+
+/// `region_outcome` with the host-set GC threshold `gc_threshold`: 1
+/// collects at every back-edge checkpoint.
+fn region_outcome_at(
+    model: &CostModel,
+    source: &str,
+    budget: i64,
+    gc_threshold: Option<usize>,
+) -> (bool, u64, [f64; 3]) {
     let mut state = State::builder()
         .costing(Costing::Metered(model.clone()))
         .build();
     support::run(&mut state, source);
+    if let Some(threshold) = gc_threshold {
+        state.gc_set_threshold(threshold);
+    }
     state.set_cost_budget(budget).expect("the State is metered");
     state.get_global("run").expect("run is defined");
     let completed = match state.call(ArgCount::Fixed(0), RetCount::Fixed(1)) {
@@ -939,6 +953,99 @@ fn numeric_loop_region_with_records_matches_canonical_dispatch_at_every_budget()
                 region_outcome(model, &canonical, budget),
                 "budget {budget} under {model:?}"
             );
+        }
+    }
+}
+
+/// `ipairs` loops whose value is a record, bound afresh every pass. Key 1
+/// is a raw miss answered by `__index` with a fresh receiver of a fresh
+/// class, which dies once the step replaces it; record 6 inherits `x`, so
+/// its first store exits before its charge; record 7 is the iterated table
+/// itself; from the second round key 5 holds `true`, which the body skips
+/// but the bind refuses, handing the rest of that loop back. Run with a
+/// collection at every checkpoint too.
+fn ipairs_record_program(twin: &str) -> String {
+    format!(
+        r#"
+        local up = 0
+        local stats = {{ calls = 0 }}
+        local Unit = {{ x = 0.5 }}
+        Unit.__index = Unit
+        function Unit:speed() return self.vx * 2 end
+        local Ghost = {{}}
+        Ghost.__index = Ghost
+        function Ghost:speed() stats.calls = stats.calls + 1 return 1 end
+        local Src = {{}}
+        Src.__index = function(t, key)
+            if key == 1 then
+                local class = {{}}
+                class.__index = {{ speed = function(self) return self.vx + 0.5 end }}
+                return setmetatable({{ x = 100, vx = 3 }}, class)
+            end
+        end
+        function run()
+            local sum, k = 0.5, 0
+            local us
+            peek = function()
+                local c = 0
+                for i = 2, 10 do
+                    local u = us and rawget(us, i)
+                    if u and u ~= true then c = c + (rawget(u, "x") or 0) * i end
+                end
+                return sum, c + k, stats.calls
+            end
+            us = setmetatable({{}}, Src)
+            for i = 2, 10 do
+                us[i] = setmetatable({{ x = i, vx = i % 3 }}, i % 4 == 0 and Ghost or Unit)
+            end
+            us[6] = setmetatable({{ vx = 1 }}, Unit)
+            us.x, us.vx = 1, 2
+            for round = 1, 3 do
+                if round == 2 then us[5] = true end
+                us[7] = nil
+                for i, u in ipairs(us) do
+                    if i ~= 5 then
+                        u.x = u.x + u.vx
+                        sum = sum + u:speed()
+                    end
+                    k = k + i
+                    {twin}
+                end
+                us[7] = us
+                for i, u in ipairs(us) do
+                    if i ~= 5 then
+                        u.vx = u.vx + 1
+                        sum = sum + u.x * 0.5
+                    end
+                    {twin}
+                end
+            end
+            return sum
+        end
+        "#
+    )
+}
+
+#[test]
+fn ipairs_region_with_records_matches_canonical_dispatch_at_every_budget() {
+    let region = ipairs_record_program("");
+    let canonical = ipairs_record_program("local _u = up");
+    let models = [
+        CostModel::default(),
+        CostModel::default()
+            .with(Charge::TableWrite, 4)
+            .with(Charge::Add, 0),
+        CostModel::zero(),
+    ];
+    for model in &models {
+        for gc_threshold in [None, Some(1)] {
+            for budget in -1..=900 {
+                assert_eq!(
+                    region_outcome_at(model, &region, budget, gc_threshold),
+                    region_outcome_at(model, &canonical, budget, gc_threshold),
+                    "budget {budget} under {model:?}, threshold {gc_threshold:?}"
+                );
+            }
         }
     }
 }
