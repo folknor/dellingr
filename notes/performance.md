@@ -238,7 +238,7 @@ them:
   the failed-search exhaustion proposal (a cost-model decision), the
   unexplained dev frame growth, and uncached number patterns (the native
   iterator and its held program landed).
-- `optimizations.md` "`string.format` cached plan": strings hunter's cached format plan.
+- `optimizations.md` "`string.format` cached plan": strings hunter's cached format plan, deferred after the scan and capacity changes.
 - `todo.md` "Sparse storage for the array part's stragglers": table hunter's
   numeric storage separated from the logical array boundary.
 - `optimizations.md` "Rust-to-Lua call forms": host hunter's note that the

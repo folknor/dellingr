@@ -89,11 +89,11 @@ pub(crate) fn format(state: &mut State) -> Result<u8> {
     // polls before its directive is parsed and its argument rendered.
     while cursor < template_len {
         let bytes = template(state, coerced_template.as_deref())?;
-        let Some(offset) = bytes[cursor..].iter().position(|byte| *byte == b'%') else {
+        let Some(offset) = find_percent(&bytes[cursor..]) else {
             break;
         };
         cursor += offset;
-        append_bytes(&mut output, &bytes[literal_start..cursor])?;
+        append_literal(&mut output, &bytes[literal_start..cursor], template_len)?;
         state.poll_interrupt()?;
         if bytes.get(cursor + 1) == Some(&b'%') {
             literal_start = cursor + 1;
@@ -117,7 +117,7 @@ pub(crate) fn format(state: &mut State) -> Result<u8> {
         cursor = next;
     }
     let bytes = template(state, coerced_template.as_deref())?;
-    append_bytes(&mut output, &bytes[literal_start..])?;
+    append_literal(&mut output, &bytes[literal_start..], template_len)?;
     if argument == 1 {
         state.charge(Charge::StringFormat, 1)?;
     }
@@ -133,6 +133,52 @@ fn template<'a>(state: &'a State, coerced: Option<&'a [u8]>) -> Result<&'a [u8]>
         None => state.to_bytes(1),
     }
 }
+
+/// The offset of the first `%` in `bytes`, eight bytes at a time. The literal
+/// scan was about half of `format`'s own time on mostly-literal templates when
+/// it went byte by byte. The result is the first match whatever the target's
+/// endianness: each word is read little-endian, so its lowest set flag is its
+/// earliest byte.
+fn find_percent(bytes: &[u8]) -> Option<usize> {
+    const HIGHS: u64 = u64::from_ne_bytes([0x80; 8]);
+    const PERCENTS: u64 = u64::from_ne_bytes([b'%'; 8]);
+    let (words, tail) = bytes.as_chunks::<8>();
+    let mut base = 0usize;
+    // bounded: one pass over the slice, which is the capped format string.
+    for word in words {
+        let word = u64::from_le_bytes(*word);
+        let diff = word ^ PERCENTS;
+        // The exact zero-byte test: a flag is set only for a byte that is 0,
+        // so the lowest flag is the first `%` with no false positive below it.
+        let flags = !(((diff & !HIGHS).wrapping_add(!HIGHS)) | diff | !HIGHS);
+        if flags != 0 {
+            let lane =
+                usize::try_from(flags.trailing_zeros() / 8).expect("a byte lane index is below 8");
+            return Some(base + lane);
+        }
+        base += 8;
+    }
+    tail.iter()
+        .position(|byte| *byte == b'%')
+        .map(|offset| base + offset)
+}
+
+/// Append a literal run. The first non-empty run sizes the output for the
+/// template's length, bounded by `FORMAT_CAPACITY_HINT`, so a typical result
+/// grows once or not at all. The hint is taken only after the run passed its
+/// cap check: a call that fails before producing output, or a deep recursion
+/// through `__tostring` on a large shared template, holds no large
+/// reservation. Capacity never affects which error is raised.
+fn append_literal(out: &mut Vec<u8>, run: &[u8], template_len: usize) -> Result<()> {
+    if out.capacity() == 0 && !run.is_empty() {
+        crate::limits::checked_string_growth(0, run.len())?;
+        out.reserve(run.len().max(template_len.min(FORMAT_CAPACITY_HINT)));
+    }
+    append_bytes(out, run)
+}
+
+/// Upper bound on the output capacity `append_literal` reserves up front.
+const FORMAT_CAPACITY_HINT: usize = 4096;
 
 /// Admit a piece of `len` bytes into `out`: the aggregate cap check every
 /// directive makes after its rendering's own errors and before its bytes.
@@ -950,8 +996,39 @@ fn quote_string(out: &mut Vec<u8>, bytes: &[u8]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::format_hex_float;
+    use super::{find_percent, format_hex_float};
     use crate::numeral::parse_lua_numeral;
+
+    #[test]
+    fn find_percent_matches_a_bytewise_scan() {
+        // Every length across two words plus a tail, with `%` at each
+        // position, alone and after a byte just above and below it, and next
+        // to high bytes that an inexact zero-byte test misreads.
+        let fillers = [b'a', b'$', b'&', 0x00, 0x80, 0xa5, 0xff];
+        for len in 0..=20 {
+            for filler in fillers {
+                let mut bytes = vec![filler; len];
+                if bytes.iter().position(|byte| *byte == b'%') != find_percent(&bytes) {
+                    panic!("no-match scan differs for len {len}, filler {filler:#x}");
+                }
+                for at in 0..len {
+                    bytes[at] = b'%';
+                    for later in at + 1..len {
+                        bytes[later] = b'%';
+                        let expected = bytes.iter().position(|byte| *byte == b'%');
+                        if expected != find_percent(&bytes) {
+                            panic!("scan differs for len {len}, filler {filler:#x}, at {at}");
+                        }
+                        bytes[later] = filler;
+                    }
+                    if Some(at) != find_percent(&bytes) {
+                        panic!("scan misses len {len}, filler {filler:#x}, at {at}");
+                    }
+                    bytes[at] = filler;
+                }
+            }
+        }
+    }
 
     fn rounded_hex_bits(number: f64, precision: u8) -> u64 {
         let bits = number.to_bits();

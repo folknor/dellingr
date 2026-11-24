@@ -1021,13 +1021,24 @@ path is recorded yet; nothing here is a candidate until one is.
   fetch; with one-time validation that all jump targets are in-bounds at
   load/finalize time, the fetch could use a pointer/len cursor - only if
   profiles show it; keep panics over UB.
-- **`string.format` cached plan (unmeasured follow-up, 2026-11-24):**
-  `string.format` now reads its template in place from slot 1 and renders
-  every directive straight into one output buffer (digits in fixed scratch,
-  no per-directive Vec). Not built: a plan cached by template identity,
-  which would also skip the literal scan and directive parse on warm
-  templates. Measure first whether a warm `format_literals` still spends
-  meaningful time scanning or parsing (`--hotpath kernel`). A cache needs
+- **`string.format` cached plan (deferred, 2026-11-24):** `perf record` of
+  release `bench/format_literals.lua` (bygg, b85864e) put about half of
+  `format`'s own samples (about 10% of the run) on the bytewise scan for the
+  next `%`, directive parsing a few percent of `format`, and about 15% of the
+  run in allocator growth of the output. The scan is now word-at-a-time
+  (`find_percent`; no `memchr`, the consumer-dependency allowlist keeps it
+  out) and the output takes a bounded capacity hint on its first literal
+  run; after both, the same profile ran about 25% fewer cycles and `format`'s
+  own time had no hot spot left (wall, bygg, two matched `--commit` pairs in
+  both orders against b85864e: 646, 643 to 524, 520 ms). A plan cache keyed by template identity
+  would now save only the parse and the per-run scans. Reopen only if a
+  warm, directive-dense workload with cheap arguments profiles the parse as
+  meaningful; `--hotpath kernel` cannot answer it (`format` and
+  `format_argument` are native-call inventory entries and carry no
+  measurement site), so use `perf`. A plan would also need a byte bound
+  on construction (a 16 MiB `%%` template is about eight million escape
+  events, and a malformed suffix must not change the error a call raises). A
+  cache needs
   invalidation on collection (a `StringPtr` is reused; the pattern cache is
   the precedent), must survive nested `__tostring` calls that can evict it,
   and must keep today's event order (missing argument before parse, parse
