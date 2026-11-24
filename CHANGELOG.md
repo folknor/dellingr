@@ -316,6 +316,15 @@ tick budgets and re-record replays.
   it used to fall back to ordinary dispatch. On bygg `bench/upvalue_bounce`
   went from 5.1 s to 2.6 s. Results, costs and collection timing are
   unchanged.
+- A typed loop may also read a number field of the element it read by a
+  string key held in a local the loop never assigns
+  (`sum = sum + us[i][key]`). On bygg `bench/column_key` went from 4.9 s to
+  2.8 s, and `bench/object_fields` measured about 3 percent slower,
+  unattributed. A key that is not a string declines the loop; a missing or
+  non-number field hands the rest of the loop back to ordinary dispatch at
+  that read, so `__index` and errors behave as before. Results, costs, the
+  charged prefix at a budget refusal, error locations, interrupt safepoints
+  and collection timing are unchanged.
 
 ## [0.7.1] - 2026-11-06
 

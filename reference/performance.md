@@ -890,12 +890,46 @@ Measured on bygg with `brokkr bench wall`, best of three, A at `0cc99ec`
 | `rekey` | 997 ms (d64872ad) | 1029, 1023 ms (01411aaa, aa1568d8) |
 | `fill` | 1503 ms (5273fec2) | 1546, 1525 ms (2c203726, 013c135a) |
 
-`rekey` and `fill` pay the failed hint check on sites whose key moves or
-whose table is fresh. Two probes bound the mechanism: a hint read through
+Those were single dirty cells. A matched interleaved pair (bygg, 2026-11-24,
+`brokkr bench --rounds 5`, `--commit 0cc99ec` against `--commit fe88e6a`,
+invocation 3dfac6e8) put `rekey` at 1007 against 1050 ms, slower in 5 of 5
+rounds: its hot site names a different string each read, so the position
+check fails before every keyed lookup. `fill` measured 1547 against 1529
+ms, 3 faster and 2 slower: its hot loops index by number and never take the
+hint, so it pays nothing. Two probes bound the mechanism: a hint read through
 the general `value_if_key` (key/value pair, array-tag check) gave only 5340
 ms, and the same string-first branch with no hint gave 5386 ms, so the gain
 is the skipped probe read as a value alone. Forcing `Table::get` and
 `HashSlots::find` inline into the handler was flat (5475 ms).
+
+## Records read by a register key in typed regions, 2026-11-24
+
+A `GET_TABLE d r k` whose receiver `r` is a record of the pass and whose
+key `k` is a register the body never writes is a record field read like
+`GET_FIELD`'s: the record site's key is read from `k` once at entry and must
+be a string, and each read takes the live slot through the site's
+key-checked position (`State::record_slot`), exiting at that `GET_TABLE`
+with the record on the stack otherwise. The `GET_TABLE` that reads the
+record now counts it as a receiver use too, so `us[i][key]` is a record read
+and then a field read, and `column_key`'s inner loop is a region (its outer
+loops still decline at `key = cs[c]`). Matched interleaved pairs on bygg,
+`brokkr bench --rounds 3` with `--commit` arms against 0c54d48:
+
+| Workload | 0c54d48 | change | invocation |
+|---|---:|---:|---|
+| `column_key` | 4951 ms | 2777 ms (3 of 3 faster) | 51846acb |
+| `column_key` | 4933 ms | 2760 ms (3 of 3 faster) | ad767d3a |
+| `object_fields` | 3035, 3016 ms | 3136, 3115 ms (6 of 6 slower) | 88ae816e, ad767d3a |
+| `method_step` | 2257 ms | 2292 ms (3 of 3 slower) | 88ae816e |
+| `store_loop` | 1480, 1471 ms | 1496, 1480 ms | 88ae816e, ad767d3a |
+| `cull` | 767 ms | 762 ms | 88ae816e |
+
+The same change with the position dropped before every read (a hash lookup
+each time) gave 3244 ms in 51846acb, so the key-checked position is about
+470 ms of the 2.2 s gained. No region of `object_fields`, `method_step` or
+`store_loop` changed shape; outlining `resolve_record_keys` put
+`object_fields` at 3179 ms, so that delta moves with layout and is not
+attributed. No corpus cost row moved. `frame.rs` is untouched.
 
 ## Host field descriptors, 2026-11-18
 

@@ -6,7 +6,8 @@
 //!   step without going back through the dispatch loop. A body may also
 //!   branch forward on number comparisons, read elements of loop-invariant
 //!   tables, read a record (a table element) per iteration whose number
-//!   fields it reads and stores, call a method of that record, and hold
+//!   fields it reads (by name, or by a string key held in a register the
+//!   body never writes, `us[i][key]`) and stores, call a method of that record, and hold
 //!   nested numeric loops (`State::run_control_region`).
 //! - **Numeric leaves.** A Lua function whose code up to its first `RETURN`
 //!   is such arithmetic, returning one value or none, runs inside call
@@ -316,14 +317,36 @@ const MAX_RECORDS: usize = 8;
 /// Record field sites one loop body may touch.
 const MAX_RECORD_SITES: usize = 16;
 
-/// A field of a loop's record: the record id and the key literal, shared
-/// by every `GET_FIELD` and `SET_FIELD` of the body naming both.
+/// A field of a loop's record: the record id and the key, shared by every
+/// `GET_FIELD`, `SET_FIELD` and `GET_TABLE` of the body naming both.
 #[derive(Clone, Copy, Debug)]
 struct RecordSite {
     record: u8,
-    key: u16,
-    /// Some constituent stores to it.
+    key: SiteKey,
+    /// Some constituent stores to it. Only a literal-keyed site stores.
     store: bool,
+}
+
+/// Where a record site's key comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SiteKey {
+    /// A key literal (`GET_FIELD`, `SET_FIELD`).
+    Literal(u16),
+    /// A register the body never writes, holding a string at entry: the
+    /// key of a `GET_TABLE d r k` on record `r` (`us[i][key]`). Read only,
+    /// never stored through, so it adds no key the region relies on: each
+    /// read takes the live slot raw and exits on a miss.
+    Register(u16),
+}
+
+impl SiteKey {
+    /// The literal of a store site's key. A store site is literal-keyed.
+    fn literal(self) -> Option<u16> {
+        match self {
+            SiteKey::Literal(key) => Some(key),
+            SiteKey::Register(_) => None,
+        }
+    }
 }
 
 /// Calls one loop body may make to numeric leaves.
@@ -801,7 +824,11 @@ impl Layout {
 
     /// The record site of record `record` and `key`, shared with earlier
     /// constituents naming both.
-    fn record_site(&mut self, record: u8, key: u16, store: bool) -> Option<u8> {
+    fn record_site(&mut self, record: u8, key: SiteKey, store: bool) -> Option<u8> {
+        debug_assert!(
+            !store || key.literal().is_some(),
+            "a store site is literal-keyed"
+        );
         let index = match self
             .record_sites
             .iter()
@@ -842,6 +869,9 @@ impl Layout {
                 ((use_.opcode() == Instr::OP_GET_FIELD || use_.opcode() == Instr::OP_SELF)
                     && use_.b() == register)
                     || (use_.opcode() == Instr::OP_SET_FIELD && use_.a() == register)
+                    || (use_.opcode() == Instr::OP_GET_TABLE
+                        && use_.b() == register
+                        && use_.c() != register)
             })
     }
 
@@ -1404,6 +1434,30 @@ impl Layout {
                             pc,
                         )?
                     }
+                    // `GET_TABLE d r k` on a record `r` with a string key in a
+                    // register `k` the body never writes: a record field read
+                    // by that key, read at entry. The key is no number
+                    // operand, so it stays out of the mirror.
+                    Instr::OP_GET_TABLE
+                        if fields && inst.c() != inst.b() && self.record_id(inst.b()).is_some() =>
+                    {
+                        const {
+                            assert!(Instr::fixed_charge(Instr::OP_GET_TABLE).is_none());
+                        }
+                        let record = self.record_receiver(inst.b())?;
+                        let key = inst.c();
+                        if self.untouchable(key) {
+                            return None;
+                        }
+                        self.receivers.push(key);
+                        let b = self.record_site(record, SiteKey::Register(key), false)?;
+                        LoopOp {
+                            kind: OpKind::RecordRead,
+                            a: self.write(inst.a())?,
+                            b,
+                            c: 0,
+                        }
+                    }
                     Instr::OP_GET_TABLE if fields => {
                         const {
                             assert!(Instr::fixed_charge(Instr::OP_GET_TABLE).is_none());
@@ -1423,7 +1477,7 @@ impl Layout {
                             assert!(Instr::fixed_charge(Instr::OP_GET_FIELD).is_none());
                         }
                         let record = self.record_receiver(inst.b())?;
-                        let b = self.record_site(record, inst.c(), false)?;
+                        let b = self.record_site(record, SiteKey::Literal(inst.c()), false)?;
                         LoopOp {
                             kind: OpKind::RecordRead,
                             a: self.write(inst.a())?,
@@ -1435,7 +1489,7 @@ impl Layout {
                     Instr::OP_SET_FIELD if fields => {
                         let record = self.record_receiver(inst.a())?;
                         let c = self.read(inst.c())?;
-                        let b = self.record_site(record, inst.b(), true)?;
+                        let b = self.record_site(record, SiteKey::Literal(inst.b()), true)?;
                         LoopOp {
                             kind: OpKind::RecordStore,
                             a: 0,
@@ -2397,7 +2451,8 @@ impl State {
     ///
     /// Records (`RECORDS`, compiled apart so other bodies keep passes free
     /// of their arms): a `GET_TABLE` whose next use of its destination is
-    /// a field receiver reads a record, a raw element that must be a table,
+    /// a field receiver (`GET_FIELD`, `SELF`, `SET_FIELD`, or a `GET_TABLE`
+    /// by another register's key) reads a record, a raw element that must be a table,
     /// else the region exits at the read's first instruction as above. The
     /// recognizer proves every field access of a record is reached only
     /// through a record read of the same pass on every path, that a record
@@ -2409,7 +2464,12 @@ impl State {
     /// and the next checkpoint republishes a number written after it.
     /// - A record field read takes the key's live slot raw (no `__index`
     ///   consulted, as for any raw hit) and must hold a number; otherwise
-    ///   the region exits at the free `GET_FIELD`.
+    ///   the region exits at the free `GET_FIELD`. A `GET_TABLE d r k` on a
+    ///   record reads it the same way by the string in key register `k`,
+    ///   which the body never writes and the entry reads once
+    ///   (`SiteKey::Register`); it exits at that `GET_TABLE`, with the record
+    ///   already on the stack in `r`, so canonical dispatch reads the key
+    ///   with its full semantics.
     /// - A record store resolves the key's live slot before its
     ///   `TableWrite` charge; a key not live there exits at the `SET_FIELD`
     ///   with nothing charged for it, and canonical dispatch charges and
@@ -2904,7 +2964,17 @@ impl State {
         let index_key = self.meta_names.get(MetaName::Index);
         // bounded: at most MAX_RECORD_SITES store sites
         for (site, key) in body.record_sites.iter().zip(keys.iter_mut()) {
-            *key = frame.literal(site.key);
+            match site.key {
+                SiteKey::Literal(literal) => *key = frame.literal(literal),
+                // A key read from a register is a string or declines: any
+                // other key is left to canonical dispatch.
+                SiteKey::Register(register) => {
+                    *key = self.stack[frame.stack_bottom + usize::from(register)];
+                    if !matches!(*key, Val::Str(_)) {
+                        return false;
+                    }
+                }
+            }
             if !site.store {
                 continue;
             }
@@ -3117,7 +3187,8 @@ impl State {
             .record_sites
             .iter()
             .filter(|site| site.store)
-            .map(|site| frame.literal(site.key));
+            .filter_map(|site| site.key.literal())
+            .map(|key| frame.literal(key));
         leaves.all(|key| !relied.contains(&key)) && records.all(|key| !relied.contains(&key))
     }
 
@@ -4007,6 +4078,9 @@ mod tests {
             "local function f(us) local s = 0 for i = 1, 9 do s = s + us[i].x end return s end",
             "local us = {} local function f() for i = 1, 9 do local u = us[i] if u.x > 2 then u.x = 0 end end end",
             "local function f(us) for i = 1, 9 do local u = us[i] u.hp = 1 end end",
+            // A record read by a key register the body never writes.
+            "local function f(us, k) local s = 0 for i = 1, 9 do s = s + us[i][k] end return s end",
+            "local function f(us, k) for i = 1, 9 do local u = us[i] u.x = u[k] + u.x end end",
         ] {
             assert_eq!(regions(source), 1, "{source}");
         }
@@ -4019,6 +4093,8 @@ mod tests {
             "local function f(us) for i = 1, 9 do local u = us[i] u.x = u end end",
             // A record replacing an invariant receiver.
             "local function f(us, o) local s = 0 for i = 1, 9 do s = s + o.y o = us[i] o.x = 1 end end",
+            // A key register the body writes.
+            "local function f(us, k) local s = 0 for i = 1, 9 do k = i s = s + us[i][k] end end",
         ] {
             assert_eq!(regions(source), 0, "{source}");
         }

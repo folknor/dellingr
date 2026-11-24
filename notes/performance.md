@@ -131,8 +131,10 @@ call to anything but a numeric leaf (nested `f(g(x))`, open arguments or
 results, a method that calls or returns early), a
 method the record holds itself or finds through a function `__index`, or
 more than eight classes at one site still run canonically. A string read
-into a register used as a key (column_key's `cs[c]`, see PERF-005) stops a
-region that holds it at that read. Straight-line chains in functions that
+into a register used as a key (column_key's `cs[c]`) stops a region that
+holds it at that read; the loop inside it, which reads `us[i][key]`, is a
+region. A number key on a record (`m[i][j]`) still declines: the record
+read by a key register takes only an entry-checked string. Straight-line chains in functions that
 are not leaves (fib's `n - 1`, `n - 2`, `+` around its calls) still
 dispatch per instruction. object_fields' remaining time is its
 construction pass (`{}`, `new_unit` calls, `SET_TABLE`), which no region
@@ -188,32 +190,36 @@ measurement attributing branch misses to the dispatch branch before work
 begins. The stable-Rust route that tests the actual next opcode and enters
 its handler directly lives under PERF-002.
 
-## PERF-005 - Dependent indexed reads keep `column_key` in generic dispatch
+## PERF-006 - The `GET_TABLE` hint taxes sites whose key moves
 
-Raised while landing the `GET_TABLE` key-position hint (2026-11-24, bygg,
-on top of 0cc99ec): `column_key` went 5.45 s to 4.9 s, but the inner
-iteration (`GET_TABLE`, `GET_TABLE`, `ADD_RR`, `FOR_LOOP`) still costs about
-25 ns, and release perf put 40 percent in `Frame::run`, 23 in
-`reg_get_table` and 13 in `instr_for_loop`. Samples cannot split that
-between dispatch and the dependent load chain.
+Matched interleaved pair (bygg, 2026-11-24, `brokkr bench --rounds 5`,
+0cc99ec against fe88e6a, invocation 3dfac6e8): `rekey` 1007 to 1050 ms,
+slower in 5 of 5 rounds. Its hot `registry[key]` read names a different
+string each time through one site, so the hint's position check fails
+every read before the keyed lookup and the refill. `fill` measured no tax
+(1547 to 1529 ms, 3 faster and 2 slower): its hot loops index by number.
 
-**Bottleneck:** the typed loop region declines `sum = sum + us[i][key]`:
-the first `GET_TABLE` takes the numeric `Index` form because its result
-feeds another `GET_TABLE` (only `GET_FIELD`/`SET_FIELD` receivers make a
-record), and the second reads a receiver the body writes. The shape to try
-is the pair as one region op: guard the invariant string key and outer
-table once per entry, read the outer array window, read the record by a
-region-local key-checked position, feed a number into the accumulator, and
-on nil or a non-number publish the first result and resume canonically at
-the second `GET_TABLE` so `__index` and errors stay canonical. Measure it
-against the same region doing a hash lookup to see what the position adds.
+**Shape to try:** a hint that stops being consulted at a site that keeps
+missing (a miss count in the slot, or a refill only after a hit), measured
+against `column_key`, which the hint serves. Layout is not excluded; the
+pair is consistent but not attributed.
 
-**Also open:** the hint's miss tax. `rekey` (key moves after each read)
-went 997 to about 1025 ms and `fill` (fresh table per read) 1503 to about
-1535 ms, both dirty single cells, not interleaved pairs. A matched
-interleaved pair would say whether that is real or layout.
+**Classification:** local change in `vm/registers.rs` and `vm/caches.rs`.
 
-**Classification:** local change in `numeric_loop.rs`; workload registered.
+## PERF-007 - `object_fields` about 3 percent slower after keyed record sites
+
+Matched pairs on bygg (2026-11-24, invocations 88ae816e and ad767d3a,
+0c54d48 against the keyed-record-site change): `object_fields` 3016-3035
+to 3115-3136 ms, slower in 6 of 6 rounds; `method_step` +21 ms and
+`store_loop` +5 to +22 ms in 3 of 3. None of these bodies has a
+register-keyed `GET_TABLE` on a record, so no region changed shape; the
+entry paths (`resolve_record_keys`, `region_keys_disjoint`) now decode a
+`SiteKey`. Outlining `resolve_record_keys` made `object_fields` slower
+still (3179 ms), so it moves with layout; the cause is not isolated. This
+sits on top of object_fields' earlier unattributed 3.1-3.2 s drift.
+
+**Next:** a five-launch same-binary control, then per-function profiles of
+the two arms at hotpath scale.
 
 ## Accounts added to existing entries
 

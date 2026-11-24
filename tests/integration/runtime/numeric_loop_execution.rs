@@ -943,6 +943,76 @@ fn numeric_loop_region_with_records_matches_canonical_dispatch_at_every_budget()
     }
 }
 
+/// Records read by a string key held in a register (`us[i][key]`), the key
+/// moving between entries: misses through `__index`, a key stored through
+/// a literal of the same name in the same body, records of other layouts,
+/// a record that is its own source table, a record replaced between
+/// entries, and a number key, which declines the region at entry.
+fn keyed_record_program(twin: &str) -> String {
+    format!(
+        r#"
+        local up = 0
+        local M = {{ __index = function(t, k) return 0.25 end }}
+        function run()
+            local sum, rounds = 0.5, 0
+            local us
+            peek = function()
+                local c = 0
+                for i = 1, 12 do
+                    local u = us and us[i]
+                    if u then c = c + (rawget(u, "x") or 0) * i end
+                end
+                return sum, c, rounds
+            end
+            us = {{}}
+            for i = 1, 12 do
+                us[i] = setmetatable({{ hp = i, armor = i % 4, speed = 2, x = 1 }}, M)
+            end
+            us[4] = setmetatable({{ speed = 3, hp = 1, armor = 0, x = 2 }}, M)
+            us[6] = setmetatable({{ armor = 9 }}, M)
+            us[9] = setmetatable({{ hp = 1, speed = 1, armor = 1, x = 0 }}, M)
+            us[11] = setmetatable(us, M)
+            us.hp, us.armor, us.speed, us.x = 1, 2, 3, 4
+            local keys = {{ "hp", "armor", "speed", "x", 13, "missing", "hp" }}
+            for round = 1, #keys do
+                local key = keys[round]
+                rounds = round
+                if round == 7 then us[6] = setmetatable({{ hp = 2 }}, M) end
+                for i = 1, 12 do
+                    local u = us[i]
+                    u.x = u[key] + u.x
+                    sum = sum + u[key]
+                    {twin}
+                end
+            end
+            return sum
+        end
+        "#
+    )
+}
+
+#[test]
+fn numeric_loop_region_with_keyed_records_matches_canonical_dispatch_at_every_budget() {
+    let region = keyed_record_program("");
+    let canonical = keyed_record_program("local _u = up");
+    let models = [
+        CostModel::default(),
+        CostModel::default()
+            .with(Charge::TableWrite, 4)
+            .with(Charge::Add, 0),
+        CostModel::zero(),
+    ];
+    for model in &models {
+        for budget in -1..=900 {
+            assert_eq!(
+                region_outcome(model, &region, budget),
+                region_outcome(model, &canonical, budget),
+                "budget {budget} under {model:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn numeric_loop_region_falls_back_when_a_read_is_not_a_number() {
     let error = support::run_error(

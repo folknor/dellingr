@@ -174,8 +174,9 @@ impl State {
     /// plain raw lookup. Measured on `column_key` (one site, 64 records of a
     /// constructor) at about 10 percent of wall, but only with the
     /// value-only read (`Table::string_value_if_key`): the key/value pair
-    /// form gave 2 percent. Sites whose key moves (`rekey`) or whose table is
-    /// fresh (`fill`) pay the failed check, about 2 to 3 percent.
+    /// form gave 2 percent. A site whose key moves every read (`rekey`) pays
+    /// the failed check: about 4 percent of its wall in a matched pair.
+    /// `fill`, whose hot loops index by number, measured no change.
     ///
     /// It takes the instruction rather than its decoded operands, which
     /// keeps the hint lookup's locals out of `Frame::run` in the dev profile.
