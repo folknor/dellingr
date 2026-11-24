@@ -211,6 +211,16 @@ measuring. Candidates are caching the upvalue slice pointer per activation
 into a register at compile time is refused (codegen.rs header: it drops
 scratch register overwrites that free dead values).
 
+### `SET_UPVAL` clones the pool slot before matching (2026-11-24)
+
+`State::set_upvalue_value` (`vm/registers.rs`) clones the whole `Upvalue`
+(tag plus `Val`) out of the pool to decide open or closed, then writes
+through `get_mut` on the closed arm: a copy and a second slot lookup per
+store. Matching on a borrowed slot (copying only the open stack index)
+would drop both. Unmeasured; `queue` (`tail = tail + 1` through an
+upvalue) is the registered workload that executes it per iteration. Found
+by the UPVAL scout, not part of that item.
+
 ### 16-byte `Val` copies that miss store forwarding
 
 What: a `Val` written as a tag byte plus two 8-byte words (payloads sit at
@@ -522,25 +532,6 @@ what materialized-value cost remains.
 ---
 
 ## Architectural
-
-### Thin engine handle under the unsized `State` (2026-11-18)
-
-`State` is unsized so host code cannot move it out of a callback's
-`&mut State` (see its type documentation). Every `&mut State` is a wide
-pointer, and the always-zero length rides through each out-of-line call:
-release native cycles grew 16 to 80 bytes, dev 48 to 368
-(reference/performance.md, "2026-11-18: unsized `State`"). Recovering it
-means running the engine on a sized inner type and re-widening only where
-host code is handed `&mut State` (`invoke_rust_fn`, the restricted closure,
-load setup). Shapes sparred with codex: a `repr(C)` outer with the inner at
-offset zero and one unsafe cast, sound because the length-zero outer covers
-exactly the inner's bytes, provided no outer field ever adds bytes or
-alignment; or a sealed trait object as the public `State` over a private
-concrete inner, which coerces safely but needs adapters for generic public
-methods. Library callbacks share the `RustFunc` path, so they stay wide
-unless they get an internal signature. A by-value context (`fn(Ctx<'_>)`)
-is the other sound shape and keeps thin pointers, at the price of every
-`RustFunc` signature. Measure wall time before paying any of these.
 
 ### Shape-based polymorphic field IC
 

@@ -998,6 +998,26 @@ handle (the engine on a sized inner type, re-widened only where host code is
 handed `&mut State`) would recover it, at the price of one layout-dependent
 unsafe cast or a trait-object public type; not done.
 
+Re-weighed and refused on 2026-11-24 (bygg, d6030e0). A measurement-only
+build that made `State` plain sized everywhere (the tail defaulted to a
+zero-length array: unsound, never committed) removes the metadata from
+every path at once, so it bounds what a sized inner, a sealed trait
+object, a borrowed wrapper or a thin by-value context can save by pointer
+width alone. Release: the largest cycle 3184 to 3120, `host_call` 944 to
+912, `host_invoke` 976 to 944, most rows 16 to 80 smaller, but
+`sort_comparator` 1456 to 1488, `callable_rust` 1536 to 1552,
+`sort_metamethods_comparator` 1552 to 1584 and `tfor_lua` 656 to 672 grew.
+Dev: the largest cycle 16608 to 16336, rows 64 to 400 smaller. At
+`MAX_NATIVE_CALL_DEPTH` that is under 1% of either documented thread.
+Wall, interleaved `brokkr bench --commit` pairs of the two builds: the
+sized build was never faster; it was slower by 1.2% on `invoke_typed` (5
+of 6 rounds), 1.0% on `invoke_stack` (6 of 6), 0.8% on `rust_boundary`,
+0.2% on `host_records`, 2.7% on `sort`, 4.7% on `gsub_replace` and 0.1% on
+`pairs` (4 rounds each); the cause of those deltas (layout or codegen) was
+not isolated. No shape pays for its unsafe proof or API churn on these
+numbers. A redesign that changes what stays live across re-entry (such as
+the gsub matcher state) is a separate mechanism and makes its own case.
+
 ### 2026-11-17: typed host invocation
 
 `State::invoke` (`vm/invoke.rs`) adds one host-api path into

@@ -267,6 +267,12 @@ impl BytecodeRuntime {
 /// named: `State` is always `State<[()]>`. The sized form has private fields
 /// and no constructor outside this module, and the unsizing coercion that
 /// boxes it has no safe inverse.
+///
+/// Every `&mut State` is therefore a wide pointer. Running the engine on a
+/// thin handle (a sized inner type, a trait object, a borrowed wrapper or a
+/// by-value callback context) was measured against a fully sized build and
+/// refused: no wall gain, and under 1% of the native stack envelope
+/// (`reference/performance.md`, "2026-11-18: unsized `State`").
 pub struct State<Tail: ?Sized = [()]> {
     #[cfg(feature = "fault-injection")]
     fault_injection: fault_injection::FaultInjection,
