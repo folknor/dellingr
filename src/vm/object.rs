@@ -1327,8 +1327,65 @@ impl<K, V: Markable> Markable for IndexMap<K, V> {
 
 /// Entry for an interned string.
 struct StringEntry {
-    data: Box<[u8]>,
+    data: StringData,
+    /// The hash the string was interned under: the index's rehash and the
+    /// sweep's removal read it, never recompute it (tests intern under a
+    /// forced hash to make collisions).
     hash: u64,
+}
+
+/// Longest string stored inline in its arena slot. Chosen so `StringData`
+/// is no larger than the `Box<[u8]>` arm plus its tag: 24 bytes, a 40-byte
+/// slot with the hash and version (pinned below).
+const INLINE_STRING_BYTES: usize = 22;
+
+/// A string's bytes: inline beside the entry header when short, so a
+/// distinct short string costs no allocator allocation and no pointer
+/// chase, otherwise one boxed allocation. The storage follows the length
+/// alone, whatever the source (a borrowed slice, a pooled range or a
+/// producer's owned `Vec`, which a short string copies and drops), so the
+/// first interning of some bytes cannot choose a different layout from a
+/// later one. Identity is the arena key either way.
+enum StringData {
+    Inline {
+        len: u8,
+        bytes: [u8; INLINE_STRING_BYTES],
+    },
+    Heap(Box<[u8]>),
+}
+
+// Layout tripwire: the inline cap and stride are a design choice, so a
+// compiler layout change or a cap edit fails the build rather than silently
+// widening every string slot.
+#[cfg(target_pointer_width = "64")]
+const _: () = {
+    assert!(INLINE_STRING_BYTES == 22);
+    assert!(size_of::<StringData>() == 24);
+    assert!(size_of::<arena::Slot<StringEntry>>() == 40);
+};
+
+impl StringData {
+    /// Inline copy of `bytes`, or `None` when they do not fit.
+    fn inline(bytes: &[u8]) -> Option<Self> {
+        let mut buf = [0; INLINE_STRING_BYTES];
+        buf.get_mut(..bytes.len())?.copy_from_slice(bytes);
+        let len = u8::try_from(bytes.len()).expect("the inline cap fits a u8");
+        Some(Self::Inline { len, bytes: buf })
+    }
+
+    /// Storage for a miss: inline when short, else the source converted to
+    /// a box (an owned `Vec` through `into_boxed_slice`, a slice copied).
+    fn new<B: AsRef<[u8]> + Into<Box<[u8]>>>(bytes: B) -> Self {
+        Self::inline(bytes.as_ref()).unwrap_or_else(|| Self::Heap(bytes.into()))
+    }
+
+    #[inline]
+    fn as_bytes(&self) -> &[u8] {
+        match self {
+            Self::Inline { len, bytes } => &bytes[..usize::from(*len)],
+            Self::Heap(data) => data,
+        }
+    }
 }
 
 /// A safe pointer to an interned string.
@@ -1395,10 +1452,11 @@ impl StringPool {
     /// `get` over the arena alone, so a caller can keep the borrow while
     /// it mutates the index.
     fn data(strings: &Arena<StringKey, StringEntry>, ptr: StringPtr) -> &[u8] {
-        &strings
+        strings
             .get(ptr.0)
             .expect("Invalid StringPtr: string was freed (use-after-free detected)")
             .data
+            .as_bytes()
     }
 
     /// Find an existing interned string by content and hash.
@@ -1409,7 +1467,7 @@ impl StringPool {
             .find(hash, |key| {
                 strings
                     .get(*key)
-                    .is_some_and(|entry| entry.data.as_ref() == bytes)
+                    .is_some_and(|entry| entry.data.as_bytes() == bytes)
             })
             .map(|key| StringPtr(*key))
     }
@@ -1421,11 +1479,12 @@ impl StringPool {
     /// writes the prepared bucket without rehashing. At exhausted capacity
     /// a hit can take that reserve; it is the one the next miss would take.
     ///
-    /// `bytes` is a borrowed slice, boxed (copied) on a miss, or a
-    /// producer's owned `Vec`, converted to the entry's storage on a miss
+    /// `bytes` is a borrowed slice or a producer's owned `Vec`. A miss of at
+    /// most `INLINE_STRING_BYTES` copies them inline (dropping a `Vec`); a
+    /// longer one boxes a slice (a copy) or converts the `Vec`
     /// (`into_boxed_slice`, which shrinks when capacity exceeds length and
-    /// may still move the bytes then) instead of the unconditional copy from
-    /// a slice, and dropped on a hit. The probe, identity and resident
+    /// may still move the bytes then) instead of copying it. A hit drops
+    /// the `Vec`. The probe, identity and resident
     /// length (never the capacity) are the same either way.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn intern_storage<B: AsRef<[u8]> + Into<Box<[u8]>>>(
@@ -1441,7 +1500,7 @@ impl StringPool {
             |key| {
                 strings
                     .get(*key)
-                    .is_some_and(|e| e.data.as_ref() == content)
+                    .is_some_and(|e| e.data.as_bytes() == content)
             },
             |key| Self::entry_hash(strings, *key),
         ) {
@@ -1450,7 +1509,7 @@ impl StringPool {
         };
         let bytes_len = content.len();
         let key = self.strings.insert(StringEntry {
-            data: bytes.into(),
+            data: StringData::new(bytes),
             hash,
         });
         vacant.insert(key);
@@ -1473,14 +1532,20 @@ impl StringPool {
         let hash = crate::det_hash::hash_bytes(bytes);
         let vacant = match self.index.entry(
             hash,
-            |key| strings.get(*key).is_some_and(|e| e.data.as_ref() == bytes),
+            |key| {
+                strings
+                    .get(*key)
+                    .is_some_and(|e| e.data.as_bytes() == bytes)
+            },
             |key| Self::entry_hash(strings, *key),
         ) {
             hashbrown::hash_table::Entry::Occupied(found) => return Some(StringPtr(*found.get())),
             hashbrown::hash_table::Entry::Vacant(vacant) => vacant,
         };
         let bytes_len = bytes.len();
-        let data: Box<[u8]> = bytes.into();
+        // Built before the insert, which can grow the arena and move the
+        // (possibly inline) source bytes.
+        let data = StringData::new(bytes);
         let key = self.strings.insert(StringEntry { data, hash });
         vacant.insert(key);
         resident.add(bytes_len);
@@ -1508,9 +1573,12 @@ impl StringPool {
         self.strings.clear_marks();
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, test))]
     fn resident_bytes(&self) -> usize {
-        self.strings.values().map(|entry| entry.data.len()).sum()
+        self.strings
+            .values()
+            .map(|entry| entry.data.as_bytes().len())
+            .sum()
     }
 
     /// Collect unreachable strings.
@@ -1531,7 +1599,7 @@ impl StringPool {
     fn collect(&mut self, resident: &mut ResidentBytes) {
         let index = &mut self.index;
         self.strings.sweep(|key, entry| {
-            resident.remove(entry.data.len());
+            resident.remove(entry.data.as_bytes().len());
             match index.find_entry(entry.hash, |k| *k == key) {
                 Ok(found) => {
                     found.remove();
@@ -1868,19 +1936,70 @@ mod tests {
     /// and on a hit leaves the pool as it was.
     #[test]
     fn owned_intern_matches_borrowed_intern() {
+        // Each side of the inline cap: a short string is stored inline, a
+        // long one adopts the Vec; neither changes identity or accounting.
+        for content in [
+            &b"owned"[..],
+            &[b'x'; INLINE_STRING_BYTES][..],
+            &[b'y'; INLINE_STRING_BYTES + 1][..],
+        ] {
+            let mut pool = StringPool::new();
+            let mut resident = ResidentBytes::default();
+            let mut owned = Vec::with_capacity(64);
+            owned.extend_from_slice(content);
+            let adopted = pool.intern_storage(owned, 7, &mut resident);
+            assert_eq!(pool.get(adopted), content);
+            assert_eq!(resident.bytes, content.len());
+            assert_eq!(pool.intern(content, 7, &mut resident), adopted);
+            let mut again = Vec::with_capacity(content.len());
+            again.extend_from_slice(content);
+            assert_eq!(pool.intern_storage(again, 7, &mut resident), adopted);
+            assert_eq!(pool.len(), 1);
+            assert_eq!(resident.bytes, content.len());
+            assert_eq!(pool.resident_bytes(), content.len());
+        }
+    }
+
+    #[test]
+    fn range_intern_across_the_inline_cap_matches_borrowed_intern() {
+        let det_hash = crate::det_hash::hash_bytes;
         let mut pool = StringPool::new();
         let mut resident = ResidentBytes::default();
-        let mut owned = Vec::with_capacity(64);
-        owned.extend_from_slice(b"owned");
-        let adopted = pool.intern_storage(owned, 7, &mut resident);
-        assert_eq!(pool.get(adopted), b"owned");
-        assert_eq!(resident.bytes, b"owned".len());
-        assert_eq!(pool.intern(b"owned", 7, &mut resident), adopted);
-        let mut again = Vec::with_capacity(16);
-        again.extend_from_slice(b"owned");
-        assert_eq!(pool.intern_storage(again, 7, &mut resident), adopted);
-        assert_eq!(pool.len(), 1);
-        assert_eq!(resident.bytes, b"owned".len());
+        let short = b"0123456789abcdefghij";
+        let long = [b'z'; 2 * INLINE_STRING_BYTES];
+        let short_src = pool.intern(short, det_hash(short), &mut resident);
+        let long_src = pool.intern(&long, det_hash(&long), &mut resident);
+        // Ranges of an inline source, and inline and boxed ranges of a long
+        // one; the misses grow the arena while the source bytes are read.
+        let cases = [
+            (short_src, 2..9),
+            (long_src, 0..INLINE_STRING_BYTES),
+            (long_src, 1..INLINE_STRING_BYTES + 3),
+        ];
+        let mut made = Vec::new();
+        for (source, range) in cases {
+            let expect = pool.get(source)[range.clone()].to_vec();
+            let ptr = pool
+                .intern_range(source, range, &mut resident)
+                .expect("range lies inside the source");
+            assert_eq!(pool.get(ptr), &expect[..]);
+            made.push((ptr, expect));
+        }
+        for _ in 0..200 {
+            let n = pool.len();
+            let filler = format!("filler {n}");
+            pool.intern(
+                filler.as_bytes(),
+                det_hash(filler.as_bytes()),
+                &mut resident,
+            );
+        }
+        for (ptr, bytes) in &made {
+            assert_eq!(pool.get(*ptr), &bytes[..]);
+            assert_eq!(pool.intern(bytes, det_hash(bytes), &mut resident), *ptr);
+        }
+        assert_eq!(pool.get(short_src), short);
+        assert_eq!(resident.bytes, pool.resident_bytes());
     }
 
     #[test]

@@ -789,21 +789,22 @@ Why deferred: it fits the envelope with room to spare and nothing is
 failing; this buys margin, not correctness. Signal: the envelope tests
 tightening, or a reason to raise `MAX_NATIVE_CALL_DEPTH`.
 
-### Short interned strings are one allocator allocation each
+### Short owned string results still allocate in their producer
 
-Owned result buffers already go into the pool without a second copy
-(`push_owned_bytes` / `alloc_string_owned`: a miss converts the producer's
-`Vec` with `into_boxed_slice`). What the 2026-11-17 heap hunter proposed
-beyond that is open: short strings in pooled storage with bytes adjacent to
-their header, so a distinct short string is not one allocator allocation (a
-short owned result would then be copied inline and its `Vec` dropped, a
-large one still adopted), with canonical identity kept separate from
-backing-byte ownership. Keep canonical interning, the collection point
-before the probe, and resident bytes counted as content length. Afterwards,
-a common checked builder (rendering into the destination buffer) is a
-follow-up; `string.format` already renders into its one output buffer
-(`reserve_piece` in `string_format.rs`). Also left:
-`table.concat` copies its separator (`to_bytes(2)?.to_vec()`) every call.
+Interned strings of at most `INLINE_STRING_BYTES` (22) bytes are stored
+inline in their arena slot (`StringData` in `vm/object.rs`), so the pool no
+longer allocates for them; a short owned result is copied inline and its
+`Vec` freed. The producers still build that `Vec` on the heap first
+(`concat_values`, `table.concat`, `gsub`, `upper`/`lower`, `reverse`,
+`string.format`), so a short miss still pays one allocate-and-free. Open: a
+common checked builder that renders short results into a stack buffer (and
+long ones into the destination buffer), keeping the allocation-policy check
+before the probe. Also left: `table.concat` copies its separator
+(`to_bytes(2)?.to_vec()`) every call. Neither is measured; the inline
+change itself measured 0.7 to 1.8 percent faster on `mixed`, `patterns`,
+`fill`, `format_literals` (two matched `--commit` rounds, bygg; see
+`reference/performance.md`), within the layout noise floor, and no
+allocator-call counts were taken.
 
 ### gmatch iterator residue after the typed iterator
 

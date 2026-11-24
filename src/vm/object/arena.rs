@@ -206,7 +206,8 @@ impl Iterator for Indices<'_> {
     }
 }
 
-struct Slot<V> {
+/// Visible to the parent module so it can pin a pool's slot stride.
+pub(super) struct Slot<V> {
     /// Odd while occupied, even while vacant (slotmap's convention).
     version: u32,
     value: Option<V>,
@@ -331,7 +332,7 @@ impl<K: ArenaKey, V> Arena<K, V> {
         })
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, test))]
     pub(crate) fn values(&self) -> impl Iterator<Item = &V> {
         self.iter().map(|(_, value)| value)
     }

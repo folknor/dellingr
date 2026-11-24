@@ -120,6 +120,19 @@ arms (8 of 8). It changes the executed path, so it is not a layout control,
 but a hybrid landing outside both behaviours it mixes leaves wall time at
 this size unable to attribute the `patterns` cost.
 
+## Short interned strings inline, 2026-11-24
+
+A string of at most 22 bytes is stored inside its arena slot rather than in
+a separate `Box<[u8]>`; the slot grows from 32 to 40 bytes (pinned by a
+const assertion in `vm/object.rs`). Identity, collection points and
+resident accounting are unchanged. Release wall, best of 3, two matched
+`--commit` rounds of b6e2bfa against the change on bygg, second round:
+`mixed` 2214 to 2183 ms, `patterns` 796 to 782 (first round 794 to 775),
+`fill` 1515 to 1488, `format_literals` 644 to 640 (one round). Every pair
+moved the same way, but each delta is inside the layout noise floor, so
+this records no attributed speedup; `state_new_us` in the records fell
+from about 42 to 28 us.
+
 ## Typed gmatch iterators, 2026-11-24
 
 A `string.gmatch` iterator became a typed heap object (`GmatchIter`) whose

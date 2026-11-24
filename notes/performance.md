@@ -232,8 +232,8 @@ them:
   was measured there and refused for the field caches).
 - `optimizations.md` "Compile-time table-shape prediction": codegen hunter's
   constructor plans.
-- `optimizations.md` "Short interned strings are one allocator allocation
-  each": heap hunter's short-string pooling.
+- `optimizations.md` "Short owned string results still allocate in
+  their producer": the heap hunter's checked builder residue.
 - `optimizations.md` "gmatch iterator residue after the typed iterator":
   strings hunter's failed-search exhaustion and pattern-cache sizing (the
   native iterator itself landed).
