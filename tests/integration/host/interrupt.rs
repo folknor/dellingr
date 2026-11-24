@@ -151,6 +151,29 @@ fn a_typed_loop_with_branches_stops_at_its_first_back_edge() {
     assert_eq!(state.to_number(-1).expect("last is a number"), 0.0);
 }
 
+/// A typed loop storing into records it reads per iteration stops at its
+/// first back edge with the first iteration's store made and no other.
+#[test]
+fn a_typed_loop_with_record_stores_stops_at_its_first_back_edge() {
+    let source = "local us = {}
+                  for i = 1, 10 do us[i] = {x = i} end
+                  peek = function() return us[1].x, us[2].x end
+                  stop()
+                  for i = 1, 10 do
+                    local u = us[i] u.x = u.x * 10
+                  end";
+    let mut state = state();
+    let error = assert_interrupted(support::try_run(&mut state, source), source);
+    assert!(error.to_string().starts_with("7:"), "{error}");
+    state.interrupt().reset();
+    state.get_global("peek").expect("peek is defined");
+    state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(2))
+        .expect("peek runs once the interrupt is reset");
+    assert_eq!(state.to_number(-2).expect("us[1].x is a number"), 10.0);
+    assert_eq!(state.to_number(-1).expect("us[2].x is a number"), 2.0);
+}
+
 /// A typed loop calling a numeric leaf keeps the call's admission as a
 /// safepoint: an interrupt raised before the loop stops it at the first
 /// call, before the callee or anything after it in the body runs.

@@ -263,6 +263,15 @@ tick budgets and re-record replays.
   to ordinary dispatch at that read, so `__index` and errors behave as
   before. Results, costs, the charged prefix at a budget refusal, error
   locations, interrupt safepoints and collection timing are unchanged.
+- Such a loop may also take a table element per iteration and read and
+  update its number fields (`local u = us[i] u.x = u.x + u.speed`), with
+  no call in the body: `bench/store_loop` went from 4.2 s to 1.7 s on
+  bygg. An element that is not a table, a field that is missing or not a
+  number, or a store to a key the element lacks hands the rest of the loop
+  back to ordinary dispatch at that instruction, so `__index`,
+  `__newindex` and errors behave as before. Results, costs, the charged
+  prefix at a budget refusal, error locations, interrupt safepoints and
+  collection timing are unchanged.
 
 ## [0.7.1] - 2026-11-06
 

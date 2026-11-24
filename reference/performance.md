@@ -606,6 +606,30 @@ compile-time-specialized branches; four rounds of trimming it moved the wall
 from 1.1 s to the figure above, and an instrumented kernel pair ran 21 ms on
 both binaries, so the remaining 5% is read as layout, unattributed.
 
+## Records in typed loop regions, 2026-11-24
+
+A region without calls may read a table element per iteration as a record
+(`local u = us[i]`) and read and store its number fields raw. Each field
+site keeps its last slot and reuses it on the next record by key-checked
+position (`Table::renew_slot`), which records built in one order share, so
+a site costs a key compare rather than a hash lookup; a store resolves its
+slot before its `TableWrite` charge and exits to canonical dispatch when
+the key is not live. Next-opcode fusion of `GET_FIELD`, arithmetic and
+`SET_FIELD` was passed over as for field leaves: it keeps every dispatch of
+the loop but two and the per-site lookup. Measured on bygg with `brokkr
+bench wall`, best of three, A at `68da812` (`--commit`), B the same tree
+plus the change (dirty):
+
+| Workload | A | B |
+|---|---:|---:|
+| `store_loop` | 4.2 s (492dcd2e) | 1.7 s (ccbd26da) |
+| `cull` | 742 ms (ad73271b) | 754 ms (4f3893ac) |
+
+`object_fields` (3.5 s, f7d2db49) calls a method on its record and still
+runs canonically. A first build that kept the record arms in the one
+control runner put `cull` at 831 ms; compiling the runner apart for bodies
+with records brought it back.
+
 ## Host field descriptors, 2026-11-18
 
 `State::raw_field` takes a `FieldName` as well as a `&str`. A descriptor

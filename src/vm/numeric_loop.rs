@@ -4,8 +4,10 @@
 //!   arithmetic runs as one region: the registers the loop touches live in an
 //!   `f64` mirror, and each iteration runs its body operations and the loop
 //!   step without going back through the dispatch loop. A body without
-//!   calls may also branch forward on number comparisons and read
-//!   elements of loop-invariant tables (`State::run_control_region`).
+//!   calls may also branch forward on number comparisons, read elements
+//!   of loop-invariant tables, and read a record (a table element) per
+//!   iteration whose number fields it reads and stores
+//!   (`State::run_control_region`).
 //! - **Numeric leaves.** A Lua function whose code up to its first `RETURN`
 //!   is such arithmetic, returning one value or none, runs inside call
 //!   dispatch without an activation when its arguments are numbers. Its
@@ -27,7 +29,8 @@
 //!   loop-invariant field reads and calls to numeric leaves, so numbers in
 //!   give numbers out, and nothing else runs while the region does: no
 //!   other call, allocation, upvalue write or handler, and no store but a
-//!   field leaf's number into a slot already live. The only foreign code is the back-edge checkpoint
+//!   number into a slot already live (a field leaf's, or a record's). The
+//!   only foreign code is the back-edge checkpoint
 //!   (`State::poll_gc_checkpoint`), which polls the interrupt and may
 //!   collect, and runs no Lua or host code. A guard at entry on every
 //!   register read before it is written in one pass of the body and the loop
@@ -39,7 +42,8 @@
 //!   the body never writes read a receiver that cannot change while the
 //!   region runs: nothing in it writes an upvalue, a register outside the
 //!   mirror or a table field under the read's key (a called field leaf's
-//!   store keys are checked against it at entry), a running closure's
+//!   and a record's store keys are checked against it at entry, and a
+//!   record never replaces a receiver register), a running closure's
 //!   upvalues never alias its own
 //!   frame's registers, and a collection frees dead objects without
 //!   changing a live table's contents (the VM has no weak tables). So the
@@ -161,13 +165,36 @@ struct Body {
     /// A loop's indexed-read receivers, with the pc an exit at each read
     /// resumes canonical dispatch from. Empty for a leaf.
     indexed: Box<[(Receiver, usize)]>,
-    /// The body has forward branches or indexed reads, so it runs through
-    /// `State::run_control_region` rather than as a straight line.
+    /// A loop's record registers, by record id: the frame register and its
+    /// mirror slot when the body also writes it as a number. Empty for a
+    /// leaf.
+    records: Box<[(u16, Option<u8>)]>,
+    /// A loop's record field sites, read or stored per iteration on the
+    /// table its record register holds. Empty for a leaf.
+    record_sites: Box<[RecordSite]>,
+    /// The body has forward branches, indexed reads or records, so it runs
+    /// through `State::run_control_region` rather than as a straight line.
     control: bool,
 }
 
 /// Indexed reads one loop body may make.
 const MAX_INDEXED: usize = 8;
+
+/// Record registers one loop body may define.
+const MAX_RECORDS: usize = 8;
+
+/// Record field sites one loop body may touch.
+const MAX_RECORD_SITES: usize = 16;
+
+/// A field of a loop's record: the record id and the key literal, shared
+/// by every `GET_FIELD` and `SET_FIELD` of the body naming both.
+#[derive(Clone, Copy, Debug)]
+struct RecordSite {
+    record: u8,
+    key: u16,
+    /// Some constituent stores to it.
+    store: bool,
+}
 
 /// Calls one loop body may make to numeric leaves.
 const MAX_CALLS: usize = 4;
@@ -307,6 +334,17 @@ enum OpKind {
     /// A loop's raw read of indexed receiver `b` at the key in slot `c`
     /// into slot `a`, exiting to canonical dispatch unless it is a number.
     Index,
+    /// A loop's raw read of indexed receiver `b` at the key in slot `c`
+    /// into record `a`, exiting to canonical dispatch unless it is a table.
+    /// Writes no mirror slot.
+    Record,
+    /// A loop's raw read of record site `b` into slot `a`, exiting to
+    /// canonical dispatch unless it is a live number.
+    RecordRead,
+    /// A loop's store of slot `c` into the live slot of record site `b`,
+    /// exiting to canonical dispatch before its charge when the key is not
+    /// live there. Writes no mirror slot.
+    RecordStore,
 }
 
 /// What a scan admits besides arithmetic.
@@ -365,8 +403,17 @@ struct Layout {
     /// The instruction being scanned is reached only by a jump: the one
     /// before it does not fall through.
     dead: bool,
-    /// Forward branches not yet reached: target pc, `must` at the branch.
-    pending: Vec<(usize, u32)>,
+    /// Forward branches not yet reached: target pc, and `must`, `rmust` and
+    /// `rmay` at the branch.
+    pending: Vec<(usize, u32, u32, u32)>,
+    /// Registers some record read of the body defines, by record id.
+    records: Vec<u16>,
+    /// Record ids whose register holds a record defined in this pass, on
+    /// every path to the instruction being scanned.
+    rmust: u32,
+    /// Record ids whose register may hold such a record there.
+    rmay: u32,
+    record_sites: Vec<RecordSite>,
     /// The operation index each scanned instruction starts, by pc.
     op_at: Vec<(usize, usize)>,
     /// Branch and jump operations with their target pcs, resolved to
@@ -426,6 +473,9 @@ impl Layout {
             || self
                 .nil_from
                 .is_some_and(|from| register >= from && !self.revived.contains(&register))
+            || self
+                .record_id(register)
+                .is_some_and(|id| self.rmay & (1 << id) != 0)
         {
             return None;
         }
@@ -443,11 +493,106 @@ impl Layout {
         let slot = self.register(register)?;
         self.written |= 1 << slot;
         self.must |= 1 << slot;
+        if let Some(id) = self.record_id(register) {
+            self.rmust &= !(1 << id);
+            self.rmay &= !(1 << id);
+        }
         self.tables.retain(|&(r, _)| r != register);
         if self.nil_from.is_some_and(|from| register >= from) && !self.revived.contains(&register) {
             self.revived.push(register);
         }
         Some(slot)
+    }
+
+    fn record_id(&self, register: u16) -> Option<usize> {
+        self.records.iter().position(|&r| r == register)
+    }
+
+    /// The record id `register` holds on every path here, as a field
+    /// receiver; `None` when some path reaching here leaves it no record of
+    /// this pass.
+    fn record_receiver(&self, register: u16) -> Option<u8> {
+        let id = self.record_id(register)?;
+        (self.rmust & (1 << id) != 0).then_some(id as u8)
+    }
+
+    /// The record site of record `record` and `key`, shared with earlier
+    /// constituents naming both.
+    fn record_site(&mut self, record: u8, key: u16, store: bool) -> Option<u8> {
+        let index = match self
+            .record_sites
+            .iter()
+            .position(|site| site.record == record && site.key == key)
+        {
+            Some(index) => index,
+            None => {
+                if self.record_sites.len() >= MAX_RECORD_SITES {
+                    return None;
+                }
+                self.record_sites.push(RecordSite {
+                    record,
+                    key,
+                    store: false,
+                });
+                self.record_sites.len() - 1
+            }
+        };
+        self.record_sites[index].store |= store;
+        Some(index as u8)
+    }
+
+    /// Whether the instruction at `next` uses register `register` as a field
+    /// receiver, which makes a `GET_TABLE` into it a record read. The
+    /// dataflow checks the use again, so this only selects the form.
+    fn receiver_next(code: &[Instr], mut next: usize, end: Option<usize>, register: u16) -> bool {
+        // A literal stored into the record is loaded first.
+        // bounded: the scan stops at the body's end
+        while end.is_some_and(|end| next < end)
+            && code
+                .get(next)
+                .is_some_and(|load| load.opcode() == Instr::OP_LOAD_NUM && load.a() != register)
+        {
+            next += 1;
+        }
+        end.is_some_and(|end| next < end)
+            && code.get(next).is_some_and(|use_| {
+                (use_.opcode() == Instr::OP_GET_FIELD && use_.b() == register)
+                    || (use_.opcode() == Instr::OP_SET_FIELD && use_.a() == register)
+            })
+    }
+
+    /// A record read of `receiver` by `GET_TABLE` instruction `inst`, whose
+    /// exit resumes canonical dispatch at `exit`. The key is read before the
+    /// destination becomes a record, as dispatch reads it. A loop control
+    /// register never holds a record.
+    fn record(&mut self, receiver: Receiver, exit: usize, inst: Instr) -> Option<LoopOp> {
+        if self.indexed.len() >= MAX_INDEXED {
+            return None;
+        }
+        let c = self.read(inst.c())?;
+        let register = inst.a();
+        if self.registers.iter().take(4).any(|&r| r == register) || self.untouchable(register) {
+            return None;
+        }
+        let id = match self.record_id(register) {
+            Some(id) => id,
+            None => {
+                if self.records.len() >= MAX_RECORDS {
+                    return None;
+                }
+                self.records.push(register);
+                self.records.len() - 1
+            }
+        };
+        self.rmust |= 1 << id;
+        self.rmay |= 1 << id;
+        self.indexed.push((receiver, exit));
+        Some(LoopOp {
+            kind: OpKind::Record,
+            a: id as u8,
+            b: (self.indexed.len() - 1) as u8,
+            c,
+        })
     }
 
     /// The register of a callee loaded and not yet called, and a method
@@ -636,19 +781,26 @@ impl Layout {
     fn join(&mut self, pc: usize) -> Option<()> {
         let mut reached = !self.dead;
         let mut must = if self.dead { u32::MAX } else { self.must };
-        self.pending.retain(|&(target, at_branch)| {
-            if target == pc {
-                reached = true;
-                must &= at_branch;
-                false
-            } else {
-                true
-            }
-        });
+        let mut rmust = if self.dead { u32::MAX } else { self.rmust };
+        let mut rmay = if self.dead { 0 } else { self.rmay };
+        self.pending
+            .retain(|&(target, at_branch, rmust_at, rmay_at)| {
+                if target == pc {
+                    reached = true;
+                    must &= at_branch;
+                    rmust &= rmust_at;
+                    rmay |= rmay_at;
+                    false
+                } else {
+                    true
+                }
+            });
         if !reached {
             return None;
         }
         self.must = must;
+        self.rmust = rmust;
+        self.rmay = rmay;
         self.dead = false;
         Some(())
     }
@@ -661,7 +813,8 @@ impl Layout {
         if target <= pc || target > end {
             return None;
         }
-        self.pending.push((target, self.must));
+        self.pending
+            .push((target, self.must, self.rmust, self.rmay));
         self.jumps.push((self.ops.len(), target));
         Some(())
     }
@@ -810,11 +963,18 @@ impl Layout {
                         let index = code[pc + 1];
                         // Both reads are free, so an exit before the pair
                         // owes no charge and none falls between its halves.
+                        // An exit resumes at `GET_UPVAL`, which installs the
+                        // table the region read without writing `t`.
                         const {
                             assert!(Instr::fixed_charge(Instr::OP_GET_UPVAL).is_none());
                             assert!(Instr::fixed_charge(Instr::OP_GET_TABLE).is_none());
                         }
-                        let op = self.index(Receiver::Upvalue(inst.b()), pc, index)?;
+                        let receiver = Receiver::Upvalue(inst.b());
+                        let op = if Self::receiver_next(code, pc + 2, end, index.a()) {
+                            self.record(receiver, pc, index)?
+                        } else {
+                            self.index(receiver, pc, index)?
+                        };
                         self.ops.push(op);
                         self.charges.push((pc + 2, 0));
                         pc += 2;
@@ -874,7 +1034,39 @@ impl Layout {
                             assert!(Instr::fixed_charge(Instr::OP_GET_TABLE).is_none());
                         }
                         self.receivers.push(inst.b());
-                        self.index(Receiver::Register(inst.b()), pc, inst)?
+                        let receiver = Receiver::Register(inst.b());
+                        if Self::receiver_next(code, pc + 1, end, inst.a()) {
+                            self.record(receiver, pc, inst)?
+                        } else {
+                            self.index(receiver, pc, inst)?
+                        }
+                    }
+                    // A field of a record, read per iteration; the receiver
+                    // is classified before the destination is written.
+                    Instr::OP_GET_FIELD if fields && self.record_id(inst.b()).is_some() => {
+                        const {
+                            assert!(Instr::fixed_charge(Instr::OP_GET_FIELD).is_none());
+                        }
+                        let record = self.record_receiver(inst.b())?;
+                        let b = self.record_site(record, inst.c(), false)?;
+                        LoopOp {
+                            kind: OpKind::RecordRead,
+                            a: self.write(inst.a())?,
+                            b,
+                            c: 0,
+                        }
+                    }
+                    // A store of a number into a field of a record.
+                    Instr::OP_SET_FIELD if fields => {
+                        let record = self.record_receiver(inst.a())?;
+                        let c = self.read(inst.c())?;
+                        let b = self.record_site(record, inst.b(), true)?;
+                        LoopOp {
+                            kind: OpKind::RecordStore,
+                            a: 0,
+                            b,
+                            c,
+                        }
                     }
                     Instr::OP_BR_LT..=Instr::OP_BR_NE if fields => {
                         let compare = CompareOp::from_branch_opcode(opcode)?;
@@ -998,6 +1190,28 @@ impl Layout {
             return None;
         }
         let control = !self.jumps.is_empty() || !self.indexed.is_empty();
+        // Invariant receivers are read once, so no record may replace one;
+        // a register read as a number before written in a pass must not
+        // still hold a record from the pass before.
+        for (id, &register) in self.records.iter().enumerate() {
+            if self.receivers.contains(&register) {
+                return None;
+            }
+            if self.rmay & (1 << id) != 0
+                && let Some(slot) = self.registers.iter().position(|&r| r == register)
+                && self.guards & (1 << slot) != 0
+            {
+                return None;
+            }
+        }
+        let records = self
+            .records
+            .iter()
+            .map(|&register| {
+                let slot = self.registers.iter().position(|&r| r == register);
+                (register, slot.map(mirror_slot))
+            })
+            .collect::<Vec<_>>();
         // Calls stay on the straight-line runner, whose nil-floor reasoning
         // assumes one path through the body; operation indices fit a `u8`.
         if control && (!self.calls.is_empty() || self.ops.len() > usize::from(u8::MAX)) {
@@ -1079,6 +1293,8 @@ impl Layout {
                 weight,
                 calls: self.calls.into_boxed_slice(),
                 indexed: self.indexed.into_boxed_slice(),
+                records: records.into_boxed_slice(),
+                record_sites: self.record_sites.into_boxed_slice(),
                 control,
             },
             registers,
@@ -1266,7 +1482,11 @@ impl State {
         local_cost: &mut u64,
     ) -> Result<()> {
         if region.body.control {
-            self.run_control_region(region, frame, ip, local_cost)
+            if region.body.records.is_empty() {
+                self.run_control_region::<false>(region, frame, ip, local_cost)
+            } else {
+                self.run_control_region::<true>(region, frame, ip, local_cost)
+            }
         } else if region.body.calls.is_empty() {
             self.run_region::<false>(region, frame, ip, local_cost)
         } else {
@@ -1530,8 +1750,41 @@ impl State {
     /// - The pass bound is the sum of every operation's weight, which
     ///   bounds any path, so below the flush threshold each executed
     ///   operation's weight is added with no settlement test.
+    ///
+    /// Records (`RECORDS`, compiled apart so other bodies keep passes free
+    /// of their arms): a `GET_TABLE` whose next use of its destination is
+    /// a field receiver reads a record, a raw element that must be a table,
+    /// else the region exits at the read's first instruction as above. The
+    /// recognizer proves every field access of a record is reached only
+    /// through a record read of the same pass on every path, that a record
+    /// is never read as a number or stored, that no register read before
+    /// written in a pass may still hold one, and that no record register is
+    /// a loop control or an invariant receiver. The record goes onto the
+    /// stack at once, as canonical dispatch leaves it, and clears its
+    /// register's mirror bits, so no exit publishes an older number over it
+    /// and the next checkpoint republishes a number written after it.
+    /// - A record field read takes the key's live slot raw (no `__index`
+    ///   consulted, as for any raw hit) and must hold a number; otherwise
+    ///   the region exits at the free `GET_FIELD`.
+    /// - A record store resolves the key's live slot before its
+    ///   `TableWrite` charge; a key not live there exits at the `SET_FIELD`
+    ///   with nothing charged for it, and canonical dispatch charges and
+    ///   stores with full semantics (`__newindex`, a new key). Otherwise the
+    ///   charge, which may refuse with no store made, then
+    ///   `GcHeap::overwrite_live_slot`, the overwrite a cached `SET_FIELD`
+    ///   makes. Stores write numbers into live slots under string keys, so
+    ///   no key is created or removed and no table version moves: number
+    ///   keyed element reads of the tables resolved at entry are unchanged,
+    ///   entry-read fields are guarded by the key check at entry
+    ///   (`State::resolve_record_keys`, which also declines `__index`), and
+    ///   record reads re-read the live slot, so aliased records (two records
+    ///   one table, a record its own source) are exact.
+    /// - A site's last slot is reused while the table and version are the
+    ///   same, else as a key-checked position (`Table::renew_slot`), which
+    ///   records of one layout share, else looked up. Inline caches are
+    ///   neither consulted nor refilled; they only accelerate.
     #[inline(never)]
-    fn run_control_region(
+    fn run_control_region<const RECORDS: bool>(
         &mut self,
         region: &NumericLoop,
         frame: &Frame,
@@ -1558,6 +1811,15 @@ impl State {
             }
             *table = Some(ptr);
         }
+        let mut keys = [Val::Nil; MAX_RECORD_SITES];
+        if RECORDS && !self.resolve_record_keys(body, frame, &mut keys) {
+            return Ok(());
+        }
+        // Each record's table this pass, and each record site's last slot:
+        // a position hint, compared by handle and never dereferenced on
+        // another table without its key check.
+        let mut records = [None::<ObjectPtr>; MAX_RECORDS];
+        let mut found = [None::<(ObjectPtr, SlotRef)>; MAX_RECORD_SITES];
         let step_pc = region.step_pc;
         let mut written: u32 = 0;
         let mut published: u32 = 0;
@@ -1567,6 +1829,21 @@ impl State {
             let mut k = 0;
             while let Some(op) = body.ops.get(k) {
                 let (cursor, charge) = body.charges[k];
+                // A store resolves its slot before its charge: a key not
+                // live there exits with nothing charged for it.
+                let mut store = None;
+                if RECORDS && let OpKind::RecordStore = op.kind {
+                    let site = usize::from(op.b) % MAX_RECORD_SITES;
+                    let table = records[usize::from(body.record_sites[site].record) % MAX_RECORDS]
+                        .expect("a record is defined on every path to its use");
+                    match self.record_slot(table, keys[site], &mut found[site]) {
+                        Some((slot, _)) => store = Some((table, slot)),
+                        None => {
+                            *ip = cursor - 1;
+                            break 'pass Ok(());
+                        }
+                    }
+                }
                 if charge != 0 {
                     if fast {
                         *local_cost += charge;
@@ -1601,6 +1878,59 @@ impl State {
                         };
                         x[at(op.a)] = n;
                         written |= 1 << op.a;
+                    }
+                    // Only a body with records holds these three.
+                    OpKind::Record if RECORDS => {
+                        let (_, exit) = body.indexed[usize::from(op.b)];
+                        let table = tables[usize::from(op.b) % MAX_INDEXED]
+                            .expect("every indexed receiver was resolved at entry");
+                        let value = self
+                            .heap
+                            .as_table_ref(table)
+                            .map(|tbl| tbl.get(&Val::Num(x[at(op.c)])));
+                        let Some(Val::Obj(record)) = value else {
+                            *ip = exit;
+                            break 'pass Ok(());
+                        };
+                        if self.heap.as_table_ref(record).is_none() {
+                            *ip = exit;
+                            break 'pass Ok(());
+                        }
+                        let id = usize::from(op.a) % MAX_RECORDS;
+                        records[id] = Some(record);
+                        let (register, slot) = body.records[id];
+                        // The stack holds the record as canonical dispatch
+                        // leaves it: no exit publishes an older number over
+                        // it, and the next checkpoint republishes a number
+                        // written after it.
+                        self.stack[base + usize::from(register)] = Val::Obj(record);
+                        if let Some(slot) = slot {
+                            written &= !(1 << slot);
+                            published &= !(1 << slot);
+                        }
+                    }
+                    OpKind::RecordRead if RECORDS => {
+                        let site = usize::from(op.b) % MAX_RECORD_SITES;
+                        let table = records
+                            [usize::from(body.record_sites[site].record) % MAX_RECORDS]
+                            .expect("a record is defined on every path to its use");
+                        let Some((_, Val::Num(n))) =
+                            self.record_slot(table, keys[site], &mut found[site])
+                        else {
+                            *ip = cursor - 1;
+                            break 'pass Ok(());
+                        };
+                        x[at(op.a)] = n;
+                        written |= 1 << op.a;
+                    }
+                    OpKind::RecordStore if RECORDS => {
+                        let (table, slot) = store.expect("the store resolved its slot");
+                        // A live overwrite under a key proven not `__index`
+                        // at entry, so inherited routes stay standing.
+                        let stored =
+                            self.heap
+                                .overwrite_live_slot(table, slot, Val::Num(x[at(op.c)]));
+                        debug_assert!(stored, "a slot resolved just before stays live");
                     }
                     _ => {
                         x[at(op.a)] = eval(op, &x);
@@ -1644,6 +1974,74 @@ impl State {
         };
         self.publish_mirror(body, base, &x, written);
         result
+    }
+
+    /// Read each record site's key into `keys`. `false` declines the region:
+    /// a stored key is `__index` (a live overwrite of it would need route
+    /// retirement), or a stored key is the key of a field the region reads
+    /// once at entry, which the store could change. Off in the forced-miss
+    /// arm of the inline-cache differential, as field leaves are, so that
+    /// arm runs canonical dispatch.
+    fn resolve_record_keys(
+        &self,
+        body: &Body,
+        frame: &Frame,
+        keys: &mut [Val; MAX_RECORD_SITES],
+    ) -> bool {
+        if body.record_sites.is_empty() {
+            return true;
+        }
+        #[cfg(feature = "disable-inline-caches")]
+        if super::caches::hits_disabled() {
+            return false;
+        }
+        let index_key = self.meta_names.get(MetaName::Index);
+        for (site, key) in body.record_sites.iter().zip(keys.iter_mut()) {
+            *key = frame.literal(site.key);
+            if !site.store {
+                continue;
+            }
+            if *key == index_key {
+                return false;
+            }
+            // bounded: at most MIRROR_SLOTS constants per store site
+            let hoisted = body.constants.iter().any(|&(_, constant)| {
+                matches!(constant, Constant::Field { key: read, .. } if frame.literal(read) == *key)
+            });
+            if hoisted {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// The live slot of `key` in record `table` and its value, through the
+    /// site's last slot `found`: the same slot while the table and its
+    /// version are unchanged, else the same position if it holds `key` live
+    /// (in this table or one of the same layout), else a lookup. `None` when
+    /// the key is not live in `table`.
+    #[inline(always)]
+    fn record_slot(
+        &self,
+        table: ObjectPtr,
+        key: Val,
+        found: &mut Option<(ObjectPtr, SlotRef)>,
+    ) -> Option<(SlotRef, Val)> {
+        let tbl = self.heap.as_table_ref(table)?;
+        if let Some((last, slot)) = *found {
+            if last == table
+                && let Some(value) = tbl.read_slot(slot)
+            {
+                return Some((slot, value));
+            }
+            if let Some((slot, value)) = tbl.renew_slot(slot, key) {
+                *found = Some((table, slot));
+                return Some((slot, value));
+            }
+        }
+        let (slot, value) = tbl.find_slot(&key)?;
+        *found = Some((table, slot));
+        Some((slot, value))
     }
 
     /// Read every call site's callee into `callees` and check what the
@@ -2235,7 +2633,8 @@ fn eval(op: &LoopOp, x: &[f64; MIRROR_SLOTS]) -> f64 {
         OpKind::Unm => -lhs,
         // Calls and loads are run by the region loop, and field reads and
         // stores by a field leaf, never through here.
-        // Branches, jumps and indexed reads only by `run_control_region`.
+        // Branches, jumps, indexed reads and records only by
+        // `run_control_region`.
         OpKind::Copy
         | OpKind::Load
         | OpKind::Call
@@ -2243,7 +2642,10 @@ fn eval(op: &LoopOp, x: &[f64; MIRROR_SLOTS]) -> f64 {
         | OpKind::Store
         | OpKind::Branch(_)
         | OpKind::Jump
-        | OpKind::Index => lhs,
+        | OpKind::Index
+        | OpKind::Record
+        | OpKind::RecordRead
+        | OpKind::RecordStore => lhs,
     }
 }
 
@@ -2392,6 +2794,30 @@ mod tests {
             // A string comparison and a truth test are not number branches.
             "local function f(t) local s = 0 for i = 1, 9 do if s == 'x' then s = 1 end end end",
             "local function f(t) local s = 0 for i = 1, 9 do if s then s = 1 end end end",
+        ] {
+            assert_eq!(regions(source), 0, "{source}");
+        }
+    }
+
+    #[test]
+    fn regions_take_records_read_from_invariant_tables() {
+        for source in [
+            "local function f(us) for i = 1, 9 do local u = us[i] u.x = u.x + u.speed end end",
+            "local function f(us) local s = 0 for i = 1, 9 do s = s + us[i].x end return s end",
+            "local us = {} local function f() for i = 1, 9 do local u = us[i] if u.x > 2 then u.x = 0 end end end",
+            "local function f(us) for i = 1, 9 do local u = us[i] u.hp = 1 end end",
+        ] {
+            assert_eq!(regions(source), 1, "{source}");
+        }
+        for source in [
+            // A record on one path only; a record used as a number; a
+            // record carried into the next pass; a store of a record.
+            "local function f(us, v) for i = 1, 9 do if i > 3 then v = us[i] end v.x = 1 end end",
+            "local function f(us) local s = 0 for i = 1, 9 do local u = us[i] u.x = 1 s = s + u end end",
+            "local function f(us, u) local s = 0 for i = 1, 9 do s = s + u u = us[i] u.x = 1 end end",
+            "local function f(us) for i = 1, 9 do local u = us[i] u.x = u end end",
+            // A record replacing an invariant receiver.
+            "local function f(us, o) local s = 0 for i = 1, 9 do s = s + o.y o = us[i] o.x = 1 end end",
         ] {
             assert_eq!(regions(source), 0, "{source}");
         }

@@ -178,8 +178,9 @@ What: an upvalue read goes `frame.upvalues` (a `Captures`: inline for one captur
 pool slot, then branches on open (read the stack slot) or closed (read the
 stored value). same_obj_read no longer runs them: its loop is a typed region
 that reads each upvalue field once on entry. Loops a typed region declines
-(stores, non-number branches, calls other than leaves or invariant-receiver
-methods) still read upvalues per instruction.
+(stores other than number fields of a record, non-number branches, calls
+other than leaves or invariant-receiver methods) still read upvalues per
+instruction.
 
 Sketch: measure first on `upvalue_bounce`, an integer loop reading four
 closed scalar captures every step (a captured number used as a number

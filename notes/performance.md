@@ -104,6 +104,13 @@ and at `State::try_numeric_leaf`; numbers in `reference/performance.md`):
   key meets a key the region resolved (`State::resolve_callees`).
   bench/method 1.6 s to 0.54 s, method_chain_counter 1.5 s to 0.57 s;
   global about 5% slower, read as layout (reference/performance.md).
+- Records in regions without calls: a `GET_TABLE` whose destination is
+  next used as a field receiver reads a table element per iteration, whose
+  number fields the body reads and stores raw, each store resolving its
+  live slot before its `TableWrite` charge and exiting to canonical
+  dispatch when the key is not live; a site's slot is reused across
+  records of one layout by key-checked position. bench/store_loop 4.2 s to
+  1.7 s on bygg.
 
 What the landed work taught: canonical-pc metadata with the canonical
 instructions as the fallback needs no position map or execution stream;
@@ -113,7 +120,9 @@ per-operation charge path with no refusal between its halves. The exact `i64`
 countdown was not built: the f64 add and compare are not where the loop's time
 went.
 
-**Residue:** loop bodies with a store, a nested loop (cull's outer loop),
+**Residue:** loop bodies storing anything but a number into a live field
+of a record (a store beside a call, a store to an invariant receiver, a
+dynamic-key `SET_TABLE`), a nested loop (cull's outer loop),
 a non-number branch (truth test, string or nil compare), a branch beside a
 leaf call, a call to anything but a numeric leaf (nested `f(g(x))`, open
 arguments or results), or a method call on a receiver read inside the loop
@@ -122,11 +131,9 @@ run canonically. Straight-line chains in functions that are not leaves
 (fib's `n - 1`, `n - 2`, `+` around its calls) still dispatch per
 instruction. Field updates outside a leaf (in a function that branches or
 calls, or in a loop body such as object_fields' `u.x = u.x + u.speed`)
-still dispatch; inside a loop region a store would need slot identity
-hoisted and every value it can reach reloaded, not the region's read-once
-fields. The store loop has its own workload, `store_loop` (object_fields'
-update pass alone, map-storage receivers read from an array), and the
-non-leaf update has `method_step` (a guarded `Body:step`); the other forms
+still dispatch; object_fields' update pass stays canonical because its
+body also calls a method on the record. The non-leaf update has
+`method_step` (a guarded `Body:step`); the other forms
 still need a workload whose loop or call the landed forms do not already
 take.
 One stable shape for a two-op fusion: after a handler, test the actual next

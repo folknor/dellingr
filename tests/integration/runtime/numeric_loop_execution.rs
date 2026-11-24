@@ -644,6 +644,78 @@ fn numeric_loop_region_method_calls_decline_what_a_store_could_change() {
     assert!(error.to_string().contains("attempt to index"), "{error}");
 }
 
+/// A loop reading a record from a local table on every iteration, then
+/// reading, updating and storing its fields. Record 5 has no raw `x`, so its
+/// first read answers through `__index` and its store makes a new key
+/// through `__newindex`; record 3 has no `hp`, so its first store exits
+/// before its charge; record 8 is the outer table itself. The inner loop is
+/// entered once per round, so it runs as a region again after each exit.
+fn record_region_program(twin: &str) -> String {
+    format!(
+        r#"
+        local up = 0
+        local log = 0
+        local M = {{
+            __index = function(t, k) return 0.5 end,
+            __newindex = function(t, k, v) log = log + 1 rawset(t, k, v) end,
+        }}
+        function run()
+            local sum, k = 0.5, 0
+            local us
+            peek = function()
+                local c = 0
+                for i = 1, 12 do
+                    local u = us and us[i]
+                    if u then c = c + (rawget(u, "x") or 0) * i + (rawget(u, "hp") or 0) end
+                end
+                return sum, c, log
+            end
+            us = {{}}
+            for i = 1, 12 do
+                us[i] = setmetatable({{ x = i, speed = i % 3, hp = 0, a = 1, b = 2 }}, M)
+            end
+            us[5] = setmetatable({{ speed = 2, hp = 0 }}, M)
+            us[3] = setmetatable({{ x = 3, speed = 1 }}, M)
+            us[8] = us
+            us.x, us.speed, us.hp = 1, 4, 0
+            for round = 1, 3 do
+                for i = 1, 12 do
+                    local u = us[i]
+                    u.x = u.x + u.speed
+                    sum = sum + u.x
+                    u.hp = i
+                    k = i
+                    {twin}
+                end
+            end
+            return sum
+        end
+        "#
+    )
+}
+
+#[test]
+fn numeric_loop_region_with_records_matches_canonical_dispatch_at_every_budget() {
+    let region = record_region_program("");
+    let canonical = record_region_program("local _u = up");
+    let models = [
+        CostModel::default(),
+        CostModel::default()
+            .with(Charge::TableWrite, 4)
+            .with(Charge::Add, 0),
+        CostModel::zero(),
+    ];
+    for model in &models {
+        for budget in -1..=900 {
+            assert_eq!(
+                region_outcome(model, &region, budget),
+                region_outcome(model, &canonical, budget),
+                "budget {budget} under {model:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn numeric_loop_region_falls_back_when_a_read_is_not_a_number() {
     let error = support::run_error(
