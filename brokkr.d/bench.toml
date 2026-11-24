@@ -363,6 +363,10 @@ xxhash = "fb93e1b1addad5f3e36e0a505bbda654"
 file = "bench/gmatch_bytes.lua"
 xxhash = "128ab7e16521ded779a23c4d0a0488d7"
 
+[data.workloads.bench.key_sweep]
+file = "bench/key_sweep.lua"
+xxhash = "c5bc66615eb4f1d388078e0f282b0abe"
+
 [data.workloads.hotpath.benchmark]
 file = "examples/composite/benchmark.lua"
 xxhash = "fd1b898cc308645a3135b078c4fd180a"
@@ -618,6 +622,10 @@ xxhash = "33158346259decd0031d2f4dcbd966d8"
 [data.workloads.hotpath.gmatch_bytes]
 file = "examples/strings/gmatch_bytes.lua"
 xxhash = "68804fca7d4bb95dcc7ae7f38ca04abe"
+
+[data.workloads.hotpath.key_sweep]
+file = "examples/tables/key_sweep.lua"
+xxhash = "7221c87ea2e3167b3c095fe047770024"
 
 # Rust-driven scenarios (brokkr.d/host.lua): one pinned file per kind and
 # scale under bench/host/ (seconds scale) and bench/host/small/ (ms scale,

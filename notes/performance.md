@@ -191,19 +191,18 @@ measurement attributing branch misses to the dispatch branch before work
 begins. The stable-Rust route that tests the actual next opcode and enters
 its handler directly lives under PERF-002.
 
-## PERF-044 - No registered workload exercises the `GET_TABLE` hint's hit path
+## PERF-045 - `resolve_callees` boxes field slots per static field-leaf site on every region entry
 
-The key-position hint (`Table::string_get_hinted`) was measured at about 10
-percent of `column_key`'s wall, but that sweep has since become a typed
-region that never reads the hint, so no registered workload is
-hint-hit dominated. The fused miss path (bygg, invocation f6369874) was
-measured on `rekey`, `fill` and `numeric_index` only; its hit side is
-unmeasured. A sweep over same-constructor records that a region declines
-(for example a call in the body the region cannot admit) would be the
-workload.
+Each typed-region entry allocates a `Box` of field slots for every static
+field-leaf call site in `State::resolve_callees`. Unmeasured; it is the same
+order of per-entry work as the relied-key collection that 42bc2a0 removed,
+measured, and reverted (about two small allocations per entry, under 0.3% of
+`object_fields`, below that workload's layout noise). Taking it alone is not
+expected to clear noise.
 
-**Classification:** register a workload at both scales, then a matched
-`--commit` pair across the hint's next change.
+**Classification:** local, low ceiling. Only worth doing alongside a change
+that restructures region entry for another reason, measured with a
+layout-controlled comparison.
 
 ## Accounts added to existing entries
 

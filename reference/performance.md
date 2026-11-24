@@ -913,9 +913,14 @@ a string key. Matched interleaved pair on bygg, `brokkr bench --rounds 5`,
 `rekey` 1024 to 977 ms (5 of 5 faster), `fill` 1510 to 1487 ms (5 of 5
 faster), `numeric_index` 4551 to 4570 ms (2 faster, 3 slower, median paired
 difference under 0.1 ms). The `index_key` native level went from 10768 to
-10704 bytes in dev and from 720 to 736 in release. No registered workload
-at this point reads through the hint on its hit path (`column_key`'s sweep
-runs in a typed region), so the hit side was not re-measured.
+10704 bytes in dev and from 720 to 736 in release. `column_key`'s sweep
+runs in a typed region and never reads the hint, so the hit side was
+measured on `key_sweep` (`column_key`'s kernel written with `repeat` loops,
+which no region takes; the site misses once per column and hits the other
+63 reads): matched interleaved pair on bygg, `brokkr bench --rounds 5`,
+`--commit 9cb5060` against `--commit d08f32c` (invocation 8b396caa, the
+verdict file at `K = 2000`), 9.7 s to 8.7-8.8 s in 5 of 5 rounds, about
+10 percent faster. The fused lookup pays on its hit side as well.
 
 ## Records read by a register key in typed regions, 2026-11-24
 

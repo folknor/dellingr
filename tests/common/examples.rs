@@ -106,6 +106,7 @@ examples! {
     tables_column_key: "examples/tables/column_key.lua",
     tables_deep_stack: "examples/tables/deep_stack.lua",
     tables_fill: "examples/tables/fill.lua",
+    tables_key_sweep: "examples/tables/key_sweep.lua",
     tables_metamethod_sequence: "examples/tables/metamethod_sequence.lua",
     tables_mixed: "examples/tables/mixed.lua",
     tables_numeric_index: "examples/tables/numeric_index.lua",
