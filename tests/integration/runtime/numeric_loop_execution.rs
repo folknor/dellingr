@@ -740,6 +740,83 @@ fn numeric_loop_region_with_method_calls_on_records_matches_canonical_dispatch_a
     }
 }
 
+/// Field leaves with forward branches: a guard on a field's truthiness (a
+/// boolean, a number the leaf itself stores into the tested field first, a
+/// table), compare-branches with an `else`, called from canonical dispatch
+/// and from a region over records, with charges that differ per path.
+/// `{leaf_twin}` keeps every leaf canonical and `{twin}` the region.
+fn branching_leaf_program(twin: &str, leaf_twin: &str) -> String {
+    format!(
+        r#"
+        local up = 0
+        local Body = {{}}
+        Body.__index = Body
+        function Body:step(dt)
+            {leaf_twin}
+            if self.alive then
+                self.x = self.x + self.vx * dt
+                if self.x > 30 then self.x = self.x - 25 else self.age = self.age + 1 end
+            end
+        end
+        function Body:flip(n)
+            {leaf_twin}
+            self.mark = n
+            if not self.mark then self.age = self.age * 2 end
+            if self.tag then self.age = self.age + n / 4 end
+            return self.age
+        end
+        local bodies = {{}}
+        for i = 1, 8 do
+            bodies[i] = setmetatable({{ alive = i % 3 ~= 0, x = i, vx = i % 4 - 1, age = 0, mark = false }}, Body)
+        end
+        bodies[5].tag = bodies
+        bodies[7].alive = nil
+        function run()
+            local sum, k = 0.5, 0
+            peek = function()
+                local c = 0
+                for i = 1, 8 do c = c + bodies[i].x * i + bodies[i].age end
+                return sum, c, k
+            end
+            for round = 1, 4 do
+                for i = 1, 8 do
+                    bodies[i]:step(2)
+                    {twin}
+                end
+                for i = 1, 8 do
+                    sum = sum + bodies[i]:flip(round)
+                end
+                k = k + round
+            end
+            return sum
+        end
+        "#
+    )
+}
+
+#[test]
+fn branching_field_leaves_match_canonical_dispatch_at_every_budget() {
+    let fast = branching_leaf_program("", "");
+    let canonical = branching_leaf_program("local _u = up", "local _u = false");
+    let models = [
+        CostModel::default(),
+        CostModel::default()
+            .with(Charge::TableWrite, 4)
+            .with(Charge::Mul, 0)
+            .with(Charge::Sub, 5),
+        CostModel::zero(),
+    ];
+    for model in &models {
+        for budget in -1..=900 {
+            assert_eq!(
+                region_outcome(model, &fast, budget),
+                region_outcome(model, &canonical, budget),
+                "budget {budget} under {model:?}"
+            );
+        }
+    }
+}
+
 /// Nested loops inside one region: an outer pass reading two upvalue
 /// tables, a number upvalue as the inner limit, an inner loop that may not
 /// enter, a forward branch out of the inner loop, and a third loop nested

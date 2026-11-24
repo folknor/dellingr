@@ -14,7 +14,11 @@
 //!   body may also read and store string-keyed fields of receiver tables (a
 //!   parameter used only as a receiver, or an upvalue), the method shape
 //!   `self.count = self.count + n`; such a field leaf runs when every field
-//!   is raw present in its table. A loop region may call either kind,
+//!   is raw present in its table. A leaf may branch forward, on number
+//!   comparisons and on a field's truthiness (`if self.alive then`), as
+//!   long as every edge reaches that first `RETURN`; it then charges the
+//!   path it ran, bounded at admission by the sum over every path. A loop
+//!   region may call either kind,
 //!   through a global, an upvalue or a method of a loop-invariant receiver.
 //!
 //! Both are derived metadata built per State from admitted bytecode (fresh
@@ -439,11 +443,28 @@ struct FieldSite {
     read_cache: Option<u8>,
     /// A constituent `SET_FIELD`'s set cache slot, if any.
     set_cache: Option<u8>,
-    /// Some constituent reads it, so it must hold a number at entry.
+    /// Some constituent reads it as a number, so it must hold one at entry.
+    /// A site only truth-tested may hold any value, but must be raw present
+    /// as every site must.
     number: bool,
     /// Some constituent stores to it, so its key must not be `__index`.
     store: bool,
 }
+
+/// How a leaf constituent uses its field site.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SiteUse {
+    /// `GET_FIELD` read as a number.
+    Number,
+    /// `GET_FIELD` read only for its truthiness.
+    Truth,
+    /// `SET_FIELD` of a number.
+    Store,
+}
+
+/// Operations a leaf with forward branches may hold: its runners report
+/// the operations a call ran as one bit each.
+const MAX_CONTROL_LEAF_OPS: usize = 64;
 
 #[derive(Clone, Copy, Debug)]
 struct LoopOp {
@@ -469,6 +490,11 @@ enum OpKind {
     /// A field leaf's store of slot `c` into field site `b`: writes no
     /// mirror slot.
     Store,
+    /// A field leaf's `GET_FIELD d s k; TEST_FALSE d` (`false`) or
+    /// `TEST_TRUE d` (`true`): when the live value of field site `b` has
+    /// the given truthiness, continue at operation index `a`. Writes no
+    /// mirror slot; `d` is left unreadable (`Layout::truth_test`).
+    Test(bool),
     /// A loop's forward compare-branch: when `b` compared with `c` is
     /// false, continue at operation index `a`. Writes no mirror slot.
     Branch(CompareOp),
@@ -883,13 +909,13 @@ impl Layout {
     }
 
     /// The field site of `source` and `key`, shared with earlier
-    /// constituents naming both.
+    /// constituents naming both, used as `use_` says.
     fn site(
         &mut self,
         source: TableSource,
         key: u16,
         cache: Option<u8>,
-        store: bool,
+        use_: SiteUse,
     ) -> Option<u8> {
         let index = match self
             .sites
@@ -913,14 +939,55 @@ impl Layout {
             }
         };
         let site = &mut self.sites[index];
-        if store {
-            site.store = true;
-            site.set_cache = site.set_cache.or(cache);
-        } else {
-            site.number = true;
-            site.read_cache = site.read_cache.or(cache);
+        match use_ {
+            SiteUse::Store => {
+                site.store = true;
+                site.set_cache = site.set_cache.or(cache);
+            }
+            SiteUse::Number | SiteUse::Truth => {
+                site.number |= use_ == SiteUse::Number;
+                site.read_cache = site.read_cache.or(cache);
+            }
         }
         Some(index as u8)
+    }
+
+    /// `GET_FIELD d s k` at `pc` fused with the `TEST_FALSE d` or
+    /// `TEST_TRUE d` after it, in a leaf ending at `end`: a branch on the
+    /// truthiness of field site `(s, k)`'s live value. The receiver is
+    /// classified before `d` is clobbered (`d` may be `s`). `d` then holds
+    /// a value the mirror does not represent: its `must` and `safe` facts
+    /// are cleared, as a call clearing it would, so a number read of it on
+    /// any path still reaching it from here refuses (`safe` meets as an
+    /// intersection at joins) until a number write restores them; it is
+    /// reserved in the layout so `Layout::receiver` never takes it for an
+    /// entry parameter, and loses any table binding. The edge is decoded
+    /// from the `TEST`, and no edge may enter the `TEST` half: an edge
+    /// there would test `d` without the lookup, and stays pending, which
+    /// refuses the plan.
+    fn truth_test(
+        &mut self,
+        inst: Instr,
+        test: Instr,
+        pc: usize,
+        end: Option<usize>,
+    ) -> Option<LoopOp> {
+        let source = self.receiver(inst.b())?;
+        let b = self.site(source, inst.c(), inst.cache_slot(), SiteUse::Truth)?;
+        let register = inst.a();
+        self.register(register)?;
+        let bit = 1u64 << self.fact(register)?;
+        self.cur.must &= !bit;
+        self.cur.safe &= !bit;
+        self.tables.retain(|&(r, _)| r != register);
+        self.note_write(register);
+        self.branch(pc + 1, test.sj(), end)?;
+        Some(LoopOp {
+            kind: OpKind::Test(test.opcode() == Instr::OP_TEST_TRUE),
+            a: 0,
+            b,
+            c: 0,
+        })
     }
 
     /// `GET_GLOBAL r k`, `GET_UPVAL r u` or a method lookup loading a
@@ -1365,7 +1432,9 @@ impl Layout {
                             c,
                         }
                     }
-                    Instr::OP_BR_LT..=Instr::OP_BR_NE if fields => {
+                    // Forward compare-branches and jumps, in a loop body or
+                    // a leaf alike.
+                    Instr::OP_BR_LT..=Instr::OP_BR_NE => {
                         let compare = CompareOp::from_branch_opcode(opcode)?;
                         let b = self.read(inst.a())?;
                         let c = self.read(inst.b())?;
@@ -1377,7 +1446,7 @@ impl Layout {
                             c,
                         }
                     }
-                    Instr::OP_BR_LT_RK..=Instr::OP_BR_NE_RK if fields => {
+                    Instr::OP_BR_LT_RK..=Instr::OP_BR_NE_RK => {
                         let compare = CompareOp::from_branch_number_opcode(opcode)?;
                         let b = self.read(inst.a())?;
                         let c = self.number(bytecode, inst.b())?;
@@ -1389,7 +1458,7 @@ impl Layout {
                             c,
                         }
                     }
-                    Instr::OP_JMP if fields => {
+                    Instr::OP_JMP => {
                         self.branch(pc, inst.sj(), end)?;
                         self.dead = true;
                         LoopOp {
@@ -1432,7 +1501,10 @@ impl Layout {
                     Instr::OP_CALL if fields => self.call_site(inst, pc)?,
                     // A leaf's upvalue load defines a table receiver and
                     // writes no mirror slot; it is free, so it has no charge.
-                    Instr::OP_GET_UPVAL if leaf => {
+                    // The table bindings are not kept per path, so a load
+                    // after the first branch, which may not dominate a use
+                    // past a join, refuses.
+                    Instr::OP_GET_UPVAL if leaf && self.jumps.is_empty() => {
                         const {
                             assert!(Instr::fixed_charge(Instr::OP_GET_UPVAL).is_none());
                         }
@@ -1442,9 +1514,31 @@ impl Layout {
                         pc += 1;
                         continue;
                     }
+                    // `GET_FIELD d s k; TEST_FALSE d` or `TEST_TRUE d`, both
+                    // inside the body: a truth test of the field. Both are
+                    // free, so no charge falls between them.
+                    Instr::OP_GET_FIELD
+                        if leaf
+                            && end.is_some_and(|end| pc + 1 < end)
+                            && code.get(pc + 1).is_some_and(|test| {
+                                matches!(test.opcode(), Instr::OP_TEST_FALSE | Instr::OP_TEST_TRUE)
+                                    && test.a() == inst.a()
+                            }) =>
+                    {
+                        const {
+                            assert!(Instr::fixed_charge(Instr::OP_GET_FIELD).is_none());
+                            assert!(Instr::fixed_charge(Instr::OP_TEST_FALSE).is_none());
+                            assert!(Instr::fixed_charge(Instr::OP_TEST_TRUE).is_none());
+                        }
+                        let op = self.truth_test(inst, code[pc + 1], pc, end)?;
+                        self.ops.push(op);
+                        self.charges.push((pc + 2, 0));
+                        pc += 2;
+                        continue;
+                    }
                     Instr::OP_GET_FIELD if leaf => {
                         let source = self.receiver(inst.b())?;
-                        let b = self.site(source, inst.c(), inst.cache_slot(), false)?;
+                        let b = self.site(source, inst.c(), inst.cache_slot(), SiteUse::Number)?;
                         LoopOp {
                             kind: OpKind::Read,
                             a: self.write(inst.a())?,
@@ -1455,7 +1549,7 @@ impl Layout {
                     Instr::OP_SET_FIELD if leaf => {
                         let source = self.receiver(inst.a())?;
                         let c = self.read(inst.c())?;
-                        let b = self.site(source, inst.b(), inst.cache_slot(), true)?;
+                        let b = self.site(source, inst.b(), inst.cache_slot(), SiteUse::Store)?;
                         LoopOp {
                             kind: OpKind::Store,
                             a: 0,
@@ -1700,13 +1794,43 @@ impl Layout {
     }
 }
 
+/// The operations one run of a leaf body made, one bit per operation
+/// index: every bit for a straight-line body. A leaf with branches holds at
+/// most `MAX_CONTROL_LEAF_OPS` operations, so each has a bit.
+type LeafPath = u64;
+
+/// Every operation of a straight-line leaf.
+const FULL_PATH: LeafPath = u64::MAX;
+
 impl Body {
-    /// Record every positive charge of one pass in the charge-site trace,
-    /// as per-instruction dispatch would.
+    /// The charges a leaf run along `path` makes, in order: its operations'
+    /// then `RETURN`'s. A leaf only branches forward, so path order is
+    /// operation order.
+    fn path_charges(&self, path: LeafPath) -> impl Iterator<Item = (usize, u64)> + '_ {
+        self.charges
+            .iter()
+            .enumerate()
+            .filter(move |&(index, _)| index >= 64 || path & (1 << index) != 0)
+            .map(|(_, &charge)| charge)
+            .chain(std::iter::once(self.tail))
+    }
+
+    /// The sum of a leaf run's charges along `path`. `weight`, the sum of
+    /// every charge, bounds it.
+    fn path_weight(&self, path: LeafPath) -> u64 {
+        if path == FULL_PATH {
+            return self.weight;
+        }
+        self.path_charges(path)
+            .fold(0, |sum, (_, weight)| sum.saturating_add(weight))
+    }
+
+    /// Record every positive charge of one pass (of a leaf, along `path`)
+    /// in the charge-site trace, as per-instruction dispatch would.
     #[cfg(feature = "cost-check-interval")]
-    fn record_charges(&self) {
+    fn record_charges(&self, path: LeafPath) {
         // bounded: one body's charge sites plus its tail charge
-        for &(cursor, weight) in self.charges.iter().chain(std::iter::once(&self.tail)) {
+        for (cursor, weight) in self.path_charges(path) {
             if weight != 0 {
                 crate::cost_meter::interval_test::record(cursor, weight);
             }
@@ -1804,7 +1928,8 @@ impl NumericLoop {
 }
 
 /// A function whose code from pc 0 to its first `RETURN` is a numeric body,
-/// possibly reading and storing fields of receiver tables, returning one
+/// possibly reading, truth-testing and storing fields of receiver tables
+/// and branching forward to at most that `RETURN`, returning one
 /// register or nothing, run by `State::try_numeric_leaf`.
 #[derive(Debug)]
 pub(super) struct NumericLeaf {
@@ -1829,10 +1954,17 @@ impl NumericLeaf {
         if bytecode.is_vararg {
             return None;
         }
+        // The body runs to the first `RETURN`, which every forward edge of
+        // the body must reach: one past it would run code the plan does not
+        // model.
+        let end = bytecode
+            .code
+            .iter()
+            .position(|inst| inst.opcode() == Instr::OP_RETURN)?;
         let mut layout = Layout::default();
-        let ret_pc = layout.scan(bytecode, cost, 0, None, Mode::Leaf)?;
+        let ret_pc = layout.scan(bytecode, cost, 0, Some(end), Mode::Leaf)?;
         let ret = *bytecode.code.get(ret_pc)?;
-        if ret.opcode() != Instr::OP_RETURN {
+        if ret_pc != end || (!layout.jumps.is_empty() && layout.ops.len() > MAX_CONTROL_LEAF_OPS) {
             return None;
         }
         let result = match ret.return_count() {
@@ -1997,6 +2129,18 @@ impl State {
         if CALLS && !self.resolve_callees(body, frame, &mut callees) {
             return Ok(());
         }
+        // The straight-line runner charges each leaf's whole weight; a
+        // leaf with branches charges its path, which only the control
+        // runner and `try_numeric_leaf` follow. Declining runs the loop
+        // canonically, each call still taking the leaf.
+        if CALLS
+            && callees
+                .iter()
+                .flatten()
+                .any(|resolved| resolved.leaf().body.control)
+        {
+            return Ok(());
+        }
         if CALLS
             && callees
                 .iter()
@@ -2048,12 +2192,14 @@ impl State {
         let result = 'pass: loop {
             // Below the threshold no charge of the pass settles the batch,
             // so its sum, or the prefix before an exit, is added at once.
+            // Every leaf here is straight-line (`run_region`), so its whole
+            // weight is what it charges.
             let fast = weight == 0 || weight < self.cost_flush_at().saturating_sub(*local_cost);
             if !CALLS && fast {
                 if weight != 0 {
                     *local_cost += weight;
                     #[cfg(feature = "cost-check-interval")]
-                    body.record_charges();
+                    body.record_charges(FULL_PATH);
                 }
                 // bounded: one pass over the region body's operations
                 for op in &body.ops {
@@ -2127,8 +2273,8 @@ impl State {
                             } else {
                                 None
                             };
-                            let result = match fields {
-                                None => callee.eval(argument),
+                            let (result, _) = match fields {
+                                None => callee.eval::<false>(argument),
                                 Some(fields) => self.run_leaf_fields(callee, fields, argument),
                             };
                             if !fast {
@@ -2627,24 +2773,22 @@ impl State {
                             // the admission checked every guarded one is a
                             // number passed.
                             let argument = |register: u16| x[at(site.args[usize::from(register)])];
-                            let result = match fields {
-                                None => leaf.eval(argument),
+                            let (result, path) = match fields {
+                                None if leaf.body.control => leaf.eval::<true>(argument),
+                                None => leaf.eval::<false>(argument),
                                 Some(fields) => self.run_leaf_fields(leaf, fields, argument),
                             };
+                            // The leaf's whole weight bounded the segment or
+                            // was admitted; the charges made are the path's.
                             if fast {
-                                *local_cost += leaf_weight;
+                                *local_cost += leaf.body.path_weight(path);
                                 #[cfg(feature = "cost-check-interval")]
                                 if leaf_weight != 0 {
-                                    leaf.body.record_charges();
+                                    leaf.body.record_charges(path);
                                 }
                             } else {
                                 // bounded: one leaf body's charge sites plus its tail charge
-                                for &(cursor, charge) in leaf
-                                    .body
-                                    .charges
-                                    .iter()
-                                    .chain(std::iter::once(&leaf.body.tail))
-                                {
+                                for (cursor, charge) in leaf.body.path_charges(path) {
                                     if charge != 0
                                         && let Err(error) =
                                             self.charge_dispatch(local_cost, cursor, charge)
@@ -3256,7 +3400,16 @@ impl State {
     ///   or store consults a metamethod or fails;
     /// - the callee's charges, body then `RETURN`, sum strictly below the
     ///   flush threshold minus the pending batch, so adding them at once
-    ///   leaves the batch where per-instruction charging would.
+    ///   leaves the batch where per-instruction charging would. A body with
+    ///   forward branches is bounded by the sum over all its operations and
+    ///   adds the charges of the operations it ran (`Body::path_weight`).
+    ///
+    /// Every field site is resolved on every path, so a call whose skipped
+    /// path names a field the receiver lacks declines although canonical
+    /// execution would not read it. A truth test reads the site's live
+    /// value, so a store before it, through any receiver, is seen; its
+    /// register holds no number afterwards and nothing reads it as one
+    /// (`Layout::truth_test`).
     ///
     /// Receivers are tracked by the reaching definition at each use, so a
     /// register that held a table and then a number is never taken as the
@@ -3322,16 +3475,23 @@ impl State {
                 x[at(slot)] = value;
             }
         }
+        // The admission test above bounds every path by `body.weight`; the
+        // charges added are those of the path run, which per-instruction
+        // dispatch would make with no settlement between them.
         let (result, weight) = if leaf.sites.is_empty() {
-            // bounded: one pass over the leaf body's straight-line operations
-            for op in &body.ops {
-                x[at(op.a)] = eval(op, &x);
-            }
+            let path = if body.control {
+                run_pure::<true>(body, &mut x)
+            } else {
+                run_pure::<false>(body, &mut x)
+            };
             #[cfg(feature = "cost-check-interval")]
             if body.weight != 0 {
-                body.record_charges();
+                body.record_charges(path);
             }
-            (leaf.result.map(|result| x[at(result)]), body.weight)
+            (
+                leaf.result.map(|result| x[at(result)]),
+                body.path_weight(path),
+            )
         } else {
             let mut fields = [None; MAX_FIELD_SITES];
             let param = |register: u16| {
@@ -3348,12 +3508,15 @@ impl State {
                 .numeric_leaf
                 .as_ref()
                 .expect("the closure's runtime holds the plan just read");
-            self.run_fields(&leaf.body, &fields, &mut x);
+            let path = self.run_fields(&leaf.body, &fields, &mut x);
             #[cfg(feature = "cost-check-interval")]
             if leaf.body.weight != 0 {
-                leaf.body.record_charges();
+                leaf.body.record_charges(path);
             }
-            (leaf.result.map(|result| x[at(result)]), leaf.body.weight)
+            (
+                leaf.result.map(|result| x[at(result)]),
+                leaf.body.path_weight(path),
+            )
         };
         *local_cost += weight;
         match result {
@@ -3472,14 +3635,14 @@ impl State {
     /// A loop region's call of field leaf `leaf` with its sites resolved to
     /// `fields` and `argument(p)` as each number parameter it reads; its
     /// result, or 0 when it returns nothing (a call keeping a result
-    /// declines such a leaf at entry).
+    /// declines such a leaf at entry), and the operations it ran.
     #[inline(never)]
     fn run_leaf_fields(
         &mut self,
         leaf: &NumericLeaf,
         fields: &[Option<(ObjectPtr, SlotRef)>; MAX_FIELD_SITES],
         argument: impl Fn(u16) -> f64,
-    ) -> f64 {
+    ) -> (f64, LeafPath) {
         let body = &leaf.body;
         let mut y = [0.0f64; MIRROR_SLOTS];
         // bounded: at most MIRROR_SLOTS registers
@@ -3494,22 +3657,68 @@ impl State {
                 y[at(slot)] = value;
             }
         }
-        self.run_fields(body, fields, &mut y);
-        leaf.result.map_or(0.0, |result| y[at(result)])
+        let path = self.run_fields(body, fields, &mut y);
+        (leaf.result.map_or(0.0, |result| y[at(result)]), path)
     }
 
     /// Run a field leaf's body over `x` with its sites resolved to
-    /// `fields`, in program order: each read reloads its slot, each store
-    /// overwrites it with a number.
+    /// `fields`, in program order (by index when it branches, forward
+    /// only): each read reloads its slot, each store overwrites it with a
+    /// number, each truth test reads the live value. Returns the operations
+    /// run.
+    #[inline(always)]
     fn run_fields(
         &mut self,
         body: &Body,
         fields: &[Option<(ObjectPtr, SlotRef)>; MAX_FIELD_SITES],
         x: &mut [f64; MIRROR_SLOTS],
-    ) {
-        // bounded: one pass over the leaf body's straight-line operations
-        for op in &body.ops {
+    ) -> LeafPath {
+        if body.control {
+            self.run_field_ops::<true>(body, fields, x)
+        } else {
+            self.run_field_ops::<false>(body, fields, x)
+        }
+    }
+
+    /// `run_fields`, compiled apart for bodies with branches (`CONTROL`),
+    /// so a straight-line body keeps its loop free of the path bits and
+    /// the branch arms.
+    fn run_field_ops<const CONTROL: bool>(
+        &mut self,
+        body: &Body,
+        fields: &[Option<(ObjectPtr, SlotRef)>; MAX_FIELD_SITES],
+        x: &mut [f64; MIRROR_SLOTS],
+    ) -> LeafPath {
+        let mut path = if CONTROL { 0 } else { FULL_PATH };
+        let mut k = 0;
+        // bounded: branches, jumps and tests only move the index forward
+        while let Some(op) = body.ops.get(k) {
+            if CONTROL {
+                path |= 1 << (k % MAX_CONTROL_LEAF_OPS);
+            }
+            k += 1;
             match op.kind {
+                OpKind::Test(truthy) if CONTROL => {
+                    let (table, slot) =
+                        fields[usize::from(op.b)].expect("resolve_sites resolved every site");
+                    // A store writes a number, so a tested slot stays live,
+                    // and a store before the test (through any receiver)
+                    // is seen, as canonical execution would see it.
+                    let value = self
+                        .heap
+                        .as_table_ref(table)
+                        .and_then(|tbl| tbl.read_slot(slot))
+                        .expect("a resolved site stays live");
+                    if value.truthy() == truthy {
+                        k = usize::from(op.a);
+                    }
+                }
+                OpKind::Branch(compare) if CONTROL => {
+                    if !holds(compare, x[at(op.b)], x[at(op.c)]) {
+                        k = usize::from(op.a);
+                    }
+                }
+                OpKind::Jump if CONTROL => k = usize::from(op.a),
                 OpKind::Read => {
                     let (table, slot) =
                         fields[usize::from(op.b)].expect("resolve_sites resolved every site");
@@ -3537,6 +3746,7 @@ impl State {
                 _ => x[at(op.a)] = eval(op, x),
             }
         }
+        path
     }
 }
 
@@ -3572,13 +3782,15 @@ fn eval(op: &LoopOp, x: &[f64; MIRROR_SLOTS]) -> f64 {
         OpKind::Unm => -lhs,
         // Calls and loads are run by the region loop, and field reads and
         // stores by a field leaf, never through here.
-        // Branches, jumps, indexed reads and records only by
-        // `run_control_region`.
+        // Branches and jumps by `run_control_region` and the leaf
+        // runners, truth tests by a field leaf, indexed reads and records
+        // only by `run_control_region`.
         OpKind::Copy
         | OpKind::Load
         | OpKind::Call
         | OpKind::Read
         | OpKind::Store
+        | OpKind::Test(_)
         | OpKind::Branch(_)
         | OpKind::Jump
         | OpKind::Index
@@ -3592,9 +3804,13 @@ fn eval(op: &LoopOp, x: &[f64; MIRROR_SLOTS]) -> f64 {
 
 impl NumericLeaf {
     /// The leaf's result with `argument(register)` as each parameter it
-    /// reads, which the caller has checked is a number it passes.
+    /// reads, which the caller has checked is a number it passes, and the
+    /// operations it ran.
     #[inline(always)]
-    fn eval(&self, argument: impl Fn(u16) -> f64) -> f64 {
+    /// `CONTROL` must be the body's `control`: compiled apart, so a
+    /// straight-line body keeps its loop free of the branch arms.
+    fn eval<const CONTROL: bool>(&self, argument: impl Fn(u16) -> f64) -> (f64, LeafPath) {
+        debug_assert_eq!(CONTROL, self.body.control);
         let body = &self.body;
         let mut y = [0.0f64; MIRROR_SLOTS];
         // bounded: at most MIRROR_SLOTS registers
@@ -3609,17 +3825,47 @@ impl NumericLeaf {
                 y[at(slot)] = value;
             }
         }
-        // bounded: one pass over the leaf body's straight-line operations
-        for op in &body.ops {
-            y[at(op.a)] = eval(op, &y);
-        }
+        let path = run_pure::<CONTROL>(body, &mut y);
         // A call keeping a result declines a leaf that returns nothing.
-        self.result.map_or(0.0, |result| y[at(result)])
+        (self.result.map_or(0.0, |result| y[at(result)]), path)
     }
 }
 
-/// The charges of a pass's operations before operation `end`, the leaves
-/// of the calls among them included.
+/// Run the operations of a leaf without field sites over `x`: in order
+/// for a straight-line body, else by index, a branch or jump moving the
+/// index forward. Returns the operations run. `CONTROL` must be the body's
+/// `control`.
+#[inline(always)]
+fn run_pure<const CONTROL: bool>(body: &Body, x: &mut [f64; MIRROR_SLOTS]) -> LeafPath {
+    if !CONTROL {
+        // bounded: one pass over the leaf body's straight-line operations
+        for op in &body.ops {
+            x[at(op.a)] = eval(op, x);
+        }
+        return FULL_PATH;
+    }
+    let mut path = 0;
+    let mut k = 0;
+    // bounded: branches and jumps only move the index forward
+    while let Some(op) = body.ops.get(k) {
+        path |= 1 << (k % MAX_CONTROL_LEAF_OPS);
+        k += 1;
+        match op.kind {
+            OpKind::Branch(compare) => {
+                if !holds(compare, x[at(op.b)], x[at(op.c)]) {
+                    k = usize::from(op.a);
+                }
+            }
+            OpKind::Jump => k = usize::from(op.a),
+            _ => x[at(op.a)] = eval(op, x),
+        }
+    }
+    path
+}
+
+/// The charges of a straight-line pass's operations before operation
+/// `end`, the leaves of the calls among them included; every such leaf is
+/// straight-line (`State::run_region`), so its whole weight is its charge.
 fn prefix_weight<'a>(body: &Body, leaf: &impl Fn(usize) -> &'a NumericLeaf, end: usize) -> u64 {
     let ops = body.charges[..end].iter().map(|&(_, weight)| weight);
     let leaves = body
@@ -3631,9 +3877,9 @@ fn prefix_weight<'a>(body: &Body, leaf: &impl Fn(usize) -> &'a NumericLeaf, end:
     ops.chain(leaves).fold(0, u64::saturating_add)
 }
 
-/// Record the positive charges of a pass's operations before `end`, each
-/// call's leaf charges after the call's own, then `FOR_LOOP`'s if `tail`,
-/// in the charge-site trace, as per-instruction dispatch would.
+/// Record the positive charges of a straight-line pass's operations before
+/// `end`, each call's leaf charges after the call's own, then `FOR_LOOP`'s
+/// if `tail`, in the charge-site trace, as per-instruction dispatch would.
 #[cfg(feature = "cost-check-interval")]
 fn record_pass<'a>(body: &Body, leaf: &impl Fn(usize) -> &'a NumericLeaf, end: usize, tail: bool) {
     // bounded: at most one pass over the body's operation and charge lists
@@ -3642,7 +3888,7 @@ fn record_pass<'a>(body: &Body, leaf: &impl Fn(usize) -> &'a NumericLeaf, end: u
             crate::cost_meter::interval_test::record(cursor, weight);
         }
         if let OpKind::Call = op.kind {
-            leaf(usize::from(op.b)).body.record_charges();
+            leaf(usize::from(op.b)).body.record_charges(FULL_PATH);
         }
     }
     if tail && body.tail.1 != 0 {
@@ -3828,6 +4074,27 @@ mod tests {
             "local s = {} local function f() local a = s; a = 1; a.x = 2 end",
             // A receiver that is not a parameter.
             "local function f() local t; t.x = 1 end",
+        ] {
+            assert!(!leaf(source), "{source}");
+        }
+        // Forward branches: on a field's truthiness, on number comparisons,
+        // with joins reaching the first `RETURN`.
+        assert!(leaf(
+            "local function f(self, dt) if self.alive then self.x = self.x + self.vx * dt self.age = self.age + 1 end end"
+        ));
+        assert!(leaf(
+            "local function f(self) if not self.on then self.n = self.n + 1 end end"
+        ));
+        assert!(leaf(
+            "local function f(x) local y = 0 if x > 1 then y = x else y = -x end return y end"
+        ));
+        for source in [
+            // The tested register holds no number past the test.
+            "local function f(self) local a = self.on if a then end return a end",
+            // A table defined on one path only.
+            "local u = {} local function f(x) if x > 1 then u.n = 2 end end",
+            // A return past the first.
+            "local function f(x) if x > 1 then return 1 end return 2 end",
         ] {
             assert!(!leaf(source), "{source}");
         }

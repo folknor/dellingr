@@ -614,18 +614,39 @@ option tables built by hosts get nothing from identity caches either.
 
 ### Compiler-recognized field-update fusion
 
-Method bodies of the form `self.field = self.field + ...` that are
-straight-line up to their return now run as field leaves without an
-activation (`vm/numeric_loop.rs`; bench/method 3.1 s to 1.7 s), which
-takes more than a fused opcode would. Residue: the same update inside a
-function that branches or calls, where an `OP_FIELD_ADD` (or next-opcode
-fusion in the `GET_FIELD` arm) would save two of the update's three
-dispatches. It owes the canonical register state and cursor when the add
-succeeds and the store's `TableWrite` charge is refused, and must prove the
-receiver register still holds the same table at the store.
+Field updates in method bodies run as field leaves without an activation
+(`vm/numeric_loop.rs`), straight-line or branching forward on number
+comparisons and field truthiness up to the first `RETURN`; that takes the
+activation, every dispatch and (from a region over records) the per-site
+lookup misses, more than a fused opcode would. Residue: the same update
+inside a function that calls, or returns early, or reads a field only on
+a path the receiver lacks it on (every site is resolved on every path, so
+such a call declines). There an `OP_FIELD_ADD` (or next-opcode fusion in
+the `GET_FIELD` arm) would save two of an adjacent update's three
+dispatches; most updates are not adjacent (`self.x = self.x + self.vx * dt`
+puts a read and a `MUL` between the read and the add). It owes the
+canonical register state and cursor when the add succeeds and the store's
+`TableWrite` charge is refused, and must prove the receiver register still
+holds the same table at the store.
 
-Signal that would promote it: the dispatches showing in a profile of
-`method_step` (a `Body:step` whose updates sit behind `if self.alive`).
+Signal that would promote it: a workload whose hot non-leaf function
+(one that calls) does such updates, with the dispatches showing in
+profiling.
+
+### Branching leaves: open costs and declines (2026-11-24)
+
+- `object_fields` measured 3.1 to 3.2 s on bygg (A f05b9ae, B d594c99,
+  eight interleaved pairs, consistent sign) after leaves took forward
+  branches; unattributed. Its path changed only by a `control` flag test
+  and a full-path test in the control runner's leaf call; no same-binary
+  control was run, so layout is not ruled out.
+- The straight-line region runner (`State::run_passes`) declines a loop
+  calling a leaf with branches, since it charges whole leaf weights; each
+  call still runs as a leaf. Following paths there cost `global` and
+  `method` 15-25% in a first build, so it would need its own
+  instantiation.
+- Every field site is resolved on every path, so a leaf whose skipped path
+  reads a field the receiver lacks declines the call.
 
 ### Compile-time table-shape prediction
 

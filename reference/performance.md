@@ -823,6 +823,45 @@ at the lookup; a run that does so on its first pass makes the next 16
 entries decline at once. Its remaining 3% and `global`'s 4% are unattributed
 (no same-binary control was run). `frame.rs` is untouched.
 
+## Field leaves with forward branches, 2026-11-24
+
+Numeric leaves now take forward control flow up to the function's first
+`RETURN`: number compare-branches, `JMP`, and a `GET_FIELD d s k` fused
+with the `TEST_FALSE d` or `TEST_TRUE d` after it into a test of the field
+site's live truthiness. A leaf with branches is admitted against the sum
+of every operation's charge and charges the path it ran; the runners report
+that path as one bit per operation (at most 64). The straight-line region
+runner still charges whole leaf weights, so it declines a loop calling a
+leaf with branches; the control runner and `try_numeric_leaf` follow
+paths. `method_step`'s `Body:step` (updates behind `if self.alive`) is
+such a leaf, and its caller's loop over records now runs as a region
+calling it. Measured on bygg with `brokkr bench wall`, interleaved
+`--commit` cells, A `f05b9ae`, B `d594c99` (the change), medians of three
+(`object_fields` and `global` of eight):
+
+| Workload | A | B |
+|---|---:|---:|
+| `method_step` | 5.8 s | 2.3 s |
+| `method` | 536 ms | 527 ms |
+| `method_polymorphic` | 1.4 s | 1.4 s |
+| `object_fields` | 3.1 s | 3.2 s |
+| `global` | 929 ms | 953 ms |
+
+`method_step`'s 3% from the step before is moot: the path it measured no
+longer runs. A first build that tracked paths inside the straight-line
+runner too put `method` at 637 ms and `global` at 1.1 s; compiling the leaf
+runners apart for straight-line bodies and keeping that runner on whole
+weights brought both back. `global` now differs by less than its own
+spread (913 ms to 1.1 s within B), with signs mixed across rounds, and its
+runner's code is the one before the change. `object_fields` is 3% slower
+with a consistent sign over eight pairs and is unattributed: its region
+calls a straight-line leaf through the control runner, whose only change
+on that path is a test of the leaf's `control` flag and of a full path. A
+read and a `MUL` between an update's read and its add, as in `self.x =
+self.x + self.vx * dt`, are why a fused `GET_FIELD`, arithmetic,
+`SET_FIELD` opcode was not built: it would cover only adjacent updates and
+keep the activation. `frame.rs` is untouched.
+
 ## Key-position hints for dynamic string keys, 2026-11-24
 
 A `GET_TABLE` site with a string key keeps the position its key last sat

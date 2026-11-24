@@ -128,7 +128,7 @@ went.
 of a record (a store to an invariant receiver, a dynamic-key
 `SET_TABLE`), a non-number branch (truth test, string or nil compare), a
 call to anything but a numeric leaf (nested `f(g(x))`, open arguments or
-results, a method that branches such as `method_step`'s `Body:step`), a
+results, a method that calls or returns early), a
 method the record holds itself or finds through a function `__index`, or
 more than eight classes at one site still run canonically. A string read
 into a register used as a key (column_key's `cs[c]`, see PERF-005) stops a
@@ -136,10 +136,9 @@ region that holds it at that read. Straight-line chains in functions that
 are not leaves (fib's `n - 1`, `n - 2`, `+` around its calls) still
 dispatch per instruction. object_fields' remaining time is its
 construction pass (`{}`, `new_unit` calls, `SET_TABLE`), which no region
-takes. After this step `method_step` measured 5.7 to 5.9 s and `global`
-882 to 915 ms on bygg, unattributed (hot paths canonical or unchanged; no
-same-binary control run); a five-launch control would say whether either
-is layout.
+takes. After this step `global` measured 882 to 915 ms on bygg,
+unattributed (hot paths canonical or unchanged; no same-binary control
+run); a five-launch control would say whether it is layout.
 One stable shape for a two-op fusion: after a handler, test the actual next
 opcode and enter its body directly inside the dispatch loop. That is the
 predecessor-specific dispatch threaded dispatch was after, without its
