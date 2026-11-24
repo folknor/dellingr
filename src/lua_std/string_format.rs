@@ -115,7 +115,7 @@ pub(crate) fn format(state: &mut State) -> Result<u8> {
     }
 
     state.set_top(0)?;
-    state.push_bytes(output)?;
+    state.push_owned_bytes(output)?;
     Ok(1)
 }
 

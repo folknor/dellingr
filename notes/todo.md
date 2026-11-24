@@ -118,6 +118,24 @@ Cosmetic:
   fixed-width integer"; the trait doc now lists the actual set (8- to 64-bit,
   signed and unsigned).
 
+### Left from the workload registry and typed-region store work (2026-11-24)
+
+- `scripts/safepoint_loops.py` scopes only native library code
+  (`src/lua_std/`, `src/patterns/` and a few `src/vm/` library files), so the
+  loops in `src/vm/numeric_loop.rs` (the region pass loops and the bounded
+  helpers such as `region_keys_disjoint` and `region_method`, which carry
+  `// bounded:` comments by hand) are held only by the module comment, the
+  `vm/interrupt.rs` list and the interrupt tests. Decide whether the check
+  should cover that file; a region loop that lost its back-edge poll would
+  pass every script check today.
+- `src/bin/dellingr-bench.rs` still says "usage: hotpath <script-path>
+  [--iterations N]" and names its argument tests `hotpath_*`, from when it was
+  the `hotpath` example; the bin is `dellingr-bench`.
+- The `reference/performance.md` header speaks of `brokkr dellingr` rows kept
+  in `.brokkr/results.db`; current runs are `brokkr bench` script benches,
+  which the header does not mention. Reword it to cover both without
+  claiming where brokkr stores the new rows unless that is verified.
+
 ## Deferred forward-looking ideas
 
 ### Execution trace hook for a stepping debugger

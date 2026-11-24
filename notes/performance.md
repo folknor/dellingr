@@ -225,8 +225,8 @@ them:
   was measured there and refused for the field caches).
 - `optimizations.md` "Compile-time table-shape prediction": codegen hunter's
   constructor plans.
-- `optimizations.md` "Owned result buffers are copied again when interned":
-  heap and strings hunters' owned-buffer adoption and short-string pooling.
+- `optimizations.md` "Short interned strings are one allocator allocation
+  each": heap hunter's short-string pooling.
 - `optimizations.md` "gmatch: drop the Lua-side wrapper and table-backed
   iterator state": strings hunter's native iterator, failed-search exhaustion
   and pattern-cache sizing.

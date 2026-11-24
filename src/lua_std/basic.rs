@@ -338,7 +338,7 @@ pub(super) const BASE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
             // which reference Lua returns unchanged.
             TostringRendering::Bytes(bytes) => {
                 state.set_top(0)?;
-                state.push_bytes(bytes)?;
+                state.push_owned_bytes(bytes)?;
             }
         }
         Ok(1)

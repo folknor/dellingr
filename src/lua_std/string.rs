@@ -258,7 +258,7 @@ fn map_ascii_case(
     charge_call(state, charge)?;
     map(&mut s);
     state.set_top(0)?;
-    state.push_bytes(s)?;
+    state.push_owned_bytes(s)?;
     Ok(1)
 }
 
@@ -908,11 +908,15 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
             state.push_bytes_from_stack_range(1, range)?;
             state.replace(1)?;
         } else {
-            let subject = string_or_number_bytes(state, 1, "sub")?;
+            // The rendering is owned: cut it down to the range in place and
+            // intern the buffer itself.
+            let mut subject = string_or_number_bytes(state, 1, "sub")?;
             let range = lua_sub_range(subject.len(), i, j);
             charge_call(state, Charge::StringSub)?;
+            subject.truncate(range.end);
+            subject.drain(..range.start);
             state.set_top(0)?;
-            state.push_bytes(&subject[range])?;
+            state.push_owned_bytes(subject)?;
         }
         Ok(1)
     }),
@@ -1051,7 +1055,7 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         charge_call(state, Charge::StringReverse)?;
         s.reverse();
         state.set_top(0)?;
-        state.push_bytes(s)?;
+        state.push_owned_bytes(s)?;
         Ok(1)
     }),
     // string.match(s, pattern [, init])
@@ -1231,7 +1235,7 @@ fn gsub_empty_pattern(
     }
 
     state.set_top(0)?;
-    state.push_bytes(result)?;
+    state.push_owned_bytes(result)?;
     state.push_number(count as f64)?;
     Ok(2)
 }
@@ -1300,7 +1304,7 @@ fn finish_gsub(
         let s_len = string_arg_len(state, s)?;
         append_subject_range(state, &mut result, s, copied..s_len)?;
         state.set_top(0)?;
-        state.push_bytes(result)?;
+        state.push_owned_bytes(result)?;
     }
     state.push_number(count as f64)?;
     Ok(2)

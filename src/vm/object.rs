@@ -888,13 +888,10 @@ impl GcHeap {
 
     /// Allocate or intern a string.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    fn alloc_string_raw(&mut self, bytes: &[u8]) -> StringPtr {
+    fn alloc_string_raw<B: AsRef<[u8]> + Into<Box<[u8]>>>(&mut self, bytes: B) -> StringPtr {
         let count = self.strings.len();
-        let ptr = self.strings.intern(
-            bytes,
-            crate::det_hash::hash_bytes(bytes),
-            &mut self.resident,
-        );
+        let hash = crate::det_hash::hash_bytes(bytes.as_ref());
+        let ptr = self.strings.intern_storage(bytes, hash, &mut self.resident);
         if self.strings.len() != count {
             self.refresh_gc_watermark();
         }
@@ -1363,18 +1360,35 @@ impl StringPool {
     /// rehash, before the new key exists, and the vacant entry's insert
     /// writes the prepared bucket without rehashing. At exhausted capacity
     /// a hit can take that reserve; it is the one the next miss would take.
+    ///
+    /// `bytes` is a borrowed slice, boxed (copied) on a miss, or a
+    /// producer's owned `Vec`, converted to the entry's storage on a miss
+    /// (`into_boxed_slice`, which shrinks when capacity exceeds length and
+    /// may still move the bytes then) instead of the unconditional copy from
+    /// a slice, and dropped on a hit. The probe, identity and resident
+    /// length (never the capacity) are the same either way.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    fn intern(&mut self, bytes: &[u8], hash: u64, resident: &mut ResidentBytes) -> StringPtr {
+    fn intern_storage<B: AsRef<[u8]> + Into<Box<[u8]>>>(
+        &mut self,
+        bytes: B,
+        hash: u64,
+        resident: &mut ResidentBytes,
+    ) -> StringPtr {
         let strings = &self.strings;
+        let content = bytes.as_ref();
         let vacant = match self.index.entry(
             hash,
-            |key| strings.get(*key).is_some_and(|e| e.data.as_ref() == bytes),
+            |key| {
+                strings
+                    .get(*key)
+                    .is_some_and(|e| e.data.as_ref() == content)
+            },
             |key| Self::entry_hash(strings, *key),
         ) {
             hashbrown::hash_table::Entry::Occupied(found) => return StringPtr(*found.get()),
             hashbrown::hash_table::Entry::Vacant(vacant) => vacant,
         };
-        let bytes_len = bytes.len();
+        let bytes_len = content.len();
         let key = self.strings.insert(StringEntry {
             data: bytes.into(),
             hash,
@@ -1411,6 +1425,12 @@ impl StringPool {
         vacant.insert(key);
         resident.add(bytes_len);
         Some(StringPtr(key))
+    }
+
+    /// Test shorthand: `intern_storage` of a borrowed slice.
+    #[cfg(test)]
+    fn intern(&mut self, bytes: &[u8], hash: u64, resident: &mut ResidentBytes) -> StringPtr {
+        self.intern_storage(bytes, hash, resident)
     }
 
     /// Mark a string as reachable.
@@ -1781,6 +1801,26 @@ mod tests {
         assert_eq!(pool.find_by_hash(b"replacement", 1), None);
         assert_eq!(pool.find_by_hash(b"keep collision", 3), Some(collided));
         assert_eq!(pool.get(collided), b"keep collision");
+    }
+
+    /// An owned buffer with spare capacity interns to the same identity as
+    /// the borrowed bytes, counts its length (not its capacity) as resident,
+    /// and on a hit leaves the pool as it was.
+    #[test]
+    fn owned_intern_matches_borrowed_intern() {
+        let mut pool = StringPool::new();
+        let mut resident = ResidentBytes::default();
+        let mut owned = Vec::with_capacity(64);
+        owned.extend_from_slice(b"owned");
+        let adopted = pool.intern_storage(owned, 7, &mut resident);
+        assert_eq!(pool.get(adopted), b"owned");
+        assert_eq!(resident.bytes, b"owned".len());
+        assert_eq!(pool.intern(b"owned", 7, &mut resident), adopted);
+        let mut again = Vec::with_capacity(16);
+        again.extend_from_slice(b"owned");
+        assert_eq!(pool.intern_storage(again, 7, &mut resident), adopted);
+        assert_eq!(pool.len(), 1);
+        assert_eq!(resident.bytes, b"owned".len());
     }
 
     #[test]

@@ -287,7 +287,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         }
 
         state.set_top(0)?;
-        state.push_bytes(result)?;
+        state.push_owned_bytes(result)?;
         Ok(1)
     }),
     // table.move(a1, f, e, t [, a2]) - costs one per copied element

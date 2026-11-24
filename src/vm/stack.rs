@@ -149,6 +149,17 @@ impl State {
         Ok(())
     }
 
+    /// `push_bytes` for a result built in an owned buffer, with the same
+    /// refusal order and collection point: a new string takes the buffer as
+    /// its storage instead of a copy of it, an existing one drops it.
+    pub(crate) fn push_owned_bytes(&mut self, bytes: Vec<u8>) -> Result<()> {
+        self.check_usable()?;
+        self.check_stack_slot()?;
+        let val = self.alloc_string_owned(bytes)?;
+        self.push_unchecked(val);
+        Ok(())
+    }
+
     /// Pushes a byte range of a string already on the stack as a Lua string,
     /// interned straight from the pooled source bytes: an existing string
     /// copies nothing, a new one is copied once into the pool.

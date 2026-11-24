@@ -1773,6 +1773,16 @@ impl State {
         Ok(Val::Str(ptr))
     }
 
+    /// `alloc_string` for a result built in an owned buffer: the same size
+    /// check, collection point and intern, but a miss converts the buffer
+    /// to the string's storage rather than copying it from a slice.
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    pub(super) fn alloc_string_owned(&mut self, bytes: Vec<u8>) -> Result<Val> {
+        check_string_size(bytes.len())?;
+        let ptr = self.allocator().alloc_string_owned(bytes);
+        Ok(Val::Str(ptr))
+    }
+
     /// Construct an [`Error`] of the given kind with no source position.
     ///
     /// The position is filled in later from the innermost Lua activation,

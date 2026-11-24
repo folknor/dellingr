@@ -73,6 +73,33 @@ that. An early `find`-only prototype measured `literal_find` at 4156 and
 4124, which the full change does not reproduce; it was not a same-binary
 control, so treat that gap as layout.
 
+## Owned results interned without a second copy, 2026-11-24
+
+Library results built in an owned `Vec` (`gsub`, `upper`, `lower`,
+`reverse`, `sub` of a number, `string.format`, `table.concat`, `tostring` of
+a non-string, and `..`) go into the string pool through `push_owned_bytes` /
+`alloc_string_owned`: an intern miss converts the buffer with
+`into_boxed_slice` instead of copying it from a slice. Same probe, collection
+point, identities and resident length, so not replay-visible. Against its
+parent 81090d3 on bygg, `brokkr bench wall` (best of 3, ms), two matched
+pairs, the second in reversed order:
+
+| Workload | 81090d3 | Change |
+|---|---|---|
+| `format_literals` | 742, 767 | 718, 716 |
+| `mixed` | 2230, 2234 | 2190, 2194 |
+| `large_subject` | 1283, 1270 | 1284, 1283 |
+| `patterns` | 1177, 1180 | 1194, 1196 |
+| `sequence_len` | 2303, 2312 | 2373, 2377 |
+
+A diagnostic variant that took only buffers with capacity equal to length
+and copied the rest measured `format_literals` 757 and `sequence_len` 2416:
+the `format_literals` gain went with the slack buffers, and `sequence_len`
+stayed slower although its `table.concat` path did HEAD's work, which points
+at layout but does not prove it. `large_subject` shows no gain: its `gsub`
+output is mostly an intern hit, and the copy a miss saves is small against
+its scan.
+
 ## Batched matcher kernels, 2026-11-17
 
 Every matcher step polled the interrupt flag and entered the cost meter,

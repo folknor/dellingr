@@ -768,38 +768,20 @@ Why deferred: it fits the envelope with room to spare and nothing is
 failing; this buys margin, not correctness. Signal: the envelope tests
 tightening, or a reason to raise `MAX_NATIVE_CALL_DEPTH`.
 
-### Owned result buffers are copied again when interned
+### Short interned strings are one allocator allocation each
 
-Found 2026-11-05 while removing the pattern functions' argument copies.
-`push_bytes(vec)` takes a `Vec<u8>` by value, but `alloc_string` interns
-through `&[u8]` and `alloc_string_raw` boxes a fresh copy on a miss, so every
-library result built in an owned buffer is copied twice: `gsub` output,
-`upper`, `lower`, `reverse`, `sub`, `table.concat`, `string.format` (which
-also copies its format string with `to_bytes(1)?.to_vec()` before
-rendering). Sketch: an owned interning entry that hashes the buffer, looks it
-up, and on a miss moves it into the pool (`into_boxed_slice`, which
-reallocates only when capacity exceeds length; shrink or build with exact
-capacity). Unmeasured; `large_subject`'s `gsub` would show it on a large
-subject, `mixed` and `patterns` on short ones.
-
-The 2026-11-17 performance hunt raised it from the heap, strings and
-table-library scopes; `concat_values` (`eval.rs`) has the same pattern (a `Vec`
-filled, then passed as a slice to `alloc_string`). The heap hunter's version goes further: producers keep
-ownership through interning and on a miss their buffer becomes the backing
-storage; short strings live in pooled storage with bytes adjacent to their
-header, so a distinct short string is not one allocator allocation; large or
-growing results keep their allocation (capacity metadata where needed) rather
-than exact-sized `Box<[u8]>`; rendering writes into the destination builder;
-canonical identity is separate from backing-byte ownership. The strings hunter
-asked for the adoption path with today's interning, allocation policy, roots
-and refusal guarantees, and warned against a shrink-to-fit that silently
-restores the copy. Risks: keep the exact collection point and root set at
-commitment (some producers clear their arguments before interning, others
-keep them, and changing that changes identities); builders that survive
-callbacks must stay valid across nested execution. Keep canonical interning:
-uninterned long strings or ropes need an identity and accounting redesign,
-since equality uses handles and distinct-string counts set collection points.
-Afterwards, a common checked builder is a follow-up.
+Owned result buffers already go into the pool without a second copy
+(`push_owned_bytes` / `alloc_string_owned`: a miss converts the producer's
+`Vec` with `into_boxed_slice`). What the 2026-11-17 heap hunter proposed
+beyond that is open: short strings in pooled storage with bytes adjacent to
+their header, so a distinct short string is not one allocator allocation (a
+short owned result would then be copied inline and its `Vec` dropped, a
+large one still adopted), with canonical identity kept separate from
+backing-byte ownership. Keep canonical interning, the collection point
+before the probe, and resident bytes counted as content length. Afterwards,
+a common checked builder (rendering into the destination buffer) is a
+follow-up shared with the "Stdlib micro (E)" `string.format` one-buffer item. Also left:
+`table.concat` copies its separator (`to_bytes(2)?.to_vec()`) every call.
 
 ### gmatch: drop the Lua-side wrapper and table-backed iterator state (E-O2)
 

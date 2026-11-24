@@ -921,8 +921,9 @@ impl State {
         }
 
         // The bytes are owned now, so interning (which may collect, with the
-        // operands still rooted where they are) reads nothing from the stack.
-        self.alloc_string(&buffer)
+        // operands still rooted where they are) reads nothing from the stack,
+        // and a new string takes the buffer rather than a second copy.
+        self.alloc_string_owned(buffer)
     }
 
     /// Admit a Lua call: check the call depth, push the activation record,
