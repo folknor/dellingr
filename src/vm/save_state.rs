@@ -74,7 +74,7 @@ use crate::det_hash::{IndexMap as DetMap, map_with_capacity};
 use super::RustFnId;
 use super::global_env::{EnvRole, SavedEnvTable};
 use super::inventory::GcRoot;
-use super::object::{GcHeap, RawObject, StringPtr, Upvalue, UpvalueRef};
+use super::object::{GcHeap, GmatchIter, RawObject, StringPtr, Upvalue, UpvalueRef};
 use super::rng::VmRng;
 use super::table::{InvalidTableKey, NormalizedTableKey, TableKeyInput, normalize_table_key};
 use super::{ObjectPtr, PointerIdKey, State, Val};
@@ -217,6 +217,21 @@ enum SavedObject {
         chunk: u32,
         upvalues: Vec<u32>,
     },
+    /// A `string.gmatch` iterator over a nonempty pattern (`GmatchIter`).
+    /// The subject and pattern are full values, so they are reachable for
+    /// `%p` identities as a table's values are; load requires both to be
+    /// strings and checks `pos` and `resumed` against the subject.
+    GmatchIter {
+        subject: SavedVal,
+        pattern: SavedVal,
+        pos: u64,
+        resumed: bool,
+    },
+    /// A `string.gmatch` iterator over the empty pattern.
+    GmatchEmptyIter {
+        pos: u64,
+        len: u64,
+    },
 }
 
 // This is a wire arena node, not an executable chunk: children are untrusted
@@ -330,6 +345,8 @@ impl SavePayload {
                         entries.len().saturating_mul(2).saturating_add(1)
                     }
                     SavedObject::Closure { upvalues, .. } => upvalues.len().saturating_add(1),
+                    SavedObject::GmatchIter { .. } => 3,
+                    SavedObject::GmatchEmptyIter { .. } => 1,
                 })
             })
             .saturating_add(self.upvalues.len())
@@ -339,7 +356,7 @@ impl SavePayload {
                     .fold(0usize, |sum, (table, pins)| {
                         sum.saturating_add(match table {
                             SavedObject::Table { entries, .. } => entries.len().saturating_mul(2),
-                            SavedObject::Closure { .. } => 0,
+                            _ => 0,
                         })
                         .saturating_add(pins.len())
                     }),
@@ -406,10 +423,23 @@ struct SaveBuilder<'a> {
 #[derive(Clone, Copy)]
 enum ValueDestination {
     Root(usize),
-    TableKey { object: u32, entry: usize },
-    TableValue { object: u32, entry: usize },
-    Metatable { object: u32 },
+    TableKey {
+        object: u32,
+        entry: usize,
+    },
+    TableValue {
+        object: u32,
+        entry: usize,
+    },
+    Metatable {
+        object: u32,
+    },
     Upvalue(u32),
+    /// A gmatch iterator's subject (`pattern` false) or pattern.
+    GmatchString {
+        object: u32,
+        pattern: bool,
+    },
 }
 enum EncodeTask {
     Value {
@@ -610,6 +640,9 @@ impl<'a> PathFinder<'a> {
                         RawObject::LuaFn(closure) => {
                             PathObjectChildren::Closure(closure.upvalues.clone())
                         }
+                        // Only strings hang off an iterator, and no
+                        // unregistered function is reachable through one.
+                        RawObject::Gmatch(_) => continue,
                     };
                     match children {
                         PathObjectChildren::Table { entries, metatable } => {
@@ -760,6 +793,16 @@ enum PendingObject {
     Closure {
         chunk: u32,
         upvalues: Vec<Option<u32>>,
+    },
+    GmatchIter {
+        subject: Option<SavedVal>,
+        pattern: Option<SavedVal>,
+        pos: u64,
+        resumed: bool,
+    },
+    GmatchEmptyIter {
+        pos: u64,
+        len: u64,
     },
 }
 
@@ -1334,6 +1377,38 @@ impl<'a> SaveBuilder<'a> {
                     upvalues: vec![None; captures.len()],
                 }
             }
+            RawObject::Gmatch(GmatchIter::General {
+                subject,
+                pattern,
+                pos,
+                resumed,
+            }) => {
+                let (subject, pattern, pos, resumed) = (*subject, *pattern, *pos, *resumed);
+                tasks.push(EncodeTask::Value {
+                    val: Val::Str(pattern),
+                    destination: ValueDestination::GmatchString {
+                        object: id,
+                        pattern: true,
+                    },
+                });
+                tasks.push(EncodeTask::Value {
+                    val: Val::Str(subject),
+                    destination: ValueDestination::GmatchString {
+                        object: id,
+                        pattern: false,
+                    },
+                });
+                PendingObject::GmatchIter {
+                    subject: None,
+                    pattern: None,
+                    pos: pos as u64,
+                    resumed,
+                }
+            }
+            RawObject::Gmatch(GmatchIter::Empty { pos, len }) => PendingObject::GmatchEmptyIter {
+                pos: *pos as u64,
+                len: *len as u64,
+            },
         };
         let slot = self
             .objects
@@ -1389,6 +1464,21 @@ impl<'a> SaveBuilder<'a> {
                 };
                 *metatable = Some(Some(value));
             }
+            ValueDestination::GmatchString { object, pattern } => {
+                let pending = self
+                    .objects
+                    .get_mut(object as usize)
+                    .ok_or(SaveError::from(SaveFault::MissingObjectSlot))?;
+                let Some(PendingObject::GmatchIter {
+                    subject,
+                    pattern: saved_pattern,
+                    ..
+                }) = pending
+                else {
+                    return Err(SaveError::from(SaveFault::GmatchDestinationNotIterator));
+                };
+                *(if pattern { saved_pattern } else { subject }) = Some(value);
+            }
         }
         Ok(())
     }
@@ -1429,6 +1519,20 @@ impl<'a> SaveBuilder<'a> {
                     })
                     .collect::<Result<Vec<_>, _>>()?,
             }),
+            PendingObject::GmatchIter {
+                subject,
+                pattern,
+                pos,
+                resumed,
+            } => Ok(SavedObject::GmatchIter {
+                subject: subject.ok_or(SaveError::from(SaveFault::UnfilledGmatchSlot))?,
+                pattern: pattern.ok_or(SaveError::from(SaveFault::UnfilledGmatchSlot))?,
+                pos,
+                resumed,
+            }),
+            PendingObject::GmatchEmptyIter { pos, len } => {
+                Ok(SavedObject::GmatchEmptyIter { pos, len })
+            }
         }
     }
     fn encode_bytecode(&mut self, bc: &Arc<Bytecode>) -> Result<u32, SaveError> {
@@ -1750,6 +1854,10 @@ fn materialize_payload(
                 let runtime = state.resolve_bytecode_runtime_no_gc(bc);
                 state.heap.no_gc_allocator().alloc_lua_fn(runtime, refs)
             }
+            SavedObject::GmatchIter { .. } | SavedObject::GmatchEmptyIter { .. } => {
+                let iter = materialize_gmatch(obj, &strings, objects.len())?;
+                state.heap.no_gc_allocator().alloc_gmatch(iter)
+            }
         };
         objects.push(ptr);
     }
@@ -1839,7 +1947,9 @@ fn materialize_payload(
                     table.set_metatable(metatable);
                 }
             }
-            SavedObject::Closure { .. } => {}
+            SavedObject::Closure { .. }
+            | SavedObject::GmatchIter { .. }
+            | SavedObject::GmatchEmptyIter { .. } => {}
         }
     }
 
@@ -2249,34 +2359,52 @@ fn decode_val(saved: &SavedVal, ctx: &DecodeCtx<'_>) -> Result<Val, SnapshotErro
     }
 }
 
+/// A saved gmatch iterator's record. `verify::validate_gmatch` has checked
+/// it against the bounds a live iterator keeps; a reference that still does
+/// not resolve is reported as corruption rather than trusted.
+fn materialize_gmatch(
+    saved: &SavedObject,
+    strings: &[StringPtr],
+    index: usize,
+) -> Result<GmatchIter, SnapshotError> {
+    let invalid = || {
+        corrupt_arena(
+            CorruptionReason::InvalidGmatchIterator,
+            index,
+            SaveLocation::Objects,
+        )
+    };
+    let string = |value: &SavedVal| match value {
+        SavedVal::Str(id) => strings.get(*id as usize).copied().ok_or_else(invalid),
+        _ => Err(invalid()),
+    };
+    let index_of = |value: u64| usize::try_from(value).map_err(|_| invalid());
+    match saved {
+        SavedObject::GmatchIter {
+            subject,
+            pattern,
+            pos,
+            resumed,
+        } => Ok(GmatchIter::General {
+            subject: string(subject)?,
+            pattern: string(pattern)?,
+            pos: index_of(*pos)?,
+            resumed: *resumed,
+        }),
+        SavedObject::GmatchEmptyIter { pos, len } => Ok(GmatchIter::Empty {
+            pos: index_of(*pos)?,
+            len: index_of(*len)?,
+        }),
+        SavedObject::Table { .. } | SavedObject::Closure { .. } => Err(invalid()),
+    }
+}
+
 fn materialize_bytecode(
     payload: &verify::VerifiedSavePayload,
 ) -> Result<Vec<Arc<Bytecode>>, SnapshotError> {
     let saved = payload.bytecode();
     let source_names = intern_bytecode_sources(saved);
     let mut out: Vec<Option<Arc<Bytecode>>> = vec![None; saved.len()];
-    // A gmatch iterator chunk becomes this process's shared iterator Arc, the
-    // identity error reporting uses to locate a lazy pattern failure at the
-    // script caller. A chunk qualifies when some closure of it captures a
-    // gmatch iterator function id and its contents equal this build's
-    // wrapper. That is a heuristic, which only affects error attribution:
-    // a script that compiles the wrapper's exact source under its name and
-    // hands the result a function registered under that id gets the shared
-    // Arc too, as does every closure of that chunk, including ones capturing
-    // something else. A same-named chunk with other contents keeps its own
-    // Arc. A chunk that differs from this build's wrapper (a save from
-    // another build) loads as saved and its errors stay located in the
-    // synthetic chunk.
-    let iterator_chunks = payload.gmatch_iterator_chunks();
-    if !iterator_chunks.is_empty() {
-        let shared = crate::lua_std::gmatch_iterator_bytecode();
-        let shared_form = saved_bytecode_node(&shared, Vec::new());
-        for idx in iterator_chunks {
-            if saved.get(idx) == Some(&shared_form) {
-                out[idx] = Some(Arc::clone(&shared));
-            }
-        }
-    }
     let mut visiting = vec![false; saved.len()];
     for idx in 0..saved.len() {
         build_bytecode_tree(idx, saved, &source_names, &mut out, &mut visiting)?;
@@ -2944,6 +3072,23 @@ impl SavedObject {
                     Ok(())
                 })?;
             }
+            SavedObject::GmatchIter {
+                subject,
+                pattern,
+                pos,
+                resumed,
+            } => {
+                out.write_u8(2);
+                subject.encode(out)?;
+                pattern.encode(out)?;
+                out.write_u64(*pos);
+                out.write_bool(*resumed);
+            }
+            SavedObject::GmatchEmptyIter { pos, len } => {
+                out.write_u8(3);
+                out.write_u64(*pos);
+                out.write_u64(*len);
+            }
         }
         Ok(())
     }
@@ -2972,6 +3117,16 @@ impl SavedObject {
             1 => Ok(SavedObject::Closure {
                 chunk: input.read_u32()?,
                 upvalues: read_vec(input, Decoder::read_u32)?,
+            }),
+            2 => Ok(SavedObject::GmatchIter {
+                subject: SavedVal::decode(input)?,
+                pattern: SavedVal::decode(input)?,
+                pos: input.read_u64()?,
+                resumed: input.read_bool()?,
+            }),
+            3 => Ok(SavedObject::GmatchEmptyIter {
+                pos: input.read_u64()?,
+                len: input.read_u64()?,
             }),
             tag => Err(input.decode_error_at(tag_offset, DecodeReason::InvalidObjectTag(tag))),
         }
@@ -3141,6 +3296,45 @@ mod tests {
 
     fn no_setup(_: &mut State) -> std::result::Result<(), Infallible> {
         Ok(())
+    }
+
+    #[test]
+    fn load_admits_only_reachable_gmatch_iterator_states() {
+        let mut payload = SavePayload::empty(true);
+        payload.strings = vec![b"abc".to_vec(), b"%a".to_vec(), Vec::new()];
+        let general = |subject, pattern, pos, resumed| SavedObject::GmatchIter {
+            subject: SavedVal::Str(subject),
+            pattern: SavedVal::Str(pattern),
+            pos,
+            resumed,
+        };
+        let empty = |pos, len| SavedObject::GmatchEmptyIter { pos, len };
+        for (saved, admitted) in [
+            (general(0, 1, 0, false), true),
+            (general(0, 1, 4, false), true),
+            (general(0, 1, 5, false), false),
+            (general(0, 1, 0, true), true),
+            (general(0, 1, 3, true), true),
+            (general(0, 1, 4, true), false),
+            (general(0, 2, 0, false), false),
+            (general(0, 9, 0, false), false),
+            (
+                SavedObject::GmatchIter {
+                    subject: SavedVal::Num(0),
+                    pattern: SavedVal::Str(1),
+                    pos: 0,
+                    resumed: false,
+                },
+                false,
+            ),
+            (empty(3, 2), true),
+            (empty(4, 2), false),
+            (empty(0, crate::limits::MAX_STRING_BYTES as u64 + 1), false),
+            (empty(u64::MAX, 2), false),
+        ] {
+            let result = verify::validate_gmatch(&payload, &saved, 0);
+            assert_eq!(result.is_ok(), admitted, "{saved:?}");
+        }
     }
 
     #[test]
@@ -3427,7 +3621,7 @@ mod tests {
             .iter()
             .filter_map(|object| match object {
                 SavedObject::Closure { chunk, .. } => Some(*chunk),
-                SavedObject::Table { .. } => None,
+                _ => None,
             })
             .collect::<BTreeSet<_>>()
             .into_iter()

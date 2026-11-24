@@ -36,6 +36,10 @@ impl NoGcAllocator<'_> {
         self.heap.alloc_table_raw()
     }
 
+    pub(in crate::vm) fn alloc_gmatch(self, iter: super::GmatchIter) -> ObjectPtr {
+        self.heap.alloc_gmatch_raw(iter)
+    }
+
     pub(in crate::vm) fn alloc_table_with_capacity(self, capacity: usize) -> ObjectPtr {
         self.heap.alloc_table_with_capacity_raw(capacity)
     }

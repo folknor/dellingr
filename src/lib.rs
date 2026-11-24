@@ -99,7 +99,6 @@ mod det_hash;
 mod disassemble;
 mod fp_env;
 mod globals;
-mod gmatch_schema;
 mod host;
 mod instr;
 pub mod limits;

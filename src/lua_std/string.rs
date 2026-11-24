@@ -1,78 +1,16 @@
 //! Lua's String Library
 
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, OnceLock};
 
-use super::{STRING_LIBRARY_CAPACITY, arg_integer, check_type_named, opt_integer};
-use crate::compiler;
+use super::{STRING_LIBRARY_CAPACITY, arg_integer, opt_integer};
 use crate::cost_meter::CostMeter;
 use crate::cost_model::Charge;
-use crate::error::{
-    Error, ErrorKind, GmatchStateFault, LibraryError, PatternErrorDetail, StringPatternFunction,
-};
+use crate::error::{Error, ErrorKind, LibraryError, PatternErrorDetail, StringPatternFunction};
 use crate::instr::{ArgCount, RetCount};
 use crate::patterns::{LuaCapture, LuaPattern, MatchError, PatternError};
 use crate::saturate::saturating_cast;
-use crate::vm::StringArg;
+use crate::vm::{GmatchIter, StringArg};
 use crate::{LuaType, Result, State};
-
-use crate::gmatch_schema;
-
-const GMATCH_WRAPPER_SRC: &str = r#"local iter, state = ...
-return function()
-    return iter(state)
-end
-"#;
-
-// This chunk is immutable. Runtime caches are State-local, and snapshot bytecode
-// ids are assigned per save, so sharing the Arc does not share mutable state.
-// Error reporting identifies this outer chunk and the iterator bytecode by
-// Arc identity and omits these implementation frames, so lazy pattern
-// failures point at the caller.
-// It is process-global and compiled when the string library opens (a RustFunc
-// cannot carry upvalues, hence the shim). Compilation is deterministic and
-// charges no script cost; the only effect is one-time host work during setup.
-static GMATCH_WRAPPER: OnceLock<Arc<crate::compiler::Bytecode>> = OnceLock::new();
-
-fn gmatch_wrapper() -> Arc<crate::compiler::Bytecode> {
-    Arc::clone(GMATCH_WRAPPER.get_or_init(|| {
-        Arc::new(
-            compiler::compile(GMATCH_WRAPPER_SRC, Some(b"string.gmatch".as_slice()))
-                .expect("the static gmatch wrapper source must compile"),
-        )
-    }))
-}
-
-impl State {
-    pub(crate) fn is_gmatch_wrapper(bytecode: &Arc<crate::compiler::Bytecode>) -> bool {
-        // Recognize the outer construction chunk and its returned iterator by
-        // identity, never source name: a user chunk may share the name.
-        // Snapshot load maps a restored iterator chunk onto this Arc (see
-        // `gmatch_iterator_bytecode`), so restored iterators match too.
-        GMATCH_WRAPPER.get().is_some_and(|wrapper| {
-            Arc::ptr_eq(wrapper, bytecode)
-                || wrapper
-                    .nested
-                    .iter()
-                    .any(|child| Arc::ptr_eq(child, bytecode))
-        })
-    }
-}
-
-/// The process-global bytecode of the iterator function the gmatch wrapper
-/// returns. The wrapper is compiled when the string library opens. Snapshot
-/// load substitutes it for a restored iterator's chunk, so the restored
-/// closure shares the identity `State::is_gmatch_wrapper` recognises.
-#[cfg(feature = "snapshot")]
-pub(crate) fn gmatch_iterator_bytecode() -> Arc<crate::compiler::Bytecode> {
-    let wrapper = gmatch_wrapper();
-    Arc::clone(
-        wrapper
-            .nested
-            .first()
-            .expect("the gmatch wrapper source defines exactly one nested function"),
-    )
-}
 
 // Library charges are registered in `crate::cost_model`: the code here
 // measures units and the registry supplies the weight of the `Charge` of the
@@ -1099,48 +1037,41 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
             .min(s_len + 1);
 
         // An empty pattern matches at every position without examining a
-        // byte, so it has its own iterator (with its own persisted schema)
-        // that runs no matcher.
+        // byte, so its iterator keeps only the subject's length and runs no
+        // matcher.
         if pattern_len == 0 {
             state.set_top(0)?;
-            state.new_table()?;
-            state.push_string(gmatch_schema::POSITION_FIELD)?;
-            state.push_number(init as f64)?;
-            state.set_table_raw(-3)?;
-            state.push_string(gmatch_schema::LENGTH_FIELD)?;
-            state.push_number(s_len as f64)?;
-            state.set_table_raw(-3)?;
-            return crate::native_call!(
-                "lib:string.gmatch->push_gmatch_wrapper:empty",
-                push_gmatch_wrapper(state, super::GMATCH_EMPTY_ITER)
-            );
+            state.push_gmatch(GmatchIter::Empty {
+                pos: init,
+                len: s_len,
+            })?;
+            return Ok(1);
         }
 
-        // The subject and pattern arguments stay in slots 1 and 2 until the
-        // iterator table holds them: a string argument is stored as the
-        // value it already is (it is not re-interned, which would hash every
-        // byte again), and stays rooted while the table is built. A number
-        // argument is interned here, the one pattern function whose state
-        // keeps it beyond the call.
+        // The iterator keeps the subject and pattern values. A string
+        // argument is pushed as the value it already is (it is not
+        // re-interned, which would hash every byte again); a number argument
+        // is interned here, the one pattern function whose state keeps it
+        // beyond the call. Both stay rooted on the stack until the iterator,
+        // which roots them from then on, is published. The pattern is kept
+        // as given: a leading `^` is literal because the step compiles it
+        // under `AnchorMode::Literal`.
         state.set_top(2)?;
-        state.new_table()?;
-        state.push_string(gmatch_schema::SUBJECT_FIELD)?;
         state.push_string_arg(&s)?;
-        state.set_table_raw(-3)?;
-        // The pattern is stored as given: a leading `^` is literal because
-        // the iterator compiles it under `AnchorMode::Literal`.
-        state.push_string(gmatch_schema::PATTERN_FIELD)?;
         state.push_string_arg(&pattern)?;
-        state.set_table_raw(-3)?;
-        state.push_string(gmatch_schema::POSITION_FIELD)?;
-        state.push_number(init as f64)?;
-        state.set_table_raw(-3)?;
-        // `push_gmatch_wrapper` takes the table alone at slot 1.
-        state.remove_bottom(2)?;
-        crate::native_call!(
-            "lib:string.gmatch->push_gmatch_wrapper:general",
-            push_gmatch_wrapper(state, super::GMATCH_ITER)
-        )
+        let subject = state
+            .string_ptr_at(3)?
+            .expect("push_string_arg pushes a string");
+        let pattern = state
+            .string_ptr_at(4)?
+            .expect("push_string_arg pushes a string");
+        state.push_gmatch(GmatchIter::General {
+            subject,
+            pattern,
+            pos: init,
+            resumed: false,
+        })?;
+        Ok(1)
     }),
     // string.gsub(s, pattern, repl [, n])
     ("string.gsub", |state| {
@@ -1412,9 +1343,6 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
     // Create the string table
     state.new_table_with_capacity(STRING_LIBRARY_CAPACITY)?;
 
-    // The gmatch iterators are catalog entries, so `open_libs` binds their ids
-    // before any gmatch runs and a persisted gmatch closure (which captures
-    // one of them as an upvalue) resolves on snapshot load.
     super::install_library_functions(state, super::STRING_SEGMENT)?;
 
     // Strings index through a shared metatable whose `__index` is this table,
@@ -1423,168 +1351,59 @@ pub(crate) fn open_string(state: &mut State) -> Result<()> {
     state.install_string_metatable()?;
 
     // Set the string table as a global
-    state.pop_to_global("string")?;
-
-    // Compile the wrapper during setup, after the string functions are
-    // installed. Compilation has no State cost accounting and touches neither
-    // the heap nor the Rust function table, so this preserves script costs and
-    // the standard library's installation order.
-    drop(gmatch_wrapper());
-    Ok(())
+    state.pop_to_global("string")
 }
 
-fn push_gmatch_wrapper(state: &mut State, iterator: crate::vm::RustFnId) -> Result<u8> {
-    state.push_chunk(&gmatch_wrapper())?;
-    state.push_rust_fn_id(iterator)?;
-    state.push_value(1)?;
-    state.remove(1)?;
-    crate::native_call!(
-        "push_gmatch_wrapper->call_unguarded",
-        state.call_unguarded(ArgCount::Fixed(2), RetCount::Fixed(1))
-    )?;
-    Ok(1)
-}
-
-fn invalid_gmatch_state(state: &State, fault: GmatchStateFault) -> Error {
-    state.library_error(LibraryError::InvalidGmatchState { fault })
-}
-
-fn push_gmatch_string_field(state: &mut State, field: &'static str) -> Result<()> {
-    state.push_string(field)?;
-    state.get_table_raw(1)?;
-    if state.typ(-1) != LuaType::String {
-        return Err(invalid_gmatch_state(
-            state,
-            GmatchStateFault::StringFieldInvalid(field),
-        ));
-    }
-    Ok(())
-}
-
-// Gmatch tables are the wrapper closure's state, but nothing makes them
-// trusted: a host can call the registered iterator handle with any table, and
-// a save is user-editable input that snapshot load does not schema-check. The
-// iterator is the authority, rejecting an absent, mistyped or out-of-range
-// field when it reads it, so a bad field cannot silently restart an iterator.
-// An exhausted iterator returns before reading the compile flag, so a bad flag
-// there goes unreported, which is harmless.
-fn gmatch_state_index(
-    state: &State,
-    stack_index: isize,
-    field: &'static str,
-    maximum: usize,
-) -> Result<usize> {
-    if state.typ(stack_index) != LuaType::Number {
-        return Err(invalid_gmatch_state(
-            state,
-            GmatchStateFault::NumberFieldInvalid(field),
-        ));
-    }
-    let number = state.to_number(stack_index)?;
-    crate::vm::integer_index(number, maximum)
-        .ok_or_else(|| invalid_gmatch_state(state, GmatchStateFault::NumberFieldOutOfRange(field)))
-}
-
-pub(super) fn gmatch_empty_iter(state: &mut State) -> Result<u8> {
-    check_type_named(state, 1, LuaType::Table, "gmatch")?;
-
-    state.push_string(gmatch_schema::POSITION_FIELD)?;
-    state.get_table_raw(1)?;
-    let pos = gmatch_state_index(
-        state,
-        -1,
-        gmatch_schema::POSITION_FIELD,
-        crate::limits::MAX_STRING_BYTES + 1,
-    )?;
-    state.pop(1)?;
-
-    state.push_string(gmatch_schema::LENGTH_FIELD)?;
-    state.get_table_raw(1)?;
-    let len = gmatch_state_index(
-        state,
-        -1,
-        gmatch_schema::LENGTH_FIELD,
-        crate::limits::MAX_STRING_BYTES,
-    )?;
-    state.pop(1)?;
-
-    if pos > len.saturating_add(1) {
-        return Err(invalid_gmatch_state(
-            state,
-            GmatchStateFault::PositionExceedsSubjectLength,
-        ));
-    }
-    if pos > len {
-        // Exhausted: no results, as reference `gmatch_aux` returns.
-        state.set_top(0)?;
-        return Ok(0);
-    }
-
-    // Stage the result and update operands before advancing. A refused push
-    // must leave this boundary available to a later call of the same closure.
-    state.push_bytes(b"")?;
-    state.push_string(gmatch_schema::POSITION_FIELD)?;
-    state.push_number((pos + 1) as f64)?;
-    state.set_table_raw(1)?;
-    state.remove(1)?;
-    Ok(1)
-}
-
-pub(super) fn gmatch_iter(state: &mut State) -> Result<u8> {
-    check_type_named(state, 1, LuaType::Table, "gmatch")?;
-
-    push_gmatch_string_field(state, gmatch_schema::SUBJECT_FIELD)?;
-    push_gmatch_string_field(state, gmatch_schema::PATTERN_FIELD)?;
-
-    state.push_string(gmatch_schema::POSITION_FIELD)?;
-    state.get_table_raw(1)?;
-    let pos = gmatch_state_index(
-        state,
-        -1,
-        gmatch_schema::POSITION_FIELD,
-        crate::limits::MAX_STRING_BYTES + 1,
-    )?;
-    state.pop(1)?;
-
-    // End of the previous accepted match, for Lua 5.4's empty-match rule.
-    // A fresh iterator has none.
-    state.push_string(gmatch_schema::LAST_MATCH_FIELD)?;
-    state.get_table_raw(1)?;
-    let lastmatch = match state.typ(-1) {
-        LuaType::Nil => None,
-        LuaType::Number => Some(gmatch_state_index(
-            state,
-            -1,
-            gmatch_schema::LAST_MATCH_FIELD,
-            crate::limits::MAX_STRING_BYTES,
-        )?),
-        _ => {
-            return Err(invalid_gmatch_state(
-                state,
-                GmatchStateFault::LastMatchFieldInvalid(gmatch_schema::LAST_MATCH_FIELD),
-            ));
-        }
+/// The step of every `string.gmatch` iterator (`GmatchIter`): the call of an
+/// iterator enters it with the iterator itself in slot 1 and the call's own
+/// arguments, which it ignores, above. Anything else in slot 1 (a host
+/// calling the step's registered id directly) is refused before the stack
+/// changes.
+///
+/// The record is trusted: only `string.gmatch` creates one, and snapshot load
+/// checks a saved one against the bounds `GmatchIter` documents. A step
+/// stages every result first and commits the advanced record last, so a
+/// refused push or an interrupted or refused match leaves the iterator where
+/// it was and a later call retries the same match.
+pub(super) fn gmatch_step(state: &mut State) -> Result<u8> {
+    let Some((iterator, record)) = state.gmatch_at(1) else {
+        return Err(state.library_error(LibraryError::NotAGmatchIterator));
     };
-    state.pop(1)?;
-
-    let subject_len = state.to_bytes(2)?.len();
-    if pos > subject_len.saturating_add(1) {
-        return Err(invalid_gmatch_state(
-            state,
-            GmatchStateFault::PositionExceedsSubjectLength,
-        ));
-    }
-    if lastmatch.is_some_and(|last| last > subject_len) {
-        return Err(invalid_gmatch_state(
-            state,
-            GmatchStateFault::LastMatchExceedsSubjectLength,
-        ));
-    }
-    if pos > subject_len {
+    let (subject, pattern, pos, resumed) = match record {
+        GmatchIter::Empty { pos, len } => {
+            if pos > len {
+                // Exhausted: no results, as reference `gmatch_aux` returns.
+                state.set_top(0)?;
+                return Ok(0);
+            }
+            // The ignored call arguments go first, so they cannot crowd the
+            // result off the stack.
+            state.set_top(1)?;
+            state.push_bytes(b"")?;
+            state.set_gmatch(iterator, GmatchIter::Empty { pos: pos + 1, len });
+            return Ok(1);
+        }
+        GmatchIter::General {
+            subject,
+            pattern,
+            pos,
+            resumed,
+        } => (subject, pattern, pos, resumed),
+    };
+    if pos > state.string_ptr_len(subject) {
         // Exhausted: no results, as reference `gmatch_aux` returns.
         state.set_top(0)?;
         return Ok(0);
     }
+    // End of the previous accepted match, for Lua 5.4's empty-match rule:
+    // every accepted match leaves the iterator at its end, and a fresh one
+    // has none.
+    let lastmatch = resumed.then_some(pos);
+    // The subject and pattern go into slots 2 and 3 for the matcher and the
+    // capture pushes, which read them from the stack.
+    state.set_top(1)?;
+    state.push_string_ptr(subject)?;
+    state.push_string_ptr(pattern)?;
 
     let (matched, matcher) =
         state.with_gmatch_matcher(2, 3, |subject, matcher, mut meter, interrupt| {
@@ -1632,22 +1451,17 @@ pub(super) fn gmatch_iter(state: &mut State) -> Result<u8> {
             push_gmatch_capture(state, matcher.capture(i))?;
         }
 
-        // Stage both writes before committing either. Each push can refuse
-        // independently, even after a batch stack preflight. Once staged, the
-        // private table's valid keys and bounded size make both raw writes
-        // infallible, and the remaining stack operations only shrink it.
-        // Keep the persisted fields: removing one would change saved bytes
-        // and require a coordinated snapshot schema migration for a minor
-        // per-call saving. Field interning is host work, not an extra charge.
-        state.push_string(gmatch_schema::POSITION_FIELD)?;
-        state.push_number(range.end as f64)?;
-        state.push_string(gmatch_schema::LAST_MATCH_FIELD)?;
-        state.push_number(range.end as f64)?;
-        state.set_table_raw(1)?;
-        state.set_table_raw(1)?;
-        state.remove(3)?;
-        state.remove(2)?;
-        state.remove(1)?;
+        // Every result is staged: the commit cannot fail, and the callback
+        // ABI keeps only the top `num_returns` values.
+        state.set_gmatch(
+            iterator,
+            GmatchIter::General {
+                subject,
+                pattern,
+                pos: range.end,
+                resumed: true,
+            },
+        );
         Ok(num_returns)
     } else {
         // No match left: no results, like the exhausted exit above.
@@ -1774,22 +1588,5 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn gmatch_error_frame_identity_includes_outer_and_iterator_chunks() {
-        let wrapper = gmatch_wrapper();
-        assert!(State::is_gmatch_wrapper(&wrapper));
-        let iterator = wrapper
-            .nested
-            .first()
-            .expect("the wrapper defines its iterator function");
-        assert!(State::is_gmatch_wrapper(iterator));
-
-        let same_named_user_chunk = Arc::new(
-            compiler::compile("return nil", Some(b"string.gmatch".as_slice()))
-                .expect("same-named user chunk compiles"),
-        );
-        assert!(!State::is_gmatch_wrapper(&same_named_user_chunk));
     }
 }

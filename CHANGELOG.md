@@ -72,10 +72,26 @@ tick budgets and re-record replays.
   its exit, which every exit path had already done. Costs, results and
   register contents at every collection point are unchanged; save bytes and
   `--dump-bytecode` listings change.
-- `string.gmatch` iterator state no longer carries the `compile_charged`
-  flag, so `GmatchStateFault::CompileFlagKeyMissing` and `CompileFlagInvalid`
-  are removed. A `string.format` literal run that crosses the string size cap
-  reports the size the whole run would reach.
+- **Replay-visible:** a `string.gmatch` iterator is a typed heap object
+  instead of a Lua closure built by a wrapper chunk over a private state
+  table. It is still a function (`type`, `tostring`, equality and table keys
+  as before) and calling it runs the step directly, so creating one
+  allocates one object and makes no call from Rust, and each step makes no
+  Lua call, interns no field key and touches no table (its results are
+  interned as before). Costs and results are unchanged. Collection timing,
+  and with it `%p` ids and object counts, moves; saves store the iterator as
+  its own record, which load checks, so save bytes change. Creating an
+  iterator, and calling it from Lua or a generic `for`, no longer takes a
+  native call level, so these succeed at `MAX_NATIVE_CALL_DEPTH` where
+  creation was refused; a host call of an iterator still takes one.
+  The iterator ids `string.gmatch.iter` (now the step a host can call with
+  an iterator) and `string.gmatch.empty_iter` (gone) change meaning.
+  `LibraryError::InvalidGmatchState` and `error::GmatchStateFault` are
+  removed; the step called without an iterator raises
+  `LibraryError::NotAGmatchIterator`, and load rejects an impossible saved
+  iterator with `CorruptionReason::InvalidGmatchIterator`.
+- A `string.format` literal run that crosses the string size cap reports the
+  size the whole run would reach.
 - `string.gsub` with a string or number replacement runs its whole scan in
   one borrow of its arguments and reads the replacement in place instead of
   compiling a template, so `InternalFault::GsubReplacementTemplateMissing` is
@@ -179,23 +195,18 @@ tick budgets and re-record replays.
   it runs, so the host can reset the interrupt and retry. The handler used
   to be recorded as entered before the interrupt poll, and the operands were
   consumed as if it had run.
-- A save holding an ordinary closure that captures a `string.gmatch`
-  iterator function (its handle is public through `registered_rust_fn`, and
-  a raw State may register those ids for host functions) loads. Load used to
-  take any closure capturing either id for a gmatch iterator and rejected it
-  for lacking a state table. Load no longer checks gmatch iterator state at
-  all: a captured id cannot prove a closure is an iterator, and saves are
-  user-editable input, so the iterator callbacks are the authority on the
-  state they read. `snapshot::GmatchCorruption` and
+- A save holding an ordinary closure that captures the `string.gmatch` step
+  function (its handle is public through `registered_rust_fn`, and a raw
+  State may register that id for a host function) loads. Load used to take
+  any closure capturing a gmatch iterator id for an iterator and rejected it
+  for lacking a state table. `snapshot::GmatchCorruption` and
   `CorruptionReason::Gmatch` are removed.
-- Malformed `string.gmatch` iterator state is reported as
-  `LibraryError::InvalidGmatchState` carrying a public
-  `error::GmatchStateFault`, not as an `InternalError`: a host calling the
-  iterator handle with another table, or an edited save, reaches it without
-  any dellingr bug.
 
 ### Performance
 
+- `string.gmatch` steps are about a third faster on short matches and well
+  over half faster on repeated failed scans (`patterns`, `failed_scan`), from
+  the typed iterator above.
 - A field or method read through more than one `__index` table (a class
   inheriting from a class) is cached per site behind a heap-wide epoch that
   a write able to change the route moves, so a warm read no longer walks

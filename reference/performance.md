@@ -100,6 +100,38 @@ at layout but does not prove it. `large_subject` shows no gain: its `gsub`
 output is mostly an intern hit, and the copy a miss saves is small against
 its scan.
 
+## Typed gmatch iterators, 2026-11-24
+
+A `string.gmatch` iterator became a typed heap object (`GmatchIter`) whose
+call runs the library step directly, in place of a Lua closure from a
+compiled wrapper chunk over a private state table. Each step used to admit
+the wrapper's Lua frame, call the step as a nested Rust function, intern
+six field keys and make four raw table reads and two writes; it now reads
+and writes the record. Creation allocates one object instead of the
+wrapper's closures and table, and makes no call from Rust. Against its
+parent 7cad369 on bygg, `brokkr bench wall` (best of 3, ms), two interleaved
+pairs:
+
+| Workload | 7cad369 | Change |
+|---|---|---|
+| `patterns` | 1204, 1189 | 802, 800 |
+| `failed_scan` | 2261, 2266 | 946, 955 |
+| `large_subject` | 1292, 1294 | 1089, 1092 |
+
+The pairs were taken on an intermediate build whose `begin_call` had two
+call sites for `invoke_rust_fn`; the committed single-site shape measured
+788 (`patterns`), 950 (`failed_scan`) and 1.1 s (`large_subject`) in one
+cell. `failed_scan` runs many short gmatch scans, so the per-step state
+traffic was most of its time; `large_subject` takes one step per iterator,
+so its gain is creation. As a control, `benchmark` (3581 to 3556) and
+`method` (535 to 524) did not move. No same-binary control was run; the
+gmatch deltas are far outside the layout spread recorded elsewhere in this
+file. In `native_bytes_per_level`, the release frame grew 16 bytes on the
+index-key scenarios and shrank 16 on `host_invoke`, everything else equal
+(release + snapshot also shrank 48 on the `gsub_pattern_*` rows);
+the dev frame grew 96 to 256 bytes a level, from the iterator's dispatch
+arms in `begin_call` and `instr_tfor_call`.
+
 ## Batched matcher kernels, 2026-11-17
 
 Every matcher step polled the interrupt flag and entered the cost meter,
@@ -389,7 +421,8 @@ its bytecode (one handle instead of two), and `reg_closure` collects its
 captures straight into the shared `Arc<[UpvalueRef]>` with no staging
 `Vec`: a capturing closure went from three allocations, one immediate free
 and two reference-count increments to one allocation and one increment; a
-capture-free one (every `string.gmatch` call makes one) allocates nothing
+capture-free one (every `string.gmatch` call then made one, its wrapper's
+main closure) allocates nothing
 of its own. The cache sweep's chunk-retention set is a reused hash set kept
 by the heap instead of a fresh `BTreeSet` per collection. Against its parent
 851d129 on bygg, `brokkr bench wall` (best of 3), base and change

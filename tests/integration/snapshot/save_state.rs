@@ -505,9 +505,8 @@ fn state_is_quiescent_after_error_in_table_constructor() {
 
 #[test]
 fn gmatch_closure_survives_save_load() {
-    // A gmatch closure captures the (now library-open-registered) iterator Rust
-    // function as an upvalue; persisting and restoring it must resolve that id
-    // and resume iteration (L12 snapshot follow-up).
+    // A gmatch iterator is saved as its typed record and resumes where it
+    // stopped.
     let mut state = State::new();
     support::eval(
         &mut state,
@@ -551,9 +550,25 @@ fn gmatch_last_match_end_survives_save_load() {
 }
 
 #[test]
+fn gmatch_empty_match_at_the_start_survives_save_load() {
+    // An accepted empty match at offset 0 leaves the iterator resumed at 0;
+    // after the load it must still reject that same empty match and move on.
+    let source = r#"f = string.gmatch("ab1", "%d*"); return f()"#;
+    let mut state = State::new();
+    support::eval(&mut state, source, 1);
+    assert_eq!(state.to_bytes(-1).unwrap(), b"");
+    state.pop(1).unwrap();
+    let mut loaded = support::reload(&state);
+    // The rest of the 5.4 sequence: the empty match at offset 1, then "1".
+    let rest = "local s = ''\nfor m in f do s = s .. '<' .. m .. '>' end\n\
+                if s ~= '<><1>' then error(s) end";
+    support::run(&mut state, rest);
+    support::run(&mut loaded, rest);
+}
+
+#[test]
 fn empty_gmatch_closure_survives_save_load() {
-    // The empty-pattern gmatch path uses a different iterator id; it too must be
-    // registered at library-open so its closure restores.
+    // The empty-pattern iterator has its own record kind.
     let mut state = State::new();
     support::run(&mut state, r#"g = string.gmatch("ab", "")"#);
 
@@ -568,11 +583,13 @@ fn empty_gmatch_closure_survives_save_load() {
 
 #[test]
 fn ordinary_closures_capturing_gmatch_iterator_handles_round_trip() {
-    // The iterator handles are public, so an ordinary closure can capture one
-    // without any state table. Load must not take it for a gmatch iterator.
-    for id in ["string.gmatch.iter", "string.gmatch.empty_iter"] {
+    // The step's handle is public, so an ordinary closure can capture one.
+    // It round-trips as the function value it is.
+    {
         let mut state = State::new();
-        let handle = state.registered_rust_fn(id).expect("open_libs ran");
+        let handle = state
+            .registered_rust_fn("string.gmatch.iter")
+            .expect("open_libs ran");
         state.push_rust_fn(handle).unwrap();
         state.set_global("seed").unwrap();
         support::run(
@@ -620,31 +637,36 @@ fn raw_state_host_function_under_a_gmatch_iterator_id_round_trips() {
 }
 
 #[test]
-fn gmatch_iterator_handle_called_with_a_bad_table_is_a_library_error() {
-    // Not an internal error: no dellingr invariant broke, a caller passed a
-    // table that is not iterator state.
-    use dellingr::error::{ErrorKind, GmatchStateFault, LibraryError};
+fn gmatch_step_handle_called_without_an_iterator_is_a_library_error() {
+    // Not an internal error: no dellingr invariant broke, a caller passed
+    // something that is not an iterator. With an iterator the step steps it.
+    use dellingr::error::{ErrorKind, LibraryError};
     let mut state = State::new();
     let handle = state.registered_rust_fn("string.gmatch.iter").unwrap();
     state.push_rust_fn(handle).unwrap();
-    state.set_global("seed").unwrap();
-    let error = support::try_run(&mut state, "seed({})").expect_err("state is malformed");
-    assert!(
-        matches!(
-            error.kind(),
-            ErrorKind::LibraryError(LibraryError::InvalidGmatchState {
-                fault: GmatchStateFault::StringFieldInvalid("s")
-            })
-        ),
-        "{error:?}"
+    state.set_global("step").unwrap();
+    for source in ["step({})", "step()", "step(function() end)"] {
+        let error = support::try_run(&mut state, source).expect_err("no iterator");
+        assert!(
+            matches!(
+                error.kind(),
+                ErrorKind::LibraryError(LibraryError::NotAGmatchIterator)
+            ),
+            "{source}: {error:?}"
+        );
+    }
+    support::run(
+        &mut state,
+        "local it = string.gmatch('a b', '%a')\n\
+         if step(it) ~= 'a' or it() ~= 'b' or step(it) ~= nil then error('step') end",
     );
 }
 
 #[test]
 fn restored_gmatch_iterator_errors_point_at_the_script_caller() {
     // The unfinished capture fails lazily, on the first call after the load.
-    // The restored iterator must be recognised as the gmatch wrapper, so the
-    // error lands on the calling script line, not in the synthetic chunk.
+    // The restored iterator's step is a Rust callback, so the error lands on
+    // the calling script line.
     let mut state = State::new();
     support::run(&mut state, "bad = string.gmatch('a', '(')");
     let save = state.save_state().unwrap();

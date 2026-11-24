@@ -159,15 +159,18 @@ fn internal_error(fault: error::CompilerFault) -> error::Error {
     error::Error::internal_fault(error::InternalFault::Compiler(fault))
 }
 
-/// The one compile path: Lua source bytes plus an optional, byte-exact chunk
-/// name, to finalized bytecode. The name is bounded before anything else is
-/// examined, so an oversized name wins over a malformed or oversized source.
+/// [`compile_with_globals`] without the global occurrences, for tests that
+/// want bytecode alone.
+#[cfg(test)]
 pub(crate) fn compile(source: impl AsRef<[u8]>, name: Option<&[u8]>) -> Result<Bytecode> {
     compile_with_globals(source, name).map(|(bc, _)| bc)
 }
 
-/// [`compile`], also returning the source's global occurrences in lexical
-/// order (`crate::Program::globals`).
+/// The one compile path: Lua source bytes plus an optional, byte-exact chunk
+/// name, to finalized bytecode and the source's global occurrences in
+/// lexical order (`crate::Program::globals`). The name is bounded before
+/// anything else is examined, so an oversized name wins over a malformed or
+/// oversized source.
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub(crate) fn compile_with_globals(
     source: impl AsRef<[u8]>,

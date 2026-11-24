@@ -286,6 +286,33 @@ impl Closure {
     }
 }
 
+/// A `string.gmatch` iterator: a function value whose state is this typed
+/// record rather than a Lua closure over a state table. Calling it runs the
+/// catalog step `lua_std::GMATCH_STEP` with the iterator itself as the
+/// callback's first argument (`State::gmatch_step_of`), so it takes the
+/// ordinary Rust callback ABI and its errors are located at the caller.
+///
+/// It holds only values a live iterator can reach, and snapshot load checks
+/// a saved one against the same bounds, so the step trusts the record. The
+/// general iterator's 5.4 empty-match rule needs the end of the previous
+/// accepted match only when it equals `pos` (every accepted match sets both
+/// to its end), so `resumed` records that and nothing else.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum GmatchIter {
+    /// A nonempty pattern over `subject`. `pos` is at most the subject's
+    /// length plus one (one past it is exhausted); a resumed `pos` is at most
+    /// the length.
+    General {
+        subject: StringPtr,
+        pattern: StringPtr,
+        pos: usize,
+        resumed: bool,
+    },
+    /// The empty pattern: one empty match at every boundary `pos..=len`,
+    /// examining no byte, so the subject itself is not kept.
+    Empty { pos: usize, len: usize },
+}
+
 /// The raw object data managed by GC.
 /// Tables and closures share these slots, so inline table metadata also
 /// affects closure storage. Strings use the separate StringPool and do not
@@ -302,13 +329,14 @@ impl Closure {
 pub(super) enum RawObject {
     LuaFn(Closure),
     Table(Table),
+    Gmatch(GmatchIter),
 }
 
 impl RawObject {
     #[must_use]
     pub(super) const fn typ(&self) -> LuaType {
         match self {
-            RawObject::LuaFn(_) => LuaType::Function,
+            RawObject::LuaFn(_) | RawObject::Gmatch(_) => LuaType::Function,
             RawObject::Table(_) => LuaType::Table,
         }
     }
@@ -711,7 +739,7 @@ impl GcHeap {
     pub(super) fn edit_watched_unmarked(&mut self) -> Option<TableEditor<'_>> {
         match self.objects.get_mut(self.watched.0)? {
             RawObject::Table(table) => Some(table.edit(&mut self.resident, &mut self.routes)),
-            RawObject::LuaFn(_) => None,
+            RawObject::LuaFn(_) | RawObject::Gmatch(_) => None,
         }
     }
 
@@ -726,7 +754,7 @@ impl GcHeap {
     pub(super) fn store_watched_probe(&mut self, probe: &HashProbe, val: &Val) -> Option<bool> {
         match self.objects.get_mut(self.watched.0)? {
             RawObject::Table(table) => Some(!table.is_on_route() && table.store_probe(probe, val)),
-            RawObject::LuaFn(_) => None,
+            RawObject::LuaFn(_) | RawObject::Gmatch(_) => None,
         }
     }
 
@@ -736,6 +764,26 @@ impl GcHeap {
         match self.get(ptr) {
             RawObject::LuaFn(closure) => Some(closure),
             _ => None,
+        }
+    }
+
+    /// The object's gmatch iterator record, if it is one.
+    pub(super) fn as_gmatch(&self, ptr: ObjectPtr) -> Option<GmatchIter> {
+        match self.get(ptr) {
+            RawObject::Gmatch(iter) => Some(*iter),
+            _ => None,
+        }
+    }
+
+    /// Overwrite gmatch iterator `ptr`'s record with `iter` (the step's
+    /// commit); false, changing nothing, when `ptr` is not an iterator.
+    pub(super) fn set_gmatch(&mut self, ptr: ObjectPtr, iter: GmatchIter) -> bool {
+        match self.get_mut(ptr).0 {
+            RawObject::Gmatch(record) => {
+                *record = iter;
+                true
+            }
+            _ => false,
         }
     }
 
@@ -788,7 +836,7 @@ impl GcHeap {
             .expect("Invalid ObjectPtr: object was freed (use-after-free detected)")
         {
             RawObject::Table(table) => table.store_slot(slot, val),
-            RawObject::LuaFn(_) => false,
+            RawObject::LuaFn(_) | RawObject::Gmatch(_) => false,
         }
     }
 
@@ -799,7 +847,7 @@ impl GcHeap {
         let (object, resident, routes) = self.get_mut(ptr);
         match object {
             RawObject::Table(table) => Some(table.edit(resident, routes)),
-            RawObject::LuaFn(_) => None,
+            RawObject::LuaFn(_) | RawObject::Gmatch(_) => None,
         }
     }
 
@@ -818,7 +866,7 @@ impl GcHeap {
             .values()
             .map(|object| match object {
                 RawObject::Table(table) => table.resident_bytes(),
-                RawObject::LuaFn(_) => 0,
+                RawObject::LuaFn(_) | RawObject::Gmatch(_) => 0,
             })
             .sum();
         assert_eq!(
@@ -857,6 +905,11 @@ impl GcHeap {
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn alloc_lua_fn_raw(&mut self, runtime: Arc<BytecodeRuntime>, upvalues: Captures) -> ObjectPtr {
         self.publish_object(RawObject::LuaFn(Closure { runtime, upvalues }))
+    }
+
+    /// Allocate a gmatch iterator.
+    fn alloc_gmatch_raw(&mut self, iter: GmatchIter) -> ObjectPtr {
+        self.publish_object(RawObject::Gmatch(iter))
     }
 
     /// Allocate a new table.
@@ -1058,6 +1111,13 @@ impl GcHeap {
             RawObject::Table(tbl) => {
                 tbl.mark_values(self, worklist);
             }
+            RawObject::Gmatch(GmatchIter::General {
+                subject, pattern, ..
+            }) => {
+                self.mark_string(*subject);
+                self.mark_string(*pattern);
+            }
+            RawObject::Gmatch(GmatchIter::Empty { .. }) => {}
         }
     }
 
@@ -1119,7 +1179,7 @@ impl GcHeap {
     pub(super) fn closures(&self) -> impl Iterator<Item = &Closure> {
         self.objects.values().filter_map(|object| match object {
             RawObject::LuaFn(closure) => Some(closure),
-            RawObject::Table(_) => None,
+            RawObject::Table(_) | RawObject::Gmatch(_) => None,
         })
     }
 

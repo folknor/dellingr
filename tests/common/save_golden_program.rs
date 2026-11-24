@@ -261,6 +261,20 @@ impl FixtureReader<'_> {
                     "{label}: closure bytecode[{chunk}] upvalues={upvalues:?}"
                 ));
             }
+            2 => {
+                let subject = self.value();
+                let pattern = self.value();
+                let pos = self.number(8);
+                let resumed = self.flag();
+                lines.push(format!(
+                    "{label}: gmatch subject={subject} pattern={pattern} pos={pos} resumed={resumed}"
+                ));
+            }
+            3 => {
+                let pos = self.number(8);
+                let len = self.number(8);
+                lines.push(format!("{label}: gmatch empty pos={pos} len={len}"));
+            }
             _ => panic!("unknown fixture object tag"),
         }
     }

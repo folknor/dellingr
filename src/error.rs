@@ -150,29 +150,6 @@ pub(crate) enum ParserFault {
     TokenTextNotUtf8,
 }
 
-/// What a `string.gmatch` iterator found wrong with its state table, carried
-/// by [`LibraryError::InvalidGmatchState`]. The iterator callbacks are
-/// reachable outside the wrapper `string.gmatch` builds (a host can push the
-/// registered handle and call it with any table) and a save is user-editable
-/// input, so these are not dellingr bugs: the iterator checks the fields it
-/// reads each time it reads them.
-#[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GmatchStateFault {
-    /// The named field is missing or is not a string.
-    StringFieldInvalid(&'static str),
-    /// The named field is missing or is not a number.
-    NumberFieldInvalid(&'static str),
-    /// The named field is not an integer in its valid range.
-    NumberFieldOutOfRange(&'static str),
-    /// The position is more than one past the subject's end.
-    PositionExceedsSubjectLength,
-    /// The previous match's end lies past the subject's end.
-    LastMatchExceedsSubjectLength,
-    /// The named last-match field is neither a number nor nil.
-    LastMatchFieldInvalid(&'static str),
-}
-
 #[cfg(feature = "snapshot")]
 #[derive(Debug)]
 pub(crate) enum SnapshotTableFault {
@@ -266,31 +243,6 @@ impl ParserFault {
             Self::LocalWithoutDeclaration => "resolved local has no declaration",
             Self::GlobalOccurrenceMissing => "assignment target names no recorded global",
             Self::TokenTextNotUtf8 => "lexer produced a non-UTF-8 identifier token",
-        }
-    }
-}
-
-impl fmt::Display for GmatchStateFault {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::StringFieldInvalid(field) => {
-                write!(f, "field '{field}' is missing or is not a string")
-            }
-            Self::NumberFieldInvalid(field) => {
-                write!(f, "field '{field}' is missing or is not a number")
-            }
-            Self::NumberFieldOutOfRange(field) => {
-                write!(f, "field '{field}' is outside its valid range")
-            }
-            Self::PositionExceedsSubjectLength => {
-                f.write_str("position exceeds the stored subject length")
-            }
-            Self::LastMatchExceedsSubjectLength => {
-                f.write_str("last match exceeds the stored subject length")
-            }
-            Self::LastMatchFieldInvalid(field) => {
-                write!(f, "field '{field}' is not a number or nil")
-            }
         }
     }
 }
@@ -901,11 +853,11 @@ pub enum LibraryError {
         /// The type returned by the replacement.
         value_type: LuaType,
     },
-    /// A `string.gmatch` iterator callback read a malformed state table.
-    InvalidGmatchState {
-        /// What was wrong with it.
-        fault: GmatchStateFault,
-    },
+    /// The `string.gmatch` step function was called without a gmatch
+    /// iterator as its first argument. A script cannot reach the step; a host
+    /// can, through its registered id (`string.gmatch.iter`), and a call with
+    /// an iterator steps that iterator.
+    NotAGmatchIterator,
 }
 
 impl LibraryError {
@@ -934,7 +886,7 @@ impl LibraryError {
             | Self::InvalidGsubCaptureIndex { .. }
             | Self::InvalidGsubEscape
             | Self::InvalidGsubReplacementValue { .. }
-            | Self::InvalidGmatchState { .. } => None,
+            | Self::NotAGmatchIterator => None,
         }
     }
 }
@@ -2039,9 +1991,7 @@ impl fmt::Display for LibraryError {
             Self::InvalidGsubReplacementValue { value_type } => {
                 write!(f, "invalid replacement value (a {value_type})")
             }
-            Self::InvalidGmatchState { fault } => {
-                write!(f, "invalid gmatch iterator state: {fault}")
-            }
+            Self::NotAGmatchIterator => f.write_str("gmatch step called without a gmatch iterator"),
         }
     }
 }

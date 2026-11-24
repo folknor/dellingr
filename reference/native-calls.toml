@@ -264,9 +264,6 @@ name = "gsub_plain_pattern"
 name = "gsub_lua_pattern"
 
 [[function]]
-name = "push_gmatch_wrapper"
-
-[[function]]
 name = "lib:error"
 root = "callback"
 evidence = "the global error, a closure in NON_BUILTIN_GLOBALS"
@@ -280,11 +277,6 @@ evidence = "the global print, a closure registered by open_base"
 name = "lib:tostring"
 root = "callback"
 evidence = "the global tostring, a closure registered by open_base"
-
-[[function]]
-name = "lib:string.gmatch"
-root = "callback"
-evidence = "string.gmatch, a closure in STRING_FUNCTIONS"
 
 [[function]]
 name = "lib:string.gsub"
@@ -550,18 +542,6 @@ id = "append_gsub_replacement->get_table_unguarded"
 
 [[edge]]
 id = "append_gsub_replacement->append_function_replacement"
-
-[[edge]]
-id = "lib:string.gmatch->push_gmatch_wrapper:empty"
-leaves = ["gmatch", "gmatch_empty_refused"]
-
-[[edge]]
-id = "lib:string.gmatch->push_gmatch_wrapper:general"
-leaves = ["gmatch", "gmatch_refused"]
-
-[[edge]]
-id = "push_gmatch_wrapper->call_unguarded"
-leaves = ["gmatch", "gmatch_refused", "gmatch_empty_refused"]
 
 [[edge]]
 id = "lib:string.gsub->gsub_empty_pattern"

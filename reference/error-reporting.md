@@ -4,22 +4,11 @@ Errors carry a structured `ErrorKind`, source location, and an optional stack
 trace. Their `Display` text is for diagnostics. It is not a stable identifier
 for an error or a cross-build log format.
 
-The built-in `string.gmatch` wrapper and iterator shim are omitted from runtime
-error traces and host callback source context when a script caller exists:
-lazy pattern errors use the script caller's call-site line, and host callbacks
-receive the caller's source context. With no script caller, the shim keeps its
-own location and source context. Recognition uses the shared bytecode
-identities for the outer wrapper and its iterator, so a user chunk named
-`string.gmatch` retains ordinary attribution. Snapshot load gives a restored
-iterator the shared identity: a chunk qualifies when a closure of it captures
-a function saved under a gmatch iterator id and its contents equal this
-build's shim. That is a heuristic, not proof of provenance: a chunk compiled
-from the shim's exact source under its name, given a function registered
-under such an id, also qualifies, and so does every other closure of that
-chunk. An iterator saved by a build whose shim differs keeps its own
-bytecode and location. When a script tail calls the iterator
-(`return iter()`), the omitted shim frame takes its tail-call marker (see
-"Stack trace names") with it.
+A `string.gmatch` iterator is a typed heap object whose step runs as a Rust
+callback (`string.gmatch.iter`), not Lua code, so it is never a traceback
+frame: a lazy pattern error is located at the calling line like any library
+error, and a host-invoked iterator's error has no Lua location. No chunk is
+recognised by identity for this.
 
 ## Kinds and exact bytes
 

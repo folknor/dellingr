@@ -227,9 +227,9 @@ them:
   constructor plans.
 - `optimizations.md` "Short interned strings are one allocator allocation
   each": heap hunter's short-string pooling.
-- `optimizations.md` "gmatch: drop the Lua-side wrapper and table-backed
-  iterator state": strings hunter's native iterator, failed-search exhaustion
-  and pattern-cache sizing.
+- `optimizations.md` "gmatch iterator residue after the typed iterator":
+  strings hunter's failed-search exhaustion and pattern-cache sizing (the
+  native iterator itself landed).
 - `optimizations.md` "`string.format` cached plan": strings hunter's cached format plan.
 - `todo.md` "Sparse storage for the array part's stragglers": table hunter's
   numeric storage separated from the logical array boundary.

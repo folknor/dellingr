@@ -487,7 +487,7 @@ impl State {
         // The two function cases inline into the call sites; only a
         // callable object pays for the resolution loop's setup.
         let func_val = self.stack[idx];
-        if let Val::RustFn(f) = func_val {
+        let rust_fn = if let Val::RustFn(f) = func_val {
             // The entry observer is marked inside `invoke_rust_fn`, after its
             // interrupt poll: marking here would report a callback refused
             // before it ran as entered, and a host get_table or set_table
@@ -516,25 +516,34 @@ impl State {
             // same logical lengths (`table.pack` is the case where that saves
             // an argument move per call); such forms belong with the leaves.
             self.stack.remove(idx);
-            return crate::native_call!(
-                "begin_call->invoke_rust_fn",
-                self.invoke_rust_fn(f, idx, shape.method(), entered)
-            )
-            .map(Some);
-        }
-        if let Some(bytecode) = self.lua_function_bytecode(func_val) {
+            f
+        } else if let Some(bytecode) = self.lua_function_bytecode(func_val) {
             self.admit_lua_call(bytecode, num_args, old_stack_bottom, shape.tail())?;
             entered.mark_entered();
             return Ok(None);
-        }
-        // Observed calls are only made for direct Lua or Rust __index and
-        // __newindex functions (the resolvers hand back nothing else).
-        // Callable-object resolution has no host-access observer.
-        debug_assert!(!entered.tracks_entry());
+        } else if let Some(step) = self.gmatch_step_of(func_val) {
+            // A gmatch iterator runs its step with the iterator left in the
+            // callee slot as the callback's first argument (`GmatchIter`), so
+            // nothing is removed: the slot roots the iterator and its
+            // strings. Tested after the Lua case, which it would otherwise
+            // slow.
+            step
+        } else {
+            // Observed calls are only made for direct Lua, Rust or gmatch
+            // iterator __index and __newindex functions (the resolvers hand
+            // back nothing else). Callable-object resolution has no
+            // host-access observer.
+            debug_assert!(!entered.tracks_entry());
+            return crate::native_call!(
+                "begin_call->begin_callable_call",
+                self.begin_callable_call(idx, num_args, old_stack_bottom, shape)
+            );
+        };
         crate::native_call!(
-            "begin_call->begin_callable_call",
-            self.begin_callable_call(idx, num_args, old_stack_bottom, shape)
+            "begin_call->invoke_rust_fn",
+            self.invoke_rust_fn(rust_fn, idx, shape.method(), entered)
         )
+        .map(Some)
     }
 
     /// `begin_call` for a callee that is not a function: resolve it
@@ -622,6 +631,12 @@ impl State {
                     Err(error) => break error,
                 }
             }
+            // A gmatch iterator placed here as a `__call` handler runs its
+            // step on the window as it stands: the iterator at `idx`, then
+            // the receiver and the arguments, which the step ignores.
+            if let Some(step) = self.gmatch_step_of(func_val) {
+                return Ok(Some((step, charges)));
+            }
             // Check for a __call metamethod: a table's own metatable, or the
             // metatable all strings share (reference Lua makes `("x")(...)`
             // callable once `getmetatable("").__call` is set). This branch is
@@ -675,7 +690,7 @@ impl State {
             num_args = combined;
             let handler_is_function = call_handler
                 .as_object_ptr()
-                .is_some_and(|ptr| self.heap.as_lua_function_ref(ptr).is_some());
+                .is_some_and(|ptr| self.heap.get(ptr).typ() == super::LuaType::Function);
             if !handler_is_function {
                 #[cfg(not(feature = "fault-injection"))]
                 let injected = false;
@@ -1386,14 +1401,6 @@ impl State {
                 // A compile error returned through a callback keeps the
                 // rejected source's location, absence included; only the
                 // traceback is the caller's.
-            } else if Self::is_gmatch_wrapper(bytecode) {
-                if let Some(caller) = trace.first() {
-                    if error.line_num() == 0 {
-                        let column = error.column();
-                        error = error.with_location(caller.line, column);
-                    }
-                    error = error.with_source_name(caller.source.clone());
-                }
             } else if error.line_num() == 0 {
                 let column = error.column();
                 error = error.with_location(Self::line_before(bytecode, cursor), column);

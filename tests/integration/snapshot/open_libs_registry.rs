@@ -68,17 +68,13 @@ fn conflicting_hidden_iterator_id_leaves_existing_environment_untouched() {
     state.set_global("print").unwrap();
     state.push_string("preserved stack value").unwrap();
     state
-        .register_rust_fn(
-            "string.gmatch.empty_iter",
-            "string.gmatch.empty_iter",
-            host_print,
-        )
+        .register_rust_fn("string.gmatch.iter", "string.gmatch.iter", host_print)
         .unwrap();
     let heap_size = state.heap_size();
-    let error = state.open_libs().expect_err("hidden iterator id conflicts");
+    let error = state.open_libs().expect_err("hidden step id conflicts");
     assert!(
         matches!(error.kind(), ErrorKind::DuplicateFunctionRegistration { id }
-        if id == "string.gmatch.empty_iter")
+        if id == "string.gmatch.iter")
     );
     assert_eq!(state.heap_size(), heap_size);
     assert_eq!(state.get_top(), 1);

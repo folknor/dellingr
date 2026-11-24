@@ -9,8 +9,6 @@ use super::{
     corrupt_arena as corrupt,
 };
 
-use crate::gmatch_schema;
-
 /// A payload whose bytecode and closure references have been structurally checked.
 ///
 /// This type intentionally has no constructor outside this module.
@@ -25,33 +23,6 @@ impl VerifiedSavePayload {
     }
     pub(super) fn bytecode(&self) -> &[SavedBytecode] {
         &self.0.bytecode
-    }
-    /// Chunk ids of closures that capture a gmatch iterator function id: the
-    /// candidates for the shared iterator identity at load. This is a
-    /// diagnostic heuristic, not recognition. Ordinary closures can capture
-    /// those ids too (the handle is public, and a raw State may register the
-    /// ids for host functions), so the caller also requires the chunk to
-    /// equal this build's wrapper, and nothing here says the closure's state
-    /// is valid.
-    pub(super) fn gmatch_iterator_chunks(&self) -> BTreeSet<usize> {
-        self.0
-            .objects
-            .iter()
-            .filter_map(|object| match object {
-                SavedObject::Closure { chunk, upvalues } => upvalues
-                    .iter()
-                    .any(|id| {
-                        matches!(
-                            self.0.upvalues.get(*id as usize),
-                            Some(super::SavedVal::Fn(name))
-                                if name == gmatch_schema::ITERATOR_ID
-                                    || name == gmatch_schema::EMPTY_ITERATOR_ID
-                        )
-                    })
-                    .then_some(*chunk as usize),
-                SavedObject::Table { .. } => None,
-            })
-            .collect()
     }
 }
 
@@ -459,11 +430,67 @@ fn validate_table_shape(
     Ok(())
 }
 
+/// A saved gmatch iterator holds only a state a live iterator can reach
+/// (`GmatchIter`): the step trusts its record, so verification, before any
+/// host setup runs, is where an edited save is refused. The pattern's own
+/// syntax is not checked: a malformed pattern is a live iterator's state
+/// too, and its error stays deferred to the search that reaches it.
+pub(super) fn validate_gmatch(
+    payload: &SavePayload,
+    object: &SavedObject,
+    object_index: usize,
+) -> Result<(), SnapshotError> {
+    let invalid = || {
+        corrupt(
+            CorruptionReason::InvalidGmatchIterator,
+            object_index,
+            SaveLocation::Objects,
+        )
+    };
+    let string_len = |value: &super::SavedVal| match value {
+        super::SavedVal::Str(id) => payload
+            .strings
+            .get(*id as usize)
+            .map(Vec::len)
+            .ok_or_else(invalid),
+        _ => Err(invalid()),
+    };
+    let within = |value: u64, maximum: usize| match usize::try_from(value) {
+        Ok(value) if value <= maximum => Ok(()),
+        _ => Err(invalid()),
+    };
+    match object {
+        SavedObject::GmatchIter {
+            subject,
+            pattern,
+            pos,
+            resumed,
+        } => {
+            let len = string_len(subject)?;
+            if string_len(pattern)? == 0 {
+                return Err(invalid());
+            }
+            // A resumed iterator's previous match ended at `pos`, inside
+            // the subject; a fresh one may start one past its end.
+            within(*pos, if *resumed { len } else { len + 1 })
+        }
+        SavedObject::GmatchEmptyIter { pos, len } => {
+            within(*len, crate::limits::MAX_STRING_BYTES)?;
+            within(
+                *pos,
+                crate::saturate::saturating_cast::<usize, u64>(*len) + 1,
+            )
+        }
+        SavedObject::Table { .. } | SavedObject::Closure { .. } => Ok(()),
+    }
+}
+
 fn validate_references(payload: &SavePayload) -> Result<(), SnapshotError> {
     for value in &payload.upvalues {
         validate_value(value, payload)?;
     }
     for (object_index, object) in payload.objects.iter().enumerate() {
+        validate_gmatch(payload, object, object_index)?;
         validate_table_shape(
             payload,
             object,
@@ -629,13 +656,8 @@ pub(super) fn verify_payload(payload: SavePayload) -> Result<VerifiedSavePayload
     validate_closures(&payload)?;
     validate_chunk_runtimes(&payload)?;
     validate_references(&payload)?;
-    // No gmatch iterator state check here. Recognising an iterator from a
-    // save needs provenance the payload cannot give: a captured iterator id
-    // is also held by ordinary closures (the handle is public through
-    // `registered_rust_fn`, and a raw State may register those ids for host
-    // functions), and a chunk equal to the wrapper's can be compiled from the
-    // same source. Saves are user-editable, so any such check is advisory;
-    // the iterator callbacks validate the state they read when they read it.
+    // gmatch iterators are checked in `validate_references`: the saved
+    // record is the iterator, so its state is checkable here.
     validate_pointer_ids(&payload)?;
     Ok(VerifiedSavePayload(payload))
 }

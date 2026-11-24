@@ -87,7 +87,7 @@ impl From<TableError> for Error {
     clippy::float_cmp,
     reason = "An exact integrality test: a key is an index only when it equals its floor."
 )]
-pub(crate) fn integer_index(value: f64, maximum: usize) -> Option<usize> {
+pub(super) fn integer_index(value: f64, maximum: usize) -> Option<usize> {
     (value >= 0.0 && value <= maximum as f64 && value == value.floor()).then_some(value as usize)
 }
 

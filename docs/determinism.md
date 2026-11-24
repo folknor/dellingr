@@ -169,7 +169,8 @@ refuses to compute in such an environment instead.
 
 ## Object identity in output
 
-`tostring` and `%p` of tables, closures and Rust functions render a state-local
+`tostring` and `%p` of tables, closures, `string.gmatch` iterators and Rust
+functions render a state-local
 identity, not an address. It is stable across a snapshot round trip. Rust
 functions render as `function: 0x<id>`. Identities rendered during load setup
 are merged with the saved ones: a value the save records takes its saved

@@ -798,66 +798,34 @@ follow-up; `string.format` already renders into its one output buffer
 (`reserve_piece` in `string_format.rs`). Also left:
 `table.concat` copies its separator (`to_bytes(2)?.to_vec()`) every call.
 
-### gmatch: drop the Lua-side wrapper and table-backed iterator state (E-O2)
+### gmatch iterator residue after the typed iterator
 
-Partially shipped as of 2026-07-25 - the per-iteration subject/pattern
-copies and pattern re-validation are gone (`memoize_gmatch_pattern`,
-`gmatch_subject_matcher_and_cost_meter`); that was the bulk of the win
-(`strings/patterns` 160ms -> 60ms).
+The typed iterator (`GmatchIter`, 2026-11-24, `reference/performance.md`
+"Typed gmatch iterators") replaced the wrapper chunk and state table. Left
+open from that work:
 
-What remains (`string.rs`): one Lua call into the compiled wrapper chunk
-(`gmatch_wrapper()`, still a compiled Bytecode) + one RustFn call, plus
-`get_table` lookups ("s", "pos") and one `set_table_raw` against the
-table-backed iterator state, every iteration.
-
-Explored 2026-09-03, and the original sketch understates the cost. The
-generic-for protocol does pass `(state, control)` to the iterator, so a bare
-RustFn works *inside a for loop* - but reference Lua also supports capturing
-the iterator and calling it standalone (`local it = s:gmatch(p); it()`),
-where it receives no arguments at all. The state therefore has to live
-inside the callable, and dellingr's `RustFunc` is a plain fn pointer by
-design (determinism, snapshot registry keyed by address). Dropping the
-wrapper needs a new captured-state Rust callable - a `Val` variant or heap
-object holding (fn, state) - which touches GC marking, Val size (and the
-NaN-boxing plan), and snapshot encoding. That is rewrite-class, not a
-stdlib cleanup; only worth doing as part of a broader Val/callable rework,
-or if `strings/patterns` profiling shows the wrapper call dominating.
-
-The 2026-11-04 defect hunt (`stdlib-strings`) proposed the same rewrite on
-correctness and maintenance grounds, not speed. Per iteration it counts about
-six `push_string` calls (an intern hash and lookup each), four raw table reads,
-full type and range revalidation (`gmatch_state_index`, `GmatchStateFault`) and
-a `Vec<LuaCapture>` allocation. Beyond the cost, the table-backed state brings
-`is_gmatch_wrapper` identity matching and frame omission in error reporting
-(`reference/error-reporting.md`), `gmatch_iterator_bytecode` substitution on
-snapshot load (load no longer schema-checks the state table: a captured
-iterator id cannot prove a closure is an iterator). A typed heap object
-(subject `StringPtr`, pattern `StringPtr`, `pos`, `lastmatch: Option`), or native closures with typed upvalues, would delete the
-shim, the identity hack, the field interning and most of the fault enum, and
-give snapshots one typed record. It changes the snapshot format and the
-error-frame rule, but no cost and no `pairs` order, since the table is
-unreachable from scripts.
-
-The 2026-11-17 performance hunt (strings scope) proposed it on speed grounds
-with a different persistence answer: keep the saved closure, upvalues, table
-fields, insertion order and values exactly as `gmatch_schema.rs` describes
-them as the persisted representation, and execute through a typed runtime
-record (compiled program, subject reference, field-slot references via the
-table's slot tokens, bounded capture storage), entered directly instead of
-through the wrapper and its nested callback, updating position fields after a
-successful result. That keeps snapshot bytes unchanged. Recognition must check
-the actual callable and captured values (the loader's wrapper recognition is a
-diagnostic heuristic, not authority), and registered iterator handles keep
-accepting arbitrary host tables with today's errors. Risks: closure identity
-and rendering, byte-identical snapshots, error attribution, result counts,
-iterator position after budget or stack refusal, and stack-cap refusals the
-removed wrapper frames produce. Two laterals from the same reading: a failed
-gmatch search does not record exhaustion, so repeated calls rescan the
-remaining suffix and recharge (an exhausted flag would change costs and saved
-state, so any memoization must keep both); and the pattern cache's byte limit
-counts source bytes, not compiled storage, so an oversized pattern bypasses
-the cache and is recompiled per iteration, which holding the program in the
-iterator would also fix.
+- A failed search does not record exhaustion, so calling an exhausted-by-miss
+  iterator again rescans the remaining suffix and recharges its steps, as
+  reference `gmatch_aux` does. Recording it would change costs and the saved
+  record, so it is a cost-model decision, not a cleanup.
+- The pattern cache's byte limit counts source bytes; a pattern over
+  `PATTERN_CACHE_BYTES` bypasses the cache and is recompiled on every step.
+  Holding the compiled program in the iterator would fix that, but the
+  record would then carry a non-saved cache that load must rebuild.
+- The iterator's dispatch arms grew the dev-build native frame of re-entry
+  through `begin_call` and `instr_tfor_call` by 96 to 256 bytes a level
+  (release: +16 on the index-key scenarios, -16 on `host_invoke`). Outlining
+  `State::gmatch_step_of` made release worse (+16 to +48), and a second
+  `invoke_rust_fn` call site in `instr_tfor_call` cost release 160; the
+  committed shape is the best of the three tried, and the dev growth is
+  unexplained.
+- Not performance, recorded here with the rest: a host call of an iterator
+  with a fixed result count larger than its results can commit the step and
+  then fail the stack cap while `finish_call` pads, so a retry sees the next
+  match. The wrapper had the same gap; the step's own refusals leave the
+  iterator unchanged, the host call's padding does not.
+- No registered workload isolates a gmatch loop over many one-byte matches;
+  `patterns` and `failed_scan` are the nearest.
 
 ---
 

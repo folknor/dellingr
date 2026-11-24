@@ -331,7 +331,8 @@ impl State {
                 continue;
             }
             let calls = match handler {
-                Val::Obj(ptr) => self.heap.as_lua_function_ref(ptr).is_some(),
+                // A Lua closure or a gmatch iterator.
+                Val::Obj(ptr) => self.heap.get(ptr).typ() == LuaType::Function,
                 Val::RustFn(_) => true,
                 Val::Str(_) => {
                     // Routes run through tables only.
@@ -664,7 +665,8 @@ impl State {
                             .insert(key, val)?;
                         return Ok(true);
                     }
-                    self.heap.as_lua_function_ref(ptr).is_some()
+                    // A Lua closure or a gmatch iterator.
+                    self.heap.get(ptr).typ() == LuaType::Function
                 }
                 Val::RustFn(_) => true,
                 _ => false,

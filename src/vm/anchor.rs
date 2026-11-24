@@ -298,7 +298,7 @@ impl State {
     }
 
     /// Like `anchor`, but additionally requires the value to be a function
-    /// (Lua closure or `RustFunc`). Use this when you want the type error
+    /// (Lua closure, `string.gmatch` iterator or `RustFunc`). Use this when you want the type error
     /// at registration time rather than at the first `call_anchor`.
     ///
     /// This is strict: tables with `__call` are rejected. To anchor a

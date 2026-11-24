@@ -132,10 +132,19 @@ impl State {
         let state = self.stack[base + 1];
         let control = self.stack[base + 2];
 
-        if let Val::RustFn(f) = iterator {
+        // A Rust iterator is called on (state, control); a gmatch iterator
+        // runs its step with itself as the first argument (`GmatchIter`),
+        // the state riding along unread. Neither enters `call_unguarded`.
+        let rust_call = match iterator {
+            Val::RustFn(f) => Some((f, state, control)),
+            _ => self
+                .gmatch_step_of(iterator)
+                .map(|step| (step, iterator, state)),
+        };
+        if let Some((f, first, second)) = rust_call {
             return crate::native_call!(
                 "instr_tfor_call->instr_tfor_call_rust_fn",
-                self.instr_tfor_call_rust_fn(f, base, state, control, num_vars)
+                self.instr_tfor_call_rust_fn(f, base, first, second, num_vars)
             );
         }
 

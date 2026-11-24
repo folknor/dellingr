@@ -357,13 +357,13 @@ fn golden_payload_covers_persisted_graph_shapes() {
         .iter()
         .filter_map(|object| match object {
             SavedObject::Closure { chunk, .. } => Some(*chunk),
-            SavedObject::Table { .. } => None,
+            _ => None,
         })
         .collect();
     assert!(chunk_runtimes.iter().any(|id| !closure_chunks.contains(id)));
     assert!(chunk_runtimes.len() < bytecode.len());
     let mut values = [false; 7];
-    let mut objects = [false; 2];
+    let mut objects = [false; 4];
     let mut shared_upvalues = BTreeSet::new();
     let mut has_shared_cell = false;
     let mut has_tombstone = false;
@@ -411,6 +411,14 @@ fn golden_payload_covers_persisted_graph_shapes() {
                     has_shared_cell |= !shared_upvalues.insert(*id);
                 }
             }
+            SavedObject::GmatchIter {
+                subject, pattern, ..
+            } => {
+                objects[2] = true;
+                visit(subject);
+                visit(pattern);
+            }
+            SavedObject::GmatchEmptyIter { .. } => objects[3] = true,
         }
     }
     for value in &payload.upvalues {
@@ -470,7 +478,7 @@ fn golden_payload_covers_persisted_graph_shapes() {
                 !matches!(key, SavedVal::Nil) && matches!(value, SavedVal::Nil)
             }),
         ),
-        SavedObject::Closure { .. } => panic!("an environment table is saved as a table"),
+        _ => panic!("an environment table is saved as a table"),
     };
     assert!(payload.env_tables.iter().any(|record| shapes(record).0));
     assert!(payload.env_tables.iter().any(|record| !shapes(record).0));
@@ -483,22 +491,19 @@ fn golden_payload_covers_persisted_graph_shapes() {
             .all(|record| !record.pins.is_empty())
     );
     let verified = verify::verify_payload(payload).expect("golden verifies");
-    // Both wrapper kinds must be recognized, not merely round-trip through
-    // the same runtime spelling. A missing capture must fail this check.
-    let chunks = verified.gmatch_iterator_chunks();
-    assert!(!chunks.is_empty());
+    // Both gmatch iterator kinds are in the golden, the general one resumed
+    // (it was called once before the save).
     let payload = verified.into_inner();
-    for id in [
-        crate::gmatch_schema::ITERATOR_ID,
-        crate::gmatch_schema::EMPTY_ITERATOR_ID,
-    ] {
-        assert!(payload.objects.iter().any(|object| match object {
-            SavedObject::Closure { chunk, upvalues } => {
-                chunks.contains(&(*chunk as usize)) && upvalues.iter().any(|index| {
-                    matches!(&payload.upvalues[*index as usize], SavedVal::Fn(name) if name == id)
-                })
-            }
-            SavedObject::Table { .. } => false,
-        }));
-    }
+    assert!(
+        payload
+            .objects
+            .iter()
+            .any(|object| matches!(object, SavedObject::GmatchIter { resumed: true, .. }))
+    );
+    assert!(
+        payload
+            .objects
+            .iter()
+            .any(|object| matches!(object, SavedObject::GmatchEmptyIter { .. }))
+    );
 }

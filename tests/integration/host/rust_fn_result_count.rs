@@ -199,13 +199,11 @@ fn inventory_rust_fn_entry_edges() -> BTreeSet<String> {
             continue;
         };
         let target = target.split(':').next().unwrap_or(target);
-        // The generic-for call_unguarded arm handles non-RustFn iterators;
-        // gmatch calls its fixed Lua wrapper here, not a user callback.
+        // The generic-for call_unguarded arm handles iterators that are not
+        // Rust calls (a Rust function or a gmatch iterator's step take
+        // instr_tfor_call_rust_fn).
         let can_enter_rust_fn = (target == "call_unguarded"
-            && !matches!(
-                id,
-                "instr_tfor_call->call_unguarded" | "push_gmatch_wrapper->call_unguarded"
-            ))
+            && id != "instr_tfor_call->call_unguarded")
             || matches!(
                 target,
                 "invoke_rust_fn" | "begin_call" | "begin_callable_call" | "instr_tfor_call_rust_fn"

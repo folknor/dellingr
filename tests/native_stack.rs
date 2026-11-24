@@ -833,30 +833,20 @@ const LEAVES: &[Leaf] = &[
         outcome: Outcome::MetaRefused,
     },
     Leaf {
-        // gmatch runs its wrapper chunk through a call made from Rust, so it
-        // needs the last native level.
+        // A gmatch iterator is a typed object whose step is a Rust
+        // callback: creating one, calling it and looping over it make no
+        // call from Rust, so all of it runs with no native level to spare.
         name: "gmatch",
-        headroom: 1,
+        headroom: 0,
         meta_room: false,
         lua: r#"local words = string.gmatch("ab", "%a")
             if words() ~= "a" then error("gmatch") end
             local empties = string.gmatch("ab", "")
-            if empties() ~= "" then error("gmatch") end"#,
+            if empties() ~= "" then error("gmatch") end
+            for w in string.gmatch("cd", "%a") do
+                if w ~= "c" and w ~= "d" then error("gmatch") end
+            end"#,
         outcome: Outcome::Completes,
-    },
-    Leaf {
-        name: "gmatch_refused",
-        headroom: 0,
-        meta_room: false,
-        lua: r#"string.gmatch("ab", "%a")"#,
-        outcome: Outcome::NativeRefused,
-    },
-    Leaf {
-        name: "gmatch_empty_refused",
-        headroom: 0,
-        meta_room: false,
-        lua: r#"string.gmatch("ab", "")"#,
-        outcome: Outcome::NativeRefused,
     },
 ];
 

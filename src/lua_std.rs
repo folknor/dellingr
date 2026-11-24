@@ -77,8 +77,6 @@ mod string_format;
 mod table;
 
 pub(crate) use basic::{ipairs_next_index, open_base};
-#[cfg(feature = "snapshot")]
-pub(crate) use string::gmatch_iterator_bytecode;
 
 use crate::LuaType;
 use crate::Result;
@@ -180,15 +178,16 @@ struct CatalogSegment {
     functions: &'static [(&'static str, crate::RustFunc)],
 }
 
-/// Callbacks library functions return: the `ipairs` iterator and the two
-/// `string.gmatch` iterators, which a saved gmatch closure captures.
+/// The catalog id of the `string.gmatch` step. A script never sees the step
+/// as a value (it calls an iterator); the id names it in diagnostics and
+/// lets a host that looks it up step an iterator it holds.
+const GMATCH_STEP_ID: &str = "string.gmatch.iter";
+
+/// Callbacks library functions return or run: the `ipairs` iterator, and the
+/// step a `string.gmatch` iterator runs.
 const RETURNED_CALLBACKS: &[(&str, crate::RustFunc)] = &[
     ("ipairs.iter", basic::base_ipairs_iter),
-    (crate::gmatch_schema::ITERATOR_ID, string::gmatch_iter),
-    (
-        crate::gmatch_schema::EMPTY_ITERATOR_ID,
-        string::gmatch_empty_iter,
-    ),
+    (GMATCH_STEP_ID, string::gmatch_step),
 ];
 
 const CATALOG: &[CatalogSegment] = &[
@@ -322,10 +321,8 @@ fn install_key(segment: &CatalogSegment, id: &'static str) -> &'static str {
 
 /// The `ipairs` iterator `ipairs` returns.
 pub(crate) const IPAIRS_ITER: RustFnId = RustFnId::catalog(0);
-/// The general `string.gmatch` iterator.
-const GMATCH_ITER: RustFnId = RustFnId::catalog(1);
-/// The `string.gmatch` iterator for an empty pattern.
-const GMATCH_EMPTY_ITER: RustFnId = RustFnId::catalog(2);
+/// The step every `string.gmatch` iterator runs when called (`vm::GmatchIter`).
+pub(crate) const GMATCH_STEP: RustFnId = RustFnId::catalog(1);
 /// Global `next`, which `pairs` also returns.
 pub(crate) const NEXT: RustFnId =
     RustFnId::catalog(segment_offset(BASE_SEGMENT) + position_in(basic::BASE_FUNCTIONS, "next"));
@@ -418,8 +415,7 @@ pub(crate) fn leaf_of(function: RustFnId) -> Option<Leaf> {
 /// callback fallback.
 const HOST_FREE_RETURN_IDS: &[&str] = &[
     "ipairs.iter",
-    crate::gmatch_schema::ITERATOR_ID,
-    crate::gmatch_schema::EMPTY_ITERATOR_ID,
+    GMATCH_STEP_ID,
     "ipairs",
     "next",
     "pairs",

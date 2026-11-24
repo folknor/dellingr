@@ -391,9 +391,8 @@ and at the deepest point any one of:
   kind (optional, greedy and minimal repetition), or its rejection at
   `MAXCCALLS` through each of those kinds;
 - a collection with a chunk tree nested to `MAX_CHUNK_NESTING` alive;
-- `string.gmatch` creating its iterator in the last native level, or refused
-  past it (the fixed wrapper chunk is compiled when the string library
-  opens, not at depth);
+- `string.gmatch` creating, calling and looping over an iterator at the
+  deepest level (none of it calls into Lua, so it needs no native level);
 - a `table.sort` default comparison failing inside the heap sort, which
   builds its error with the sort frames live;
 - the refusal of the next call, through the same path as the levels below

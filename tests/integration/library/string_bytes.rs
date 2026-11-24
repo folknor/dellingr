@@ -164,6 +164,57 @@ fn gmatch_returns_a_self_contained_closure() {
 }
 
 #[test]
+fn gmatch_iterators_are_called_through_every_function_route() {
+    // An iterator is a function value: a `__call`, `__index` or `__newindex`
+    // handler, a tail call and a method-style call all step it, and the
+    // arguments they pass are ignored.
+    let mut state = State::new();
+    support::run(
+        &mut state,
+        r#"
+            local it = string.gmatch("a b c d e f", "%a")
+            local callable = setmetatable({}, {__call = it})
+            if callable(1, 2) ~= "a" then error("__call") end
+            local reader = setmetatable({}, {__index = it})
+            if reader.missing ~= "b" then error("__index") end
+            local writer = setmetatable({}, {__newindex = it})
+            writer.x = 1
+            if rawget(writer, "x") ~= nil then error("__newindex stored") end
+            local function tail() return it() end
+            if tail() ~= "d" then error("tail call") end
+            local holder = {step = it}
+            if holder:step() ~= "e" then error("method call") end
+            if it ~= it or it == string.gmatch("a", "%a") then error("identity") end
+            if type(it) ~= "function" then error("type") end
+            local rendered = tostring(it)
+            if rendered:sub(1, 9) ~= "function:" then error(rendered) end
+            for rest in it do
+                if rest ~= "f" then error("generic for") end
+            end
+        "#,
+    );
+}
+
+#[test]
+fn gmatch_captures_survive_collection_between_pushes() {
+    // The iterator is the only owner of a built subject; each capture is
+    // interned while collection runs at every allocation.
+    let mut state = State::new();
+    state.gc_set_threshold(1);
+    support::run(
+        &mut state,
+        r#"
+            local tail, pattern = "cd", "(%a)"
+            local it = string.gmatch("ab" .. tail, pattern .. pattern)
+            tail, pattern = nil, nil
+            local a, b = it()
+            local c, d = it()
+            if a .. b .. c .. d ~= "abcd" then error(a .. b .. c .. d) end
+        "#,
+    );
+}
+
+#[test]
 fn gmatch_closures_keep_independent_state() {
     let mut state = State::new();
     support::eval(

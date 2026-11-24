@@ -82,10 +82,9 @@ use meta_name::MetaNames;
 
 pub(super) use lua_val::PointerIdKey;
 pub(super) use lua_val::Val;
-pub(super) use object::ObjectPtr;
-use object::{GcHeap, GcPolicy, StringPtr, UpvaluePool};
+use object::{GcHeap, GcPolicy, UpvaluePool};
+pub(super) use object::{GmatchIter, ObjectPtr, StringPtr};
 use rng::VmRng;
-pub(crate) use table::integer_index;
 use table::{Table, TemplatePrototype};
 
 use crate::limits::{
@@ -315,7 +314,8 @@ pub struct State<Tail: ?Sized = [()]> {
     /// string can need two programs. Insertion order makes eviction
     /// deterministic.
     /// It is an implementation cache only: no charge depends on residency,
-    /// iterator state remains entirely in Lua values, and a snapshot simply
+    /// a gmatch iterator holds its pattern string, not a program, and a
+    /// snapshot simply
     /// rebuilds entries on later use. Entries are reference-counted, so an
     /// operation that calls back into Lua (a gsub replacement function) keeps
     /// its program alive across GC pruning or eviction.
@@ -843,6 +843,68 @@ impl State {
         Ok((result, matcher))
     }
 
+    /// The Rust step a call of `val` runs when `val` is a `string.gmatch`
+    /// iterator: the step is entered through the ordinary callback ABI with
+    /// the iterator left in the callee slot, as the callback's first
+    /// argument (see `GmatchIter`).
+    ///
+    /// Forced inline: outlined, it grew the release native frame of every
+    /// re-entry through `begin_call` by a further 16 to 48 bytes
+    /// (`native_bytes_per_level`).
+    #[inline(always)]
+    pub(crate) fn gmatch_step_of(&self, val: Val) -> Option<RustFnId> {
+        match val {
+            Val::Obj(ptr) if self.heap.as_gmatch(ptr).is_some() => {
+                Some(crate::lua_std::GMATCH_STEP)
+            }
+            _ => None,
+        }
+    }
+
+    /// The gmatch iterator at 1-based stack index `idx` and its record,
+    /// if the value there is one.
+    pub(crate) fn gmatch_at(&self, idx: isize) -> Option<(ObjectPtr, GmatchIter)> {
+        // An absent slot holds no iterator, so the caller reports that.
+        let Ok(Val::Obj(ptr)) = self.at_index(idx) else {
+            return None;
+        };
+        Some((ptr, self.heap.as_gmatch(ptr)?))
+    }
+
+    /// Commit a gmatch step: overwrite the record of the iterator `ptr`.
+    pub(crate) fn set_gmatch(&mut self, ptr: ObjectPtr, iter: GmatchIter) {
+        let stored = self.heap.set_gmatch(ptr, iter);
+        debug_assert!(stored, "a gmatch commit targets the iterator it read");
+    }
+
+    /// Push a new gmatch iterator. The caller keeps the record's strings
+    /// rooted (on the stack) until this returns: the slot is checked first,
+    /// then the allocation may collect, then the iterator is published
+    /// straight into the checked slot.
+    pub(crate) fn push_gmatch(&mut self, iter: GmatchIter) -> Result<()> {
+        self.check_stack_space(1)?;
+        let ptr = self.allocator().alloc_gmatch(iter);
+        self.push_unchecked(Val::Obj(ptr));
+        Ok(())
+    }
+
+    /// The pushable string value of a gmatch record's string.
+    pub(crate) fn push_string_ptr(&mut self, ptr: StringPtr) -> Result<()> {
+        self.check_stack_slot()?;
+        self.push_unchecked(Val::Str(ptr));
+        Ok(())
+    }
+
+    /// The byte length of a live interned string.
+    pub(crate) fn string_ptr_len(&self, ptr: StringPtr) -> usize {
+        self.heap.get_string(ptr).len()
+    }
+
+    /// The interned string at 1-based stack index `idx`.
+    pub(crate) fn string_ptr_at(&self, idx: isize) -> Result<Option<StringPtr>> {
+        Ok(self.at_index(idx)?.as_string_ptr())
+    }
+
     pub(crate) fn budget_exceeded_error(&self) -> Error {
         self.error(ErrorKind::BudgetExceeded {
             used: self.cost.used(),
@@ -1202,21 +1264,11 @@ impl State {
     // Host callbacks
     // ========================================================================
 
-    /// Prefer the script caller over the private `string.gmatch` shim when
-    /// reporting source context. Keep the shim when it has no script caller.
+    /// The Lua activation that supplies source context: the innermost one.
     /// Takes the call stack rather than `&self` so the returned borrow stays
     /// disjoint from `self.callbacks`.
     fn host_context_frame(call_stack: &[CallInfo]) -> Option<&CallInfo> {
-        let last = call_stack.last()?;
-        if !Self::is_gmatch_wrapper(&last.bytecode) {
-            return Some(last);
-        }
-        call_stack
-            .iter()
-            .rev()
-            .skip(1)
-            .find(|info| !Self::is_gmatch_wrapper(&info.bytecode))
-            .or(Some(last))
+        call_stack.last()
     }
 
     /// Called by the built-in `print()` function.
@@ -1240,8 +1292,6 @@ impl State {
     /// Called when an error occurs. Notifies host callbacks.
     pub(crate) fn host_error(&mut self, error: &mut Error) {
         if error.mark_reported() {
-            // Gmatch implementation chunks are omitted when a script caller
-            // can provide source context; a host-invoked shim keeps its own.
             let source = Self::host_context_frame(&self.in_flight.call_stack)
                 .and_then(|info| info.bytecode.source.as_ref());
             error.attach_source_name_if_absent(source);
@@ -1250,8 +1300,7 @@ impl State {
     }
 
     /// Returns the active script caller's chunk name, byte-exact, or `None`
-    /// outside execution or in an unnamed chunk. The private `string.gmatch`
-    /// shim is skipped when a script caller exists.
+    /// outside execution or in an unnamed chunk.
     pub fn current_source(&self) -> Option<&[u8]> {
         Self::host_context_frame(&self.in_flight.call_stack)
             .and_then(|info| info.bytecode.source.as_deref())
@@ -1835,32 +1884,17 @@ impl State {
         let mut trace = Vec::with_capacity(self.in_flight.call_stack.len() + 1);
 
         // First entry: the current frame where the error occurred
-        // A host may call the iterator without a script caller. Keep its
-        // implementation location in that case rather than inventing one.
-        let shim_with_script_caller = Self::is_gmatch_wrapper(bytecode)
-            && self
-                .in_flight
-                .call_stack
-                .iter()
-                .rev()
-                .skip(1)
-                .any(|info| !Self::is_gmatch_wrapper(&info.bytecode));
-        if !shim_with_script_caller {
-            let tail_called = self
-                .in_flight
-                .call_stack
-                .last()
-                .is_some_and(|info| info.chain.tail_called());
-            trace.push(Self::trace_frame(bytecode, cursor, tail_called));
-        }
+        let tail_called = self
+            .in_flight
+            .call_stack
+            .last()
+            .is_some_and(|info| info.chain.tail_called());
+        trace.push(Self::trace_frame(bytecode, cursor, tail_called));
 
         // Add entries from call_stack (most recent first).
         // Skip the last entry (current function) since we already have it.
         // The remaining entries are the callers, with ip pointing to their call sites.
         for call_info in self.in_flight.call_stack.iter().rev().skip(1) {
-            if Self::is_gmatch_wrapper(&call_info.bytecode) {
-                continue;
-            }
             trace.push(Self::trace_frame(
                 &call_info.bytecode,
                 call_info.ip,

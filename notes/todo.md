@@ -76,8 +76,8 @@ Questions for the user:
 What a change of mind costs: the code and docs in that commit, plus the
 regenerated `cost_golden.txt`, `corpus_cost.txt`, error-boundary transcript
 and save golden, and the CHANGELOG "Changed (breaking)" entry. The `gmatch`
-iterator state also lost its `compile_charged` flag in that commit, which a
-return to a compile charge would need back.
+iterator record (`GmatchIter`) has no compile-charged flag, which a return to
+a compile charge would need added, along with its saved form.
 
 ### Housekeeping left from the `_G`-as-real-table change (2026-10-23)
 

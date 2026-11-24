@@ -127,6 +127,8 @@ pub(super) enum SaveFault {
     UpvalueDestinationNotClosure,
     TableDestinationNotTable,
     MetatableDestinationNotTable,
+    GmatchDestinationNotIterator,
+    UnfilledGmatchSlot,
     UnregisteredFunctionPathNotFound,
 }
 
@@ -149,6 +151,10 @@ impl fmt::Display for SaveFault {
             Self::UpvalueDestinationNotClosure => "upvalue destination is not a closure",
             Self::TableDestinationNotTable => "table destination is not a table",
             Self::MetatableDestinationNotTable => "metatable destination is not a table",
+            Self::GmatchDestinationNotIterator => {
+                "gmatch iterator destination is not a gmatch iterator"
+            }
+            Self::UnfilledGmatchSlot => "unfilled gmatch iterator string slot",
             Self::UnregisteredFunctionPathNotFound => {
                 "unregistered function path was not found from its root"
             }
@@ -597,6 +603,10 @@ pub enum CorruptionReason {
     ChunkRuntimesNotAscending,
     /// A closure's chunk is missing from the chunk runtime list.
     ClosureChunkWithoutRuntime,
+    /// A `string.gmatch` iterator holds a state no live iterator can reach:
+    /// a subject or pattern that is not a string, an empty pattern, or a
+    /// position past its subject.
+    InvalidGmatchIterator,
 }
 
 impl fmt::Display for CorruptionReason {
@@ -616,6 +626,7 @@ impl fmt::Display for CorruptionReason {
                 f.write_str("chunk runtime ids are not strictly ascending")
             }
             Self::ClosureChunkWithoutRuntime => f.write_str("closure chunk has no runtime bundle"),
+            Self::InvalidGmatchIterator => f.write_str("invalid gmatch iterator state"),
         }
     }
 }
