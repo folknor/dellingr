@@ -218,6 +218,41 @@ fn field_sites_answer_mixed_receivers_like_the_keyed_lookup() {
     assert_eq!(val, 10_100.0 * 1_000_000.0 + 42_000.0 + 233.0);
 }
 
+/// The dynamic-key counterpart: one `GET_TABLE` site whose key-position hint
+/// a run of same-layout records warms, then receivers where that position
+/// holds another key, a tombstone, a re-added key past it, an inline record,
+/// an `__index` fallback, a non-string key and a non-table receiver.
+#[test]
+fn dynamic_key_sites_answer_mixed_receivers_like_the_keyed_lookup() {
+    let val = support::eval_number(
+        r#"
+        local function rec(b) return { a = 1, b = b, c = 3, d = 4, e = 5, f = 6 } end
+        local swapped = { b = 20, a = 1, c = 3, d = 4, e = 5, f = 6 }
+        local dead = rec(0)
+        dead.b = nil
+        local readded = rec(0)
+        readded.b = nil
+        readded.b = 30
+        local inherited = setmetatable({ a = 1, c = 3, d = 4, e = 5, f = 6, g = 7 },
+            { __index = function(_, k) return k == "b" and 40 or 0 end })
+        local list = { rec(10), rec(11), swapped, rec(12), dead, readded, { b = 60 },
+            inherited, { a = 1, c = 3, d = 4, e = 5, f = 6, g = 7 }, rec(13) }
+        local function read(t, k) return t[k] or 0 end
+        local sum = 0
+        for _ = 1, 2 do
+            for i = 1, #list do sum = sum + read(list[i], "b") end
+            for i = 1, #list do sum = sum + read(list[i], "a") * 1000 end
+        end
+        sum = sum + read({ [1] = 7 }, 1) * 100000
+        if read("xy", "len") ~= string.len then error("string receiver") end
+        return sum
+    "#,
+    );
+    // "b" per pass: 10+11+20+12+0+30+60+40+0+13 = 196; "a" per pass: nine
+    // ones (only `{ b = 60 }` has none).
+    assert_eq!(val, 2.0 * (196.0 + 9_000.0) + 700_000.0);
+}
+
 #[test]
 fn field_cache_does_not_cache_index_metamethod_result() {
     let val = support::eval_number(

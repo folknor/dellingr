@@ -708,6 +708,29 @@ runs canonically. A first build that kept the record arms in the one
 control runner put `cull` at 831 ms; compiling the runner apart for bodies
 with records brought it back.
 
+## Key-position hints for dynamic string keys, 2026-11-24
+
+A `GET_TABLE` site with a string key keeps the position its key last sat
+at, in a per-site cache slot (the D operand), and reads that position
+first, checking the live key and a non-nil value; a miss is one keyed
+lookup that answers and refills the hint. Records of one constructor share
+their slot order, so a sweep such as `us[i][key]` skips the hash probe.
+Measured on bygg with `brokkr bench wall`, best of three, A at `0cc99ec`
+(clean tree and `--commit`), B the same tree plus the change (dirty):
+
+| Workload | A | B |
+|---|---:|---:|
+| `column_key` | 5440, 5476, 5464 ms (6f28099c, ba6395c4, 0ac7323f) | 4904, 4905 ms (d692946d, 12a775c1) |
+| `rekey` | 997 ms (d64872ad) | 1029, 1023 ms (01411aaa, aa1568d8) |
+| `fill` | 1503 ms (5273fec2) | 1546, 1525 ms (2c203726, 013c135a) |
+
+`rekey` and `fill` pay the failed hint check on sites whose key moves or
+whose table is fresh. Two probes bound the mechanism: a hint read through
+the general `value_if_key` (key/value pair, array-tag check) gave only 5340
+ms, and the same string-first branch with no hint gave 5386 ms, so the gain
+is the skipped probe read as a value alone. Forcing `Table::get` and
+`HashSlots::find` inline into the handler was flat (5475 ms).
+
 ## Host field descriptors, 2026-11-18
 
 `State::raw_field` takes a `FieldName` as well as a `&str`. A descriptor

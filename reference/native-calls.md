@@ -227,8 +227,8 @@ marker, which is the quickest way to see what a change touched.
 The recurring native stack of each scenario's cycle, as printed by the
 on-demand probe `brokkr test native_bytes_per_level`, which covers dev and
 release through the sweeps configured in `brokkr.toml`. Measured on the
-commit that makes `string.gmatch` iterators typed heap objects, on top of
-7cad369, on bygg (x86-64 Linux) with
+commit that gives `GET_TABLE` its key-position hint, on top of 0cc99ec, on
+bygg (x86-64 Linux) with
 `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` and that host's global Cargo
 configuration. Release is Cargo's default release profile (the repository
 sets no overrides). Dev's default and snapshot builds agree in every row;
@@ -250,65 +250,65 @@ separately.
 
 | Scenario | Dev, also snapshot | Release | Release + snapshot |
 |---|---|---|---|
-| `index_field` | 10608 | 624 | 624 |
-| `index_method` | 10608 | 624 | 624 |
-| `index_key` | 10576 | 704 | 704 |
-| `index_rust` | 12912 | 1104 | 1104 |
-| `newindex_field` | 10864 | 736 | 736 |
-| `newindex_key` | 10624 | 704 | 704 |
-| `newindex_rust` | 13168 | 1216 | 1216 |
-| `length` | 10464 | 496 | 496 |
-| `string_index_field` | 10608 | 624 | 624 |
-| `string_index_key` | 10576 | 704 | 704 |
-| `index_string_handler` | 10608 | 624 | 624 |
-| `string_library_index` | 10608 | 624 | 624 |
-| `host_get_table` | 12464 | 1008 | 1008 |
-| `host_get_table_string` | 12464 | 1008 | 1008 |
-| `host_set_table` | 12320 | 992 | 992 |
-| `host_call` | 12000 | 944 | 944 |
-| `host_anchor` | 12592 | 1120 | 1120 |
-| `host_invoke` | 12560 | 976 | 976 |
-| `host_tostring_bytes` | 13088 | 1296 | 1296 |
-| `host_to_string_with_meta` | 13264 | 1344 | 1344 |
-| `tostring` | 12208 | 1120 | 1120 |
-| `print` | 12720 | 1296 | 1296 |
-| `format` | 13632 | 1408 | 1408 |
-| `error_tostring` | 12912 | 1408 | 1424 |
-| `sort_comparator` | 14032 | 1456 | 1456 |
-| `sort_comparator_right` | 14032 | 1456 | 1456 |
-| `sort_comparator_sortdown` | 14032 | 1456 | 1456 |
-| `callable_rust` | 14224 | 1536 | 1536 |
-| `tail_rust` | 12208 | 928 | 928 |
-| `tail_callable_rust` | 12400 | 1008 | 1008 |
-| `sort_metamethods_comparator` | 13744 | 1552 | 1552 |
-| `sort_metamethods_length` | 12000 | 1152 | 1152 |
-| `sort_metamethods_read` | 13200 | 1312 | 1312 |
-| `sort_metamethods_write` | 13056 | 1296 | 1296 |
-| `insert_length` | 12240 | 1184 | 1184 |
-| `insert_shift_read` | 12528 | 1168 | 1168 |
-| `insert_shift_write` | 12400 | 1152 | 1152 |
-| `insert_value` | 12400 | 1152 | 1152 |
-| `remove_length` | 12208 | 1136 | 1136 |
-| `remove_read` | 12496 | 1120 | 1120 |
-| `remove_shift_read` | 12496 | 1120 | 1120 |
-| `remove_shift_write` | 12368 | 1104 | 1104 |
-| `remove_clear` | 12368 | 1104 | 1104 |
-| `concat_length` | 12736 | 1152 | 1152 |
-| `concat_read` | 13024 | 1136 | 1136 |
-| `move_read` | 12816 | 1168 | 1168 |
-| `move_write` | 12688 | 1088 | 1088 |
-| `unpack_length` | 12160 | 1088 | 1088 |
-| `unpack_read` | 12448 | 1072 | 1072 |
-| `gsub_empty_function` | 13232 | 1520 | 1520 |
-| `gsub_plain_function` | 13088 | 1520 | 1520 |
-| `gsub_pattern_function` | 16496 | 3184 | 3104 |
-| `gsub_pattern_captures` | 16496 | 3184 | 3104 |
-| `gsub_empty_table` | 13360 | 1472 | 1472 |
-| `gsub_plain_table` | 13216 | 1472 | 1472 |
-| `gsub_pattern_table` | 16624 | 3136 | 3056 |
-| `tfor_lua` | 10688 | 656 | 656 |
-| `tfor_ipairs` | 12544 | 1056 | 1056 |
-| `tfor_host_iterator` | 12400 | 944 | 944 |
+| `index_field` | 10592 | 624 | 624 |
+| `index_method` | 10592 | 624 | 624 |
+| `index_key` | 10768 | 720 | 720 |
+| `index_rust` | 12896 | 1104 | 1104 |
+| `newindex_field` | 10848 | 736 | 736 |
+| `newindex_key` | 10608 | 704 | 704 |
+| `newindex_rust` | 13152 | 1216 | 1216 |
+| `length` | 10448 | 496 | 496 |
+| `string_index_field` | 10592 | 624 | 624 |
+| `string_index_key` | 10768 | 720 | 720 |
+| `index_string_handler` | 10592 | 624 | 624 |
+| `string_library_index` | 10592 | 624 | 624 |
+| `host_get_table` | 12448 | 1008 | 1008 |
+| `host_get_table_string` | 12448 | 1008 | 1008 |
+| `host_set_table` | 12304 | 992 | 992 |
+| `host_call` | 11984 | 944 | 944 |
+| `host_anchor` | 12576 | 1120 | 1120 |
+| `host_invoke` | 12544 | 976 | 976 |
+| `host_tostring_bytes` | 13072 | 1296 | 1296 |
+| `host_to_string_with_meta` | 13248 | 1344 | 1344 |
+| `tostring` | 12192 | 1120 | 1120 |
+| `print` | 12704 | 1296 | 1296 |
+| `format` | 13616 | 1408 | 1408 |
+| `error_tostring` | 12896 | 1408 | 1424 |
+| `sort_comparator` | 14016 | 1456 | 1456 |
+| `sort_comparator_right` | 14016 | 1456 | 1456 |
+| `sort_comparator_sortdown` | 14016 | 1456 | 1456 |
+| `callable_rust` | 14208 | 1536 | 1536 |
+| `tail_rust` | 12192 | 928 | 928 |
+| `tail_callable_rust` | 12384 | 1008 | 1008 |
+| `sort_metamethods_comparator` | 13728 | 1552 | 1552 |
+| `sort_metamethods_length` | 11984 | 1152 | 1152 |
+| `sort_metamethods_read` | 13184 | 1312 | 1312 |
+| `sort_metamethods_write` | 13040 | 1296 | 1296 |
+| `insert_length` | 12224 | 1184 | 1184 |
+| `insert_shift_read` | 12512 | 1168 | 1168 |
+| `insert_shift_write` | 12384 | 1152 | 1152 |
+| `insert_value` | 12384 | 1152 | 1152 |
+| `remove_length` | 12192 | 1136 | 1136 |
+| `remove_read` | 12480 | 1120 | 1120 |
+| `remove_shift_read` | 12480 | 1120 | 1120 |
+| `remove_shift_write` | 12352 | 1104 | 1104 |
+| `remove_clear` | 12352 | 1104 | 1104 |
+| `concat_length` | 12720 | 1152 | 1152 |
+| `concat_read` | 13008 | 1136 | 1136 |
+| `move_read` | 12800 | 1168 | 1168 |
+| `move_write` | 12672 | 1088 | 1088 |
+| `unpack_length` | 12144 | 1088 | 1088 |
+| `unpack_read` | 12432 | 1072 | 1072 |
+| `gsub_empty_function` | 13216 | 1520 | 1520 |
+| `gsub_plain_function` | 13072 | 1520 | 1520 |
+| `gsub_pattern_function` | 16480 | 3184 | 3104 |
+| `gsub_pattern_captures` | 16480 | 3184 | 3104 |
+| `gsub_empty_table` | 13344 | 1472 | 1472 |
+| `gsub_plain_table` | 13200 | 1472 | 1472 |
+| `gsub_pattern_table` | 16608 | 3136 | 3056 |
+| `tfor_lua` | 10672 | 656 | 656 |
+| `tfor_ipairs` | 12528 | 1056 | 1056 |
+| `tfor_host_iterator` | 12384 | 944 | 944 |
 | `chain_index` | 0 | 0 | 0 |
 | `chain_newindex` | 0 | 0 | 0 |
 

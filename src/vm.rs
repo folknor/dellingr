@@ -2056,6 +2056,8 @@ mod runtime_tests {
                 field_lookup,
                 set_field_lookup,
                 tfor_cursor,
+                // Key-position hints hold a position, never a handle.
+                table_key: _,
                 // Prototypes hold only the runtime's own literals as keys,
                 // never a handle that can die while the runtime lives.
                 table_templates: _,

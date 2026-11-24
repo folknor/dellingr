@@ -191,6 +191,8 @@ pub enum CacheFamily {
     SetField,
     /// Generic-`for` `pairs` cursors.
     TforCursor,
+    /// `GET_TABLE` key-position hints.
+    TableKey,
 }
 
 impl std::fmt::Display for CacheFamily {
@@ -199,6 +201,7 @@ impl std::fmt::Display for CacheFamily {
             Self::Field => "field",
             Self::SetField => "set-field",
             Self::TforCursor => "TFOR_CALL cursor",
+            Self::TableKey => "GET_TABLE key hint",
         })
     }
 }
@@ -316,6 +319,7 @@ pub(crate) trait BytecodeView {
     fn field_cache_slots(&self) -> u8;
     fn set_field_cache_slots(&self) -> u8;
     fn tfor_cursor_slots(&self) -> u8;
+    fn table_key_slots(&self) -> u8;
     fn num_params(&self) -> u8;
     fn num_locals(&self) -> u8;
     fn max_stack(&self) -> u16;
@@ -353,6 +357,9 @@ impl BytecodeView for Bytecode {
     }
     fn tfor_cursor_slots(&self) -> u8 {
         self.tfor_cursor_slots
+    }
+    fn table_key_slots(&self) -> u8 {
+        self.table_key_slots
     }
     fn num_params(&self) -> u8 {
         self.num_params
@@ -579,10 +586,11 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
     let mut next_field_slot = 0usize;
     let mut next_set_field_slot = 0usize;
     let mut next_tfor_cursor_slot = 0usize;
+    let mut next_table_key_slot = 0usize;
     // This loop deliberately restates the cache-slot allocation policy of
     // `Bytecode::assign_cache_slots` (first-use order for globals, a fresh
     // global slot per SET_GLOBAL, instruction order for fields and methods,
-    // set-fields and TFOR_CALL cursors). The duplication is the point: the
+    // set-fields, TFOR_CALL cursors and GET_TABLE key hints). The duplication is the point: the
     // verifier is the independent check on a snapshot's cached operands, and
     // a shared helper would let a policy bug validate itself. Any change to
     // the allocation policy must change both. Compiler finalization runs this
@@ -594,7 +602,9 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
     // allocation plus the final count equality prove every admitted slot is
     // below its family's declared count, which the runtime cache vectors are
     // sized from. A cache slot owns one site: cache hits trust the slot to
-    // describe this site's key, so two sites must never share one.
+    // describe this site's key, so two sites must never share one. (A
+    // GET_TABLE hint re-checks its key on every use, so for it the rule is
+    // addressing only.)
     let sequential = |pc: usize,
                       slot: Option<u8>,
                       next: &mut usize,
@@ -682,9 +692,19 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
                 reg(pc, a)?;
                 reg(pc, b)?;
             }
-            // Three registers: table reads and writes by key, comparisons.
-            Instr::OP_GET_TABLE
-            | Instr::OP_SET_TABLE
+            Instr::OP_GET_TABLE => {
+                reg(pc, a)?;
+                reg(pc, b)?;
+                reg(pc, c)?;
+                sequential(
+                    pc,
+                    inst.cache_slot(),
+                    &mut next_table_key_slot,
+                    CacheFamily::TableKey,
+                )?;
+            }
+            // Three registers: table writes by key, comparisons.
+            Instr::OP_SET_TABLE
             | Instr::OP_INIT_INDEX
             | Instr::OP_LT
             | Instr::OP_LE
@@ -937,6 +957,7 @@ pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), Bytecode
         || usize::from(view.field_cache_slots()) != next_field_slot
         || usize::from(view.set_field_cache_slots()) != next_set_field_slot
         || usize::from(view.tfor_cursor_slots()) != next_tfor_cursor_slot
+        || usize::from(view.table_key_slots()) != next_table_key_slot
     {
         return Err(err(None, ValidationReason::CacheSlotCountMismatch));
     }
@@ -1123,7 +1144,7 @@ mod tree_tests {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        let families: [(String, u8, Count, ValidationReason); 5] = [
+        let families: [(String, u8, Count, ValidationReason); 6] = [
             (
                 sites(&|i| format!("if get_{i} then end")),
                 Instr::OP_GET_GLOBAL,
@@ -1161,6 +1182,17 @@ mod tree_tests {
                 |bc| &mut bc.tfor_cursor_slots,
                 ValidationReason::CacheSlotOrder {
                     family: CacheFamily::TforCursor,
+                },
+            ),
+            (
+                format!(
+                    "local t, k = {{}}, 'x'\n{}",
+                    sites(&|_| "if t[k] then end".into())
+                ),
+                Instr::OP_GET_TABLE,
+                |bc| &mut bc.table_key_slots,
+                ValidationReason::CacheSlotOrder {
+                    family: CacheFamily::TableKey,
                 },
             ),
         ];

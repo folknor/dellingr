@@ -60,6 +60,8 @@ pub(crate) struct Bytecode {
     pub(crate) set_field_cache_slots: u8,
     /// Number of `pairs` cursor slots (`OP_TFOR_CALL`).
     pub(crate) tfor_cursor_slots: u8,
+    /// Number of key-position hint slots (`OP_GET_TABLE`).
+    pub(crate) table_key_slots: u8,
     pub(crate) num_params: u8,
     /// The most non-parameter locals the function has in scope at once.
     pub(crate) num_locals: u8,
@@ -128,6 +130,7 @@ impl Bytecode {
         let mut field_len = 0usize;
         let mut set_field_len = 0usize;
         let mut tfor_cursor_len = 0usize;
+        let mut table_key_len = 0usize;
 
         for inst in &mut self.code {
             let slot = match inst.opcode() {
@@ -142,6 +145,7 @@ impl Bytecode {
                 Instr::OP_GET_FIELD | Instr::OP_SELF => allocate(&mut field_len),
                 Instr::OP_SET_FIELD => allocate(&mut set_field_len),
                 Instr::OP_TFOR_CALL => allocate(&mut tfor_cursor_len),
+                Instr::OP_GET_TABLE => allocate(&mut table_key_len),
                 _ => continue,
             };
             *inst = inst.with_cache_slot(slot);
@@ -152,6 +156,7 @@ impl Bytecode {
         self.field_cache_slots = field_len as u8;
         self.set_field_cache_slots = set_field_len as u8;
         self.tfor_cursor_slots = tfor_cursor_len as u8;
+        self.table_key_slots = table_key_len as u8;
     }
 }
 

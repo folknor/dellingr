@@ -248,6 +248,7 @@ struct SavedBytecode {
     field_cache_slots: u8,
     set_field_cache_slots: u8,
     tfor_cursor_slots: u8,
+    table_key_slots: u8,
     num_params: u8,
     num_locals: u8,
     max_stack: u16,
@@ -1556,6 +1557,7 @@ impl<'a> SaveBuilder<'a> {
             field_cache_slots: 0,
             set_field_cache_slots: 0,
             tfor_cursor_slots: 0,
+            table_key_slots: 0,
             num_params: 0,
             num_locals: 0,
             max_stack: 0,
@@ -1592,6 +1594,7 @@ fn saved_bytecode_node(bc: &Bytecode, nested: Vec<u32>) -> SavedBytecode {
         field_cache_slots: bc.field_cache_slots,
         set_field_cache_slots: bc.set_field_cache_slots,
         tfor_cursor_slots: bc.tfor_cursor_slots,
+        table_key_slots: bc.table_key_slots,
         num_params: bc.num_params,
         num_locals: bc.num_locals,
         max_stack: bc.max_stack,
@@ -2543,6 +2546,7 @@ fn build_bytecode_node(
         field_cache_slots: src.field_cache_slots,
         set_field_cache_slots: src.set_field_cache_slots,
         tfor_cursor_slots: src.tfor_cursor_slots,
+        table_key_slots: src.table_key_slots,
         num_params: src.num_params,
         num_locals: src.num_locals,
         max_stack: src.max_stack,
@@ -3169,6 +3173,7 @@ impl SavedBytecode {
         out.write_u8(self.field_cache_slots);
         out.write_u8(self.set_field_cache_slots);
         out.write_u8(self.tfor_cursor_slots);
+        out.write_u8(self.table_key_slots);
         out.write_u8(self.num_params);
         out.write_u8(self.num_locals);
         out.write_u16(self.max_stack);
@@ -3213,6 +3218,7 @@ impl SavedBytecode {
             field_cache_slots: input.read_u8()?,
             set_field_cache_slots: input.read_u8()?,
             tfor_cursor_slots: input.read_u8()?,
+            table_key_slots: input.read_u8()?,
             num_params: input.read_u8()?,
             num_locals: input.read_u8()?,
             max_stack: input.read_u16()?,
@@ -3578,6 +3584,7 @@ mod tests {
             field_cache_slots: 0,
             set_field_cache_slots: 0,
             tfor_cursor_slots: 0,
+            table_key_slots: 0,
             num_params: 0,
             num_locals: 0,
             max_stack: 2,
@@ -4745,6 +4752,7 @@ mod tests {
                 field_cache_slots: 9,
                 set_field_cache_slots: 3,
                 tfor_cursor_slots: 4,
+                table_key_slots: 6,
                 num_params: 2,
                 num_locals: 5,
                 max_stack: 300,

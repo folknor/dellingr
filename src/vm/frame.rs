@@ -514,13 +514,7 @@ impl Frame {
                     fixed_cost!(Instr::OP_GET_TABLE);
                     crate::native_call!(
                         "run_frame->reg_get_table",
-                        state.reg_get_table(
-                            ra,
-                            base + inst.b() as usize,
-                            base + inst.c() as usize,
-                            local_cost,
-                            *ip,
-                        )
+                        state.reg_get_table(frame, inst, ra, base, local_cost, *ip)
                     )?;
                 }
 

@@ -475,7 +475,7 @@ impl HashProbe {
 
 /// A slot position whose key is re-checked on every use
 /// ([`Table::value_if_key`]), independent of the shape version.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct KeyedIndex(usize);
 
 /// What the debug shape witness last saw: the version, the number of hash
@@ -1390,6 +1390,25 @@ impl Table {
     pub(super) fn find_keyed(&self, key: &Val) -> Option<(KeyedIndex, Val)> {
         let (index, value) = self.get_with_index(key)?;
         Some((KeyedIndex(index), value))
+    }
+
+    /// The live value at `at` if the key there is the string `key`: the
+    /// value-only form of [`Self::value_if_key`] for keys that never take an
+    /// array-tagged position. The value alone comes back in registers (see
+    /// [`Self::get_index_value`]). A mismatch, a tombstone or a position past
+    /// the slots is `None`, and the caller looks the key up.
+    #[inline(always)]
+    pub(super) fn string_value_if_key(&self, at: KeyedIndex, key: Val) -> Option<Val> {
+        let (slot_key, value) = match &self.storage {
+            TableStorage::Inline { entries, len } => {
+                if at.0 >= *len as usize {
+                    return None;
+                }
+                entries[at.0]
+            }
+            TableStorage::Map(map, _) => *map.get(at.0)?,
+        };
+        (slot_key == key && !matches!(value, Val::Nil)).then_some(value)
     }
 
     /// The live value at `at` if the key there is `key`, whatever the version.

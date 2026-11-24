@@ -54,6 +54,9 @@ impl BytecodeView for SavedBytecode {
     fn tfor_cursor_slots(&self) -> u8 {
         self.tfor_cursor_slots
     }
+    fn table_key_slots(&self) -> u8 {
+        self.table_key_slots
+    }
     fn num_params(&self) -> u8 {
         self.num_params
     }

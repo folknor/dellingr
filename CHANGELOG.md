@@ -65,6 +65,13 @@ tick budgets and re-record replays.
   or `ipairs` loop ends is now observed at the next safepoint after the
   loop rather than before the final step. Old binaries reject saves
   containing the new opcodes as invalid bytecode.
+- **Replay-visible:** `GET_TABLE` carries a cache operand (its D byte),
+  and each function records a count of `GET_TABLE` key-hint slots, so
+  save bytes and `--dump-bytecode` listings change (format 15 is not yet
+  released, so its number stays). A site with a string key reads the
+  position its key last sat at, checked against the live table and key,
+  before a hash lookup. Results, costs and `__index` behaviour are
+  unchanged.
 - **Replay-visible:** adjacent nil loads (consecutive value-less `local`
   statements, `nil` arguments or values side by side, nil padding after a
   `nil` value) compile to one `LOAD_NIL` when no jump enters between them,

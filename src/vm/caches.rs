@@ -93,7 +93,8 @@ pub(super) fn hits_disabled() -> bool {
 // is one per name (a cached GET_GLOBAL reuses its name's slot, each cached
 // SET_GLOBAL takes a fresh one). A TFOR_CALL cursor slot is one per site too,
 // but its key is the loop's dynamic control, which the cursor re-checks
-// itself. Whatever the slot rule becomes, it must keep one key per field,
+// itself, and a GET_TABLE key hint (`TableKeySlot`) re-checks its key on
+// every use. Whatever the slot rule becomes, it must keep one key per field,
 // method, set-field and global slot.
 //
 // What an entry's slot token proves, and the table rule it rests on, is in
@@ -133,6 +134,33 @@ impl TforCursorSlot {
 
     pub(super) fn set(&self, entry: TforCursorEntry) {
         self.entry.set(Some(entry));
+    }
+}
+
+/// A `GET_TABLE` site's guess at where its string key sits in the receiver:
+/// the position its last raw lookup found the key at, in whatever table that
+/// was. Only a guess, re-checked against the live table and key on every use
+/// (`Table::string_value_if_key`), so it needs no key, no table handle and no
+/// version: a sweep over records of one constructor finds the key at the same
+/// position in each, and anything else misses into the ordinary lookup.
+#[derive(Debug, Default)]
+pub(super) struct TableKeySlot {
+    position: Cell<KeyedIndex>,
+}
+
+impl TableKeySlot {
+    #[inline(always)]
+    pub(super) fn get(&self) -> Option<KeyedIndex> {
+        #[cfg(feature = "disable-inline-caches")]
+        if hits_disabled() {
+            return None;
+        }
+        Some(self.position.get())
+    }
+
+    #[inline(always)]
+    pub(super) fn set(&self, position: KeyedIndex) {
+        self.position.set(position);
     }
 }
 
@@ -398,6 +426,7 @@ pub(super) struct RuntimeCaches {
     pub(super) field_lookup: Vec<FieldLookupCacheSlot>,
     pub(super) set_field_lookup: Vec<SetFieldLookupCacheSlot>,
     pub(super) tfor_cursor: Vec<TforCursorSlot>,
+    pub(super) table_key: Vec<TableKeySlot>,
     /// One prototype per `table_templates` entry, filled on the template's
     /// first execution (`BytecodeRuntime::template`), so an unexecuted
     /// template costs only its empty cell at load. Its keys are the runtime's literals,
@@ -443,6 +472,7 @@ impl RuntimeCaches {
             field_lookup: slots(bc.field_cache_slots),
             set_field_lookup: slots(bc.set_field_cache_slots),
             tfor_cursor: slots(bc.tfor_cursor_slots),
+            table_key: slots(bc.table_key_slots),
             table_templates: bc.table_templates.iter().map(|_| OnceCell::new()).collect(),
             reached: Cell::new(false),
         }
@@ -484,6 +514,11 @@ impl RuntimeCaches {
         self.tfor_cursor.get(usize::from(slot?))
     }
 
+    #[inline(always)]
+    pub(super) fn table_key(&self, slot: Option<u8>) -> Option<&TableKeySlot> {
+        self.table_key.get(usize::from(slot?))
+    }
+
     /// Weak-reference processing for one runtime: clear every entry that
     /// names an object or string the collector just freed.
     ///
@@ -505,6 +540,8 @@ impl RuntimeCaches {
             field_lookup,
             set_field_lookup,
             tfor_cursor,
+            // A position, no handle: nothing for a collection to clear.
+            table_key: _,
             // Keys are this runtime's own literals, live as long as it is.
             table_templates: _,
             reached: _, // The collector's own flag, not a cache cell.
@@ -557,6 +594,7 @@ impl RuntimeCaches {
             field_lookup,
             set_field_lookup,
             tfor_cursor,
+            table_key: _,
             table_templates: _,
             reached: _,
         } = self;

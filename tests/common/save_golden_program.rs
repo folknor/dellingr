@@ -294,7 +294,7 @@ impl FixtureReader<'_> {
         for _ in 0..self.count() {
             self.fixed_vector(2);
         } // Templates.
-        self.take(8); // Cache slots, parameters, locals and max_stack.
+        self.take(9); // Cache slots, parameters, locals and max_stack.
         self.fixed_vector(4); // Nested chunk ids.
         self.fixed_vector(2); // Upvalue descriptors.
         self.flag(); // Vararg.

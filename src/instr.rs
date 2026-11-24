@@ -369,7 +369,7 @@ macro_rules! opcode_rows {
             OP_NEW_TABLE_PRESIZED = 13, Ab, Once(NewTable);
             OP_NEW_TABLE_TEMPLATE = 14, Ab, Once(NewTable) {Template, B};
             OP_GET_FIELD = 15, Abcd, Free {String, C};
-            OP_GET_TABLE = 16, Abc, Free;
+            OP_GET_TABLE = 16, Abcd, Free;
             OP_SET_FIELD = 17, Abcd, Once(TableWrite) {String, B};
             OP_SET_TABLE = 18, Abc, Once(TableWrite);
             OP_INIT_FIELD = 19, Abc, Once(TableWrite) {String, B};
@@ -907,7 +907,7 @@ impl Instr {
         )
     }
     /// The cache slot of a cache-bearing opcode (GET_GLOBAL, SET_GLOBAL,
-    /// GET_FIELD, SET_FIELD, SELF, TFOR_CALL).
+    /// GET_FIELD, SET_FIELD, SELF, TFOR_CALL, GET_TABLE).
     #[inline(always)]
     pub(crate) const fn cache_slot(self) -> Option<u8> {
         decode_cache_slot(self.d())
@@ -943,7 +943,8 @@ impl Instr {
             encode_cache_slot(cache_slot),
         )
     }
-    /// `R[dst] = R[table][R[key]]`.
+    /// `R[dst] = R[table][R[key]]`, uncached until
+    /// `Bytecode::assign_cache_slots` gives it a key-position hint slot.
     pub(crate) const fn get_table(dst: u16, table: u16, key: u16) -> Self {
         Self::pack(Self::OP_GET_TABLE, dst, table, key, 0)
     }
@@ -1311,13 +1312,16 @@ mod tests {
         // Cache operands are persisted inside raw instruction words: pin the
         // uncached, first and last slot encodings of every cache family.
         type CacheFamily = (&'static str, fn(Option<u8>) -> Instr);
-        let cache_families: [CacheFamily; 6] = [
+        let cache_families: [CacheFamily; 7] = [
             ("OP_GET_GLOBAL", |s| Instr::get_global(1, 7, s)),
             ("OP_SET_GLOBAL", |s| Instr::set_global(1, 7, s)),
             ("OP_GET_FIELD", |s| Instr::get_field(1, 2, 7, s)),
             ("OP_SET_FIELD", |s| Instr::set_field(1, 7, 2, s)),
             ("OP_SELF", |s| Instr::self_(1, 2, 7, s)),
             ("OP_TFOR_CALL", |s| Instr::tfor_call(3, 2, s)),
+            ("OP_GET_TABLE", |s| {
+                Instr::get_table(1, 2, 3).with_cache_slot(s)
+            }),
         ];
         for (name, encode) in cache_families {
             writeln!(

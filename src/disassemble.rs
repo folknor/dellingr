@@ -65,8 +65,12 @@ fn write_function(f: &mut fmt::Formatter<'_>, bc: &Bytecode, path: &mut String) 
     )?;
     writeln!(
         f,
-        "  cache slots: global={} field={} set_field={} tfor_cursor={}",
-        bc.global_cache_slots, bc.field_cache_slots, bc.set_field_cache_slots, bc.tfor_cursor_slots
+        "  cache slots: global={} field={} set_field={} tfor_cursor={} table_key={}",
+        bc.global_cache_slots,
+        bc.field_cache_slots,
+        bc.set_field_cache_slots,
+        bc.tfor_cursor_slots,
+        bc.table_key_slots
     )?;
 
     if !bc.upvalues.is_empty() {
@@ -195,6 +199,7 @@ fn write_annotation(
             | Instr::OP_SELF
             | Instr::OP_SET_FIELD
             | Instr::OP_TFOR_CALL
+            | Instr::OP_GET_TABLE
     ) {
         notes.next(f)?;
         match inst.cache_slot() {

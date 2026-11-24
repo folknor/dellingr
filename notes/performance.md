@@ -185,25 +185,32 @@ measurement attributing branch misses to the dispatch branch before work
 begins. The stable-Rust route that tests the actual next opcode and enters
 its handler directly lives under PERF-002.
 
-## PERF-004 - Dynamic string-key reads through uncached `GET_TABLE`
+## PERF-005 - Dependent indexed reads keep `column_key` in generic dispatch
 
-Raised by the lookup hunter. The other constant-operand and loop-step forms
-have landed or were measured flat and refused (reasons at `Generator::suffix`,
-`cond_jump` in `codegen.rs` and the compare-branch arm in `frame.rs`).
+Raised while landing the `GET_TABLE` key-position hint (2026-11-24, bygg,
+on top of 0cc99ec): `column_key` went 5.45 s to 4.9 s, but the inner
+iteration (`GET_TABLE`, `GET_TABLE`, `ADD_RR`, `FOR_LOOP`) still costs about
+25 ns, and release perf put 40 percent in `Frame::run`, 23 in
+`reg_get_table` and 13 in `instr_for_loop`. Samples cannot split that
+between dispatch and the dependent load chain.
 
-**Bottleneck:** a dynamic string key (`t[name]`) reads through uncached
-`GET_TABLE`. `column_key` is the workload: one `us[i][key]` site sums a
-column over 64 six-field (map storage) records of one constructor, so each
-key repeats across 64 receivers before it changes. (`rekey` reads one
-receiver with the key cycling over 64 names and `fill` reads once per fresh
-table, so neither gives a last-key cache anything to hit.) The shape is a
-cached `KeyedIndex` checked with `value_if_key` against the live table and
-key, not a field plan (the field cache trusts one key per slot with no key
-compare); a missing or cleared slot still takes the ordinary lookup so
-`__index` can answer.
+**Bottleneck:** the typed loop region declines `sum = sum + us[i][key]`:
+the first `GET_TABLE` takes the numeric `Index` form because its result
+feeds another `GET_TABLE` (only `GET_FIELD`/`SET_FIELD` receivers make a
+record), and the second reads a receiver the body writes. The shape to try
+is the pair as one region op: guard the invariant string key and outer
+table once per entry, read the outer array window, read the record by a
+region-local key-checked position, feed a number into the accumulator, and
+on nil or a non-number publish the first result and resume canonically at
+the second `GET_TABLE` so `__index` and errors stay canonical. Measure it
+against the same region doing a hash lookup to see what the position adds.
 
-**Classification:** local change, smaller ceiling; its workload is
-registered.
+**Also open:** the hint's miss tax. `rekey` (key moves after each read)
+went 997 to about 1025 ms and `fill` (fresh table per read) 1503 to about
+1535 ms, both dirty single cells, not interleaved pairs. A matched
+interleaved pair would say whether that is real or layout.
+
+**Classification:** local change in `numeric_loop.rs`; workload registered.
 
 ## Accounts added to existing entries
 

@@ -14,6 +14,7 @@
 //! stack cap itself.
 
 use super::super::error::{ConstructorTableOperation, ErrorKind, InternalFault, TypeError};
+use super::caches::TableKeySlot;
 use super::frame::Frame;
 use super::metamethod::{IndexOutcome, IndexStart};
 use super::object::{Captures, Upvalue};
@@ -164,22 +165,57 @@ impl State {
     /// inline; a raw miss on a table with a metatable continues past the
     /// receiver's lookup it already did, and any other receiver resolves
     /// from the start.
+    ///
+    /// A string key first tries the site's key-position hint: the position
+    /// the key last sat at, checked against the live table and key, so a
+    /// sweep over records of one constructor skips the hash probe. A hint
+    /// miss is one keyed lookup that both answers and refills the hint; its
+    /// raw nil goes straight to the metatable decision. Other keys take the
+    /// plain raw lookup. Measured on `column_key` (one site, 64 records of a
+    /// constructor) at about 10 percent of wall, but only with the
+    /// value-only read (`Table::string_value_if_key`): the key/value pair
+    /// form gave 2 percent. Sites whose key moves (`rekey`) or whose table is
+    /// fresh (`fill`) pay the failed check, about 2 to 3 percent.
+    ///
+    /// It takes the instruction rather than its decoded operands, which
+    /// keeps the hint lookup's locals out of `Frame::run` in the dev profile.
     pub(super) fn reg_get_table(
         &mut self,
+        frame: &Frame,
+        inst: Instr,
         dst: usize,
-        table: usize,
-        key: usize,
+        base: usize,
         local_cost: &mut u64,
         call_site: usize,
     ) -> Result<()> {
-        let tbl_val = self.stack[table];
-        let key_val = self.stack[key];
+        let tbl_val = self.stack[base + inst.b() as usize];
+        let key_val = self.stack[base + inst.c() as usize];
+        let hint: Option<&TableKeySlot> = frame.runtime.caches.table_key(inst.cache_slot());
         let start = match tbl_val
             .as_object_ptr()
             .and_then(|ptr| self.heap.as_table_ref(ptr))
         {
             Some(tbl) => {
-                let val = tbl.get(&key_val);
+                let val = match hint {
+                    Some(hint) if matches!(key_val, Val::Str(_)) => {
+                        if let Some(val) = hint
+                            .get()
+                            .and_then(|at| tbl.string_value_if_key(at, key_val))
+                        {
+                            self.stack[dst] = val;
+                            return Ok(());
+                        }
+                        match tbl.find_keyed(&key_val) {
+                            Some((at, val)) => {
+                                hint.set(at);
+                                self.stack[dst] = val;
+                                return Ok(());
+                            }
+                            None => Val::Nil,
+                        }
+                    }
+                    _ => tbl.get(&key_val),
+                };
                 match tbl.get_metatable() {
                     Some(metatable) if matches!(val, Val::Nil) => {
                         IndexStart::AfterRawMiss(metatable)
