@@ -205,23 +205,6 @@ workload.
 **Classification:** register a workload at both scales, then a matched
 `--commit` pair across the hint's next change.
 
-## PERF-008 - Typed-region entry work repeated on every entry
-
-`run_control_region` collects the region's relied keys into a fresh `Vec`
-twice per entry when a call site is dynamic (once inside
-`region_keys_disjoint`, once in the runner), and starts its per-site
-method caches empty, so each entry re-runs `admit_method` (site checks, an
-`Arc` clone, upvalue field resolution) for every metatable it meets.
-`object_fields`' update loop is entered about 100,000 times per run at
-roughly 30 us of passes each; not measured. Sharing the one collection
-within an entry is sound (same literals, same frame, no VM execution
-between). Keeping method entries across entries is not free: it needs a
-proof that the method lookup and cached upvalue slots still hold after
-intervening Lua or host code.
-
-**Classification:** local change in `vm/numeric_loop.rs`; measure with a
-matched `--commit` pair on `object_fields` and `method_step`.
-
 ## Accounts added to existing entries
 
 This hunt's account of these mechanisms went into the entry already filed for

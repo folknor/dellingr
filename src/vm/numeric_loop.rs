@@ -2567,6 +2567,13 @@ impl State {
         // a position hint, compared by handle and never dereferenced on
         // another table without its key check.
         let mut callees: [Option<Resolved>; MAX_CALLS] = Default::default();
+        // Empty at every entry on purpose. An entry's method binding and
+        // upvalue-field proofs hold for one run only: between runs, code can
+        // overwrite the method under the same key (same metatable, same
+        // slot, so neither handle nor shape version notices), rebind an
+        // upvalue to another table, or put a non-number in a proved slot,
+        // and admission also depends on this entry's stack base. Keeping
+        // entries across runs needs validation of all of that.
         let mut methods: [Vec<RegionMethod>; MAX_CALLS] = Default::default();
         // Per call site: the method and receiver a method lookup on a record
         // found this pass, and the cache entry.
@@ -3141,6 +3148,14 @@ impl State {
     /// (of an invariant receiver or of a record), every callee's global
     /// name and every field the region reads at entry. Keys are interned,
     /// so equal keys are equal values.
+    ///
+    /// The keys are the frame's literals, which are immutable and rooted
+    /// for the run, so collecting them is optional for correctness: one
+    /// collection could serve the whole entry, or a predicate could ask
+    /// per store. A predicate version that dropped both per-entry
+    /// collections measured slower on `object_fields` (3069 to 3147 ms,
+    /// 7 of 8 matched pairs, bygg, 2026-11-24): the collections cost below
+    /// that workload's layout noise, so neither change has earned its place.
     fn relied_keys(&self, body: &Body, frame: &Frame) -> Vec<Val> {
         body.calls
             .iter()
