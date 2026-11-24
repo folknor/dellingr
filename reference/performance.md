@@ -1036,6 +1036,26 @@ in dev and release: the entry hook sits in `Frame::tfor_fused_loop`,
 inlined only in release, since a live bool or call-pc local in the
 `TFOR_CALL` arm cost 16 to 48 bytes a level.
 
+## `ipairs` loops over records, 2026-11-24
+
+An `ipairs` region whose body uses the value as a record binds it afresh
+at the start of every pass (`OpKind::Bind`), so the record is defined in
+its own pass as a `GET_TABLE` record is. `ipairs_store` is `store_loop`'s
+kernel written over `ipairs`. Matched interleaved pairs on bygg,
+`brokkr bench --rounds 3` with `--commit` arms, 212d8e6 against 3d69389
+(best of one per cell), invocation b1fbf39f:
+
+| Workload | 212d8e6 | 3d69389 |
+|---|---:|---:|
+| `ipairs_store` | 4.2, 3.6, 3.6 s | 1.6, 1.5, 1.5 s |
+| `store_loop` | 1.5, 1.5, 1.5 s | 1.5, 1.5, 1.5 s |
+| `ipairs` | 1.8, 1.8, 1.8 s | 1.8, 1.8, 1.8 s |
+| `object_fields` | 2.9, 2.9, 2.9 s | 2.9, 3.0, 2.9 s |
+
+`ipairs_store` now runs at `store_loop`'s speed. `native_bytes_per_level`
+is unchanged in dev and release: the bind sits in the control runner, which
+is not live across a native re-entry.
+
 ## The session's `object_fields` deltas, re-measured, 2026-11-24
 
 Both `object_fields` slowdowns above (the forward-branch leaves and the
