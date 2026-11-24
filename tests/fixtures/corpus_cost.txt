@@ -25,7 +25,7 @@ examples/calls/method_chain.lua|141a5a7aa1d8453a36135afe9b714c44|802010
 examples/calls/method_chain_counter.lua|ea8212f69d89a5be9742e08859081e19|1604011
 examples/calls/method_chain_wide.lua|f610ce8c547a99a8e54fc52b68f51bc6|802019
 examples/calls/method_polymorphic.lua|6b6609c4b16cb1e7910c06fd99cd3d5f|677304
-examples/calls/method_step.lua|60bec06777e6b9dd9b5a8b49926775d7|3892100
+examples/calls/method_step.lua|7ffb0728234cd8b6c0060d172da4efbf|3892100
 examples/calls/result_adjust.lua|0a6667c4ac5e50ab10967e31497c9abe|1083600
 examples/calls/rust_boundary.lua|0443637fb717226cb1239958b85ee341|62009
 examples/calls/tail_call.lua|d6093b8c5e88d2806c8d5faa4fdfafc3|1234100

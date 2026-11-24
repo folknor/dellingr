@@ -1,9 +1,7 @@
 -- Workload: a per-entity tick method that updates its receiver's fields
--- behind a guard. `Body:step` is `if self.alive then self.x = self.x + ...`:
--- the field updates sit in a method that branches, so it is no leaf and
--- every call takes an activation and dispatches each update's read, add and
--- store. The caller walks an array of bodies, so the receiver changes on
--- every call and the loop runs canonically. Three bodies in four are alive.
+-- behind an `if self.alive` guard. The loop walks an array of bodies and
+-- runs as a typed region that calls `Body:step` as a branching field leaf.
+-- The receiver changes on every call. Three bodies in four are alive.
 
 local Body = {}
 Body.__index = Body

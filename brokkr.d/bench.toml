@@ -549,7 +549,7 @@ xxhash = "6d707a7823d6642d3cc7b270ceec4322"
 
 [data.workloads.hotpath.method_step]
 file = "examples/calls/method_step.lua"
-xxhash = "60bec06777e6b9dd9b5a8b49926775d7"
+xxhash = "7ffb0728234cd8b6c0060d172da4efbf"
 
 [data.workloads.hotpath.store_loop]
 file = "examples/tables/store_loop.lua"

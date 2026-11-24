@@ -118,22 +118,6 @@ Cosmetic:
   fixed-width integer"; the trait doc now lists the actual set (8- to 64-bit,
   signed and unsigned).
 
-### `method_step`'s header says its loop runs canonically (2026-11-24)
-
-`examples/calls/method_step.lua` opens by saying `Body:step` "is no leaf
-and every call takes an activation and dispatches each update's read, add
-and store", so "the loop runs canonically". Since field leaves took forward
-number branches and the fused field-truth branch (`if self.alive`),
-`Body:step` is a branching leaf and the loop is a typed region (the
-"Field leaves with forward branches" section of `reference/performance.md`
-records method_step 5.8 s to 2.3 s). The header now misdescribes what the
-workload measures. Rewording it re-pins the pair in `brokkr.d/bench.toml`
-and cuts its stored history, so do it the next time that pair is re-pinned
-anyway, or decide the history is worth cutting. Distinct from the `bench/`
-"probe rationale" headers in the `_G` housekeeping list: this is the
-`examples/` file's mechanism text gone stale. Found while scouting the
-GET_TABLE hint hit-path workload.
-
 ## Deferred forward-looking ideas
 
 ### Execution trace hook for a stepping debugger
