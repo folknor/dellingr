@@ -111,6 +111,10 @@ and at `State::try_numeric_leaf`; numbers in `reference/performance.md`):
   dispatch when the key is not live; a site's slot is reused across
   records of one layout by key-checked position. bench/store_loop 4.2 s to
   1.7 s on bygg.
+- Method calls on records, calls beside branches, nested loops and number
+  upvalue reads in regions (`State::run_control_region`): bench/method_polymorphic
+  2.1 s to 1.4 s, object_fields 3.4 s to 3.0 s, store_loop 1.7 s to 1.5 s;
+  cull flat with its outer loop now a region (reference/performance.md).
 
 What the landed work taught: canonical-pc metadata with the canonical
 instructions as the fallback needs no position map or execution stream;
@@ -121,21 +125,21 @@ countdown was not built: the f64 add and compare are not where the loop's time
 went.
 
 **Residue:** loop bodies storing anything but a number into a live field
-of a record (a store beside a call, a store to an invariant receiver, a
-dynamic-key `SET_TABLE`), a nested loop (cull's outer loop),
-a non-number branch (truth test, string or nil compare), a branch beside a
-leaf call, a call to anything but a numeric leaf (nested `f(g(x))`, open
-arguments or results), or a method call on a receiver read inside the loop
-(method_polymorphic's `shapes[i]:area()`, object_fields' `units[i]`) still
-run canonically. Straight-line chains in functions that are not leaves
-(fib's `n - 1`, `n - 2`, `+` around its calls) still dispatch per
-instruction. Field updates outside a leaf (in a function that branches or
-calls, or in a loop body such as object_fields' `u.x = u.x + u.speed`)
-still dispatch; object_fields' update pass stays canonical because its
-body also calls a method on the record. The non-leaf update has
-`method_step` (a guarded `Body:step`); the other forms
-still need a workload whose loop or call the landed forms do not already
-take.
+of a record (a store to an invariant receiver, a dynamic-key
+`SET_TABLE`), a non-number branch (truth test, string or nil compare), a
+call to anything but a numeric leaf (nested `f(g(x))`, open arguments or
+results, a method that branches such as `method_step`'s `Body:step`), a
+method the record holds itself or finds through a function `__index`, or
+more than eight classes at one site still run canonically. A string read
+into a register used as a key (column_key's `cs[c]`, see PERF-005) stops a
+region that holds it at that read. Straight-line chains in functions that
+are not leaves (fib's `n - 1`, `n - 2`, `+` around its calls) still
+dispatch per instruction. object_fields' remaining time is its
+construction pass (`{}`, `new_unit` calls, `SET_TABLE`), which no region
+takes. After this step `method_step` measured 5.7 to 5.9 s and `global`
+882 to 915 ms on bygg, unattributed (hot paths canonical or unchanged; no
+same-binary control run); a five-launch control would say whether either
+is layout.
 One stable shape for a two-op fusion: after a handler, test the actual next
 opcode and enter its body directly inside the dispatch loop. That is the
 predecessor-specific dispatch threaded dispatch was after, without its

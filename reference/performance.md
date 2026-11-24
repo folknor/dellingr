@@ -714,7 +714,9 @@ key, a callee's global name or a field the region reads once at entry
 of `SELF` and `CALL` in the dispatch loop, which keeps the lookup and the
 site resolution on every call and saves two of about six dispatches, and
 resolving a varying receiver on every pass, which would make the region the
-canonical lookup minus its dispatch. Measured on bygg with `brokkr bench
+canonical lookup minus its dispatch (a later step took it with a
+metatable-keyed cache, "Method calls on records and nested loops in typed
+regions"). Measured on bygg with `brokkr bench
 wall`, best of three, A at `0ab6e1c` (`--commit`), B the same tree plus the
 change (dirty):
 
@@ -756,10 +758,52 @@ plus the change (dirty):
 | `store_loop` | 4.2 s (492dcd2e) | 1.7 s (ccbd26da) |
 | `cull` | 742 ms (ad73271b) | 754 ms (4f3893ac) |
 
-`object_fields` (3.5 s, f7d2db49) calls a method on its record and still
-runs canonically. A first build that kept the record arms in the one
+`object_fields` (3.5 s, f7d2db49) called a method on its record and still
+ran canonically at this step. A first build that kept the record arms in the one
 control runner put `cull` at 831 ms; compiling the runner apart for bodies
 with records brought it back.
+
+## Method calls on records and nested loops in typed regions, 2026-11-24
+
+The control runner now also takes calls beside branches, nested numeric
+loops (their `FOR_PREP` and `FOR_LOOP` as operations over the same mirror,
+each taken back edge polling), number `GET_UPVAL` reads hoisted to entry,
+and `SELF` on a record read this pass. Such a method is looked up on every
+pass through a cache of the run keyed by the record's metatable: an entry is
+exact for the whole run because no store of the region or of an admitted
+leaf is under `__index` or a key the region relies on, so the route
+`region_method` walked answers the same. This is what answers the earlier
+objection that per-pass resolution would be the canonical lookup minus its
+dispatch: a hit costs the record's own raw miss and a pointer compare, and
+the leaf's receiver fields reuse key-checked positions across records of
+one layout. The recognizer's facts (written, not cleared by a call, holding
+a record) are kept per register and met at each loop head with what its back
+edges carry, rescanning to a fixpoint. Measured on bygg with `brokkr bench
+wall`, best of three, A at `94a39b7` (`--commit`), B the same tree plus the
+change (dirty), same day:
+
+| Workload | A | B |
+|---|---:|---:|
+| `method_polymorphic` | 2.1 s (8d77b035) | 1.4 s (e9848542) |
+| `object_fields` | 3.4 s (46b9405d) | 3.0 s (6ec96f74) |
+| `store_loop` | 1.7 s (9456bd35) | 1.5 s (ddeba22e) |
+| `cull` | 763 ms (c1d1abb4) | 762 ms (44d7724d) |
+| `method_step` | 5.7 s (4b1aea6a) | 5.9 s (f9a1127e) |
+| `column_key` | 4.9 s (954aa411) | 4.9 s (92cc02a5) |
+| `method` | 527 ms (38c3e47e) | 522 ms (3e148426) |
+| `global` | 882 ms (843b9874) | 915 ms (e16484da) |
+
+`cull`'s outer loop now runs as a region holding the inner one, and is
+flat: its outer dispatch was a small share. Two layout effects were found
+on the way: with the runner instantiated for more body shapes, LLVM stopped
+inlining `Table::get` and `Table::renew_slot` into it (cull 846 ms,
+store_loop 1.9 s), fixed by `Table::get_number` and forcing `renew_slot`
+inline; and a `get_number` that inlined the hash probe moved
+`HashSlots::find` out of `get_with_index`, slowing `method_step`'s canonical
+field reads by 12%. `method_step`'s method is no leaf, so its loops decline
+at the lookup; a run that does so on its first pass makes the next 16
+entries decline at once. Its remaining 3% and `global`'s 4% are unattributed
+(no same-binary control was run). `frame.rs` is untouched.
 
 ## Key-position hints for dynamic string keys, 2026-11-24
 

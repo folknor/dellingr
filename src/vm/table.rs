@@ -1056,6 +1056,19 @@ impl Table {
         self.hash_get(key)
     }
 
+    /// `get` with the number key `key`, its array window answered inline:
+    /// the typed loop regions' element reads, whose runner is instantiated
+    /// for several body shapes and stopped inlining `get` into them.
+    #[inline(always)]
+    pub(super) fn get_number(&self, key: f64) -> Val {
+        match array_index(key, self.vlen) {
+            Some(slot) => self.array_value(slot + 1),
+            // Through `get`, not `hash_get`: another inlined probe site moved
+            // the hash-part probe out of line from the field reads.
+            None => self.get(&Val::Num(key)),
+        }
+    }
+
     #[inline]
     fn hash_get(&self, key: &Val) -> Val {
         if !is_valid_table_key(key) {
@@ -1271,8 +1284,10 @@ impl Table {
     }
 
     /// After the version moved: if the slot still holds `key` live, a token
-    /// for it at the current version, and its value.
-    #[inline]
+    /// for it at the current version, and its value. Forced inline: a typed
+    /// loop region's record sites renew on every record, and the runner,
+    /// instantiated for several body shapes, stopped inlining it.
+    #[inline(always)]
     pub(super) fn renew_slot(&self, slot: SlotRef, key: Val) -> Option<(SlotRef, Val)> {
         let (slot_key, value) = self.get_index(slot.index)?;
         (slot_key == key).then_some((

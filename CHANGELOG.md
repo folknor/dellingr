@@ -296,6 +296,18 @@ tick budgets and re-record replays.
   `__newindex` and errors behave as before. Results, costs, the charged
   prefix at a budget refusal, error locations, interrupt safepoints and
   collection timing are unchanged.
+- A typed loop may now also call a method of the element it read
+  (`total = total + shapes[i]:area()`, `u:damage(n)`), when the method is
+  such a function; the method is looked up on every iteration, so the
+  elements may be of different classes. It may call functions beside its
+  branches, and loops nested in it run inside it. On bygg
+  `bench/method_polymorphic` went from 2.1 s to 1.4 s,
+  `bench/object_fields` from 3.4 s to 3.0 s and `bench/store_loop` from
+  1.7 s to 1.5 s. A method found through a function `__index`, held by the
+  element itself, or not such a function hands the rest of the loop back to
+  ordinary dispatch at the method lookup. Results, costs, the charged prefix
+  at a budget refusal, error locations, interrupt safepoints and collection
+  timing are unchanged.
 
 ## [0.7.1] - 2026-11-06
 

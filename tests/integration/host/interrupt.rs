@@ -130,6 +130,32 @@ fn a_typed_numeric_loop_stops_at_its_first_back_edge() {
     assert_eq!(state.to_number(-1).expect("last is a number"), 1.0);
 }
 
+/// A loop nested in a typed loop polls at its own back edge, before its
+/// counters are written.
+#[test]
+fn a_typed_loop_nested_in_a_region_stops_at_its_first_back_edge() {
+    let source = "local s, last = 0, 0
+                  peek = function() return s, last end
+                  stop()
+                  for i = 1, 10 do
+                    for j = 1, 3 do
+                      s = s + j
+                      last = j
+                    end
+                  end";
+    let mut state = state();
+    let error = assert_interrupted(support::try_run(&mut state, source), source);
+    // The inner FOR_LOOP carries the line of the inner loop's `end`.
+    assert!(error.to_string().starts_with("8:"), "{error}");
+    state.interrupt().reset();
+    state.get_global("peek").expect("peek is defined");
+    state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(2))
+        .expect("peek runs once the interrupt is reset");
+    assert_eq!(state.to_number(-2).expect("s is a number"), 1.0);
+    assert_eq!(state.to_number(-1).expect("last is a number"), 1.0);
+}
+
 /// A typed loop with branches and indexed reads polls at the same back edge.
 #[test]
 fn a_typed_loop_with_branches_stops_at_its_first_back_edge() {

@@ -3,11 +3,11 @@
 //! - **Typed loop regions.** A numeric `for` loop whose body is such
 //!   arithmetic runs as one region: the registers the loop touches live in an
 //!   `f64` mirror, and each iteration runs its body operations and the loop
-//!   step without going back through the dispatch loop. A body without
-//!   calls may also branch forward on number comparisons, read elements
-//!   of loop-invariant tables, and read a record (a table element) per
-//!   iteration whose number fields it reads and stores
-//!   (`State::run_control_region`).
+//!   step without going back through the dispatch loop. A body may also
+//!   branch forward on number comparisons, read elements of loop-invariant
+//!   tables, read a record (a table element) per iteration whose number
+//!   fields it reads and stores, call a method of that record, and hold
+//!   nested numeric loops (`State::run_control_region`).
 //! - **Numeric leaves.** A Lua function whose code up to its first `RETURN`
 //!   is such arithmetic, returning one value or none, runs inside call
 //!   dispatch without an activation when its arguments are numbers. Its
@@ -36,7 +36,12 @@
 //!   register read before it is written in one pass of the body and the loop
 //!   step therefore proves every read of the whole loop is a number. The
 //!   guard reads operands before the destination is marked written, so
-//!   `R0 = R0 + k` guards `R0`.
+//!   `R0 = R0 + k` guards `R0`. The recognizer keeps per-register facts
+//!   (written on every path, not cleared by a call, holding a record) over
+//!   forward edges, and meets each loop head's facts with those its back
+//!   edges carry, scanning again until no head narrows
+//!   (`NumericLoop::recognize`), so a read a later iteration makes is
+//!   proven as the first's.
 //! - Field reads. `GET_UPVAL r u; GET_FIELD r r k` (the scratch register
 //!   reused as the destination) and `GET_FIELD d s k` with `s` a register
 //!   the body never writes read a receiver that cannot change while the
@@ -91,16 +96,24 @@
 //!   and a method's receiver in `r + 1` (installed after the mirror is
 //!   published) and canonical dispatch makes the call, so no leaf effect
 //!   happens before every one of its charges is admitted. A fast pass adds
-//!   the charges of the operations before the exit only.
+//!   the charges of the operations before the exit only. A method of a
+//!   record read this pass is looked up on every pass through a cache of
+//!   the run, keyed by the record's metatable (`State::run_control_region`
+//!   says why each entry stays exact).
+//! - A `GET_UPVAL r u` whose register is next read as a number is a number
+//!   read once at entry, as a field read is.
 //! - The loop step reads the mirror's controls, which a body may have
 //!   written, computes the next value into a temporary, polls on the taken
 //!   back edge with the cursor past `FOR_LOOP`, and only then writes the
 //!   hidden and visible counters, so an interrupted iteration writes no
-//!   counter.
+//!   counter. A nested loop's `FOR_PREP` and `FOR_LOOP` run the same way
+//!   inside the body, its taken back edge polling with the cursor past its
+//!   own `FOR_LOOP`.
 //!
 //! Why a numeric leaf is exact: see `State::try_numeric_leaf`.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use super::BytecodeRuntime;
 use super::MetaName;
@@ -136,7 +149,19 @@ pub(super) struct NumericLoop {
     /// canonical instructions, so this is not `prep + 1 + ops.len()`.
     step_pc: usize,
     body: Body,
+    /// Entries left to decline after a run that met a method it could not
+    /// call on its first pass (`State::run_control_region`): a loop whose
+    /// record methods are no leaves would otherwise pay the entry and that
+    /// first pass on every entry, for nothing. Declining runs the loop
+    /// canonically, which is exact, so this only changes the time taken.
+    /// Atomic only so the runtime stays `Sync`; one State's execution is the
+    /// only reader and writer.
+    backoff: AtomicU8,
 }
+
+/// Entries a region declines after its first pass met a method it could
+/// not call.
+const BACKOFF_ENTRIES: u8 = 16;
 
 /// A straight-line body over an `f64` mirror.
 #[derive(Debug)]
@@ -172,9 +197,110 @@ struct Body {
     /// A loop's record field sites, read or stored per iteration on the
     /// table its record register holds. Empty for a leaf.
     record_sites: Box<[RecordSite]>,
-    /// The body has forward branches, indexed reads or records, so it runs
-    /// through `State::run_control_region` rather than as a straight line.
+    /// A loop's nested numeric loops, by `Prep` order. Empty for a leaf.
+    inner: Box<[InnerLoop]>,
+    /// The body has forward branches, indexed reads, records, nested loops
+    /// or method calls on a record, so it runs through
+    /// `State::run_control_region` rather than as a straight line.
     control: bool,
+}
+
+/// A numeric `for` nested in a loop body: its `FOR_PREP` and `FOR_LOOP`
+/// run as the region's `Prep` and `Step` operations over the same mirror.
+#[derive(Clone, Copy, Debug)]
+struct InnerLoop {
+    /// Mirror slots of its four controls (start/counter, limit, step,
+    /// visible variable).
+    controls: [u8; 4],
+    /// The inner `FOR_LOOP` pc.
+    step_pc: usize,
+    /// The operation index of the first body operation.
+    body: usize,
+    /// The operation index of the instruction after the inner `FOR_LOOP`,
+    /// where a `Prep` that does not enter goes.
+    exit: usize,
+}
+
+/// Loops one region may nest inside its own.
+const MAX_INNER: usize = 8;
+
+/// Nesting depth of loops inside one region.
+const MAX_DEPTH: usize = 4;
+
+/// Scans of one region while its loop-head facts descend to a fixpoint.
+const MAX_SCANS: usize = 8;
+
+/// Classes one method-call site on a record may resolve per region run.
+const MAX_METHOD_CLASSES: usize = 8;
+
+/// Register facts at one program point, keyed by fact index (one per
+/// register the region names, fixed before the solving scans).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Facts {
+    /// Written on every path since the region's entry: a read outside it
+    /// is guarded at entry.
+    must: u64,
+    /// Not cleared by a call on any path since its last write.
+    safe: u64,
+    /// Holds a record defined in this pass on every path.
+    rmust: u64,
+    /// May hold a record on some path.
+    rmay: u64,
+}
+
+impl Facts {
+    /// The identity of `meet`, for a point no edge has reached yet.
+    const TOP: Self = Facts {
+        must: u64::MAX,
+        safe: u64::MAX,
+        rmust: u64::MAX,
+        rmay: 0,
+    };
+    /// The region's entry: nothing written, nothing cleared, no record.
+    const ENTRY: Self = Facts {
+        must: 0,
+        safe: u64::MAX,
+        rmust: 0,
+        rmay: 0,
+    };
+
+    fn meet(self, other: Self) -> Self {
+        // An intersection of facts, a union of possibilities.
+        Facts {
+            must: self.must & other.must,
+            safe: self.safe & other.safe,
+            rmust: self.rmust & other.rmust,
+            rmay: self.rmay | other.rmay,
+        }
+    }
+
+    /// After a number write of fact `fact`.
+    fn wrote(self, fact: usize) -> Self {
+        let bit = 1u64 << fact;
+        Facts {
+            must: self.must | bit,
+            safe: self.safe | bit,
+            rmust: self.rmust & !bit,
+            rmay: self.rmay & !bit,
+        }
+    }
+}
+
+impl Default for Facts {
+    fn default() -> Self {
+        Facts::ENTRY
+    }
+}
+
+/// A loop being scanned inside a region: where its back edge goes and the
+/// facts its head assumed.
+#[derive(Clone, Copy)]
+struct OpenLoop {
+    index: usize,
+    base: u16,
+    step_pc: usize,
+    head: usize,
+    entry: Facts,
 }
 
 /// Indexed reads one loop body may make.
@@ -219,6 +345,8 @@ struct CallSite {
     above: u32,
     /// The `CALL` pc.
     pc: usize,
+    /// The callee load's pc: a method lookup on a record exits there.
+    load_pc: usize,
     /// The `Call` operation's index in the body.
     op: usize,
 }
@@ -244,11 +372,22 @@ enum Callee {
         receiver: Receiver,
         key: u16,
     },
+    /// `SELF r t k` on record register `t`: method `k` of the record this
+    /// pass read, resolved per pass through a cache keyed by the record's
+    /// metatable (`State::run_control_region`).
+    Dynamic {
+        record: u8,
+        key: u16,
+    },
 }
 
 impl Callee {
     fn method(self) -> bool {
-        matches!(self, Callee::Method { .. })
+        matches!(self, Callee::Method { .. } | Callee::Dynamic { .. })
+    }
+
+    fn dynamic(self) -> bool {
+        matches!(self, Callee::Dynamic { .. })
     }
 }
 
@@ -263,6 +402,10 @@ enum Constant {
         /// The `GET_FIELD` site's cache slot.
         cache: Option<u8>,
     },
+    /// A number upvalue of the running closure, read at entry: nothing a
+    /// region runs writes an upvalue, and a running closure's upvalues
+    /// never alias its own frame's registers.
+    Upvalue(u16),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -345,6 +488,11 @@ enum OpKind {
     /// exiting to canonical dispatch before its charge when the key is not
     /// live there. Writes no mirror slot.
     RecordStore,
+    /// A nested loop's `FOR_PREP`, of inner loop `b`.
+    Prep,
+    /// A nested loop's `FOR_LOOP`, of inner loop `b`: a taken back edge
+    /// polls and continues at the inner body.
+    Step,
 }
 
 /// What a scan admits besides arithmetic.
@@ -398,22 +546,39 @@ struct Layout {
     number_ids: Vec<Option<u16>>,
     /// Slots some instruction of the body writes, on any path.
     written: u32,
-    /// Slots written on every path from the body's head to the instruction
-    /// being scanned: a read outside this set is guarded at entry.
-    must: u32,
+    /// Registers the facts are kept for, by fact index. A region's are
+    /// fixed by a first scan before the solving scans
+    /// (`NumericLoop::recognize`), so a fact exists before the
+    /// instruction that first names its register.
+    facts: Vec<u16>,
+    /// The layout was seeded by an earlier scan: no new register, fact or
+    /// record may appear.
+    frozen: bool,
+    /// The facts at the instruction being scanned.
+    cur: Facts,
     /// The instruction being scanned is reached only by a jump: the one
     /// before it does not fall through.
     dead: bool,
-    /// Forward branches not yet reached: target pc, and `must`, `rmust` and
-    /// `rmay` at the branch.
-    pending: Vec<(usize, u32, u32, u32)>,
+    /// Forward edges not yet reached: target pc and the facts on the edge.
+    pending: Vec<(usize, Facts)>,
+    /// Loop heads (the pc after a `FOR_PREP`) with the facts their back
+    /// edges were found to carry, kept across scans.
+    heads: Vec<(usize, Facts)>,
+    /// A back edge carried facts its head did not assume: scan again.
+    restart: bool,
+    /// The facts the region's own head assumed.
+    outer_entry: Facts,
+    /// Loops open at the instruction being scanned, innermost last.
+    loops: Vec<OpenLoop>,
+    /// Nested loops, by `Prep` order.
+    inner: Vec<InnerLoop>,
+    /// Registers any operation writes on any path: a number write, a record
+    /// read, a method lookup's two destinations, a loop's controls.
+    wrote: Vec<u16>,
+    /// The lowest register any call clears.
+    min_cleared: Option<u16>,
     /// Registers some record read of the body defines, by record id.
     records: Vec<u16>,
-    /// Record ids whose register holds a record defined in this pass, on
-    /// every path to the instruction being scanned.
-    rmust: u32,
-    /// Record ids whose register may hold such a record there.
-    rmay: u32,
     record_sites: Vec<RecordSite>,
     /// The operation index each scanned instruction starts, by pc.
     op_at: Vec<(usize, usize)>,
@@ -429,18 +594,11 @@ struct Layout {
     charges: Vec<(usize, u64)>,
     calls: Vec<CallSite>,
     /// A callee loaded into its register and not yet called: no other
-    /// operation may touch that register in between.
+    /// operation may touch that register in between, and no edge may
+    /// leave, enter or cross the interval.
     loading: Option<(u16, Callee)>,
-    /// The lowest function register called so far: the loop controls must
-    /// lie below it.
-    call_floor: Option<u16>,
-    /// The lowest register a call leaves nil: above its function register,
-    /// and the function register itself when the call keeps no result. A
-    /// register at or above it reads nil unless it is in `revived`.
-    nil_from: Option<u16>,
-    /// Registers at or above `nil_from` written since the call that cleared
-    /// them.
-    revived: Vec<u16>,
+    /// The loading operation's index and pc.
+    loading_at: (usize, usize),
     /// Registers a method lookup writes (`SELF`'s function register and
     /// receiver copy): a field or indexed receiver must not be one.
     method_writes: Vec<u16>,
@@ -456,35 +614,133 @@ impl Layout {
         self.registers.len() + self.constants.len() >= MIRROR_SLOTS
     }
 
+    /// A layout seeded with the registers, facts and records of an earlier
+    /// scan of the same body, and the loop-head facts found so far.
+    fn seeded(seed: Option<(Vec<u16>, Vec<u16>, Vec<u16>)>, heads: Vec<(usize, Facts)>) -> Self {
+        let mut layout = Layout {
+            heads,
+            ..Layout::default()
+        };
+        if let Some((registers, facts, records)) = seed {
+            layout.registers = registers;
+            layout.facts = facts;
+            layout.records = records;
+            layout.frozen = true;
+        }
+        layout
+    }
+
     fn register(&mut self, register: u16) -> Option<u8> {
         if let Some(slot) = self.registers.iter().position(|&r| r == register) {
             return Some(mirror_slot(slot));
         }
-        if self.full() {
+        if self.frozen || self.full() {
             return None;
         }
         self.registers.push(register);
         Some(mirror_slot(self.registers.len() - 1))
     }
 
-    /// A register operand being read: guarded unless written earlier.
+    /// `register`'s fact index.
+    fn fact(&mut self, register: u16) -> Option<usize> {
+        if let Some(fact) = self.facts.iter().position(|&r| r == register) {
+            return Some(fact);
+        }
+        if self.frozen || self.facts.len() >= 64 {
+            return None;
+        }
+        self.facts.push(register);
+        Some(self.facts.len() - 1)
+    }
+
+    /// `register` now holds something other than a record or a number: its
+    /// record facts die, and it counts as written for the receiver check.
+    fn overwritten(&mut self, register: u16) -> Option<()> {
+        let bit = 1u64 << self.fact(register)?;
+        self.cur.rmust &= !bit;
+        self.cur.rmay &= !bit;
+        self.note_write(register);
+        Some(())
+    }
+
+    fn note_write(&mut self, register: u16) {
+        if !self.wrote.contains(&register) {
+            self.wrote.push(register);
+        }
+    }
+
+    /// The stored facts of loop head `head`, met into `facts`.
+    fn at_head(&self, head: usize, facts: Facts) -> Facts {
+        self.heads
+            .iter()
+            .find(|&&(pc, _)| pc == head)
+            .map_or(facts, |&(_, stored)| facts.meet(stored))
+    }
+
+    /// A back edge to loop head `head`, which assumed `entry`, carrying
+    /// `taken`: when that narrows the head's facts, store them and mark the
+    /// region for another scan.
+    fn back_edge(&mut self, head: usize, entry: Facts, taken: Facts) {
+        let met = entry.meet(taken);
+        if met == entry {
+            return;
+        }
+        self.restart = true;
+        match self.heads.iter_mut().find(|(pc, _)| *pc == head) {
+            Some((_, stored)) => *stored = stored.meet(met),
+            None => self.heads.push((head, met)),
+        }
+    }
+
+    /// The facts after number writes of `registers`, from `facts`.
+    fn written_facts(&mut self, mut facts: Facts, registers: &[u16]) -> Option<Facts> {
+        // bounded: at most two loop counters
+        for &register in registers {
+            facts = facts.wrote(self.fact(register)?);
+        }
+        Some(facts)
+    }
+
+    /// A register operand being read: guarded unless written earlier. A
+    /// provisional upvalue load read as a number becomes a number read
+    /// once at entry.
     fn read(&mut self, register: u16) -> Option<u8> {
-        if self.untouchable(register)
-            || self.tables.iter().any(|&(r, _)| r == register)
-            || self
-                .nil_from
-                .is_some_and(|from| register >= from && !self.revived.contains(&register))
-            || self
-                .record_id(register)
-                .is_some_and(|id| self.rmay & (1 << id) != 0)
+        if let Some((loaded, Callee::Upvalue(index))) = self.loading
+            && loaded == register
         {
+            self.hoist_upvalue(register, index)?;
+        }
+        if self.untouchable(register) || self.tables.iter().any(|&(r, _)| r == register) {
+            return None;
+        }
+        let bit = 1u64 << self.fact(register)?;
+        if self.cur.safe & bit == 0 || self.cur.rmay & bit != 0 {
             return None;
         }
         let slot = self.register(register)?;
-        if self.must & (1 << slot) == 0 {
+        if self.cur.must & bit == 0 {
             self.guards |= 1 << slot;
         }
         Some(slot)
+    }
+
+    /// Turn the open `GET_UPVAL register u` load into a copy of upvalue
+    /// `u`, read once at entry, at the load's own operation. No edge
+    /// entered or crossed the interval (`join` and `branch` refuse while a
+    /// load is open) and nothing touched the register in it, so the write
+    /// counts from the load.
+    fn hoist_upvalue(&mut self, register: u16, index: u16) -> Option<()> {
+        let b = self.constant(Constant::Upvalue(index), None)?;
+        self.loading = None;
+        let a = self.write(register)?;
+        let (op, _) = self.loading_at;
+        *self.ops.get_mut(op)? = LoopOp {
+            kind: OpKind::Copy,
+            a,
+            b,
+            c: 0,
+        };
+        Some(())
     }
 
     fn write(&mut self, register: u16) -> Option<u8> {
@@ -492,16 +748,11 @@ impl Layout {
             return None;
         }
         let slot = self.register(register)?;
+        let fact = self.fact(register)?;
         self.written |= 1 << slot;
-        self.must |= 1 << slot;
-        if let Some(id) = self.record_id(register) {
-            self.rmust &= !(1 << id);
-            self.rmay &= !(1 << id);
-        }
+        self.cur = self.cur.wrote(fact);
         self.tables.retain(|&(r, _)| r != register);
-        if self.nil_from.is_some_and(|from| register >= from) && !self.revived.contains(&register) {
-            self.revived.push(register);
-        }
+        self.note_write(register);
         Some(slot)
     }
 
@@ -512,9 +763,14 @@ impl Layout {
     /// The record id `register` holds on every path here, as a field
     /// receiver; `None` when some path reaching here leaves it no record of
     /// this pass.
-    fn record_receiver(&self, register: u16) -> Option<u8> {
+    fn record_receiver(&mut self, register: u16) -> Option<u8> {
+        // A loaded callee, or a method's receiver copy, is no record.
+        if self.untouchable(register) {
+            return None;
+        }
         let id = self.record_id(register)?;
-        (self.rmust & (1 << id) != 0).then_some(id as u8)
+        let bit = 1u64 << self.fact(register)?;
+        (self.cur.rmust & bit != 0).then_some(id as u8)
     }
 
     /// The record site of record `record` and `key`, shared with earlier
@@ -557,7 +813,8 @@ impl Layout {
         }
         end.is_some_and(|end| next < end)
             && code.get(next).is_some_and(|use_| {
-                (use_.opcode() == Instr::OP_GET_FIELD && use_.b() == register)
+                ((use_.opcode() == Instr::OP_GET_FIELD || use_.opcode() == Instr::OP_SELF)
+                    && use_.b() == register)
                     || (use_.opcode() == Instr::OP_SET_FIELD && use_.a() == register)
             })
     }
@@ -578,15 +835,19 @@ impl Layout {
         let id = match self.record_id(register) {
             Some(id) => id,
             None => {
-                if self.records.len() >= MAX_RECORDS {
+                if self.frozen || self.records.len() >= MAX_RECORDS {
                     return None;
                 }
                 self.records.push(register);
                 self.records.len() - 1
             }
         };
-        self.rmust |= 1 << id;
-        self.rmay |= 1 << id;
+        let fact = self.fact(register)?;
+        let bit = 1u64 << fact;
+        self.cur = self.cur.wrote(fact);
+        self.cur.rmust |= bit;
+        self.cur.rmay |= bit;
+        self.note_write(register);
         self.indexed.push((receiver, exit));
         Some(LoopOp {
             kind: OpKind::Record,
@@ -666,7 +927,7 @@ impl Layout {
     /// callee into `r` (and a method's receiver into `r + 1`). Off under
     /// fault injection, whose call-depth and stack-space sites count every
     /// admission.
-    fn load(&mut self, register: u16, callee: Callee) -> Option<LoopOp> {
+    fn load(&mut self, register: u16, callee: Callee, pc: usize) -> Option<LoopOp> {
         if cfg!(feature = "fault-injection")
             || self.loading.is_some()
             || self.calls.len() >= MAX_CALLS
@@ -674,12 +935,21 @@ impl Layout {
         {
             return None;
         }
+        // The destinations now hold a callee (and a method's receiver), no
+        // record of this pass. Their `must` and `safe` facts stand only
+        // because nothing may read them before the `CALL` or the hoist that
+        // ends the interval writes or clears them: a second load, any edge
+        // into or out of the interval, a loop step and an open load at the
+        // end are all refused.
         if callee.method() {
             let copy = register.checked_add(1)?;
             self.method_writes.extend([register, copy]);
+            self.overwritten(copy)?;
         }
+        self.overwritten(register)?;
         self.register(register)?;
         self.loading = Some((register, callee));
+        self.loading_at = (self.ops.len(), pc);
         Some(LoopOp {
             kind: OpKind::Load,
             a: 0,
@@ -723,14 +993,18 @@ impl Layout {
         }
         self.loading = None;
         // Everything above `r`, and `r` too without a result, is nil after
-        // the call.
+        // the call: no longer safe to read, and no record.
         let cleared = register.checked_add(u16::from(results))?;
-        self.call_floor = Some(
-            self.call_floor
-                .map_or(register, |floor| floor.min(register)),
-        );
-        self.nil_from = Some(self.nil_from.map_or(cleared, |from| from.min(cleared)));
-        self.revived.retain(|&revived| revived < cleared);
+        self.min_cleared = Some(self.min_cleared.map_or(cleared, |m| m.min(cleared)));
+        let killed = self
+            .facts
+            .iter()
+            .enumerate()
+            .filter(|&(_, &r)| r >= cleared)
+            .fold(0u64, |mask, (fact, _)| mask | 1 << fact);
+        self.cur.safe &= !killed;
+        self.cur.rmust &= !killed;
+        self.cur.rmay &= !killed;
         let a = if results == 1 {
             self.write(register)?
         } else {
@@ -745,6 +1019,7 @@ impl Layout {
             results,
             above: 0,
             pc,
+            load_pc: self.loading_at.1,
             op: self.ops.len(),
         });
         Some(LoopOp {
@@ -781,42 +1056,36 @@ impl Layout {
     /// unless that one jumped away, and each forward branch targeting `pc`.
     /// `None` for code no edge reaches.
     fn join(&mut self, pc: usize) -> Option<()> {
-        let mut reached = !self.dead;
-        let mut must = if self.dead { u32::MAX } else { self.must };
-        let mut rmust = if self.dead { u32::MAX } else { self.rmust };
-        let mut rmay = if self.dead { 0 } else { self.rmay };
-        self.pending
-            .retain(|&(target, at_branch, rmust_at, rmay_at)| {
-                if target == pc {
-                    reached = true;
-                    must &= at_branch;
-                    rmust &= rmust_at;
-                    rmay |= rmay_at;
-                    false
-                } else {
-                    true
-                }
-            });
-        if !reached {
+        let mut joined = false;
+        let mut facts = if self.dead { Facts::TOP } else { self.cur };
+        self.pending.retain(|&(target, at_edge)| {
+            if target == pc {
+                joined = true;
+                facts = facts.meet(at_edge);
+                false
+            } else {
+                true
+            }
+        });
+        // No edge may enter a callee load's interval.
+        if !(joined || !self.dead) || (joined && self.loading.is_some()) {
             return None;
         }
-        self.must = must;
-        self.rmust = rmust;
-        self.rmay = rmay;
+        self.cur = facts;
         self.dead = false;
         Some(())
     }
 
     /// A forward branch or jump at `pc` with offset `offset`, inside a body
-    /// ending at `end`; its target joins `must` as it stands now.
+    /// ending at `end`; its target joins the facts as they stand now. No
+    /// edge may leave a callee load's interval.
     fn branch(&mut self, pc: usize, offset: i32, end: Option<usize>) -> Option<()> {
         let end = end?;
         let target = Frame::jumped(pc + 1, offset);
-        if target <= pc || target > end {
+        if target <= pc || target > end || self.loading.is_some() {
             return None;
         }
-        self.pending
-            .push((target, self.must, self.rmust, self.rmay));
+        self.pending.push((target, self.cur));
         self.jumps.push((self.ops.len(), target));
         Some(())
     }
@@ -867,6 +1136,11 @@ impl Layout {
             let opcode = inst.opcode();
             self.join(pc)?;
             self.op_at.push((pc, self.ops.len()));
+            if self.loops.last().is_some_and(|open| open.step_pc == pc) {
+                self.step(cost, pc)?;
+                pc += 1;
+                continue;
+            }
             let op = if let Some((op, operands)) = ArithOp::decode(opcode) {
                 let (b, c) = match operands {
                     ArithOperands::RegReg => (self.read(inst.b())?, self.read(inst.c())?),
@@ -1009,12 +1283,31 @@ impl Layout {
                                 receiver: Receiver::Upvalue(inst.b()),
                                 key: lookup.c(),
                             },
+                            pc,
                         )?;
                         self.ops.push(op);
                         self.charges.push((pc + 2, 0));
                         pc += 2;
                         continue;
                     }
+                    // `SELF r t k` on a record: the method is looked up on
+                    // every pass.
+                    Instr::OP_SELF if fields && self.record_id(inst.b()).is_some() => {
+                        const {
+                            assert!(Instr::fixed_charge(Instr::OP_SELF).is_none());
+                        }
+                        let record = self.record_receiver(inst.b())?;
+                        self.load(
+                            inst.a(),
+                            Callee::Dynamic {
+                                record,
+                                key: inst.c(),
+                            },
+                            pc,
+                        )?
+                    }
+                    // A nested numeric loop.
+                    Instr::OP_FOR_PREP if fields && end.is_some() => self.prep(code, pc, end)?,
                     // `SELF r s k` on a register the body never writes.
                     Instr::OP_SELF if fields => {
                         const {
@@ -1030,6 +1323,7 @@ impl Layout {
                                 receiver: Receiver::Register(inst.b()),
                                 key: inst.c(),
                             },
+                            pc,
                         )?
                     }
                     Instr::OP_GET_TABLE if fields => {
@@ -1128,9 +1422,12 @@ impl Layout {
                             name: inst.b(),
                             cache: inst.cache_slot(),
                         },
+                        pc,
                     )?,
+                    // A callee load, or, read next as a number, a number
+                    // upvalue read once at entry (`Layout::read`).
                     Instr::OP_GET_UPVAL if fields => {
-                        self.load(inst.a(), Callee::Upvalue(inst.b()))?
+                        self.load(inst.a(), Callee::Upvalue(inst.b()), pc)?
                     }
                     Instr::OP_CALL if fields => self.call_site(inst, pc)?,
                     // A leaf's upvalue load defines a table receiver and
@@ -1180,10 +1477,109 @@ impl Layout {
             self.op_at.push((pc, self.ops.len()));
         }
         // A branch into the second half of a fused pair was never joined.
-        if !self.pending.is_empty() {
+        if !self.pending.is_empty() || !self.loops.is_empty() {
             return None;
         }
         Some(pc)
+    }
+
+    /// A nested loop's `FOR_PREP` at `pc` inside a body ending at `end`.
+    /// It reads its three controls; when it does not enter it goes past
+    /// its `FOR_LOOP` with nothing written, as dispatch does, and when it
+    /// does it writes all four. No edge from outside may enter the loop's
+    /// body or reach its `FOR_LOOP`.
+    fn prep(&mut self, code: &[Instr], pc: usize, end: Option<usize>) -> Option<LoopOp> {
+        let end = end?;
+        let inst = code[pc];
+        let after = pc + 1;
+        let exit = Frame::jumped(after, inst.sj());
+        if exit <= after || exit > end {
+            return None;
+        }
+        let step_pc = exit - 1;
+        let step = *code.get(step_pc)?;
+        if step.opcode() != Instr::OP_FOR_LOOP
+            || step.a() != inst.a()
+            || Frame::jumped(exit, step.sj()) != after
+            || self.loops.len() >= MAX_DEPTH
+            || self
+                .loops
+                .last()
+                .is_some_and(|open| step_pc >= open.step_pc)
+            || self.inner.len() >= MAX_INNER
+            || self
+                .pending
+                .iter()
+                .any(|&(target, _)| target > pc && target <= step_pc)
+        {
+            return None;
+        }
+        let base = inst.a();
+        let registers = [
+            base,
+            base.checked_add(1)?,
+            base.checked_add(2)?,
+            base.checked_add(3)?,
+        ];
+        self.read(registers[2])?;
+        self.read(registers[1])?;
+        self.read(registers[0])?;
+        if self.loading.is_some() {
+            return None;
+        }
+        // The edge past the loop when it does not enter.
+        self.pending.push((exit, self.cur));
+        let mut controls = [0u8; 4];
+        // bounded: the four numeric loop controls
+        for (slot, &register) in controls.iter_mut().zip(&registers) {
+            *slot = self.write(register)?;
+        }
+        self.cur = self.at_head(after, self.cur);
+        let index = self.inner.len();
+        self.inner.push(InnerLoop {
+            controls,
+            step_pc,
+            body: self.ops.len() + 1,
+            exit: 0,
+        });
+        self.loops.push(OpenLoop {
+            index,
+            base,
+            step_pc,
+            head: after,
+            entry: self.cur,
+        });
+        Some(LoopOp {
+            kind: OpKind::Prep,
+            a: 0,
+            b: index as u8,
+            c: 0,
+        })
+    }
+
+    /// The innermost open loop's `FOR_LOOP` at `pc`: it reads the three
+    /// controls; its taken edge writes the counter and the visible
+    /// variable and returns to the head, its fall-through writes nothing.
+    fn step(&mut self, cost: &CostState, pc: usize) -> Option<()> {
+        let open = self.loops.pop()?;
+        let base = open.base;
+        self.read(base.checked_add(2)?)?;
+        self.read(base.checked_add(1)?)?;
+        self.read(base)?;
+        if self.loading.is_some() {
+            return None;
+        }
+        let taken = self.written_facts(self.cur, &[base, base.checked_add(3)?])?;
+        self.back_edge(open.head, open.entry, taken);
+        self.ops.push(LoopOp {
+            kind: OpKind::Step,
+            a: 0,
+            b: open.index as u8,
+            c: 0,
+        });
+        self.charges
+            .push(Self::charge(cost, Instr::OP_FOR_LOOP, pc));
+        Some(())
     }
 
     /// The finished body. `None` if a field receiver register is written by
@@ -1192,19 +1588,17 @@ impl Layout {
         if self.loading.is_some() {
             return None;
         }
-        let control = !self.jumps.is_empty() || !self.indexed.is_empty();
-        // Invariant receivers are read once, so no record may replace one;
-        // a register read as a number before written in a pass must not
-        // still hold a record from the pass before.
+        let control = !self.jumps.is_empty()
+            || !self.indexed.is_empty()
+            || !self.inner.is_empty()
+            || self.calls.iter().any(|site| site.callee.dynamic());
+        // Invariant receivers are read once, so no record may replace one.
+        // What a pass leaves for the next (a record, a cleared register) is
+        // the loop heads' business: their facts are met with the back
+        // edges' (`Layout::back_edge`).
         // bounded: at most MAX_RECORDS record registers
-        for (id, &register) in self.records.iter().enumerate() {
+        for &register in &self.records {
             if self.receivers.contains(&register) {
-                return None;
-            }
-            if self.rmay & (1 << id) != 0
-                && let Some(slot) = self.registers.iter().position(|&r| r == register)
-                && self.guards & (1 << slot) != 0
-            {
                 return None;
             }
         }
@@ -1216,9 +1610,8 @@ impl Layout {
                 (register, slot.map(mirror_slot))
             })
             .collect::<Vec<_>>();
-        // Calls stay on the straight-line runner, whose nil-floor reasoning
-        // assumes one path through the body; operation indices fit a `u8`.
-        if control && (!self.calls.is_empty() || self.ops.len() > usize::from(u8::MAX)) {
+        // Operation indices fit a `u8`.
+        if control && self.ops.len() > usize::from(u8::MAX) {
             return None;
         }
         // bounded: at most one forward jump per bytecode instruction
@@ -1226,6 +1619,15 @@ impl Layout {
             let (_, index) = self.op_at.iter().find(|&&(pc, _)| pc == target)?;
             self.ops[op].a = *index as u8;
         }
+        // bounded: at most MAX_INNER nested loops
+        for inner in &mut self.inner {
+            let exit = inner.step_pc + 1;
+            let (_, index) = self.op_at.iter().find(|&&(pc, _)| pc == exit)?;
+            inner.exit = *index;
+        }
+        // An entry-resolved receiver keeps its register's value for the whole
+        // region: nothing writes it (a number, a record, a method lookup's
+        // destinations, a loop's controls) and no call clears it.
         // bounded: the receivers recorded during the bytecode scan
         for &receiver in &self.receivers {
             if let Some(slot) = self.registers.iter().position(|&r| r == receiver)
@@ -1233,35 +1635,22 @@ impl Layout {
             {
                 return None;
             }
-            if self.method_writes.contains(&receiver) {
+            if self.method_writes.contains(&receiver)
+                || self.wrote.contains(&receiver)
+                || self.min_cleared.is_some_and(|cleared| receiver >= cleared)
+            {
                 return None;
             }
         }
-        if let (Some(floor), Some(from)) = (self.call_floor, self.nil_from) {
-            // A call writes its function register and clears every register
-            // above it (and the function register too when it keeps no
-            // result), so a register read before written at or above the
-            // lowest cleared one would read nil from the second pass on; the
-            // loop controls and a receiver must survive every pass.
-            let reserved_above = self.registers[..reserved].iter().any(|&r| r >= floor);
-            let guard_above = self
+        // bounded: at most MAX_CALLS call sites
+        for site in &mut self.calls {
+            let cleared = site.cleared();
+            site.above = self
                 .registers
                 .iter()
                 .enumerate()
-                .any(|(slot, &r)| self.guards & (1 << slot) != 0 && r >= from);
-            if reserved_above || guard_above || self.receivers.iter().any(|&r| r >= from) {
-                return None;
-            }
-            // bounded: at most MAX_CALLS call sites
-            for site in &mut self.calls {
-                let cleared = site.cleared();
-                site.above = self
-                    .registers
-                    .iter()
-                    .enumerate()
-                    .filter(|&(_, &r)| r >= cleared)
-                    .fold(0, |mask, (slot, _)| mask | 1 << slot);
-            }
+                .filter(|&(_, &r)| r >= cleared)
+                .fold(0, |mask, (slot, _)| mask | 1 << slot);
         }
         // Number the constant slots after the registers. The layout never
         // holds more than `MIRROR_SLOTS` slots in all, so every final slot is
@@ -1303,6 +1692,7 @@ impl Layout {
                 indexed: self.indexed.into_boxed_slice(),
                 records: records.into_boxed_slice(),
                 record_sites: self.record_sites.into_boxed_slice(),
+                inner: self.inner.into_boxed_slice(),
                 control,
             },
             registers,
@@ -1360,27 +1750,56 @@ impl NumericLoop {
         }
 
         let base = prep_inst.a();
-        let mut layout = Layout::default();
-        // bounded: four numeric loop control registers
-        for offset in 0..4 {
-            layout.register(base.checked_add(offset)?)?;
-        }
-        layout.scan(bytecode, cost, after, Some(step_pc), Mode::Region)?;
-        let tail = Layout::charge(cost, Instr::OP_FOR_LOOP, step_pc);
-        // The loop step reads the three hidden controls after the body,
-        // guarded unless every path to it writes them.
-        // bounded: three initialized numeric loop control slots
-        for slot in 0..3u8 {
-            if layout.must & (1 << slot) == 0 {
-                layout.guards |= 1 << slot;
+        let controls = [
+            base,
+            base.checked_add(1)?,
+            base.checked_add(2)?,
+            base.checked_add(3)?,
+        ];
+        // The first scan fixes the registers, facts and records; each later
+        // scan solves the loop heads' facts from the back edges found so
+        // far, until a scan finds every head's facts unchanged.
+        let mut seed = None;
+        let mut heads = Vec::new();
+        // bounded: at most MAX_SCANS scans of one region
+        for scan in 0..MAX_SCANS {
+            let mut layout = Layout::seeded(seed.take(), std::mem::take(&mut heads));
+            // bounded: four numeric loop control registers
+            for &register in &controls {
+                layout.register(register)?;
+                layout.fact(register)?;
             }
+            layout.cur = layout.at_head(after, Facts::ENTRY);
+            layout.outer_entry = layout.cur;
+            layout.scan(bytecode, cost, after, Some(step_pc), Mode::Region)?;
+            // The loop step reads the three hidden controls after the body,
+            // guarded unless every path to it writes them; its taken edge
+            // writes the counter and the visible variable.
+            layout.read(controls[2])?;
+            layout.read(controls[1])?;
+            layout.read(controls[0])?;
+            let taken = layout.written_facts(layout.cur, &[controls[0], controls[3]])?;
+            let entry = layout.outer_entry;
+            layout.back_edge(after, entry, taken);
+            if scan == 0 || layout.restart {
+                heads = std::mem::take(&mut layout.heads);
+                seed = Some((
+                    std::mem::take(&mut layout.registers),
+                    std::mem::take(&mut layout.facts),
+                    std::mem::take(&mut layout.records),
+                ));
+                continue;
+            }
+            let tail = Layout::charge(cost, Instr::OP_FOR_LOOP, step_pc);
+            let (body, _) = layout.finish(4, tail)?;
+            return Some(Self {
+                prep,
+                step_pc,
+                body,
+                backoff: AtomicU8::new(0),
+            });
         }
-        let (body, _) = layout.finish(4, tail)?;
-        Some(Self {
-            prep,
-            step_pc,
-            body,
-        })
+        None
     }
 }
 
@@ -1470,6 +1889,31 @@ impl Resolved {
     }
 }
 
+/// One class's entry in a region-local method cache of a method call on a
+/// record (`Callee::Dynamic`): the receiver metatable it was found through,
+/// the method, its runtime (which holds the leaf plan) and its field sites.
+struct RegionMethod {
+    meta: ObjectPtr,
+    method: Val,
+    runtime: Arc<BytecodeRuntime>,
+    /// The leaf's upvalue field sites, resolved at admission.
+    fields: FieldSlots,
+    /// Each field site's key.
+    keys: [Val; MAX_FIELD_SITES],
+    /// Each receiver site's last slot, a position hint as a record site's.
+    hints: FieldSlots,
+    has_fields: bool,
+}
+
+impl RegionMethod {
+    fn leaf(&self) -> &NumericLeaf {
+        self.runtime
+            .numeric_leaf
+            .as_ref()
+            .expect("admit_method found a leaf plan")
+    }
+}
+
 /// Mask an operand into the mirror; every operand is below `MIRROR_SLOTS`
 /// by construction, so this only spares the bounds check.
 #[inline(always)]
@@ -1494,10 +1938,36 @@ impl State {
         local_cost: &mut u64,
     ) -> Result<()> {
         if region.body.control {
-            if region.body.records.is_empty() {
-                self.run_control_region::<false>(region, frame, ip, local_cost)
-            } else {
-                self.run_control_region::<true>(region, frame, ip, local_cost)
+            let body = &region.body;
+            match (
+                body.records.is_empty(),
+                body.calls.is_empty(),
+                body.inner.is_empty(),
+            ) {
+                (true, true, true) => {
+                    self.run_control_region::<false, false, false>(region, frame, ip, local_cost)
+                }
+                (true, true, false) => {
+                    self.run_control_region::<false, false, true>(region, frame, ip, local_cost)
+                }
+                (false, true, true) => {
+                    self.run_control_region::<true, false, false>(region, frame, ip, local_cost)
+                }
+                (false, true, false) => {
+                    self.run_control_region::<true, false, true>(region, frame, ip, local_cost)
+                }
+                (true, false, true) => {
+                    self.run_control_region::<false, true, false>(region, frame, ip, local_cost)
+                }
+                (true, false, false) => {
+                    self.run_control_region::<false, true, true>(region, frame, ip, local_cost)
+                }
+                (false, false, true) => {
+                    self.run_control_region::<true, true, false>(region, frame, ip, local_cost)
+                }
+                (false, false, false) => {
+                    self.run_control_region::<true, true, true>(region, frame, ip, local_cost)
+                }
             }
         } else if region.body.calls.is_empty() {
             self.run_region::<false>(region, frame, ip, local_cost)
@@ -1746,9 +2216,10 @@ impl State {
         result
     }
 
-    /// `run_numeric_loop` for a body with forward branches or indexed reads,
-    /// and no calls. The operations run by index, a branch or jump moving
-    /// the index forward to its target.
+    /// `run_numeric_loop` for a body with forward branches, indexed reads,
+    /// records, nested loops or method calls on a record. The operations
+    /// run by index, a branch or jump moving the index forward to its
+    /// target, a nested loop's taken back edge moving it back.
     ///
     /// Beyond the straight-line runner's argument:
     /// - Each indexed read's receiver is read once at entry and must be a
@@ -1799,8 +2270,44 @@ impl State {
     ///   same, else as a key-checked position (`Table::renew_slot`), which
     ///   records of one layout share, else looked up. Inline caches are
     ///   neither consulted nor refilled; they only accelerate.
+    ///
+    /// Nested loops: an inner `FOR_PREP` (`Prep`) reads its controls from
+    /// the mirror, numbers by the entry guards, and either writes all four
+    /// or goes past its `FOR_LOOP` with nothing written; an inner
+    /// `FOR_LOOP` (`Step`) computes the next counter, and on the taken edge
+    /// publishes the slots first written since the last checkpoint, polls
+    /// with the cursor past it, and only then writes the counters, as the
+    /// region's own step does. Every back edge ends a charge segment: the
+    /// fast test is made again there, and between two of them each
+    /// operation runs at most once, so the sum of every weight still bounds
+    /// a segment. The recognizer solves the facts at each loop head to a
+    /// fixpoint over its back edges, so a read the second iteration makes
+    /// is proven as the first's.
+    ///
+    /// Calls (`CALLS`): as in the straight-line runner, a call runs its
+    /// leaf on the mirror after reading the poll flag and, in a
+    /// per-operation segment, after `CostState::admits_charges` admits the
+    /// whole leaf, else exits at the `CALL` with the callee and receiver
+    /// put back last. The recognizer tracks per path which registers a
+    /// call left nil, so a branch beside a call is exact. A method call on
+    /// a record (`Callee::Dynamic`) looks its method up on every pass: an
+    /// own raw value of the key exits at the free `SELF`; otherwise the
+    /// receiver's metatable selects an entry of the site's region-local
+    /// cache, filled by `State::region_method` and `State::admit_method`
+    /// on a miss. An entry stays exact for the whole run: no store of the
+    /// region or of any admitted leaf is under `__index` or under a key the
+    /// region relies on (method keys, callee names, entry-read fields), and
+    /// nothing creates or removes a key or sets a metatable, so every link
+    /// of the route answers the same. The leaf's receiver fields are found
+    /// per pass on the record, as record sites are, and every read one
+    /// must hold a number before the leaf runs, else the region exits at
+    /// the `CALL`. In a fast segment a method's leaf weight joins the bound
+    /// (`weight` still bounds what remains), else the segment turns
+    /// per-operation. Cached metatables and methods stay reachable through
+    /// the receivers, which the entry-resolved tables hold by number keys
+    /// no region store can replace, and nothing allocates.
     #[inline(never)]
-    fn run_control_region<const RECORDS: bool>(
+    fn run_control_region<const RECORDS: bool, const CALLS: bool, const NESTED: bool>(
         &mut self,
         region: &NumericLoop,
         frame: &Frame,
@@ -1809,6 +2316,13 @@ impl State {
     ) -> Result<()> {
         let base = frame.stack_bottom;
         let body = &region.body;
+        if CALLS {
+            let backoff = region.backoff.load(Ordering::Relaxed);
+            if backoff != 0 {
+                region.backoff.store(backoff - 1, Ordering::Relaxed);
+                return Ok(());
+            }
+        }
         let mut x = [0.0f64; MIRROR_SLOTS];
         if !self.load_mirror(body, frame, base, &mut x) {
             return Ok(());
@@ -1835,127 +2349,330 @@ impl State {
         // Each record's table this pass, and each record site's last slot:
         // a position hint, compared by handle and never dereferenced on
         // another table without its key check.
+        let mut callees: [Option<Resolved>; MAX_CALLS] = Default::default();
+        let mut methods: [Vec<RegionMethod>; MAX_CALLS] = Default::default();
+        // Per call site: the method and receiver a method lookup on a record
+        // found this pass, and the cache entry.
+        let mut current = [(Val::Nil, None::<ObjectPtr>, 0usize); MAX_CALLS];
+        let mut method_keys = [Val::Nil; MAX_CALLS];
+        // A method's field sites this pass, resolved before its leaf runs.
+        let mut method_slots: FieldSlots = [None; MAX_FIELD_SITES];
+        let mut relied = Vec::new();
+        let mut weight = body.weight;
+        if CALLS {
+            if !self.resolve_callees(body, frame, &mut callees) {
+                return Ok(());
+            }
+            if body.calls.iter().any(|site| site.callee.dynamic()) {
+                #[cfg(feature = "disable-inline-caches")]
+                if super::caches::hits_disabled() {
+                    return Ok(());
+                }
+                relied = self.relied_keys(body, frame);
+            }
+            // bounded: at most MAX_CALLS call sites
+            for ((site, resolved), key) in body.calls.iter().zip(&callees).zip(&mut method_keys) {
+                if let Callee::Dynamic { key: literal, .. } = site.callee {
+                    *key = frame.literal(literal);
+                }
+                if let Some(resolved) = resolved {
+                    weight = weight.saturating_add(resolved.leaf().body.weight);
+                }
+            }
+        }
         let mut records = [None::<ObjectPtr>; MAX_RECORDS];
         let mut found = [None::<(ObjectPtr, SlotRef)>; MAX_RECORD_SITES];
         let step_pc = region.step_pc;
         let mut written: u32 = 0;
         let mut published: u32 = 0;
+        // The call site whose callee is loaded and not yet called, which an
+        // exit puts back in its register.
+        let mut loaded: Option<usize> = None;
+        // A segment, from a pass's start or a back edge to the next back edge
+        // or the pass's end, tests once whether it runs fast: kept apart, the
+        // test stays out of the operation loop. A method call whose leaf
+        // does not fit turns the rest of its segment per-operation.
+        let mut slow;
+        let mut first_pass = true;
         let result = 'pass: loop {
-            let fast =
-                body.weight == 0 || body.weight < self.cost_flush_at().saturating_sub(*local_cost);
             let mut k = 0;
-            // bounded: branches only advance the operation index within this pass
-            while let Some(op) = body.ops.get(k) {
-                let (cursor, charge) = body.charges[k];
-                // A store resolves its slot before its charge: a key not
-                // live there exits with nothing charged for it.
-                let mut store = None;
-                if RECORDS && let OpKind::RecordStore = op.kind {
-                    let site = usize::from(op.b) % MAX_RECORD_SITES;
-                    let table = records[usize::from(body.record_sites[site].record) % MAX_RECORDS]
-                        .expect("a record is defined on every path to its use");
-                    match self.record_slot(table, keys[site], &mut found[site]) {
-                        Some((slot, _)) => store = Some((table, slot)),
-                        None => {
-                            *ip = cursor - 1;
-                            break 'pass Ok(());
-                        }
-                    }
-                }
-                if charge != 0 {
-                    if fast {
-                        *local_cost += charge;
-                        #[cfg(feature = "cost-check-interval")]
-                        crate::cost_meter::interval_test::record(cursor, charge);
-                    } else {
-                        *ip = cursor;
-                        if let Err(error) = self.charge_dispatch(local_cost, cursor, charge) {
-                            break 'pass Err(error);
-                        }
-                    }
-                }
-                k += 1;
-                match op.kind {
-                    OpKind::Branch(compare) => {
-                        if !holds(compare, x[at(op.b)], x[at(op.c)]) {
-                            k = usize::from(op.a);
-                        }
-                    }
-                    OpKind::Jump => k = usize::from(op.a),
-                    OpKind::Index => {
-                        let (_, exit) = body.indexed[usize::from(op.b)];
-                        let table = tables[usize::from(op.b) % MAX_INDEXED]
-                            .expect("every indexed receiver was resolved at entry");
-                        let value = self
-                            .heap
-                            .as_table_ref(table)
-                            .map(|tbl| tbl.get(&Val::Num(x[at(op.c)])));
-                        let Some(Val::Num(n)) = value else {
-                            *ip = exit;
-                            break 'pass Ok(());
-                        };
-                        x[at(op.a)] = n;
-                        written |= 1 << op.a;
-                    }
-                    // Only a body with records holds these three.
-                    OpKind::Record if RECORDS => {
-                        let (_, exit) = body.indexed[usize::from(op.b)];
-                        let table = tables[usize::from(op.b) % MAX_INDEXED]
-                            .expect("every indexed receiver was resolved at entry");
-                        let value = self
-                            .heap
-                            .as_table_ref(table)
-                            .map(|tbl| tbl.get(&Val::Num(x[at(op.c)])));
-                        let Some(Val::Obj(record)) = value else {
-                            *ip = exit;
-                            break 'pass Ok(());
-                        };
-                        if self.heap.as_table_ref(record).is_none() {
-                            *ip = exit;
-                            break 'pass Ok(());
-                        }
-                        let id = usize::from(op.a) % MAX_RECORDS;
-                        records[id] = Some(record);
-                        let (register, slot) = body.records[id];
-                        // The stack holds the record as canonical dispatch
-                        // leaves it: no exit publishes an older number over
-                        // it, and the next checkpoint republishes a number
-                        // written after it.
-                        self.stack[base + usize::from(register)] = Val::Obj(record);
-                        if let Some(slot) = slot {
-                            written &= !(1 << slot);
-                            published &= !(1 << slot);
-                        }
-                    }
-                    OpKind::RecordRead if RECORDS => {
+            slow = false;
+            // bounded: each segment ends at a back edge, which polls, or at
+            // the pass's end
+            'segment: loop {
+                let fast = !slow
+                    && (weight == 0 || weight < self.cost_flush_at().saturating_sub(*local_cost));
+                // bounded: branches only advance the operation index within this pass
+                while let Some(op) = body.ops.get(k) {
+                    let (cursor, charge) = body.charges[k];
+                    // A store resolves its slot before its charge: a key not
+                    // live there exits with nothing charged for it.
+                    let mut store = None;
+                    if RECORDS && let OpKind::RecordStore = op.kind {
                         let site = usize::from(op.b) % MAX_RECORD_SITES;
                         let table = records
                             [usize::from(body.record_sites[site].record) % MAX_RECORDS]
                             .expect("a record is defined on every path to its use");
-                        let Some((_, Val::Num(n))) =
-                            self.record_slot(table, keys[site], &mut found[site])
-                        else {
-                            *ip = cursor - 1;
-                            break 'pass Ok(());
-                        };
-                        x[at(op.a)] = n;
-                        written |= 1 << op.a;
+                        match self.record_slot(table, keys[site], &mut found[site]) {
+                            Some((slot, _)) => store = Some((table, slot)),
+                            None => {
+                                *ip = cursor - 1;
+                                break 'pass Ok(());
+                            }
+                        }
                     }
-                    OpKind::RecordStore if RECORDS => {
-                        let (table, slot) = store.expect("the store resolved its slot");
-                        // A live overwrite under a key proven not `__index`
-                        // at entry, so inherited routes stay standing.
-                        let stored =
-                            self.heap
-                                .overwrite_live_slot(table, slot, Val::Num(x[at(op.c)]));
-                        debug_assert!(stored, "a slot resolved just before stays live");
+                    if charge != 0 {
+                        if fast {
+                            *local_cost += charge;
+                            #[cfg(feature = "cost-check-interval")]
+                            crate::cost_meter::interval_test::record(cursor, charge);
+                        } else {
+                            *ip = cursor;
+                            if let Err(error) = self.charge_dispatch(local_cost, cursor, charge) {
+                                break 'pass Err(error);
+                            }
+                        }
                     }
-                    _ => {
-                        x[at(op.a)] = eval(op, &x);
-                        written |= 1 << op.a;
+                    k += 1;
+                    match op.kind {
+                        OpKind::Branch(compare) => {
+                            if !holds(compare, x[at(op.b)], x[at(op.c)]) {
+                                k = usize::from(op.a);
+                            }
+                        }
+                        OpKind::Jump => k = usize::from(op.a),
+                        OpKind::Index => {
+                            let (_, exit) = body.indexed[usize::from(op.b)];
+                            let table = tables[usize::from(op.b) % MAX_INDEXED]
+                                .expect("every indexed receiver was resolved at entry");
+                            let value = self
+                                .heap
+                                .as_table_ref(table)
+                                .map(|tbl| tbl.get_number(x[at(op.c)]));
+                            let Some(Val::Num(n)) = value else {
+                                *ip = exit;
+                                break 'pass Ok(());
+                            };
+                            x[at(op.a)] = n;
+                            written |= 1 << op.a;
+                        }
+                        // Only a body with records holds these three.
+                        OpKind::Record if RECORDS => {
+                            let (_, exit) = body.indexed[usize::from(op.b)];
+                            let table = tables[usize::from(op.b) % MAX_INDEXED]
+                                .expect("every indexed receiver was resolved at entry");
+                            let value = self
+                                .heap
+                                .as_table_ref(table)
+                                .map(|tbl| tbl.get_number(x[at(op.c)]));
+                            let Some(Val::Obj(record)) = value else {
+                                *ip = exit;
+                                break 'pass Ok(());
+                            };
+                            if self.heap.as_table_ref(record).is_none() {
+                                *ip = exit;
+                                break 'pass Ok(());
+                            }
+                            let id = usize::from(op.a) % MAX_RECORDS;
+                            records[id] = Some(record);
+                            let (register, slot) = body.records[id];
+                            // The stack holds the record as canonical dispatch
+                            // leaves it: no exit publishes an older number over
+                            // it, and the next checkpoint republishes a number
+                            // written after it.
+                            self.stack[base + usize::from(register)] = Val::Obj(record);
+                            if let Some(slot) = slot {
+                                written &= !(1 << slot);
+                                published &= !(1 << slot);
+                            }
+                        }
+                        OpKind::RecordRead if RECORDS => {
+                            let site = usize::from(op.b) % MAX_RECORD_SITES;
+                            let table = records
+                                [usize::from(body.record_sites[site].record) % MAX_RECORDS]
+                                .expect("a record is defined on every path to its use");
+                            let Some((_, Val::Num(n))) =
+                                self.record_slot(table, keys[site], &mut found[site])
+                            else {
+                                *ip = cursor - 1;
+                                break 'pass Ok(());
+                            };
+                            x[at(op.a)] = n;
+                            written |= 1 << op.a;
+                        }
+                        OpKind::RecordStore if RECORDS => {
+                            let (table, slot) = store.expect("the store resolved its slot");
+                            // A live overwrite under a key proven not `__index`
+                            // at entry, so inherited routes stay standing.
+                            let stored =
+                                self.heap
+                                    .overwrite_live_slot(table, slot, Val::Num(x[at(op.c)]));
+                            debug_assert!(stored, "a slot resolved just before stays live");
+                        }
+                        OpKind::Prep if NESTED => {
+                            let inner = &body.inner[usize::from(op.b)];
+                            let [start, limit, step, visible] = inner.controls;
+                            let first = x[at(start)];
+                            if super::eval_control::check_numeric_for_condition(
+                                first,
+                                x[at(limit)],
+                                x[at(step)],
+                            ) {
+                                x[at(visible)] = first;
+                                written |= 1 << start | 1 << limit | 1 << step | 1 << visible;
+                            } else {
+                                k = inner.exit;
+                            }
+                        }
+                        OpKind::Step if NESTED => {
+                            let inner = &body.inner[usize::from(op.b)];
+                            let [counter, limit, step, visible] = inner.controls;
+                            let by = x[at(step)];
+                            let next = x[at(counter)] + by;
+                            if super::eval_control::check_numeric_for_condition(
+                                next,
+                                x[at(limit)],
+                                by,
+                            ) {
+                                *ip = inner.step_pc + 1;
+                                let fresh = written & !published;
+                                if fresh != 0 {
+                                    self.publish_mirror(body, base, &x, fresh);
+                                    published |= fresh;
+                                }
+                                if let Err(error) = self.poll_gc_checkpoint() {
+                                    break 'pass Err(error);
+                                }
+                                x[at(counter)] = next;
+                                x[at(visible)] = next;
+                                written |= 1 << counter | 1 << visible;
+                                slow = false;
+                                k = inner.body;
+                                continue 'segment;
+                            }
+                        }
+                        OpKind::Load if CALLS => {
+                            // The register holds the callee, not a number, until
+                            // the call writes it.
+                            let index = usize::from(op.b);
+                            let site = &body.calls[index];
+                            if let Callee::Dynamic { record, .. } = site.callee {
+                                let table = records[usize::from(record) % MAX_RECORDS]
+                                    .expect("a record is defined on every path to its use");
+                                let Some(entry) = self.region_method_entry(
+                                    table,
+                                    method_keys[index],
+                                    &mut methods[index],
+                                    site,
+                                    base,
+                                    &relied,
+                                ) else {
+                                    if first_pass {
+                                        region.backoff.store(BACKOFF_ENTRIES, Ordering::Relaxed);
+                                    }
+                                    *ip = site.load_pc;
+                                    break 'pass Ok(());
+                                };
+                                current[index] = (methods[index][entry].method, Some(table), entry);
+                            }
+                            written &= !(1 << site.slot);
+                            loaded = Some(index);
+                        }
+                        OpKind::Call if CALLS => {
+                            let index = usize::from(op.b);
+                            let site = &body.calls[index];
+                            let (leaf, fields) = match &callees[index] {
+                                Some(resolved) => (resolved.leaf(), resolved.fields.as_deref()),
+                                None => {
+                                    let (_, receiver, entry) = current[index];
+                                    let receiver =
+                                        receiver.expect("a method lookup preceded its call");
+                                    if !self.method_fields(
+                                        &mut methods[index][entry],
+                                        receiver,
+                                        &mut method_slots,
+                                    ) {
+                                        *ip = site.pc;
+                                        break 'pass Ok(());
+                                    }
+                                    let entry = &methods[index][entry];
+                                    (entry.leaf(), entry.has_fields.then_some(&method_slots))
+                                }
+                            };
+                            let leaf_weight = leaf.body.weight;
+                            // A method's leaf weight is not in the bound: in a
+                            // fast segment it must fit beside what remains.
+                            if fast
+                                && site.callee.dynamic()
+                                && leaf_weight != 0
+                                && leaf_weight.saturating_add(weight)
+                                    >= self.cost_flush_at().saturating_sub(*local_cost)
+                            {
+                                // Nothing of the call is done yet, and `CALL` is
+                                // free: make it again, per-operation.
+                                slow = true;
+                                k -= 1;
+                                continue 'segment;
+                            }
+                            // The call's admission safepoint, and in a
+                            // per-operation segment a leaf charge that could be
+                            // refused, hand the call to canonical dispatch.
+                            if self.heap.gc_poll_requested()
+                                || (!fast && !self.cost.admits_charges(*local_cost, leaf_weight))
+                            {
+                                *ip = site.pc;
+                                break 'pass Ok(());
+                            }
+                            // Leaf parameter `p` is argument `p`; the entry or
+                            // the admission checked every guarded one is a
+                            // number passed.
+                            let argument = |register: u16| x[at(site.args[usize::from(register)])];
+                            let result = match fields {
+                                None => leaf.eval(argument),
+                                Some(fields) => self.run_leaf_fields(leaf, fields, argument),
+                            };
+                            if fast {
+                                *local_cost += leaf_weight;
+                                #[cfg(feature = "cost-check-interval")]
+                                if leaf_weight != 0 {
+                                    leaf.body.record_charges();
+                                }
+                            } else {
+                                // bounded: one leaf body's charge sites plus its tail charge
+                                for &(cursor, charge) in leaf
+                                    .body
+                                    .charges
+                                    .iter()
+                                    .chain(std::iter::once(&leaf.body.tail))
+                                {
+                                    if charge != 0
+                                        && let Err(error) =
+                                            self.charge_dispatch(local_cost, cursor, charge)
+                                    {
+                                        break 'pass Err(error);
+                                    }
+                                }
+                            }
+                            // Without a result `above` holds `r`'s own slot, so
+                            // the write is dropped again.
+                            x[at(op.a)] = result;
+                            written = (written | 1 << op.a) & !site.above;
+                            published &= !site.above;
+                            let cleared = base + usize::from(site.cleared());
+                            self.stack[cleared..frame.top].fill(Val::Nil);
+                            self.record_call_site(site.pc + 1);
+                            loaded = None;
+                        }
+                        _ => {
+                            x[at(op.a)] = eval(op, &x);
+                            written |= 1 << op.a;
+                        }
                     }
                 }
+                break;
             }
+            let fast =
+                !slow && (weight == 0 || weight < self.cost_flush_at().saturating_sub(*local_cost));
             let (cursor, charge) = body.tail;
             if charge != 0 {
                 if fast {
@@ -1989,8 +2706,24 @@ impl State {
             x[3] = next;
             written |= 0b1001;
             *ip = region.prep + 1;
+            first_pass = false;
         };
         self.publish_mirror(body, base, &x, written);
+        // Last, so no published number overwrites it.
+        if CALLS && let Some(index) = loaded {
+            let function = base + usize::from(body.calls[index].register);
+            let (callee, receiver) = match &callees[index] {
+                Some(resolved) => (resolved.callee, resolved.receiver),
+                None => {
+                    let (method, receiver, _) = current[index];
+                    (method, receiver.map_or(Val::Nil, Val::Obj))
+                }
+            };
+            self.stack[function] = callee;
+            if body.calls[index].callee.method() {
+                self.stack[function + 1] = receiver;
+            }
+        }
         result
     }
 
@@ -2124,6 +2857,10 @@ impl State {
                     };
                     (method, receiver)
                 }
+                // Looked up per pass (`State::region_method_entry`); the
+                // checks above hold for the whole run, since nothing the
+                // region runs captures a register or changes the depth.
+                Callee::Dynamic { .. } => continue,
             };
             let Val::Obj(ptr) = value else {
                 return false;
@@ -2175,22 +2912,16 @@ impl State {
         self.region_keys_disjoint(body, frame, callees)
     }
 
-    /// Whether no leaf of `callees` stores under a key some resolution of
-    /// the region relies on: a method key, a callee's global name or a field
-    /// the region reads at entry. Keys are interned, so equal keys are equal
-    /// values.
-    fn region_keys_disjoint(
-        &self,
-        body: &Body,
-        frame: &Frame,
-        callees: &[Option<Resolved>; MAX_CALLS],
-    ) -> bool {
-        let read_keys = body
-            .calls
+    /// The keys some resolution of the region relies on: every method key
+    /// (of an invariant receiver or of a record), every callee's global
+    /// name and every field the region reads at entry. Keys are interned,
+    /// so equal keys are equal values.
+    fn relied_keys(&self, body: &Body, frame: &Frame) -> Vec<Val> {
+        body.calls
             .iter()
             .filter_map(|site| match site.callee {
                 Callee::Global { name, .. } => Some(name),
-                Callee::Method { key, .. } => Some(key),
+                Callee::Method { key, .. } | Callee::Dynamic { key, .. } => Some(key),
                 Callee::Upvalue(_) => None,
             })
             .chain(
@@ -2198,12 +2929,27 @@ impl State {
                     .iter()
                     .filter_map(|&(_, constant)| match constant {
                         Constant::Field { key, .. } => Some(key),
-                        Constant::Number(_) => None,
+                        Constant::Number(_) | Constant::Upvalue(_) => None,
                     }),
-            );
-        // bounded: at most MAX_CALLS sites of MAX_FIELD_SITES each, against
-        // the body's own sites and constants
-        let mut stored = callees.iter().flatten().flat_map(|resolved| {
+            )
+            .map(|key| frame.literal(key))
+            .collect()
+    }
+
+    /// Whether no store of the region (a leaf of `callees`, a record
+    /// store) is under a key some resolution of the region relies on
+    /// (`State::relied_keys`). A method leaf admitted mid-run is checked
+    /// when it is admitted (`State::admit_method`).
+    fn region_keys_disjoint(
+        &self,
+        body: &Body,
+        frame: &Frame,
+        callees: &[Option<Resolved>; MAX_CALLS],
+    ) -> bool {
+        let relied = self.relied_keys(body, frame);
+        // bounded: at most MAX_CALLS sites of MAX_FIELD_SITES each, and
+        // MAX_RECORD_SITES record sites, against the relied keys
+        let mut leaves = callees.iter().flatten().flat_map(|resolved| {
             let runtime = &resolved.runtime;
             resolved
                 .leaf()
@@ -2212,8 +2958,167 @@ impl State {
                 .filter(|site| site.store)
                 .map(|site| runtime.literals[usize::from(site.key)])
         });
-        let read_keys: Vec<Val> = read_keys.map(|key| frame.literal(key)).collect();
-        stored.all(|key| !read_keys.contains(&key))
+        let mut records = body
+            .record_sites
+            .iter()
+            .filter(|site| site.store)
+            .map(|site| frame.literal(site.key));
+        leaves.all(|key| !relied.contains(&key)) && records.all(|key| !relied.contains(&key))
+    }
+
+    /// The cache entry of the method `key` of record `table` at `site`,
+    /// filled on a miss. `None` exits at the lookup: the record holds the
+    /// key itself, has no metatable, the site's cache is full, the route
+    /// would run a handler (`State::region_method`), or the method cannot
+    /// run here (`State::admit_method`).
+    fn region_method_entry(
+        &self,
+        table: ObjectPtr,
+        key: Val,
+        entries: &mut Vec<RegionMethod>,
+        site: &CallSite,
+        base: usize,
+        relied: &[Val],
+    ) -> Option<usize> {
+        let tbl = self.heap.as_table_ref(table)?;
+        if !matches!(tbl.get(&key), Val::Nil) {
+            return None;
+        }
+        let meta = tbl.get_metatable()?;
+        if let Some(index) = entries.iter().position(|entry| entry.meta == meta) {
+            return Some(index);
+        }
+        if entries.len() >= MAX_METHOD_CLASSES {
+            return None;
+        }
+        let method = self.region_method(Val::Obj(table), key)?;
+        entries.push(self.admit_method(meta, method, site, base, relied)?);
+        Some(entries.len() - 1)
+    }
+
+    /// Admit `method`, found through metatable `meta`, for method calls at
+    /// `site` for the rest of the run: what `State::resolve_callees` checks
+    /// of a static method (a Lua closure with a leaf plan, a result when the
+    /// call keeps one, parameter reads that are number arguments, the frame
+    /// reservation), its stores under neither `__index` nor a key in
+    /// `relied`, and its upvalue field sites resolved to live slots once (an
+    /// upvalue open on this frame, which the region writes, refuses). Its
+    /// receiver sites are found per pass (`State::method_fields`).
+    fn admit_method(
+        &self,
+        meta: ObjectPtr,
+        method: Val,
+        site: &CallSite,
+        base: usize,
+        relied: &[Val],
+    ) -> Option<RegionMethod> {
+        let Val::Obj(ptr) = method else {
+            return None;
+        };
+        let closure = self.heap.as_lua_function_ref(ptr)?;
+        let runtime = &closure.runtime;
+        let leaf = runtime.numeric_leaf.as_ref()?;
+        if site.results == 1 && leaf.result.is_none() {
+            return None;
+        }
+        let arguments = site.args.len();
+        let parameters_are_arguments =
+            leaf.body
+                .registers
+                .iter()
+                .enumerate()
+                .all(|(slot, &register)| {
+                    let register = usize::from(register);
+                    leaf.body.guards & (1 << slot) == 0 || (register >= 1 && register < arguments)
+                });
+        let function = base + usize::from(site.register);
+        if !parameters_are_arguments
+            || function + 1 + leaf.max_stack + FRAME_HEADROOM > MAX_STACK_SIZE
+        {
+            return None;
+        }
+        let index_key = self.meta_names.get(MetaName::Index);
+        let mut fields: FieldSlots = [None; MAX_FIELD_SITES];
+        let mut keys = [Val::Nil; MAX_FIELD_SITES];
+        // bounded: at most MAX_FIELD_SITES field sites
+        for ((field, slot_key), site) in fields.iter_mut().zip(&mut keys).zip(leaf.sites.iter()) {
+            let key = runtime.literals[usize::from(site.key)];
+            *slot_key = key;
+            if site.store && (key == index_key || relied.contains(&key)) {
+                return None;
+            }
+            match site.source {
+                TableSource::Param(0) => {}
+                TableSource::Param(_) => return None,
+                TableSource::Upvalue(index) => {
+                    let &uv_ref = closure.upvalues.as_slice().get(usize::from(index))?;
+                    let value = match self.upvalue_pool.get(uv_ref) {
+                        Upvalue::Open(stack_idx) if *stack_idx < base => self.stack[*stack_idx],
+                        Upvalue::Open(_) => return None,
+                        Upvalue::Closed(value) => *value,
+                    };
+                    let Val::Obj(table) = value else {
+                        return None;
+                    };
+                    let (slot, value) = self.heap.as_table_ref(table)?.find_slot(&key)?;
+                    if site.number && !matches!(value, Val::Num(_)) {
+                        return None;
+                    }
+                    *field = Some((table, slot));
+                }
+            }
+        }
+        Some(RegionMethod {
+            meta,
+            method,
+            runtime: Arc::clone(runtime),
+            fields,
+            keys,
+            hints: [None; MAX_FIELD_SITES],
+            has_fields: !leaf.sites.is_empty(),
+        })
+    }
+
+    /// Resolve the field sites of `entry`'s leaf for a call on record
+    /// `receiver` into `out`: its upvalue sites as admitted, its receiver
+    /// sites as record sites are (`State::record_slot`). `false` when a
+    /// receiver key is not live in the record or a read one does not hold a
+    /// number: the call then runs canonically, with nothing done.
+    fn method_fields(
+        &self,
+        entry: &mut RegionMethod,
+        receiver: ObjectPtr,
+        out: &mut FieldSlots,
+    ) -> bool {
+        let RegionMethod {
+            runtime,
+            fields,
+            keys,
+            hints,
+            ..
+        } = entry;
+        let leaf = runtime
+            .numeric_leaf
+            .as_ref()
+            .expect("admitted with a leaf plan");
+        // bounded: at most MAX_FIELD_SITES field sites
+        for (index, site) in leaf.sites.iter().enumerate() {
+            out[index] = match site.source {
+                TableSource::Param(_) => {
+                    let Some((slot, value)) =
+                        self.record_slot(receiver, keys[index], &mut hints[index])
+                    else {
+                        return false;
+                    };
+                    if site.number && !matches!(value, Val::Num(_)) {
+                        return false;
+                    }
+                    Some((receiver, slot))
+                }
+                TableSource::Upvalue(_) => fields[index],
+            };
+        }
+        true
     }
 
     /// The method `key` of `receiver` as `SELF` would find it, when that
@@ -2275,6 +3180,10 @@ impl State {
         for &(slot, constant) in &body.constants {
             x[at(slot)] = match constant {
                 Constant::Number(value) => value,
+                Constant::Upvalue(index) => match self.upvalue_value(frame, index) {
+                    Val::Num(n) => n,
+                    _ => return false,
+                },
                 Constant::Field {
                     receiver,
                     key,
@@ -2675,7 +3584,9 @@ fn eval(op: &LoopOp, x: &[f64; MIRROR_SLOTS]) -> f64 {
         | OpKind::Index
         | OpKind::Record
         | OpKind::RecordRead
-        | OpKind::RecordStore => lhs,
+        | OpKind::RecordStore
+        | OpKind::Prep
+        | OpKind::Step => lhs,
     }
 }
 
@@ -2822,9 +3733,8 @@ mod tests {
             assert_eq!(regions(source), 1, "{source}");
         }
         for source in [
-            // A receiver the body writes; a branch beside a call.
+            // A receiver the body writes.
             "local function f(t) local s = 0 for i = 1, 9 do s = s + t[i]; t = i end end",
-            "local function f() local s = 0 for i = 1, 9 do if s > 1 then s = g(s) end end end",
             // A string comparison and a truth test are not number branches.
             "local function f(t) local s = 0 for i = 1, 9 do if s == 'x' then s = 1 end end end",
             "local function f(t) local s = 0 for i = 1, 9 do if s then s = 1 end end end",
@@ -2852,6 +3762,36 @@ mod tests {
             "local function f(us) for i = 1, 9 do local u = us[i] u.x = u end end",
             // A record replacing an invariant receiver.
             "local function f(us, o) local s = 0 for i = 1, 9 do s = s + o.y o = us[i] o.x = 1 end end",
+        ] {
+            assert_eq!(regions(source), 0, "{source}");
+        }
+    }
+
+    #[test]
+    fn regions_take_nested_loops_and_method_calls_on_records() {
+        // A nested loop runs inside its enclosing region, and is a region of
+        // its own too; a number upvalue read inside a body is read at entry.
+        for source in [
+            "local function f() local s = 0 for i = 1, 9 do for j = 1, i do s = s + j end end end",
+            "local n = 5 local function f() local s = 0 for i = 1, 9 do for j = i, n do if j > 2 then s = s + j end end s = s - i end end",
+        ] {
+            assert_eq!(regions(source), 2, "{source}");
+        }
+        // A method call on a record read per pass, beside a branch and
+        // record stores; a branch beside a call.
+        let taken = usize::from(!cfg!(feature = "fault-injection"));
+        for source in [
+            "local function f(us) local s = 0 for i = 1, 9 do s = s + us[i]:m() end return s end",
+            "local function f(us) for i = 1, 9 do local u = us[i] u:m(i % 5) u.x = u.x + u.speed end end",
+            "local function f() local s = 0 for i = 1, 9 do if s > 1 then s = g(s) end end end",
+        ] {
+            assert_eq!(regions(source), taken, "{source}");
+        }
+        // A record copied as a number, and a record carried into the
+        // next pass through a nested loop's head.
+        for source in [
+            "local function f(us) for i = 1, 9 do local u = us[i] local v = u u:m() end end",
+            "local function f(us, u) local s = 0 for i = 1, 9 do for j = 1, 2 do s = s + u u = us[j] u.x = 1 end end end",
         ] {
             assert_eq!(regions(source), 0, "{source}");
         }

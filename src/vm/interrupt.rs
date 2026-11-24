@@ -13,8 +13,8 @@
 //!   loop, before the loop counters or the generic-for control are
 //!   written). `JMP`, the compare-and-branch and test opcodes, `FOR_LOOP`
 //!   and `TFOR_LOOP` (the generic `for`'s back edge) poll, and so does the
-//!   typed numeric loop region at each `FOR_LOOP` it runs
-//!   (`vm/numeric_loop.rs`); admission refuses
+//!   typed numeric loop region at each `FOR_LOOP` it runs, its own and
+//!   those of the loops nested in it (`vm/numeric_loop.rs`); admission refuses
 //!   a backward `FOR_PREP`, so bytecode of any provenance has no unpolled
 //!   cycle;
 //! - the admission of every Lua function call, from Lua or from Rust (a host
@@ -24,7 +24,8 @@
 //!   run without an activation (`State::try_numeric_leaf`) reads the same
 //!   poll flag at that point and declines to canonical admission when it is
 //!   set, so the poll there is the one that reports. A typed loop region
-//!   calling a numeric leaf reads it at each such call the same way and,
+//!   calling a numeric leaf, a method of a record included, reads it at
+//!   each such call the same way and,
 //!   when it is set, leaves the region at that `CALL` for canonical
 //!   admission to report. Recursion needs
 //!   no backward jump, and tail recursion, which runs at constant depth, is

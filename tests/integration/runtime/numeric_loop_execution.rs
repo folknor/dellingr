@@ -644,6 +644,156 @@ fn numeric_loop_region_method_calls_decline_what_a_store_could_change() {
     assert!(error.to_string().contains("attempt to index"), "{error}");
 }
 
+/// Method calls on records read per pass: three classes behind one site,
+/// one inheriting two `__index` levels up, one record holding the method
+/// itself, one class whose method is no leaf, one record inheriting a field
+/// its method reads, and a method storing into its record, which the loop
+/// then reads and stores. The loop is nested in a round loop, with a branch
+/// beside the call and a `break` out of the inner loop. `{twin}` goes into
+/// the inner body, where an unread upvalue load keeps every loop canonical,
+/// and `{leaf_twin}` into every leaf, where a free boolean load makes it no
+/// leaf; neither changes a charge.
+fn record_method_program(twin: &str, leaf_twin: &str) -> String {
+    format!(
+        r#"
+        local up = 0
+        local stats = {{ calls = 0 }}
+        local Shape = {{}}
+        Shape.__index = Shape
+        function Shape:area()
+            {leaf_twin}
+            return self.w * self.h
+        end
+        local Rect = setmetatable({{}}, {{ __index = Shape }})
+        Rect.__index = Rect
+        Rect.h = 5
+        local Circle = {{}}
+        Circle.__index = Circle
+        function Circle:area()
+            {leaf_twin}
+            stats.calls = stats.calls + 1
+            self.r = self.r + 0.5
+            return 3 * self.r
+        end
+        local Odd = {{}}
+        Odd.__index = Odd
+        function Odd:area() if self.w then return 1 end return 2 end
+        local shapes = {{}}
+        function run()
+            local sum, k = 0.5, 0
+            peek = function()
+                local c = 0
+                for i = 1, 9 do
+                    local s = shapes[i]
+                    if s then c = c + (rawget(s, "r") or 0) * i end
+                end
+                return sum, c + k, stats.calls
+            end
+            for i = 1, 9 do
+                if i % 3 == 0 then
+                    shapes[i] = setmetatable({{ w = i, h = 2 }}, Rect)
+                else
+                    shapes[i] = setmetatable({{ r = i }}, Circle)
+                end
+            end
+            shapes[5] = setmetatable({{ w = 1, h = 1 }}, Shape)
+            shapes[8] = setmetatable({{ w = 1 }}, Rect)
+            shapes[9] = setmetatable({{ w = 4, area = function(self) return 7 end }}, Circle)
+            shapes[7] = setmetatable({{ w = 1 }}, Odd)
+            for round = 1, 3 do
+                for i = 1, 9 do
+                    if round == 3 and i == 6 then break end
+                    local s = shapes[i]
+                    sum = sum + s:area()
+                    if sum > 40 then sum = sum - 40 end
+                    k = k + i
+                    {twin}
+                end
+                k = k + round
+            end
+            return sum
+        end
+        "#
+    )
+}
+
+#[test]
+fn numeric_loop_region_with_method_calls_on_records_matches_canonical_dispatch_at_every_budget() {
+    let region = record_method_program("", "");
+    let canonical = record_method_program("local _u = up", "local _u = false");
+    let models = [
+        CostModel::default(),
+        CostModel::default()
+            .with(Charge::TableWrite, 4)
+            .with(Charge::Mul, 0)
+            .with(Charge::Sub, 5),
+        CostModel::zero(),
+    ];
+    for model in &models {
+        for budget in -1..=900 {
+            assert_eq!(
+                region_outcome(model, &region, budget),
+                region_outcome(model, &canonical, budget),
+                "budget {budget} under {model:?}"
+            );
+        }
+    }
+}
+
+/// Nested loops inside one region: an outer pass reading two upvalue
+/// tables, a number upvalue as the inner limit, an inner loop that may not
+/// enter, a forward branch out of the inner loop, and a third loop nested
+/// in the second. `{twin}` in the innermost body keeps every loop canonical.
+fn nested_region_program(twin: &str) -> String {
+    format!(
+        r#"
+        local up = 0
+        local n = 6
+        local xs, ys = {{}}, {{}}
+        for i = 1, 8 do xs[i] = i * 3 % 7 ys[i] = i * 5 % 9 end
+        function run()
+            local sum, hits, last = 0.5, 0, 0
+            peek = function() return sum, hits, last end
+            for i = 1, 8 do
+                local a = xs[i]
+                for j = i, n do
+                    if ys[j] > a + 4 then break end
+                    for k = 1, j % 3 do
+                        sum = sum + k * a - j
+                        {twin}
+                    end
+                    hits = hits + 1
+                end
+                last = i + a
+            end
+            return sum
+        end
+        "#
+    )
+}
+
+#[test]
+fn numeric_loop_region_with_nested_loops_matches_canonical_dispatch_at_every_budget() {
+    let region = nested_region_program("");
+    let canonical = nested_region_program("local _u = up");
+    let models = [
+        CostModel::default(),
+        CostModel::default()
+            .with(Charge::Mul, 0)
+            .with(Charge::Sub, 5),
+        CostModel::zero(),
+    ];
+    for model in &models {
+        for budget in -1..=900 {
+            assert_eq!(
+                region_outcome(model, &region, budget),
+                region_outcome(model, &canonical, budget),
+                "budget {budget} under {model:?}"
+            );
+        }
+    }
+}
+
 /// A loop reading a record from a local table on every iteration, then
 /// reading, updating and storing its fields. Record 5 has no raw `x`, so its
 /// first read answers through `__index` and its store makes a new key
