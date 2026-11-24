@@ -230,7 +230,7 @@ them:
 - `optimizations.md` "gmatch: drop the Lua-side wrapper and table-backed
   iterator state": strings hunter's native iterator, failed-search exhaustion
   and pattern-cache sizing.
-- `optimizations.md` "Stdlib micro (E)": strings hunter's cached format plan.
+- `optimizations.md` "`string.format` cached plan": strings hunter's cached format plan.
 - `todo.md` "Sparse storage for the array part's stragglers": table hunter's
   numeric storage separated from the logical array boundary.
 - `todo.md` "Grow the brokkr workload registry": host hunter's note that the

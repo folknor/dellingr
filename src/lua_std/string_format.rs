@@ -19,7 +19,8 @@ struct FormatFlags {
 }
 
 struct Directive {
-    raw: Vec<u8>,
+    /// The directive's bytes in the template, kept for error payloads.
+    raw: std::ops::Range<usize>,
     flags: FormatFlags,
     width: Option<u8>,
     precision: Option<u8>,
@@ -59,11 +60,17 @@ pub(crate) fn format(state: &mut State) -> Result<u8> {
         return Err(format_arg_type_error(state, 1, LuaType::String, None));
     }
     state.check_type_in(1, &[LuaType::String, LuaType::Number], "format")?;
-    let format_bytes = if state.typ(1) == LuaType::Number {
-        state.bytes_with_default_string_coercion(1)?
+    // A string template is read in place from slot 1, which stays rooted and
+    // unchanged for the whole call: a `%s` argument's `__tostring` runs above
+    // this frame's arguments. The slice is reacquired after every call that
+    // takes `&mut State`, so only offsets live across a re-entry. A numeric
+    // template is coerced once into an owned buffer.
+    let coerced_template = if state.typ(1) == LuaType::Number {
+        Some(state.bytes_with_default_string_coercion(1)?)
     } else {
-        state.to_bytes(1)?.to_vec()
+        None
     };
+    let template_len = template(state, coerced_template.as_deref())?.len();
     let argument_count = state.get_top();
     let mut output = Vec::new();
     let mut argument = 1usize;
@@ -80,14 +87,15 @@ pub(crate) fn format(state: &mut State) -> Result<u8> {
 
     // bounded: one pass over the capped format string's bytes. Each `%`
     // polls before its directive is parsed and its argument rendered.
-    while cursor < format_bytes.len() {
-        if format_bytes[cursor] != b'%' {
-            cursor += 1;
-            continue;
-        }
-        append_bytes(&mut output, &format_bytes[literal_start..cursor])?;
+    while cursor < template_len {
+        let bytes = template(state, coerced_template.as_deref())?;
+        let Some(offset) = bytes[cursor..].iter().position(|byte| *byte == b'%') else {
+            break;
+        };
+        cursor += offset;
+        append_bytes(&mut output, &bytes[literal_start..cursor])?;
         state.poll_interrupt()?;
-        if format_bytes.get(cursor + 1) == Some(&b'%') {
+        if bytes.get(cursor + 1) == Some(&b'%') {
             literal_start = cursor + 1;
             cursor += 2;
             continue;
@@ -98,18 +106,18 @@ pub(crate) fn format(state: &mut State) -> Result<u8> {
             return Err(format_arg_error(state, argument, ArgDetail::NoValue));
         }
 
-        let (directive, next) = parse_directive(state, &format_bytes, cursor)?;
-        validate_directive(state, &directive)?;
+        let (directive, next) = parse_directive(state, bytes, cursor)?;
+        validate_directive(state, bytes, &directive)?;
         state.charge(Charge::StringFormat, 1)?;
-        let formatted = crate::native_call!(
+        crate::native_call!(
             "format->format_argument",
-            format_argument(state, argument, &directive)
+            format_argument(state, argument, &directive, &mut output)
         )?;
-        append_bytes(&mut output, &formatted)?;
         literal_start = next;
         cursor = next;
     }
-    append_bytes(&mut output, &format_bytes[literal_start..])?;
+    let bytes = template(state, coerced_template.as_deref())?;
+    append_bytes(&mut output, &bytes[literal_start..])?;
     if argument == 1 {
         state.charge(Charge::StringFormat, 1)?;
     }
@@ -117,6 +125,21 @@ pub(crate) fn format(state: &mut State) -> Result<u8> {
     state.set_top(0)?;
     state.push_owned_bytes(output)?;
     Ok(1)
+}
+
+fn template<'a>(state: &'a State, coerced: Option<&'a [u8]>) -> Result<&'a [u8]> {
+    match coerced {
+        Some(bytes) => Ok(bytes),
+        None => state.to_bytes(1),
+    }
+}
+
+/// Admit a piece of `len` bytes into `out`: the aggregate cap check every
+/// directive makes after its rendering's own errors and before its bytes.
+fn reserve_piece(out: &mut Vec<u8>, len: usize) -> Result<()> {
+    crate::limits::checked_string_growth(out.len(), len)?;
+    out.reserve(len);
+    Ok(())
 }
 
 fn parse_directive(state: &State, bytes: &[u8], start: usize) -> Result<(Directive, usize)> {
@@ -184,9 +207,9 @@ fn parse_directive(state: &State, bytes: &[u8], start: usize) -> Result<(Directi
         cursor += 1;
     }
     check_directive_length(state, start, cursor)?;
-    let raw = bytes[start..cursor].to_vec();
+    let raw = start..cursor;
     let conversion = classify_conversion(conversion_byte)
-        .ok_or_else(|| invalid_conversion_error(state, &raw))?;
+        .ok_or_else(|| invalid_conversion_error(state, &bytes[raw.clone()]))?;
     let has_modifiers = raw.len() > 2;
 
     Ok((
@@ -255,7 +278,7 @@ fn classify_conversion(byte: u8) -> Option<Conversion> {
     Some(conversion)
 }
 
-fn validate_directive(state: &State, directive: &Directive) -> Result<()> {
+fn validate_directive(state: &State, template: &[u8], directive: &Directive) -> Result<()> {
     if matches!(directive.conversion, Conversion::Quoted) && directive.has_modifiers {
         return Err(state.library_error(LibraryError::QuotedFormatHasModifiers));
     }
@@ -281,7 +304,10 @@ fn validate_directive(state: &State, directive: &Directive) -> Result<()> {
         || directive.width_digits > MAX_FORMAT_FIELD_DIGITS
         || directive.precision_digits > MAX_FORMAT_FIELD_DIGITS
     {
-        return Err(invalid_specification(state, &directive.raw));
+        return Err(invalid_specification(
+            state,
+            &template[directive.raw.clone()],
+        ));
     }
     Ok(())
 }
@@ -304,59 +330,55 @@ fn unsigned_integer_bits(integer: i64) -> u64 {
     u64::from_ne_bytes(integer.to_ne_bytes())
 }
 
-fn format_argument(state: &mut State, argument: usize, directive: &Directive) -> Result<Vec<u8>> {
-    let idx =
-        isize::try_from(argument).map_err(|_| invalid_specification(state, &directive.raw))?;
+fn argument_index(argument: usize) -> isize {
+    isize::try_from(argument).expect("format argument index is bounded by the VM stack cap")
+}
+
+/// `%c` emits its integer modulo 256.
+fn char_byte(integer: i64) -> u8 {
+    u8::try_from(integer.rem_euclid(256)).expect("a value reduced modulo 256 fits in a byte")
+}
+
+/// Render one directive's argument straight into `out`. Each conversion
+/// raises its own errors (argument type, `%s` zeros, `%q` quoting size,
+/// `%p` identity) before the aggregate cap check in `reserve_piece`, as when
+/// every directive rendered into a buffer of its own.
+fn format_argument(
+    state: &mut State,
+    argument: usize,
+    directive: &Directive,
+    out: &mut Vec<u8>,
+) -> Result<()> {
+    let idx = argument_index(argument);
     match directive.conversion {
         Conversion::Char => {
             let integer = integer_argument(state, idx, argument)?;
-            let byte = u8::try_from(integer.rem_euclid(256))
-                .map_err(|_| invalid_specification(state, &directive.raw))?;
-            Ok(pad_bytes(&[byte], directive.width, directive.flags.left))
+            let byte = char_byte(integer);
+            pad_bytes(out, &[byte], directive.width, directive.flags.left)
         }
         Conversion::SignedDecimal => {
             let integer = integer_argument(state, idx, argument)?;
-            Ok(format_signed_integer(integer, directive))
+            format_signed_integer(out, integer, directive)
         }
         Conversion::UnsignedDecimal => {
             let integer = integer_argument(state, idx, argument)?;
-            Ok(format_unsigned_integer(
-                unsigned_integer_bits(integer),
-                10,
-                false,
-                directive,
-            ))
+            format_unsigned_integer(out, unsigned_integer_bits(integer), 10, false, directive)
         }
         Conversion::Octal => {
             let integer = integer_argument(state, idx, argument)?;
-            Ok(format_unsigned_integer(
-                unsigned_integer_bits(integer),
-                8,
-                false,
-                directive,
-            ))
+            format_unsigned_integer(out, unsigned_integer_bits(integer), 8, false, directive)
         }
         Conversion::HexLower => {
             let integer = integer_argument(state, idx, argument)?;
-            Ok(format_unsigned_integer(
-                unsigned_integer_bits(integer),
-                16,
-                false,
-                directive,
-            ))
+            format_unsigned_integer(out, unsigned_integer_bits(integer), 16, false, directive)
         }
         Conversion::HexUpper => {
             let integer = integer_argument(state, idx, argument)?;
-            Ok(format_unsigned_integer(
-                unsigned_integer_bits(integer),
-                16,
-                true,
-                directive,
-            ))
+            format_unsigned_integer(out, unsigned_integer_bits(integer), 16, true, directive)
         }
         Conversion::Float(kind) => {
             let number = number_argument(state, idx, argument)?;
-            Ok(format_float(number, directive, kind))
+            format_float(out, number, directive, kind)
         }
         Conversion::String => {
             // The rendering and the bytes kept are free; the directive's one
@@ -365,53 +387,84 @@ fn format_argument(state: &mut State, argument: usize, directive: &Directive) ->
                 "format_argument->tostring_rendering",
                 state.tostring_rendering(idx)
             )?;
-            let formatted = match rendering {
+            match rendering {
                 TostringRendering::Itself => {
-                    format_string_rendering(state.to_bytes(idx)?, directive)
+                    format_string_rendering(state, out, state.to_bytes(idx)?, directive, argument)
                 }
                 TostringRendering::OnTop => {
-                    let formatted = format_string_rendering(state.to_bytes(-1)?, directive);
+                    // The handler's result is popped whatever the append
+                    // reports, then the saved result propagates.
+                    let formatted = format_string_rendering(
+                        state,
+                        out,
+                        state.to_bytes(-1)?,
+                        directive,
+                        argument,
+                    );
                     state.pop(1)?;
                     formatted
                 }
-                TostringRendering::Bytes(bytes) => format_string_rendering(&bytes, directive),
-            };
-            formatted.map_err(|detail| format_arg_error(state, argument, detail))
+                TostringRendering::Bytes(bytes) => {
+                    format_string_rendering(state, out, &bytes, directive, argument)
+                }
+            }
         }
-        Conversion::Quoted => quote_argument(state, idx, argument),
+        Conversion::Quoted => quote_argument(state, idx, argument, out),
         Conversion::Pointer => {
-            let bytes = match state.typ(idx) {
+            // The identity is resolved before the size check: resolving can
+            // assign an id or fail on an exhausted id space.
+            let id = match state.typ(idx) {
                 // `(null)` is correct, not a stub: 5.4 substitutes it for any
                 // argument with no pointer representation. Verified against
                 // the reference - `string.format("%p", 42)` prints `(null)`.
-                LuaType::Nil | LuaType::Boolean | LuaType::Number => b"(null)".to_vec(),
+                LuaType::Nil | LuaType::Boolean | LuaType::Number => None,
                 LuaType::String | LuaType::Table | LuaType::Function => {
-                    match state.format_pointer_id(idx)? {
-                        Some(id) => format!("0x{id:x}").into_bytes(),
-                        None => b"(null)".to_vec(),
-                    }
+                    state.format_pointer_id(idx)?
                 }
             };
-            Ok(pad_bytes(&bytes, directive.width, directive.flags.left))
+            format_pointer(out, id, directive)
         }
     }
 }
 
+#[inline(never)]
+fn format_pointer(out: &mut Vec<u8>, id: Option<u64>, directive: &Directive) -> Result<()> {
+    match id {
+        Some(id) => {
+            let mut scratch = [0u8; 18];
+            scratch[..2].copy_from_slice(b"0x");
+            let digits = render_digits(&mut scratch[2..], id, 16, false);
+            let len = 2 + digits;
+            scratch.copy_within(18 - digits.., 2);
+            pad_bytes(out, &scratch[..len], directive.width, directive.flags.left)
+        }
+        None => pad_bytes(out, b"(null)", directive.width, directive.flags.left),
+    }
+}
+
 fn format_string_rendering(
+    state: &State,
+    out: &mut Vec<u8>,
     bytes: &[u8],
     directive: &Directive,
-) -> std::result::Result<Vec<u8>, ArgDetail> {
+    argument: usize,
+) -> Result<()> {
     if directive.has_modifiers && bytes.contains(&0) {
-        return Err(ArgDetail::StringContainsZeros);
+        return Err(format_arg_error(
+            state,
+            argument,
+            ArgDetail::StringContainsZeros,
+        ));
     }
     let selected_len = directive.precision.map_or(bytes.len(), |precision| {
         usize::from(precision).min(bytes.len())
     });
-    Ok(pad_bytes(
+    pad_bytes(
+        out,
         &bytes[..selected_len],
         directive.width,
         directive.flags.left,
-    ))
+    )
 }
 
 fn number_argument(state: &mut State, idx: isize, argument: usize) -> Result<f64> {
@@ -459,7 +512,30 @@ fn format_arg_type_error(
     )))
 }
 
-fn format_signed_integer(value: i64, directive: &Directive) -> Vec<u8> {
+/// Write `value`'s digits in `radix` right-aligned at the end of `scratch`
+/// and return how many were written. `scratch` must hold every digit of
+/// `value` in `radix` (22 for any `u64` in octal).
+fn render_digits(scratch: &mut [u8], mut value: u64, radix: u64, uppercase: bool) -> usize {
+    let alphabet: &[u8; 16] = if uppercase {
+        b"0123456789ABCDEF"
+    } else {
+        b"0123456789abcdef"
+    };
+    let mut end = scratch.len();
+    // bounded: at most 22 digits for a u64 in radix 8 or more.
+    loop {
+        end -= 1;
+        scratch[end] = alphabet[usize::try_from(value % radix).expect("a digit fits in usize")];
+        value /= radix;
+        if value == 0 {
+            break;
+        }
+    }
+    scratch.len() - end
+}
+
+#[inline(never)]
+fn format_signed_integer(out: &mut Vec<u8>, value: i64, directive: &Directive) -> Result<()> {
     let sign = if value.is_negative() {
         b"-".as_slice()
     } else if directive.flags.plus {
@@ -469,29 +545,30 @@ fn format_signed_integer(value: i64, directive: &Directive) -> Vec<u8> {
     } else {
         b"".as_slice()
     };
-    let digits = if directive.precision == Some(0) && value == 0 {
-        Vec::new()
+    let mut scratch = [0u8; 22];
+    let count = if directive.precision == Some(0) && value == 0 {
+        0
     } else {
-        value.unsigned_abs().to_string().into_bytes()
+        render_digits(&mut scratch, value.unsigned_abs(), 10, false)
     };
-    format_integer_parts(sign, b"", digits, directive)
+    format_integer_parts(out, sign, b"", &scratch[22 - count..], directive)
 }
 
+#[inline(never)]
 fn format_unsigned_integer(
+    out: &mut Vec<u8>,
     value: u64,
-    radix: u8,
+    radix: u64,
     uppercase: bool,
     directive: &Directive,
-) -> Vec<u8> {
-    let mut digits = match radix {
-        8 => format!("{value:o}").into_bytes(),
-        16 if uppercase => format!("{value:X}").into_bytes(),
-        16 => format!("{value:x}").into_bytes(),
-        _ => value.to_string().into_bytes(),
+) -> Result<()> {
+    let mut scratch = [0u8; 22];
+    let count = if directive.precision == Some(0) && value == 0 {
+        0
+    } else {
+        render_digits(&mut scratch, value, radix, uppercase)
     };
-    if directive.precision == Some(0) && value == 0 {
-        digits.clear();
-    }
+    let digits = &scratch[22 - count..];
     let prefix: &[u8] = if directive.flags.alternate {
         match radix {
             8 if digits.is_empty()
@@ -509,51 +586,52 @@ fn format_unsigned_integer(
     } else {
         b""
     };
-    format_integer_parts(b"", prefix, digits, directive)
+    format_integer_parts(out, b"", prefix, digits, directive)
 }
 
 fn format_integer_parts(
+    out: &mut Vec<u8>,
     sign: &[u8],
     prefix: &[u8],
-    mut digits: Vec<u8>,
+    digits: &[u8],
     directive: &Directive,
-) -> Vec<u8> {
-    if let Some(precision) = directive.precision {
-        let required = usize::from(precision).saturating_sub(digits.len());
-        if required > 0 {
-            let mut padded = vec![b'0'; required];
-            padded.extend_from_slice(&digits);
-            digits = padded;
-        }
-    }
-
-    let content_len = sign.len() + prefix.len() + digits.len();
+) -> Result<()> {
+    let precision_zeros = directive.precision.map_or(0, |precision| {
+        usize::from(precision).saturating_sub(digits.len())
+    });
+    let content_len = sign.len() + prefix.len() + precision_zeros + digits.len();
     let padding = directive
         .width
         .map_or(0, usize::from)
         .saturating_sub(content_len);
     let zero_width_padding =
         directive.flags.zero && !directive.flags.left && directive.precision.is_none();
-    let mut output = Vec::with_capacity(content_len + padding);
+    reserve_piece(out, content_len + padding)?;
     if !directive.flags.left && !zero_width_padding {
-        output.resize(padding, b' ');
+        out.resize(out.len() + padding, b' ');
     }
-    output.extend_from_slice(sign);
-    output.extend_from_slice(prefix);
+    out.extend_from_slice(sign);
+    out.extend_from_slice(prefix);
     if zero_width_padding {
-        output.resize(output.len() + padding, b'0');
+        out.resize(out.len() + padding, b'0');
     }
-    output.extend_from_slice(&digits);
+    out.resize(out.len() + precision_zeros, b'0');
+    out.extend_from_slice(digits);
     if directive.flags.left {
-        output.resize(output.len() + padding, b' ');
+        out.resize(out.len() + padding, b' ');
     }
-    output
+    Ok(())
 }
 
 // Outlined: the decimal conversion's scratch stays off `format_argument`,
 // whose frame is live across a `%s` argument's `__tostring` call.
 #[inline(never)]
-fn format_float(number: f64, directive: &Directive, kind: FloatKind) -> Vec<u8> {
+fn format_float(
+    out: &mut Vec<u8>,
+    number: f64,
+    directive: &Directive,
+    kind: FloatKind,
+) -> Result<()> {
     // NaN is canonicalised here, at output, rather than in the arithmetic.
     // The sign of a hardware-generated NaN is platform-specific (x86-64's
     // default NaN has the sign bit set, aarch64's does not), and NaNs reach
@@ -598,7 +676,7 @@ fn format_float(number: f64, directive: &Directive, kind: FloatKind) -> Vec<u8> 
     } else {
         b""
     };
-    pad_float(sign, &body, directive)
+    pad_float(out, sign, &body, directive)
 }
 
 fn format_scientific(number: f64, precision: usize, uppercase: bool, alternate: bool) -> Vec<u8> {
@@ -733,55 +811,55 @@ fn format_hex_float(
     format!("{prefix}{leading:x}{dot}{fraction_text}{marker}{exponent:+}").into_bytes()
 }
 
-fn pad_float(sign: &[u8], body: &[u8], directive: &Directive) -> Vec<u8> {
+fn pad_float(out: &mut Vec<u8>, sign: &[u8], body: &[u8], directive: &Directive) -> Result<()> {
     let content_len = sign.len() + body.len();
     let padding = directive
         .width
         .map_or(0, usize::from)
         .saturating_sub(content_len);
-    let mut output = Vec::with_capacity(content_len + padding);
+    reserve_piece(out, content_len + padding)?;
     let zero_padding = directive.flags.zero
         && !directive.flags.left
         && !matches!(body, b"inf" | b"INF" | b"nan" | b"NAN");
     if !directive.flags.left && !zero_padding {
-        output.resize(padding, b' ');
+        out.resize(out.len() + padding, b' ');
     }
-    output.extend_from_slice(sign);
+    out.extend_from_slice(sign);
     if zero_padding {
         if body.starts_with(b"0x") || body.starts_with(b"0X") {
-            output.extend_from_slice(&body[..2]);
-            output.resize(output.len() + padding, b'0');
-            output.extend_from_slice(&body[2..]);
-            return output;
+            out.extend_from_slice(&body[..2]);
+            out.resize(out.len() + padding, b'0');
+            out.extend_from_slice(&body[2..]);
+            return Ok(());
         }
-        output.resize(output.len() + padding, b'0');
+        out.resize(out.len() + padding, b'0');
     }
-    output.extend_from_slice(body);
+    out.extend_from_slice(body);
     if directive.flags.left {
-        output.resize(output.len() + padding, b' ');
+        out.resize(out.len() + padding, b' ');
     }
-    output
+    Ok(())
 }
 
-fn pad_bytes(bytes: &[u8], width: Option<u8>, left: bool) -> Vec<u8> {
+fn pad_bytes(out: &mut Vec<u8>, bytes: &[u8], width: Option<u8>, left: bool) -> Result<()> {
     let padding = width.map_or(0, usize::from).saturating_sub(bytes.len());
-    let mut output = Vec::with_capacity(bytes.len() + padding);
+    reserve_piece(out, bytes.len() + padding)?;
     if !left {
-        output.resize(padding, b' ');
+        out.resize(out.len() + padding, b' ');
     }
-    output.extend_from_slice(bytes);
+    out.extend_from_slice(bytes);
     if left {
-        output.resize(output.len() + padding, b' ');
+        out.resize(out.len() + padding, b' ');
     }
-    output
+    Ok(())
 }
 
-fn quote_argument(state: &mut State, idx: isize, argument: usize) -> Result<Vec<u8>> {
-    match state.typ(idx) {
-        LuaType::String => quote_string(state.to_bytes(idx)?),
+fn quote_argument(state: &mut State, idx: isize, argument: usize, out: &mut Vec<u8>) -> Result<()> {
+    let bytes = match state.typ(idx) {
+        LuaType::String => return quote_string(out, state.to_bytes(idx)?),
         LuaType::Number => {
             let number = state.to_number(idx)?;
-            let output = if number.is_nan() {
+            if number.is_nan() {
                 b"(0/0)".to_vec()
             } else if number == f64::INFINITY {
                 b"1e9999".to_vec()
@@ -801,63 +879,73 @@ fn quote_argument(state: &mut State, idx: isize, argument: usize) -> Result<Vec<
                     bytes.insert(0, b'-');
                 }
                 bytes
-            };
-            Ok(output)
+            }
         }
-        LuaType::Boolean => Ok(if state.to_boolean(idx) {
-            b"true".to_vec()
-        } else {
-            b"false".to_vec()
-        }),
-        LuaType::Nil => Ok(b"nil".to_vec()),
-        LuaType::Table | LuaType::Function => Err(format_arg_error(
-            state,
-            argument,
-            ArgDetail::ValueHasNoLiteralForm,
-        )),
-    }
+        LuaType::Boolean => {
+            if state.to_boolean(idx) {
+                b"true".to_vec()
+            } else {
+                b"false".to_vec()
+            }
+        }
+        LuaType::Nil => b"nil".to_vec(),
+        LuaType::Table | LuaType::Function => {
+            return Err(format_arg_error(
+                state,
+                argument,
+                ArgDetail::ValueHasNoLiteralForm,
+            ));
+        }
+    };
+    append_bytes(out, &bytes)
 }
 
-fn quote_string(bytes: &[u8]) -> Result<Vec<u8>> {
+/// Quote `bytes` onto `out`. The quoting's own size checks measure the
+/// quoted piece alone, from `start`, exactly as when it was built in a
+/// buffer of its own; the aggregate cap check follows once it is complete.
+#[inline(never)]
+fn quote_string(out: &mut Vec<u8>, bytes: &[u8]) -> Result<()> {
+    let start = out.len();
     let capacity = crate::limits::checked_string_growth(bytes.len(), 2)?;
-    let mut output = Vec::with_capacity(capacity);
-    output.push(b'"');
+    out.reserve(capacity);
+    out.push(b'"');
     // bounded: one pass over the argument string's bytes.
     for (index, byte) in bytes.iter().copied().enumerate() {
+        let piece = out.len() - start;
         match byte {
             b'"' | b'\\' => {
-                crate::limits::checked_string_growth(output.len(), 2)?;
-                output.push(b'\\');
-                output.push(byte);
+                crate::limits::checked_string_growth(piece, 2)?;
+                out.push(b'\\');
+                out.push(byte);
             }
             b'\n' => {
-                crate::limits::checked_string_growth(output.len(), 2)?;
-                output.push(b'\\');
-                output.push(b'\n');
+                crate::limits::checked_string_growth(piece, 2)?;
+                out.push(b'\\');
+                out.push(b'\n');
             }
             0..=31 | 127 => {
                 let next_is_digit = bytes.get(index + 1).is_some_and(u8::is_ascii_digit);
-                if next_is_digit {
-                    let escaped = format!("{byte:03}");
-                    crate::limits::checked_string_growth(output.len(), escaped.len() + 1)?;
-                    output.push(b'\\');
-                    output.extend_from_slice(escaped.as_bytes());
+                let mut scratch = [b'0'; 3];
+                let count = render_digits(&mut scratch, u64::from(byte), 10, false);
+                let escaped = if next_is_digit {
+                    &scratch[..]
                 } else {
-                    let escaped = byte.to_string();
-                    crate::limits::checked_string_growth(output.len(), escaped.len() + 1)?;
-                    output.push(b'\\');
-                    output.extend_from_slice(escaped.as_bytes());
-                }
+                    &scratch[3 - count..]
+                };
+                crate::limits::checked_string_growth(piece, escaped.len() + 1)?;
+                out.push(b'\\');
+                out.extend_from_slice(escaped);
             }
             _ => {
-                crate::limits::checked_string_growth(output.len(), 1)?;
-                output.push(byte);
+                crate::limits::checked_string_growth(piece, 1)?;
+                out.push(byte);
             }
         }
     }
-    crate::limits::checked_string_growth(output.len(), 1)?;
-    output.push(b'"');
-    Ok(output)
+    crate::limits::checked_string_growth(out.len() - start, 1)?;
+    out.push(b'"');
+    crate::limits::checked_string_growth(start, out.len() - start)?;
+    Ok(())
 }
 
 #[cfg(test)]

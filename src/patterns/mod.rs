@@ -22,6 +22,12 @@ pub(crate) use self::luapat::AnchorMode;
 pub(crate) use self::luapat::LuaCapture;
 
 /// Whether every byte in `pattern` is literal to the Lua pattern compiler.
+///
+/// Deliberately context-free: a pattern-leading `-` not followed by a
+/// quantifier is literal (`"-foo"`), but recognising that needs a positional
+/// rule and a context-aware test for needles that are rare in scripts, and
+/// the matcher already returns the same result for them. Reference
+/// `string.find` classifies `-` as special everywhere too.
 pub(crate) fn is_plain(pattern: &[u8]) -> bool {
     !pattern.iter().any(|byte| luapat::is_pattern_magic(*byte))
 }

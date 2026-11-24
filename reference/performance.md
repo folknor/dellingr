@@ -174,9 +174,9 @@ literal text between `%`s into one copy with the same per-byte charging
 semantics, using the batched appender that `gsub` used for template
 literals at the time. It also treated `%%` as literal text and batched
 literal runs on the first `gsub` template application. The change
-preserved costs, the exhaustion point and the cap boundary (pinned by
-`format_literal_bytes_stop_at_the_first_byte_that_starts_with_no_budget` and
-`format_literal_run_across_the_size_cap_charges_the_bytes_that_fit`).
+preserved costs, the exhaustion point and the cap boundary, as pinned by
+the per-byte literal tests of the time; cost model 9 later removed per-byte
+literal charges and those tests with them.
 
 Plantasjen (as above), default release profile, `brokkr dellingr --bench`
 cells (best of 3 launches, the harness's elapsed ms), base and change
@@ -196,6 +196,25 @@ cycle shrank (release 1520 to 1472, 1488 with snapshot; dev 12912 to
 3168 to 3184, back to its 58e2808 figure); dev and release + snapshot are
 unchanged. The cause of the gsub move is unproven; marking the appender
 `#[inline(never)]` did not change it, so it was left inlinable.
+
+## `string.format` renders into one buffer, 2026-11-24
+
+`string.format` copied its template per call, allocated a `raw` Vec per
+directive, rendered each directive into a Vec of its own (plus a digit
+`String` per integer) and then copied that into the output. The change reads
+the template in place from slot 1 (reacquired after any `__tostring`),
+keeps a directive's bytes as a range, finds the next `%` with one scan per
+literal run, and writes every conversion straight into the output buffer
+with digits in fixed scratch. Each directive still raises its rendering
+errors before the aggregate cap check, `%q` keeps its piece-relative
+checks, and `%p` resolves its identity before the size check, so results,
+errors, reported sizes and charges are unchanged.
+
+bygg, release, `brokkr bench wall --workload format_literals`, best of 3,
+cells interleaved against eb33341: 731, 736 ms to 648, 646 ms (about 12%).
+The release `format` native cycle went from 1568 to 1408 bytes (measured
+under a newer compiler than the previous table; see
+[native-calls.md](native-calls.md)).
 
 ## Sequence library reads off the stack, 2026-11-17
 

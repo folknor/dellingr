@@ -35,6 +35,20 @@ Why not yet: no mechanism; the size is in the band code layout alone moves.
 Signal: a perf annotate of `resolve_index` or `Frame::run` on `method` that
 shows a specific reload or spill the old build did not have.
 
+### sequence_len and patterns slower after owned-buffer interning (2026-11-24)
+
+What: eb33341 (owned library results become pool storage on an intern
+miss) against its parent 81090d3, `brokkr bench wall`, two matched pairs in
+reversed order on bygg: `sequence_len` 2303/2312 to 2373/2377 ms (+3%),
+`patterns` 1177/1180 to 1194/1196 ms (+1.4%), while `format_literals` and
+`mixed` got faster. A variant adopting only exact-capacity buffers left
+`sequence_len` at 2416 ms although its `table.concat` path then did the
+parent's work, which points at code layout but does not prove it.
+
+Why not yet: no mechanism found. Signal: a five-launch same-binary control
+on both workloads; if the deltas clear its spread, a perf annotate of the
+`table.concat` and pattern paths against the parent.
+
 ### Per-instruction weight of the register dispatch loop (2026-10-23)
 
 The entries below share one measurement. perf on plantasjen (Zen 3),
@@ -780,7 +794,8 @@ large one still adopted), with canonical identity kept separate from
 backing-byte ownership. Keep canonical interning, the collection point
 before the probe, and resident bytes counted as content length. Afterwards,
 a common checked builder (rendering into the destination buffer) is a
-follow-up shared with the "Stdlib micro (E)" `string.format` one-buffer item. Also left:
+follow-up; `string.format` already renders into its one output buffer
+(`reserve_piece` in `string_format.rs`). Also left:
 `table.concat` copies its separator (`to_bytes(2)?.to_vec()`) every call.
 
 ### gmatch: drop the Lua-side wrapper and table-backed iterator state (E-O2)
@@ -993,30 +1008,17 @@ in todo.md's workload-registry entry).
   fetch; with one-time validation that all jump targets are in-bounds at
   load/finalize time, the fetch could use a pointer/len cursor - only if
   profiles show it; keep panics over UB.
-- **Stdlib micro (E):** `string.format` should format into one output buffer
-  instead of per-directive Vec round-trips (invasive across ~15 helper
-  functions). Literal runs and `%%` are already batched; what is left is per
-  directive: one rendered-output Vec (`format_integer_parts`, `pad_bytes`),
-  a digit `String` per integer (`unsigned_abs().to_string()`) and the
-  `Directive.raw` Vec. On the `format_literals` probe that is about 1900
-  short-lived allocations per `_bench()` (source-derived counts, unmeasured).
-  Exactness constraint (cost model 9): each directive stays one
-  transaction - parse and validation errors in today's order, then its one
-  atomic unit before the argument is rendered, then the rendering's own
-  errors, then the aggregate cap check, then the bytes. Checking the
-  aggregate cap inside `%q`'s own quoting, or before a rendering error such
-  as `%.1s` of a string with a zero, changes which error is reported.
-  The 2026-11-17 performance hunt (strings scope) called this a rewrite:
-  compile an interned template into literal spans, escaped-percent
-  operations, typed directives and deferred error operations, cache the plan
-  by string identity, and execute it into one checked output buffer (padding
-  and signs written directly, digits in bounded scratch, `%s` ranges appended
-  borrowed; today even `%s` without a metamethod copies into `pad_bytes` and
-  then into the output). Cached parsing alone leaves most allocation in place.
-  The plan encodes today's event order rather than validating the template
-  eagerly, matching the exactness constraint above. The format argument can
-  stay rooted in its slot across `__tostring` with spans reacquired after
-  re-entry, so the template copy is unnecessary.
-  The plain-pattern classifier treats `-` as magic even though a leading `-`
-  with no preceding class item is literal; conservative is fine, just noting
-  the fast path misses needles like `"-foo"`.
+- **`string.format` cached plan (unmeasured follow-up, 2026-11-24):**
+  `string.format` now reads its template in place from slot 1 and renders
+  every directive straight into one output buffer (digits in fixed scratch,
+  no per-directive Vec). Not built: a plan cached by template identity,
+  which would also skip the literal scan and directive parse on warm
+  templates. Measure first whether a warm `format_literals` still spends
+  meaningful time scanning or parsing (`--hotpath kernel`). A cache needs
+  invalidation on collection (a `StringPtr` is reused; the pattern cache is
+  the precedent), must survive nested `__tostring` calls that can evict it,
+  and must keep today's event order (missing argument before parse, parse
+  and validation before the charge, charge before rendering, a poll per
+  `%`). Residual allocations: float bodies from `number_text`/`format!`,
+  `%s` of a non-string without a string-returning handler
+  (`TostringRendering::Bytes`), and `%q` of a non-string.
