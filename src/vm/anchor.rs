@@ -332,7 +332,7 @@ impl State {
     /// `ErrorKind::InvalidAnchor` if the handle belongs to a different
     /// `State`.
     pub fn push_anchor(&mut self, a: &Anchor) -> Result<()> {
-        self.check_usable()?;
+        self.check_poisoned()?;
         match self.registry.get(a) {
             Some(val) => self.push_val(val),
             None => Err(self.error(ErrorKind::InvalidAnchor)),

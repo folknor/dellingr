@@ -118,6 +118,16 @@ Cosmetic:
   fixed-width integer"; the trait doc now lists the actual set (8- to 64-bit,
   signed and unsigned).
 
+### Environment check before caller conversions in the string pushes (2026-11-24)
+
+Found while narrowing the floating-point check to computing methods:
+`push_string` and `push_bytes` run the caller's `AsRef` conversion after
+`check_usable`, so caller code can change the environment between the check
+and the allocation. `Program::compile` checks after its conversion for that
+reason. Allocation and GC pacing are integer bookkeeping today, so no wrong
+result follows; the fix is to check after the conversion, poison first, or
+take concrete borrows.
+
 ## Deferred forward-looking ideas
 
 ### Execution trace hook for a stepping debugger

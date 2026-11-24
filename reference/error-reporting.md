@@ -208,7 +208,10 @@ State marks itself poisoned instead of trying to make each site unwind-safe:
 report through `SaveError`) refuses a poisoned State before other work and
 then refuses an unsupported floating-point environment with
 `ErrorKind::UnsupportedFloatEnvironment`; poison takes precedence.
-`scripts/poison_contract.py` checks this entry rule for every public fallible
-method. Unlike poisoning, an unsupported-environment refusal leaves the State
+`State::check_poisoned` refuses poison only, for the reviewed value moves
+whose outcome cannot depend on the environment (the list is in
+`docs/determinism.md`). `scripts/poison_contract.py` checks this entry rule
+for every public fallible method and admits the poison-only prologue only on
+the methods it lists as environment-independent. Unlike poisoning, an unsupported-environment refusal leaves the State
 usable once the host restores its environment (`docs/determinism.md`,
 "Floating-point environment").

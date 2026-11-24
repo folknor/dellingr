@@ -952,27 +952,26 @@ each get fewer than ~3 accesses (so warmup amortization matters).
 
 ## Host boundary and per-State costs
 
-### Rust-to-Lua call forms
+### `many_chunks` slower since the gmatch program moved into its object
 
-`State::invoke` landed (597db95) on its theoretical saving alone: one
-usability check per call and no callee insert. The `invoke_typed` and
-`invoke_stack` scenarios now measure it against the push / `call_anchor` /
-`to_number` / `pop` sequence with the same `step(i, 0.5)` and count: 3.5 s
-against 5.0 s wall for 60 million calls (about 58 and 83 ns a call), one
-launch each on bygg, 2026-11-24, dirty tree at 8b98de6. Not yet an
-interleaved A/B pair, so the gap is a first reading, not a verdict. Open:
-whether the stack sequence's extra cost is the per-call checks or the
-callee insert, and whether `call_anchor` can shed it.
+`many_chunks` went from about 1.9 s to 2.2 s wall (27 to 31 us a
+collection) at b85864e, bisected in interleaved `--commit` rounds on bygg,
+2026-11-24 (`reference/performance.md`, "Collections over many retained
+runtimes"). The scenario creates no gmatch iterator, so the candidates are
+the `held_patterns` prune added to every collection's cleanup, the
+`RawObject::Gmatch` shape in `mark_children`'s match, and code layout. Not
+yet separated; a same-binary control and a build reverting each piece would
+tell. The leaf-runtime flag change since took it to about 1.8 s.
 
-### Collections over many retained runtimes
+### Tree expansion during closure tracing
 
-The `many_chunks` scenario (1000 distinct loaded chunks, small live heap,
-automatic collection off) runs a full collection in about 27 us on bygg
-(70,000 collections in 1.9 s wall, 2026-11-24, dirty tree at 8b98de6),
-covering the per-runtime literal roots and cache sweep and at least one
-runtime-cache prune. No profile yet splits that time between the
-per-runtime walks and the rest of the collection; until one does, the
-`CACHE_PRUNE_INTERVAL` cadence change stays measured only on `gc_churn`.
+From the spar on the runtime reconcile (2026-11-24): a reached runtime with
+nested prototypes could expand its tree into the live-chunk set when closure
+tracing first flags it, removing the discovery pass over the runtime map in
+`sweep_bytecode_caches`. Pending identities must stay out until tracing
+finishes. It moves work into the closure tracer and leaves the literal-root
+visit and the map `retain`, so it pays only on states whose retained
+runtimes mostly have nested prototypes; no workload has that shape.
 
 ### `ipairs` traversal about 3x the numeric `for` over the same array
 

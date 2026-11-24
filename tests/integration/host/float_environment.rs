@@ -119,13 +119,17 @@ fn every_unsupported_control_is_refused_and_diagnosed() {
             // before any work. The others also create a State, which must
             // succeed: creation is not checked.
             let traps = unmasked.contains(&mxcsr);
-            let (created, compiled, pushed, called) = under(mxcsr, || {
+            // A push computes nothing, so it refuses poison only and is
+            // accepted; a push that allocates still refuses.
+            let (created, compiled, moved, pushed, called) = under(mxcsr, || {
                 let created = (!traps).then(State::new);
                 let compiled = Program::compile("return 1.5 + 2", None).map(drop);
-                let pushed = state.push_number(1.0);
+                let moved = state.push_number(1.0).and_then(|()| state.pop(1));
+                let pushed = state.push_string("s");
                 let called = state.call(ArgCount::Fixed(0), RetCount::Fixed(0));
-                (created, compiled, pushed, called)
+                (created, compiled, moved, pushed, called)
             });
+            moved.expect("a value move does not depend on the environment");
 
             if !traps {
                 let mut created = created.expect("created above");
@@ -194,11 +198,11 @@ fn flip_and_fail(_state: &mut State) -> dellingr::Result<u8> {
     )))
 }
 
-/// Turns on FTZ, records whether a push is refused, restores the default
+/// Turns on FTZ, records whether an allocating push is refused, restores the default
 /// and returns a value.
 fn flip_push_and_restore(state: &mut State) -> dellingr::Result<u8> {
     write_mxcsr(DEFAULT | FTZ);
-    let refused = state.push_number(1.0);
+    let refused = state.push_string("refused");
     write_mxcsr(DEFAULT);
     let refused = matches!(
         refused.as_ref().map_err(Error::kind),

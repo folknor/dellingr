@@ -15,7 +15,10 @@ pub(crate) const CANONICAL_NAN_BITS: u64 = 0x7ff8_0000_0000_0000;
 /// nothing a script can do observes them, so only the exits need pinning.
 #[inline]
 pub(crate) fn canonical_nan(n: f64) -> f64 {
-    if n.is_nan() {
+    // An integer test, not `is_nan`: no floating-point instruction, so a
+    // signalling NaN raises nothing under unmasked traps, and `to_number`
+    // stays independent of the environment it no longer checks.
+    if n.to_bits() & !(1 << 63) > f64::INFINITY.to_bits() {
         f64::from_bits(CANONICAL_NAN_BITS)
     } else {
         n
@@ -381,7 +384,37 @@ pub(crate) const fn hex_value(byte: u8) -> Option<u8> {
 mod tests {
     use crate::crmath::{TestRng, parse_hex_float};
 
-    use super::parse_lua_numeral;
+    use super::{CANONICAL_NAN_BITS, canonical_nan, parse_lua_numeral};
+
+    #[test]
+    fn canonical_nan_replaces_every_nan_and_keeps_every_other_bit_pattern() {
+        let nans = [
+            0x7ff8_0000_0000_0000_u64,
+            0xfff8_0000_0000_0001,
+            0x7ff0_0000_0000_0001, // signalling
+            0xfff7_ffff_ffff_ffff, // signalling, negative
+            0x7fff_ffff_ffff_ffff,
+        ];
+        for bits in nans {
+            assert_eq!(
+                canonical_nan(f64::from_bits(bits)).to_bits(),
+                CANONICAL_NAN_BITS
+            );
+        }
+        let kept = [
+            0_u64,
+            1 << 63,               // -0
+            1,                     // smallest subnormal
+            0x800f_ffff_ffff_ffff, // largest negative subnormal
+            0x7ff0_0000_0000_0000, // inf
+            0xfff0_0000_0000_0000, // -inf
+            0x7fef_ffff_ffff_ffff, // max
+            1.5_f64.to_bits(),
+        ];
+        for bits in kept {
+            assert_eq!(canonical_nan(f64::from_bits(bits)).to_bits(), bits);
+        }
+    }
 
     fn assert_hex_matches_oracle(input: &str) {
         let parsed = parse_lua_numeral(input.as_bytes()).expect("the generated hex float is valid");

@@ -1183,11 +1183,15 @@ impl State {
         // set for all three sources rather than treating the heap's marked
         // closures as the complete runtime-cache root set. The set's order
         // is never read: `retain` walks the map in its own order.
+        //
+        // A reached entry is retained by its own flag, so only one with
+        // nested prototypes walks its tree into the set. Most retained
+        // runtimes are leaves (the functions a chunk defines), and on a State
+        // holding many of them the set insert and lookup per entry were most
+        // of this sweep's cost.
         let object::LiveChunks { trees, pending } = live;
         for runtime in self.bytecode_caches.values() {
-            // Take every flag, even for an entry already retained through a
-            // tree, so none is left set for the next collection.
-            if runtime.caches.take_reached() {
+            if runtime.caches.reached() && !runtime.bytecode.nested.is_empty() {
                 Self::retain_bytecode_tree(trees, &runtime.bytecode);
             }
         }
@@ -1196,8 +1200,10 @@ impl State {
         for identity in pending.drain(..) {
             trees.insert(identity);
         }
+        // `take_reached` runs first for every entry, so no flag is left set
+        // for the next collection.
         self.bytecode_caches
-            .retain(|identity, _| trees.contains(identity));
+            .retain(|identity, runtime| runtime.caches.take_reached() || trees.contains(identity));
     }
 
     /// Clear every runtime cache entry that names an object the sweep freed
@@ -1700,6 +1706,30 @@ impl State {
     pub(crate) fn check_usable(&self) -> Result<()> {
         if self.poisoned || (self.host_code_active() && crate::fp_env::unsupported()) {
             return Err(self.unusable_error());
+        }
+        Ok(())
+    }
+
+    /// The prologue of a public fallible method whose outcome cannot depend
+    /// on the floating-point environment: it moves values, validates integer
+    /// indices and handles, or reads tags and bytes, and runs no Lua, host
+    /// code, compilation, heap allocation or floating-point instruction on
+    /// a value. It refuses a poisoned State and reads no control register.
+    /// Nothing such a method does is computed, so the refusal of a bad
+    /// environment comes at the next method that computes, or at the
+    /// callback's return, before any Lua runs (`docs/determinism.md`).
+    ///
+    /// The register read is the cost this saves: about 5.6 ns a call on
+    /// x86_64 (`stmxcsr` waits for in-flight floating-point work, since
+    /// MXCSR holds the sticky status flags), which was most of the gap
+    /// between the push, `call_anchor`, `to_number`, `pop` sequence and
+    /// `State::invoke` (`reference/performance.md`, "Host call forms").
+    /// `scripts/poison_contract.py` admits this prologue only on the methods
+    /// it lists as environment-independent.
+    #[inline(always)]
+    pub(crate) fn check_poisoned(&self) -> Result<()> {
+        if self.poisoned {
+            return Err(Self::poisoned_error());
         }
         Ok(())
     }

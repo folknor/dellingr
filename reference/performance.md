@@ -120,6 +120,45 @@ arms (8 of 8). It changes the executed path, so it is not a layout control,
 but a hybrid landing outside both behaviours it mixes leaves wall time at
 this size unable to attribute the `patterns` cost.
 
+## Host call forms, 2026-11-24
+
+The `invoke_typed` and `invoke_stack` scenarios (60 million calls of
+`step(i, 0.5)`) split, release wall on bygg, six interleaved `--commit`
+rounds per comparison, every round sign-consistent. At 310e646, `invoke`
+took 3490 ms (58 ns a call) and the push, push, `call_anchor`, `to_number`,
+`pop` sequence 5039 ms (84 ns). A measurement build without the MXCSR read
+in `State::check_usable` took 3201 and 3340 ms, and the same build with the
+stack driver pushing the callee first (no `Vec::insert` in `call_anchor`)
+3290 ms. So each control-register read cost about 5.6 ns (`stmxcsr` waits
+for in-flight floating-point work, since MXCSR holds the sticky status
+flags), the stack sequence paid five against `invoke`'s one, and that was
+the whole gap; the callee insert is not measurable. `call_anchor` has only
+the entry check `invoke` also pays, so it had nothing to shed.
+
+The value moves now refuse poison only (`State::check_poisoned`; the list
+and the argument are in `docs/determinism.md`). Against 310e646, same
+protocol: `invoke_stack` 5065 to 3684 ms (61 ns a call), `invoke_typed`
+3484 to 3471 (3 of 6 rounds faster, no change).
+
+## Collections over many retained runtimes, 2026-11-24
+
+The `many_chunks` scenario (1000 loaded chunks each retaining one leaf
+closure, 70,000 explicit collections), release wall on bygg, six
+interleaved `--commit` rounds per comparison, every round sign-consistent.
+At 310e646 a collection took about 31 us (2189 ms). Measurement builds:
+pruning runtime caches on every collection instead of every 65,536th, 2751
+ms, so the cadence saves about 8 us a collection on code-heavy, data-light
+state; skipping `sweep_bytecode_caches` after setup, about 1.7 s, so the
+per-runtime reconcile was about 7 us. Its cost was a set insert and lookup
+per retained runtime. A reached runtime is now retained by its own flag and
+only one with nested prototypes walks its tree into the set: 2183 to 1802
+ms (about 26 us a collection).
+
+The scenario was about 1.9 s at 0cc99ec and moved to about 2.2 s with
+b85864e (three interleaved rounds of fe88e6a, b6e2bfa, dbf3841 and b85864e:
+1.9, 1.9, 1.9, 2.2 s). No gmatch iterator exists in the scenario, so the
+mechanism is not established; layout is not ruled out.
+
 ## Short interned strings inline, 2026-11-24
 
 A string of at most 22 bytes is stored inside its arena slot rather than in

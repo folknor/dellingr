@@ -12,6 +12,15 @@ tick budgets and re-record replays.
 
 ### Changed (breaking)
 
+- The value-moving stack methods (`push_nil`, `push_boolean`,
+  `push_number`, `push_value`, `push_anchor`, `push_rust_fn`, `pop`,
+  `set_top`, `insert`, `remove`, `replace`, `copy_val`, `to_number`,
+  `to_bytes`, `try_to_boolean`, `try_typ`) refuse a poisoned State but no
+  longer read the floating-point control register, since nothing they do
+  depends on it; an unsupported environment is refused at the next method
+  that computes or at a callback's return, before any Lua runs
+  (docs/determinism.md). The read cost about 5.6 ns on x86_64, and a host
+  call built from stack operations is about 27% faster. Not replay-visible.
 - **Replay-visible:** automatic garbage collection paces by a score of
   objects, distinct strings and resident table backing and string bytes (one
   unit per 256 bytes), not by objects and strings alone (docs/limits.md,

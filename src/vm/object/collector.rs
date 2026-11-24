@@ -80,7 +80,9 @@ impl NoGcAllocator<'_> {
 /// capacity, so a steady-state collection allocates nothing for it.
 #[derive(Default)]
 pub(in crate::vm) struct LiveChunks {
-    /// Active chunks with their nested prototype graphs, each fully
+    /// Active chunks, and reached runtimes that have nested prototypes (a
+    /// reached leaf is retained by its own flag), with their nested
+    /// prototype graphs, each fully
     /// traversed: `State::retain_bytecode_tree` stops at an identity already
     /// here, which is only sound because every entry's graph is in too. It
     /// holds every identity walked, with or without a runtime entry, so a

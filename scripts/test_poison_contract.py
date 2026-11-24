@@ -9,14 +9,27 @@ from test_native_calls import SourceFixture
 
 def check(sources, **review):
     """The checker over fixture sources, which define none of the real
-    registrations NON_EXECUTING reviews."""
+    registrations NON_EXECUTING reviews nor the methods FP_INDEPENDENT
+    does."""
     review.setdefault("non_executing", set())
+    review.setdefault("fp_independent", set())
     return guard.check_sources(sources, **review)
 
 
 class PoisonContractTests(SourceFixture):
     def problems(self, text):
         return check([self.source(text)])
+
+    def test_poison_only_prologue_is_admitted_only_on_reviewed_methods(self):
+        source = self.source('''impl State {
+ pub fn moves(&mut self) -> Result<()> { self.check_poisoned()?; Ok(()) }
+ pub fn computes(&mut self) -> Result<()> { self.check_poisoned()?; Ok(()) }
+ pub fn checked(&mut self) -> Result<()> { self.check_usable()?; Ok(()) }
+}''')
+        problems = check([source], fp_independent={"moves", "checked"})
+        self.assertEqual(len(problems), 2, problems)
+        self.assertIn("State::computes: refuses poison only", problems[0])
+        self.assertIn("checked no longer refuses poison only", problems[1])
 
     def test_new_method_and_late_or_discarded_checks_fail(self):
         problems = self.problems('''impl State {

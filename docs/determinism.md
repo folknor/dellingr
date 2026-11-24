@@ -104,8 +104,8 @@ refuses to compute in such an environment instead.
   `LoadError::UnsupportedFloatEnvironment` for snapshots). The error carries
   the register value and decodes it. Reading changes nothing: dellingr never
   resets the environment, which would be undefined behaviour in Rust.
-- Checked: every public fallible `State` method made by host code,
-  `Program::compile`, `save_state`, `load_state` on entry and again after
+- Checked: every public fallible `State` method made by host code that can
+  compute, except the value moves listed below, plus `Program::compile`, `save_state`, `load_state` on entry and again after
   its setup closure, and every host Rust callback's return, where a callback
   that returns `Ok` with the environment changed fails with this error
   instead, so Lua never resumes under it. A host function's own calls into
@@ -121,6 +121,21 @@ refuses to compute in such an environment instead.
   as it found it, as it is during any allocating operation. Creating a State is not
   checked: it computes nothing that depends on the environment, and a State
   may be created on one thread and run on another.
+- Refusing poison only, not the environment: the fallible methods whose
+  outcome cannot depend on it, because they move values, validate integer
+  indices and handles, or read tags and bytes, and run no Lua, host code,
+  compilation, heap allocation or floating-point instruction on a value:
+  `push_nil`, `push_boolean`, `push_number`, `push_value`, `push_anchor`,
+  `push_rust_fn`, `pop`, `set_top`, `insert`, `remove`, `replace`,
+  `copy_val`, `to_number`, `to_bytes`, `try_to_boolean` and `try_typ`
+  (`scripts/poison_contract.py` holds the reviewed list). They succeed in an
+  unsupported environment, and the refusal comes at the next method that
+  computes or at the callback's return, before any Lua runs. What they did
+  stays done: a value popped or pushed then is popped or pushed, as with any
+  call that failed partway. Each read of the control register costs a few
+  nanoseconds on x86_64, which made it most of the cost of a host call
+  assembled from stack operations. `consume_cost` keeps the check, so no
+  budget is spent in a refused environment.
 - Not checked: the infallible observations (`to_boolean`, `raw_equal`,
   `typ`, `get_top`, ...). `raw_equal` on a subnormal under denormals-are-zero
   answers as any host comparison would.

@@ -65,10 +65,26 @@ SAFE_INFALLIBLE = {
 # takes such code, or that reaches Lua, is an error, so the set cannot rot.
 NON_EXECUTING = {"add_rust_fn", "register_rust_fn", "set_global_named_rust_fn"}
 
+# Public fallible methods whose outcome cannot depend on the floating-point
+# environment: they move values, validate integer indices and handles, or
+# read tags and bytes, and run no Lua, host code, compilation, heap
+# allocation or floating-point instruction on a value. They refuse poison
+# only (`State::check_poisoned`); the environment is refused at the next
+# method that computes or at a callback's return (docs/determinism.md).
+# Membership is this review's claim: the script enforces the prologue shape,
+# not the independence. A listed name that no longer uses the prologue is an
+# error, so the set cannot rot.
+FP_INDEPENDENT = {
+    "set_top", "pop", "push_nil", "push_number", "push_boolean", "push_rust_fn",
+    "push_value", "push_anchor", "insert", "remove", "replace", "copy_val",
+    "try_to_boolean", "to_number", "to_bytes", "try_typ",
+}
+
 # Both prologues refuse a poisoned State and then an unsupported
 # floating-point environment; the snapshot entry points report through
 # SaveError.
 DIRECT = re.compile(r"self\s*\.\s*check_usable\s*\(\s*\)\s*\?\s*;")
+POISON_ONLY = re.compile(r"self\s*\.\s*check_poisoned\s*\(\s*\)\s*\?\s*;")
 SAVE_REFUSAL = re.compile(r"self\s*\.\s*check_save_usable\s*\(\s*\)\s*\?\s*;")
 GUARDED = re.compile(r"self\s*\.\s*guarded\s*(\()\s*\|state\|")
 # Any spelling of a call to the guard, and any use of it as a value.
@@ -171,7 +187,8 @@ def takes_state_code(fn, types):
         re.search(rf"\b{re.escape(name)}\b", sig) for name in types)
 
 
-def check_sources(sources, safe_infallible=SAFE_INFALLIBLE, non_executing=NON_EXECUTING):
+def check_sources(sources, safe_infallible=SAFE_INFALLIBLE, non_executing=NON_EXECUTING,
+                  fp_independent=FP_INDEPENDENT):
     problems = []
     methods = [fn for src in sources for fn in src.fns if public_receiver(fn)]
     definitions = rust.definitions(sources)
@@ -181,6 +198,7 @@ def check_sources(sources, safe_infallible=SAFE_INFALLIBLE, non_executing=NON_EX
         return bool(found) and all(DIRECT.match(body(fn).lstrip()) for fn in found)
 
     # Rule 1: entry refusal.
+    poison_only = set()
     for fn in methods:
         where = f"{fn.src.rel}:{fn.line}: {fn.qual}"
         if not returns_result(fn):
@@ -188,6 +206,12 @@ def check_sources(sources, safe_infallible=SAFE_INFALLIBLE, non_executing=NON_EX
                 problems.append(f"{where}: review this infallible poisoned-State API")
             continue
         entry = body(fn).lstrip()
+        if POISON_ONLY.match(entry):
+            poison_only.add(fn.name)
+            if fn.name not in fp_independent:
+                problems.append(f"{where}: refuses poison only, but is not reviewed as "
+                                "floating-point independent (FP_INDEPENDENT)")
+            continue
         if DIRECT.match(entry) or SAVE_REFUSAL.match(entry):
             continue
         if GUARDED.match(entry) and checked_boundary("guarded"):
@@ -195,6 +219,9 @@ def check_sources(sources, safe_infallible=SAFE_INFALLIBLE, non_executing=NON_EX
         problems.append(f"{where}: must refuse poisoning before other work")
     if not methods:
         problems.append("no public State receiver methods found")
+    for name in sorted(fp_independent - poison_only):
+        problems.append(f"poison_contract.py: {name} no longer refuses poison only; "
+                        "drop it from FP_INDEPENDENT")
 
     # Rule 2: the execution boundary.
     reached, _, _ = rust.closure(sources)

@@ -484,6 +484,13 @@ impl RuntimeCaches {
         self.reached.set(true);
     }
 
+    /// Whether a closure running this bundle was traced since the flag was
+    /// last taken, leaving it set.
+    #[inline(always)]
+    pub(super) fn reached(&self) -> bool {
+        self.reached.get()
+    }
+
     /// Whether a closure running this bundle was traced since the last
     /// call, clearing the flag.
     pub(super) fn take_reached(&self) -> bool {
