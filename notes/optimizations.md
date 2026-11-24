@@ -983,9 +983,15 @@ record rule (a record is defined earlier in the same pass). A candidate
 from the spar: a body-entry operation that re-establishes a fresh record
 from the yielded stack slot every pass, so no record fact rides the back
 edge. Loops with three or more variables are declined (the extra ones are
-nil every step). Not measured on a workload with records; `table_mixed`
-and `vararg` hold ipairs loops over numbers and were not re-measured
-after the region landed.
+nil every step). Not measured on a workload with records.
+
+### `numeric_index` about 4% slower after the `ipairs` region landed
+
+Matched pairs 63e5a4c against 908777f on bygg (`reference/performance.md`,
+"`ipairs` loops as typed regions"): `numeric_index` 4.5 to 4.7 s, 3 of 3
+pairs, with an unchanged region shape. Unattributed; suspected layout of
+`run_control_region`'s instantiations. Needs a five-launch same-binary
+control before any mechanism is chased.
 
 ---
 

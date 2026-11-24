@@ -991,6 +991,36 @@ each time) gave 3244 ms in 51846acb, so the key-checked position is about
 attributed; a later matched run did not reproduce it (next section). No
 corpus cost row moved. `frame.rs` is untouched.
 
+## `ipairs` loops as typed regions, 2026-11-24
+
+A generic `for` over the `ipairs` iterator whose body the region scan
+admits runs as a typed region, the pass ending in the iterator step
+(`State::ipairs_step`, shared with the dispatch loop's fast step) instead
+of `FOR_LOOP`. Before it, `bench/ipairs.lua` cost about 19 ns an element
+against about 6 ns for the same sum by numeric `for` and `arr[i]`: the
+step was already callback-free, so the gap was the two dispatches per
+element. Matched interleaved pairs on bygg, `brokkr bench --rounds 3` with
+`--commit` arms, 63e5a4c against 908777f (best of one per cell):
+
+| Workload | 63e5a4c | 908777f | invocation |
+|---|---:|---:|---|
+| `ipairs` | 5.1, 5.1, 5.1 s | 1.8, 1.8, 1.8 s | b4b25be3 |
+| `table_mixed` | 5.0, 5.0, 5.0 s | 3.9, 4.0, 3.9 s | b4b25be3 |
+| `vararg` | 4.8, 4.8, 4.8 s | 4.1, 4.1, 4.0 s | b4b25be3 |
+| `numeric_index` | 4.5, 4.6, 4.5 s | 4.7, 4.7, 4.7 s | b4b25be3 |
+| `object_fields` | 3.1, 3.1, 3.1 s | 2.9, 3.0, 3.0 s | 1cc04ca6 |
+| `column_key` | 2.7, 2.8, 2.8 s | 2.8, 2.8, 2.9 s | 1cc04ca6 |
+| `method_step` | 2.3, 2.2, 2.3 s | 2.3, 2.6, 2.3 s | 1cc04ca6 |
+| `store_loop` | 1.5, 1.5, 1.5 s | 1.5, 1.5, 1.5 s | 1cc04ca6 |
+
+`numeric_index` runs the same region shape on both arms; its 3 of 3
+slower pairs, like `object_fields` faster and `column_key` slower, are not
+attributed (the control runner's instantiations gained the `ipairs` tail),
+and no same-binary control was run. `native_bytes_per_level` is unchanged
+in dev and release: the entry hook sits in `Frame::tfor_fused_loop`,
+inlined only in release, since a live bool or call-pc local in the
+`TFOR_CALL` arm cost 16 to 48 bytes a level.
+
 ## The session's `object_fields` deltas, re-measured, 2026-11-24
 
 Both `object_fields` slowdowns above (the forward-branch leaves and the
