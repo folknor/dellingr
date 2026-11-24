@@ -79,9 +79,12 @@ Library results built in an owned `Vec` (`gsub`, `upper`, `lower`,
 a non-string, and `..`) go into the string pool through `push_owned_bytes` /
 `alloc_string_owned`: an intern miss converts the buffer with
 `into_boxed_slice` instead of copying it from a slice. Same probe, collection
-point, identities and resident length, so not replay-visible. Against its
-parent 81090d3 on bygg, `brokkr bench wall` (best of 3, ms), two matched
-pairs, the second in reversed order:
+point, identities and resident length, so not replay-visible. The table
+below, against its parent 81090d3 on bygg (`brokkr bench wall`, best of 3,
+ms, two pairs, the second in reversed order), is not a matched pair: the
+parent arm was a `--commit` worktree build and the change arm the live dirty
+tree, which differ in more than the commit. Every row of it is qualified by
+that, the gains as much as the slowdowns.
 
 | Workload | 81090d3 | Change |
 |---|---|---|
@@ -92,12 +95,30 @@ pairs, the second in reversed order:
 | `sequence_len` | 2303, 2312 | 2373, 2377 |
 
 A diagnostic variant that took only buffers with capacity equal to length
-and copied the rest measured `format_literals` 757 and `sequence_len` 2416:
-the `format_literals` gain went with the slack buffers, and `sequence_len`
-stayed slower although its `table.concat` path did HEAD's work, which points
-at layout but does not prove it. `large_subject` shows no gain: its `gsub`
-output is mostly an intern hit, and the copy a miss saves is small against
-its scan.
+and copied the rest (also a live-tree cell) measured `format_literals` 757
+and `sequence_len` 2416. `large_subject` shows no gain: its `gsub` output is
+mostly an intern hit, and the copy a miss saves is small against its scan.
+
+Re-measured with both arms as `--commit` builds, interleaved `--rounds`,
+one launch per cell, on bygg the same day. eb33341 against 81090d3:
+`sequence_len` faster in 6 of 6 rounds, median paired -80 ms (invocation
+ec5c73c0), so the slowdown above was the unmatched arm and is withdrawn;
+`patterns` slower in 4 of 6 (+13 ms) and then 11 of 12 (+11.5 ms,
+invocation c5f3b532), so about 1% there is real for that binary pair, cause
+unattributed.
+
+At fe88e6a, against a local diagnostic commit that routed
+`State::alloc_string_owned` through the borrowed copy (owned path dead), 8
+rounds each: `mixed` is 64 ms (2.9%) faster with adoption, 8 of 8 (its `..`
+results are intern misses, so adoption saves a copy on each); `patterns` is
+15 ms and then 9 ms slower with adoption (8 of 8, 5 of 8); `format_literals`
+about 6 ms slower (5 of 8, 7 of 8); `large_subject` tied; `sequence_len` 27
+ms faster with adoption (6 of 8) although its `table.concat` results are all
+intern hits. Adoption is kept for the `mixed` gain. A third arm adopting only
+exact-capacity buffers ran `format_literals` 27 ms slower than both pure
+arms (8 of 8). It changes the executed path, so it is not a layout control,
+but a hybrid landing outside both behaviours it mixes leaves wall time at
+this size unable to attribute the `patterns` cost.
 
 ## Typed gmatch iterators, 2026-11-24
 

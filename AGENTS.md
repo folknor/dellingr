@@ -91,6 +91,7 @@ Host-side work a script cannot drive (State construction, compilation, collectio
 
 - **Every measurement of dellingr's own performance goes through `brokkr bench`**: never hyperfine, `time` or a hand-rolled loop. Register a workload first. The one exception is `scripts/bench.sh`, which only regenerates the README comparison table.
 - **Never run benchmark or profiling commands in parallel.**
+- **A matched A/B builds both arms with `--commit`** (`brokkr bench --rounds N --commit A --commit B`; commit a variant locally first). A live-tree build is unmatched against a `--commit` build even when the tree is clean: one such pair showed a 3% slowdown that reversed once both arms were commits.
 - **Interleave matched A/B cells** and compare medians with sign consistency across pairs; `--iterations N` is best-of-N within one cell and cannot cancel drift. A same-day matched pair beats any historical number.
 - **Suspect code layout before mechanism**: binaries whose executed path is identical have measured about 11% apart. Run a five-launch same-binary control before trusting a small delta.
 - Never point instrumentation (`--hotpath`, any `--features hotpath` build) at a seconds-scale `bench/` file: its event queue is unbounded and backlogs tens of GB. `wall` declares no `hotpath_features`, so brokkr refuses `--hotpath` on it, and the profilable benches bind only `data.workloads.hotpath`; keep it that way.

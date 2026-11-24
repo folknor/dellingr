@@ -35,19 +35,22 @@ Why not yet: no mechanism; the size is in the band code layout alone moves.
 Signal: a perf annotate of `resolve_index` or `Frame::run` on `method` that
 shows a specific reload or spill the old build did not have.
 
-### sequence_len and patterns slower after owned-buffer interning (2026-11-24)
+### patterns about 1% slower with owned-buffer interning (2026-11-24)
 
-What: eb33341 (owned library results become pool storage on an intern
-miss) against its parent 81090d3, `brokkr bench wall`, two matched pairs in
-reversed order on bygg: `sequence_len` 2303/2312 to 2373/2377 ms (+3%),
-`patterns` 1177/1180 to 1194/1196 ms (+1.4%), while `format_literals` and
-`mixed` got faster. A variant adopting only exact-capacity buffers left
-`sequence_len` at 2416 ms although its `table.concat` path then did the
-parent's work, which points at code layout but does not prove it.
+What: matched `--commit` rounds on bygg (reference/performance.md, "Owned
+results interned without a second copy"): eb33341 against 81090d3 slower in
+11 of 12 rounds, +11.5 ms; at fe88e6a, adoption against a borrowed-copy
+diagnostic build slower by 15 and 9 ms (8 of 8, 5 of 8). Adoption stays
+for `mixed` (2.9% faster). The `sequence_len` slowdown once filed beside
+this one did not survive matched arms.
 
-Why not yet: no mechanism found. Signal: a five-launch same-binary control
-on both workloads; if the deltas clear its spread, a perf annotate of the
-`table.concat` and pattern paths against the parent.
+Why not yet: no mechanism. The workload's owned producers are `gsub`,
+`reverse` and number `tostring`; hit/miss counts and allocator calls for
+them were not taken. Signal: a cost localized to one producer or the intern
+path, backed by hit/miss and allocation counts, or a comparison holding code
+layout fixed. Wall A/B alone cannot settle it: a one-branch hybrid of the two
+behaviours moved `format_literals` 4% past both. Nothing supports a
+per-producer opt-out yet.
 
 ### Per-instruction weight of the register dispatch loop (2026-10-23)
 
