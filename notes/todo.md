@@ -118,19 +118,6 @@ Cosmetic:
   fixed-width integer"; the trait doc now lists the actual set (8- to 64-bit,
   signed and unsigned).
 
-### `scripts/ab_pairs.py` duplicates `brokkr bench --rounds` (2026-11-24)
-
-`scripts/ab_pairs.py` hand-rolls interleaved A/B cells (one
-`brokkr bench --commit <ref> wall` per cell, order reversed each round).
-`brokkr bench --rounds N --commit A --commit B` does the same natively and
-groups the cells under one invocation for `brokkr results --invocation`;
-AGENTS.md's Benchmarks section now names `--rounds` as the matched form.
-AGENTS.md's scripts paragraph still lists `ab_pairs.py` as worth knowing
-and describes it as "`--bench --commit`" cells, an older spelling of the
-command. Retire the script or say what it still offers over `--rounds`,
-and correct that description. Found while scouting the owned-buffer
-slowdowns.
-
 ### `method_step`'s header says its loop runs canonically (2026-11-24)
 
 `examples/calls/method_step.lua` opens by saying `Body:step` "is no leaf
