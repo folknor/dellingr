@@ -736,10 +736,7 @@ fn is_incomplete_numeral(input: &[u8]) -> bool {
         .strip_prefix(b"0x")
         .or_else(|| input.strip_prefix(b"0X"))
     {
-        let Some(exponent_start) = mantissa_and_exponent
-            .iter()
-            .position(|byte| matches!(*byte, b'p' | b'P'))
-        else {
+        let Some(exponent_start) = memchr::memchr2(b'p', b'P', mantissa_and_exponent) else {
             return mantissa_and_exponent.is_empty() || mantissa_and_exponent == b".";
         };
         let mantissa = &mantissa_and_exponent[..exponent_start];
@@ -747,8 +744,7 @@ fn is_incomplete_numeral(input: &[u8]) -> bool {
         has_mantissa_digits(mantissa, u8::is_ascii_hexdigit)
             && (exponent.is_empty() || exponent == b"+" || exponent == b"-")
     } else {
-        let Some(exponent_start) = input.iter().position(|byte| matches!(*byte, b'e' | b'E'))
-        else {
+        let Some(exponent_start) = memchr::memchr2(b'e', b'E', input) else {
             return false;
         };
         let mantissa = &input[..exponent_start];

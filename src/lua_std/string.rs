@@ -92,10 +92,7 @@ fn scan_subslice(
     let mut start = 0usize;
     // safepoint: polls the interrupt flag once per candidate, below.
     while start <= last_start {
-        let Some(offset) = haystack[start..=last_start]
-            .iter()
-            .position(|&b| b == first)
-        else {
+        let Some(offset) = memchr::memchr(first, &haystack[start..=last_start]) else {
             charge(meter, last_start - start + 1)?;
             return Ok(None);
         };
@@ -465,10 +462,7 @@ fn append_literal_run(
     let mut i = start;
     // bounded: one pass over the run just measured.
     while i < end {
-        let stop = repl[i..end]
-            .iter()
-            .position(|&b| b == b'%')
-            .map_or(end, |offset| i + offset);
+        let stop = memchr::memchr(b'%', &repl[i..end]).map_or(end, |offset| i + offset);
         out.extend_from_slice(&repl[i..stop]);
         if stop == end {
             break;

@@ -300,6 +300,24 @@ The release `format` native cycle went from 1568 to 1408 bytes (measured
 under a newer compiler than the previous table; see
 [native-calls.md](native-calls.md)).
 
+## Direct byte searches with memchr, 2026-11-24
+
+On bygg, `brokkr bench wall` built release commits 649adf0b (A) and
+196aa737 (B) with `--commit`. Each workload ran two interleaved pairs
+(A B, B A), with one launch per cell. The measured B commit is the code
+revision before this documentation was added. Times are the sidecar
+`WARM` phase in milliseconds, in round order (invocation 10f71224).
+
+| Workload | A rounds | B rounds | Median change |
+|---|---|---|---|
+| `format_literals` | 203.67, 201.55 | 204.05, 201.44 | +0.1% |
+| `patterns` | 306.25, 308.72 | 304.55, 298.06 | -2.0% |
+| `large_subject` | 432.66, 431.91 | 432.69, 429.75 | -0.2% |
+
+Both `patterns` pairs favor B, and the other workloads change direction
+between pairs. All three shifts fall within the roughly 11% code-layout
+noise band.
+
 ## Sequence library reads off the stack, 2026-11-17
 
 `table.concat` and `unpack` read each element straight from the table

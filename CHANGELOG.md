@@ -217,6 +217,9 @@ tick budgets and re-record replays.
 
 ### Performance
 
+- Added `memchr` as a direct dependency for byte searches in string
+  formatting, plain pattern searches, replacement strings, and numeral
+  diagnostics. String results and charges are unchanged.
 - `string.gmatch` steps are about a third faster on short matches and well
   over half faster on repeated failed scans (`patterns`, `failed_scan`), from
   the typed iterator above.

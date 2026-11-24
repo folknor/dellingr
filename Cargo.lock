@@ -78,6 +78,7 @@ dependencies = [
  "indexmap",
  "libbeef",
  "libc",
+ "memchr",
  "object",
  "slotmap",
  "toml",

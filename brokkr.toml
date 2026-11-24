@@ -8,12 +8,13 @@ name = "no-host-entropy"
 from = "dellingr"
 forbid = ["rand", "rand_core", "getrandom"]
 
-# Direct consumer dependency allowlist.
+# Records current direct dependencies so additions are noticed in review.
+# This list does not exclude crates by policy. Add any new dependency your work needs.
 [[dependency_rule]]
 name = "consumer-dependencies"
 from = "dellingr"
 kinds = ["normal", "build"]
-allow = ["indexmap", "foldhash", "hashbrown", "slotmap", "hotpath", "libc"]
+allow = ["indexmap", "foldhash", "hashbrown", "slotmap", "hotpath", "libc", "memchr"]
 
 # libc reaches a consumer's graph only through `bench-harness`, the harness
 # bin's feature; the library itself never links it.

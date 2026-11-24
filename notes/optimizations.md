@@ -1025,13 +1025,12 @@ path is recorded yet; nothing here is a candidate until one is.
   release `bench/format_literals.lua` (bygg, b85864e) put about half of
   `format`'s own samples (about 10% of the run) on the bytewise scan for the
   next `%`, directive parsing a few percent of `format`, and about 15% of the
-  run in allocator growth of the output. The scan is now word-at-a-time
-  (`find_percent`; no `memchr`, the consumer-dependency allowlist keeps it
-  out) and the output takes a bounded capacity hint on its first literal
-  run; after both, the same profile ran about 25% fewer cycles and `format`'s
+  run in allocator growth of the output. The original word-at-a-time scan
+  and a bounded capacity hint on the first literal run cut about 25% of the
+  cycles in the same profile, and `format`'s
   own time had no hot spot left (wall, bygg, two matched `--commit` pairs in
-  both orders against b85864e: 646, 643 to 524, 520 ms). A plan cache keyed by template identity
-  would now save only the parse and the per-run scans. Reopen only if a
+  both orders against b85864e: 646, 643 to 524, 520 ms). The scan now uses `memchr`. A plan cache keyed by template
+  identity would now save only the parse and the per-run scans. Reopen only if a
   warm, directive-dense workload with cheap arguments profiles the parse as
   meaningful; `--hotpath kernel` cannot answer it (`format` and
   `format_argument` are native-call inventory entries and carry no

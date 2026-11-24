@@ -89,7 +89,7 @@ pub(crate) fn format(state: &mut State) -> Result<u8> {
     // polls before its directive is parsed and its argument rendered.
     while cursor < template_len {
         let bytes = template(state, coerced_template.as_deref())?;
-        let Some(offset) = find_percent(&bytes[cursor..]) else {
+        let Some(offset) = memchr::memchr(b'%', &bytes[cursor..]) else {
             break;
         };
         cursor += offset;
@@ -132,35 +132,6 @@ fn template<'a>(state: &'a State, coerced: Option<&'a [u8]>) -> Result<&'a [u8]>
         Some(bytes) => Ok(bytes),
         None => state.to_bytes(1),
     }
-}
-
-/// The offset of the first `%` in `bytes`, eight bytes at a time. The literal
-/// scan was about half of `format`'s own time on mostly-literal templates when
-/// it went byte by byte. The result is the first match whatever the target's
-/// endianness: each word is read little-endian, so its lowest set flag is its
-/// earliest byte.
-fn find_percent(bytes: &[u8]) -> Option<usize> {
-    const HIGHS: u64 = u64::from_ne_bytes([0x80; 8]);
-    const PERCENTS: u64 = u64::from_ne_bytes([b'%'; 8]);
-    let (words, tail) = bytes.as_chunks::<8>();
-    let mut base = 0usize;
-    // bounded: one pass over the slice, which is the capped format string.
-    for word in words {
-        let word = u64::from_le_bytes(*word);
-        let diff = word ^ PERCENTS;
-        // The exact zero-byte test: a flag is set only for a byte that is 0,
-        // so the lowest flag is the first `%` with no false positive below it.
-        let flags = !(((diff & !HIGHS).wrapping_add(!HIGHS)) | diff | !HIGHS);
-        if flags != 0 {
-            let lane =
-                usize::try_from(flags.trailing_zeros() / 8).expect("a byte lane index is below 8");
-            return Some(base + lane);
-        }
-        base += 8;
-    }
-    tail.iter()
-        .position(|byte| *byte == b'%')
-        .map(|offset| base + offset)
 }
 
 /// Append a literal run. The first non-empty run sizes the output for the
@@ -495,7 +466,7 @@ fn format_string_rendering(
     directive: &Directive,
     argument: usize,
 ) -> Result<()> {
-    if directive.has_modifiers && bytes.contains(&0) {
+    if directive.has_modifiers && memchr::memchr(0, bytes).is_some() {
         return Err(format_arg_error(
             state,
             argument,
@@ -996,7 +967,7 @@ fn quote_string(out: &mut Vec<u8>, bytes: &[u8]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{find_percent, format_hex_float};
+    use super::format_hex_float;
     use crate::numeral::parse_lua_numeral;
 
     #[test]
@@ -1008,7 +979,7 @@ mod tests {
         for len in 0..=20 {
             for filler in fillers {
                 let mut bytes = vec![filler; len];
-                if bytes.iter().position(|byte| *byte == b'%') != find_percent(&bytes) {
+                if bytes.iter().position(|byte| *byte == b'%') != memchr::memchr(b'%', &bytes) {
                     panic!("no-match scan differs for len {len}, filler {filler:#x}");
                 }
                 for at in 0..len {
@@ -1016,12 +987,12 @@ mod tests {
                     for later in at + 1..len {
                         bytes[later] = b'%';
                         let expected = bytes.iter().position(|byte| *byte == b'%');
-                        if expected != find_percent(&bytes) {
+                        if expected != memchr::memchr(b'%', &bytes) {
                             panic!("scan differs for len {len}, filler {filler:#x}, at {at}");
                         }
                         bytes[later] = filler;
                     }
-                    if Some(at) != find_percent(&bytes) {
+                    if Some(at) != memchr::memchr(b'%', &bytes) {
                         panic!("scan misses len {len}, filler {filler:#x}, at {at}");
                     }
                     bytes[at] = filler;
