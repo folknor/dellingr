@@ -131,6 +131,22 @@ command. Retire the script or say what it still offers over `--rounds`,
 and correct that description. Found while scouting the owned-buffer
 slowdowns.
 
+### `method_step`'s header says its loop runs canonically (2026-11-24)
+
+`examples/calls/method_step.lua` opens by saying `Body:step` "is no leaf
+and every call takes an activation and dispatches each update's read, add
+and store", so "the loop runs canonically". Since field leaves took forward
+number branches and the fused field-truth branch (`if self.alive`),
+`Body:step` is a branching leaf and the loop is a typed region (the
+"Field leaves with forward branches" section of `reference/performance.md`
+records method_step 5.8 s to 2.3 s). The header now misdescribes what the
+workload measures. Rewording it re-pins the pair in `brokkr.d/bench.toml`
+and cuts its stored history, so do it the next time that pair is re-pinned
+anyway, or decide the history is worth cutting. Distinct from the `bench/`
+"probe rationale" headers in the `_G` housekeeping list: this is the
+`examples/` file's mechanism text gone stale. Found while scouting the
+GET_TABLE hint hit-path workload.
+
 ## Deferred forward-looking ideas
 
 ### Execution trace hook for a stepping debugger
@@ -219,15 +235,6 @@ reconstruct today's canonical array span including interior nils and the
 logical hash history; segmented access can slow dense reads, so the contiguous
 form stays. High confidence in the pathologies, medium in their weight on
 game throughput. (Performance, but filed here beside the matching entry.)
-
-### Contract test for the scenario bench script
-
-What: `brokkr.d/host.lua` (the `host` and `snapshot` benches) is compiled
-and name-checked by `brokkr check` but never executed by it. Its refusals (no
-scenario KVs, no success line, a count that disagrees with the KV) run only
-in a real `brokkr bench`. A `bench_tests` contract file driving the script
-against scripted harness output would cover them on every check; the same
-holds for `brokkr.d/bench.lua`. Neither has one today.
 
 ### Typed `State<U>` for user-data
 

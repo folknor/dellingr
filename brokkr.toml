@@ -1,5 +1,6 @@
 project = "dellingr"
 include = ["brokkr.d/bench.toml"]
+bench_tests = "brokkr.d/bench_tests"
 
 # These crates are absent, so Clippy paths into them cannot resolve. Refuse
 # their introduction at the dependency boundary instead of keeping no-op bans.
