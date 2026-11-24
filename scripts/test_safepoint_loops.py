@@ -61,7 +61,7 @@ mod tests { fn t() { for i in 0..9 { check(i); } } }
         self.assertEqual(self.problems(
             "fn f() { for i in 0..n { work(i); } }", "src/vm/eval.rs"), [])
         for scoped in ("src/patterns/luapat.rs", "src/vm/leaf.rs", "src/vm/rng.rs",
-                       "src/vm/table_ops.rs"):
+                       "src/vm/table_ops.rs", "src/vm/numeric_loop.rs"):
             self.assertEqual(len(self.problems(
                 "fn f() { for i in 0..n { work(i); } }", scoped)), 1, scoped)
 

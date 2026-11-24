@@ -209,8 +209,8 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Args, Strin
         }
     }
 
-    let raw =
-        positional.ok_or_else(|| "usage: hotpath <script-path> [--iterations N]".to_owned())?;
+    let raw = positional
+        .ok_or_else(|| "usage: dellingr-bench <script-path> [--iterations N]".to_owned())?;
     Ok(Args {
         script_path: PathBuf::from(&raw),
         target: raw,
@@ -595,12 +595,15 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn hotpath_requires_a_script_path() {
-        assert!(parse_args_from(Vec::<String>::new()).is_err());
+    fn dellingr_bench_requires_a_script_path() {
+        assert_eq!(
+            parse_args_from(Vec::<String>::new()).err().as_deref(),
+            Some("usage: dellingr-bench <script-path> [--iterations N]")
+        );
     }
 
     #[test]
-    fn hotpath_keeps_the_callers_script_path() {
+    fn dellingr_bench_keeps_the_callers_script_path() {
         let args = parse_args_from(["examples/numerics/arithmetic.lua".to_owned()])
             .expect("script path parses");
         assert_eq!(
@@ -610,7 +613,7 @@ mod tests {
     }
 
     #[test]
-    fn hotpath_chunk_name_uses_the_path_without_a_reference_lua_prefix() {
+    fn dellingr_bench_chunk_name_uses_the_path_without_a_reference_lua_prefix() {
         assert_eq!(
             chunk_name(std::path::Path::new("bench/arithmetic.lua")),
             b"bench/arithmetic.lua"

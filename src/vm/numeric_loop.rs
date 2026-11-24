@@ -364,6 +364,7 @@ impl NumericLoops {
     pub(super) fn new(bytecode: &Bytecode, cost: &CostState) -> Self {
         let code = &bytecode.code;
         let mut loops = Vec::new();
+        // bounded: one pass over the bytecode during region plan construction
         for (prep, inst) in code.iter().enumerate() {
             if inst.opcode() == Instr::OP_FOR_PREP
                 && let Some(region) = NumericLoop::recognize(bytecode, prep, cost)
@@ -712,6 +713,7 @@ impl Layout {
         // table, not a mirror slot: its entry is a placeholder no leaf reads
         // (`State::resolve_callees` refuses a numeric read of parameter 0).
         let mut args = Vec::with_capacity(usize::from(count));
+        // bounded: the fixed argument count encoded in the call instruction
         for offset in 1..=u16::from(count) {
             args.push(if method && offset == 1 {
                 0
@@ -859,6 +861,7 @@ impl Layout {
         let code = &bytecode.code;
         let fields = mode == Mode::Region;
         let leaf = mode == Mode::Leaf;
+        // bounded: pc advances until the region end or the end of the bytecode
         while end.is_none_or(|end| pc < end) {
             let inst = *code.get(pc)?;
             let opcode = inst.opcode();
@@ -1193,6 +1196,7 @@ impl Layout {
         // Invariant receivers are read once, so no record may replace one;
         // a register read as a number before written in a pass must not
         // still hold a record from the pass before.
+        // bounded: at most MAX_RECORDS record registers
         for (id, &register) in self.records.iter().enumerate() {
             if self.receivers.contains(&register) {
                 return None;
@@ -1217,10 +1221,12 @@ impl Layout {
         if control && (!self.calls.is_empty() || self.ops.len() > usize::from(u8::MAX)) {
             return None;
         }
+        // bounded: at most one forward jump per bytecode instruction
         for &(op, target) in &self.jumps {
             let (_, index) = self.op_at.iter().find(|&&(pc, _)| pc == target)?;
             self.ops[op].a = *index as u8;
         }
+        // bounded: the receivers recorded during the bytecode scan
         for &receiver in &self.receivers {
             if let Some(slot) = self.registers.iter().position(|&r| r == receiver)
                 && (slot < reserved || self.written & (1 << slot) != 0)
@@ -1246,6 +1252,7 @@ impl Layout {
             if reserved_above || guard_above || self.receivers.iter().any(|&r| r >= from) {
                 return None;
             }
+            // bounded: at most MAX_CALLS call sites
             for site in &mut self.calls {
                 let cleared = site.cleared();
                 site.above = self
@@ -1267,6 +1274,7 @@ impl Layout {
                 slot
             }
         };
+        // bounded: the operations emitted by one bytecode scan
         for op in &mut self.ops {
             op.b = fix(op.b);
             op.c = fix(op.c);
@@ -1307,6 +1315,7 @@ impl Body {
     /// as per-instruction dispatch would.
     #[cfg(feature = "cost-check-interval")]
     fn record_charges(&self) {
+        // bounded: one body's charge sites plus its tail charge
         for &(cursor, weight) in self.charges.iter().chain(std::iter::once(&self.tail)) {
             if weight != 0 {
                 crate::cost_meter::interval_test::record(cursor, weight);
@@ -1352,6 +1361,7 @@ impl NumericLoop {
 
         let base = prep_inst.a();
         let mut layout = Layout::default();
+        // bounded: four numeric loop control registers
         for offset in 0..4 {
             layout.register(base.checked_add(offset)?)?;
         }
@@ -1359,6 +1369,7 @@ impl NumericLoop {
         let tail = Layout::charge(cost, Instr::OP_FOR_LOOP, step_pc);
         // The loop step reads the three hidden controls after the body,
         // guarded unless every path to it writes them.
+        // bounded: three initialized numeric loop control slots
         for slot in 0..3u8 {
             if layout.must & (1 << slot) == 0 {
                 layout.guards |= 1 << slot;
@@ -1422,6 +1433,7 @@ impl NumericLeaf {
         let sites = std::mem::take(&mut layout.sites).into_boxed_slice();
         let tail = Layout::charge(cost, Instr::OP_RETURN, ret_pc);
         let (body, registers) = layout.finish(0, tail)?;
+        // bounded: at most MIRROR_SLOTS registers
         for (slot, &register) in registers.iter().enumerate() {
             if body.guards & (1 << slot) != 0 && register >= params {
                 return None;
@@ -1573,11 +1585,13 @@ impl State {
                     #[cfg(feature = "cost-check-interval")]
                     body.record_charges();
                 }
+                // bounded: one pass over the region body's operations
                 for op in &body.ops {
                     x[at(op.a)] = eval(op, &x);
                     written |= 1 << op.a;
                 }
             } else if !CALLS {
+                // bounded: one pass over the region body's operations and charges
                 for (op, &(cursor, charge)) in body.ops.iter().zip(&body.charges) {
                     if charge != 0 {
                         *ip = cursor;
@@ -1596,6 +1610,7 @@ impl State {
                     }
                 }
             } else {
+                // bounded: one pass over the region body's operations and charges
                 for (index, (op, &(cursor, charge))) in
                     body.ops.iter().zip(&body.charges).enumerate()
                 {
@@ -1647,6 +1662,7 @@ impl State {
                                 Some(fields) => self.run_leaf_fields(callee, fields, argument),
                             };
                             if !fast {
+                                // bounded: one leaf body's charge sites plus its tail charge
                                 for &(cursor, charge) in callee
                                     .body
                                     .charges
@@ -1798,6 +1814,7 @@ impl State {
             return Ok(());
         }
         let mut tables = [None::<ObjectPtr>; MAX_INDEXED];
+        // bounded: at most MAX_INDEXED indexed reads
         for (table, &(receiver, _)) in tables.iter_mut().zip(&body.indexed) {
             let value = match receiver {
                 Receiver::Upvalue(index) => self.upvalue_value(frame, index),
@@ -1827,6 +1844,7 @@ impl State {
             let fast =
                 body.weight == 0 || body.weight < self.cost_flush_at().saturating_sub(*local_cost);
             let mut k = 0;
+            // bounded: branches only advance the operation index within this pass
             while let Some(op) = body.ops.get(k) {
                 let (cursor, charge) = body.charges[k];
                 // A store resolves its slot before its charge: a key not
@@ -1996,6 +2014,7 @@ impl State {
             return false;
         }
         let index_key = self.meta_names.get(MetaName::Index);
+        // bounded: at most MAX_RECORD_SITES store sites
         for (site, key) in body.record_sites.iter().zip(keys.iter_mut()) {
             *key = frame.literal(site.key);
             if !site.store {
@@ -2081,6 +2100,7 @@ impl State {
         if self.stack.len() != frame.top || self.in_flight.call_depth >= MAX_CALL_DEPTH {
             return false;
         }
+        // bounded: at most MAX_CALLS call sites
         for (index, site) in body.calls.iter().enumerate() {
             let function = base + usize::from(site.register);
             if self
@@ -2242,6 +2262,7 @@ impl State {
         base: usize,
         x: &mut [f64; MIRROR_SLOTS],
     ) -> bool {
+        // bounded: at most MIRROR_SLOTS registers
         for (slot, &register) in body.registers.iter().enumerate() {
             if body.guards & (1 << slot) != 0 {
                 match self.stack[base + usize::from(register)] {
@@ -2250,6 +2271,7 @@ impl State {
                 }
             }
         }
+        // bounded: at most MIRROR_SLOTS constants
         for &(slot, constant) in &body.constants {
             x[at(slot)] = match constant {
                 Constant::Number(value) => value,
@@ -2297,6 +2319,7 @@ impl State {
     }
 
     fn publish_mirror(&mut self, body: &Body, base: usize, x: &[f64], written: u32) {
+        // bounded: at most MIRROR_SLOTS registers
         for (slot, &register) in body.registers.iter().enumerate() {
             if written & (1 << slot) != 0 {
                 self.stack[base + usize::from(register)] = Val::Num(x[slot]);
@@ -2372,6 +2395,7 @@ impl State {
             return false;
         }
         let mut x = [0.0f64; MIRROR_SLOTS];
+        // bounded: at most MIRROR_SLOTS registers
         for (slot, &register) in body.registers.iter().enumerate() {
             if body.guards & (1 << slot) != 0 {
                 if register >= u16::from(num_args) {
@@ -2383,12 +2407,14 @@ impl State {
                 }
             }
         }
+        // bounded: at most MIRROR_SLOTS constants
         for &(slot, constant) in &body.constants {
             if let Constant::Number(value) = constant {
                 x[at(slot)] = value;
             }
         }
         let (result, weight) = if leaf.sites.is_empty() {
+            // bounded: one pass over the leaf body's straight-line operations
             for op in &body.ops {
                 x[at(op.a)] = eval(op, &x);
             }
@@ -2463,6 +2489,7 @@ impl State {
         }
         let runtime = &closure.runtime;
         let index_key = self.meta_names.get(MetaName::Index);
+        // bounded: at most MAX_FIELD_SITES field sites
         for (site, field) in leaf.sites.iter().zip(fields.iter_mut()) {
             let receiver = match site.source {
                 TableSource::Param(register) => {
@@ -2546,11 +2573,13 @@ impl State {
     ) -> f64 {
         let body = &leaf.body;
         let mut y = [0.0f64; MIRROR_SLOTS];
+        // bounded: at most MIRROR_SLOTS registers
         for (slot, &register) in body.registers.iter().enumerate() {
             if body.guards & (1 << slot) != 0 {
                 y[slot] = argument(register);
             }
         }
+        // bounded: at most MIRROR_SLOTS constants
         for &(slot, constant) in &body.constants {
             if let Constant::Number(value) = constant {
                 y[at(slot)] = value;
@@ -2569,6 +2598,7 @@ impl State {
         fields: &[Option<(ObjectPtr, SlotRef)>; MAX_FIELD_SITES],
         x: &mut [f64; MIRROR_SLOTS],
     ) {
+        // bounded: one pass over the leaf body's straight-line operations
         for op in &body.ops {
             match op.kind {
                 OpKind::Read => {
@@ -2656,16 +2686,19 @@ impl NumericLeaf {
     fn eval(&self, argument: impl Fn(u16) -> f64) -> f64 {
         let body = &self.body;
         let mut y = [0.0f64; MIRROR_SLOTS];
+        // bounded: at most MIRROR_SLOTS registers
         for (slot, &register) in body.registers.iter().enumerate() {
             if body.guards & (1 << slot) != 0 {
                 y[slot] = argument(register);
             }
         }
+        // bounded: at most MIRROR_SLOTS constants
         for &(slot, constant) in &body.constants {
             if let Constant::Number(value) = constant {
                 y[at(slot)] = value;
             }
         }
+        // bounded: one pass over the leaf body's straight-line operations
         for op in &body.ops {
             y[at(op.a)] = eval(op, &y);
         }
@@ -2692,6 +2725,7 @@ fn prefix_weight<'a>(body: &Body, leaf: &impl Fn(usize) -> &'a NumericLeaf, end:
 /// in the charge-site trace, as per-instruction dispatch would.
 #[cfg(feature = "cost-check-interval")]
 fn record_pass<'a>(body: &Body, leaf: &impl Fn(usize) -> &'a NumericLeaf, end: usize, tail: bool) {
+    // bounded: at most one pass over the body's operation and charge lists
     for (op, &(cursor, weight)) in body.ops.iter().zip(&body.charges).take(end) {
         if weight != 0 {
             crate::cost_meter::interval_test::record(cursor, weight);

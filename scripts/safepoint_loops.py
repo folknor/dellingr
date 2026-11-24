@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Check that every loop in native library code is an interrupt safepoint or
+"""Check that every loop in the scoped native VM code is an interrupt safepoint or
 says why it does not need one.
 
 A host interrupt (src/vm/interrupt.rs) stops running Lua at safepoints. The
-dispatch loop and call admission cover bytecode; native library work is
-covered only where a loop polls. Whether a loop needs a poll depends on where
+dispatch loop and call admission cover bytecode; native region and library
+loops that can repeat without bound must poll. Whether a loop needs a poll depends on where
 its trip count comes from, which a lexer cannot decide, so this check forces
 the decision to be written down instead. Every `for`, `while` and `loop` in
 the scoped files, outside test code, must either
@@ -18,7 +18,8 @@ the scoped files, outside test code, must either
 
 Scope: the standard library, the pattern matcher, the dispatch leaves
 under src/vm/leaf.rs, the table operations under src/vm/table_ops.rs and
-the `math.random` sampler under src/vm/rng.rs. Iteration
+the `math.random` sampler under src/vm/rng.rs, and numeric regions
+under src/vm/numeric_loop.rs. Iteration
 through closures (`for_each`, `fold`, `map`) is not a loop here and is not
 checked. Uses native_calls' Rust lexer, so comments and literals cannot
 supply a poll. Prints `ok` when every loop is decided.
@@ -30,7 +31,13 @@ import sys
 import native_calls as rust
 
 SCOPE_DIRS = ("src/lua_std/", "src/patterns/")
-SCOPE_FILES = ("src/lua_std.rs", "src/vm/leaf.rs", "src/vm/rng.rs", "src/vm/table_ops.rs")
+SCOPE_FILES = (
+    "src/lua_std.rs",
+    "src/vm/leaf.rs",
+    "src/vm/numeric_loop.rs",
+    "src/vm/rng.rs",
+    "src/vm/table_ops.rs",
+)
 
 # `for` not followed by `<` (a higher-ranked bound), `while` and `loop`.
 LOOP = re.compile(r"\b(?:(for)\b(?!\s*<)|while\b|loop\b)")
@@ -98,7 +105,7 @@ def check_sources(sources):
                 continue
             keyword = code[m.start():m.end()]
             problems.append(
-                f"{source.rel}:{line}: `{keyword}` loop in native library code "
+                f"{source.rel}:{line}: `{keyword}` loop in scoped native VM code "
                 "neither polls the interrupt nor says why it need not "
                 "(`// bounded: <why>` or `// safepoint: <where>` above it)"
             )

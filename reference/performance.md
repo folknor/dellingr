@@ -1,10 +1,9 @@
 # Performance record
 
-Measured numbers over time. Every entry names the commit, the host and the
-cargo profile it was taken under; numbers taken under different profiles do
-not compare, and neither do `brokkr dellingr` rows stored on either side of a
-profile change (`.brokkr/results.db` keeps them, filed under the same
-workload names).
+Each measurement records the commit, host and Cargo profile. Compare runs
+within the same profile, whether they come from the current `brokkr bench`
+script benches or the historical `brokkr dellingr` command. Historical rows
+in `.brokkr/results.db` retained the same workload names across profile changes.
 
 ## Build profiles
 

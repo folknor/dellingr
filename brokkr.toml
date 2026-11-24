@@ -569,8 +569,8 @@ expect = "ok"
 match = "last-line"
 stream = "stdout"
 
-# Interrupt safepoints (src/vm/interrupt.rs): every loop in native library
-# code polls or says why it need not (`// bounded:` or `// safepoint:`).
+# Interrupt safepoints (src/vm/interrupt.rs): every loop in scoped native
+# VM code polls or says why it need not (`// bounded:` or `// safepoint:`).
 [[script_check]]
 name = "safepoint-loops"
 command = "python3 -B scripts/safepoint_loops.py"

@@ -65,9 +65,9 @@
 //! `docs/budget.md` ("Stopping a script from the host") states the same
 //! contract. The `safepoint-loops` script check
 //! (`scripts/safepoint_loops.py`) holds every loop in the standard library,
-//! the pattern matcher, the table operations and the `math.random` sampler
-//! to the per-step pass: each
-//! polls, or records why it is bounded or where it polls instead.
+//! the pattern matcher, dispatch leaves, numeric regions, table operations
+//! and the `math.random` sampler to the per-step pass: each polls, or records
+//! why it is bounded or where it polls instead.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
