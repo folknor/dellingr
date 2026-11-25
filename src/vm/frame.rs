@@ -12,7 +12,7 @@ use super::Instr;
 use super::Result;
 use super::State;
 use super::Val;
-use super::object::Captures;
+use super::object::{Captures, UpvalueRef};
 use crate::cost_model::Charge;
 use crate::instr::{ArgCount, CompareOp, RetCount};
 
@@ -194,6 +194,116 @@ impl Frame {
     fn settle_cost(state: &mut State, local_cost: &mut u64, next: u64) -> Result<()> {
         state.charge_cost(next)?;
         *local_cost = 0;
+        Ok(())
+    }
+
+    /// Continue a template constructor from the instruction after its
+    /// `NEW_TABLE_TEMPLATE`, which has just allocated the table into
+    /// register `table`: execute the leading run of static value loads and
+    /// pinned writes into that table in this one call instead of one dispatch
+    /// each. `ip` is the dispatch cursor; on return it names the first
+    /// instruction the run did not execute, and on a refused charge the
+    /// refused write's own cursor, so the fault is located at that field.
+    ///
+    /// The run is exactly the canonical execution, with the dispatch and the
+    /// receiver's type check removed. Every scratch-register write still
+    /// happens (a freed scratch register stays a GC root, docs/limits.md), and
+    /// each pinned write admits its `TableWrite` charge separately, at its
+    /// own cursor, with the zero-weight bypass of `fixed_cost!`, so the
+    /// charged prefix, the pending batch and `cost_used` are those of
+    /// dispatching it. The loads are free and infallible and nothing in the
+    /// run allocates, calls or polls an interrupt. The receiver check can go
+    /// because this call starts at the allocation: the table is the one just
+    /// written to `table`, and the run ends at any instruction that could
+    /// overwrite that register (a load into it, a nil fill covering it) or
+    /// write another table. Jumps into the run's middle reach the canonical
+    /// handlers, which check as before; the key and entry checks of
+    /// `Table::init_at_index` and its fallback insert stay.
+    ///
+    /// Only the leading run is taken. A pinned write after a charged or
+    /// fallible value (`ADD_RK` in `examples/alloc/record_tables.lua`) is
+    /// left to dispatch: fusing across it needs a witness that the register
+    /// still holds this table.
+    ///
+    /// Declined in its favour: a `DUPTABLE`-style opcode that evaluates every
+    /// value first and fills the table at the end, and a bytecode plan that
+    /// prefills literals into the prototype. The first moves `NewTable` and
+    /// the write charges past value work that can charge, fail, allocate or
+    /// call, so `cost_used` at an error, collection timing and object ids
+    /// move. The second skips scratch-register writes that stay GC roots
+    /// after the constructor, and a single opcode cannot fail at the refused
+    /// field's line. Measured on bygg in matched interleaved pairs against
+    /// 8b07d97, 3 rounds best of 3: `static_records` 1601 to 1471 ms (3 of 3),
+    /// `record_tables` 1577 to 1553 ms, `short_tables` and `method_step` flat.
+    /// Release native bytes per level unchanged; dev 16 bytes more.
+    #[inline(never)]
+    pub(super) fn template_init_run(
+        frame: &Frame,
+        state: &mut State,
+        local_cost: &mut u64,
+        ip: &mut usize,
+        table: usize,
+        upvalues: &[UpvalueRef],
+    ) -> Result<()> {
+        let code: &[Instr] = &frame.bytecode.code;
+        let base = frame.stack_bottom;
+        let Some(ptr) = state.stack[table].as_object_ptr() else {
+            return Ok(());
+        };
+        // bounded: one step per instruction, ending at the code's end.
+        while let Some(&inst) = code.get(*ip) {
+            let ra = base + inst.a() as usize;
+            match inst.opcode() {
+                Instr::OP_LOAD_NIL => {
+                    let end = ra + inst.b() as usize;
+                    if (ra..end).contains(&table) {
+                        return Ok(());
+                    }
+                    state.stack[ra..end].fill(Val::Nil);
+                }
+                Instr::OP_LOAD_BOOL if ra != table => {
+                    state.stack[ra] = Val::Bool(inst.b() != 0);
+                }
+                Instr::OP_LOAD_NUM if ra != table => {
+                    state.stack[ra] = Val::Num(frame.get_number_constant(inst.b()));
+                }
+                Instr::OP_LOAD_STR if ra != table => {
+                    state.stack[ra] = frame.literal(inst.b());
+                }
+                Instr::OP_GET_UPVAL if ra != table => {
+                    state.stack[ra] = state.upvalue_value(upvalues, inst.b());
+                }
+                Instr::OP_INIT_FIELD_PINNED if ra == table => {
+                    *ip += 1;
+                    const CHARGE: Option<Charge> = Instr::fixed_charge(Instr::OP_INIT_FIELD_PINNED);
+                    if let Some(charge) = CHARGE {
+                        let units = state.cost.weight(charge);
+                        if units != 0 {
+                            let next = (*local_cost).saturating_add(units);
+                            if next >= state.cost_flush_at() {
+                                Self::settle_cost(state, local_cost, next)?;
+                            } else {
+                                *local_cost = next;
+                            }
+                            #[cfg(feature = "cost-check-interval")]
+                            crate::cost_meter::interval_test::record(*ip, units);
+                        }
+                    }
+                    let key = frame.literal(inst.b());
+                    let val = state.stack[base + inst.c() as usize];
+                    let mut tbl = state
+                        .heap
+                        .edit_table(ptr)
+                        .expect("the run's receiver is the table its allocation just made");
+                    if !tbl.init_at_index(usize::from(inst.d()), key, val) {
+                        tbl.insert(key, val)?;
+                    }
+                    continue;
+                }
+                _ => return Ok(()),
+            }
+            *ip += 1;
+        }
         Ok(())
     }
 
@@ -520,6 +630,7 @@ impl Frame {
                 Instr::OP_NEW_TABLE_TEMPLATE => {
                     fixed_cost!(Instr::OP_NEW_TABLE_TEMPLATE);
                     state.reg_new_table_template(frame, ra, inst.b());
+                    Self::template_init_run(frame, state, local_cost, ip, ra, upvalues)?;
                 }
 
                 // Table reads

@@ -42,6 +42,44 @@ fn templated_constructor_handles_nil_before_later_fields() {
     assert_eq!(result, 413.0);
 }
 
+/// A template constructor whose values are all locals, upvalues and literals
+/// runs its pinned writes in one call after the allocation. Each write still
+/// admits its own charge at its own line: a budget refused at the k-th field
+/// fails at that field's line with the same `cost_used` as one dispatch per
+/// write.
+#[test]
+fn fused_template_writes_charge_and_fail_at_their_own_fields() {
+    use dellingr::error::ErrorKind;
+    use dellingr::{ArgCount, RetCount, State};
+
+    let code = "local x, y = 1, 2\n\
+                local t = {\n\
+                a = x,\n\
+                b = y,\n\
+                c = 3,\n\
+                d = true,\n\
+                e = 'five',\n\
+                }\n\
+                return t.a + t.b + t.c";
+    // NewTable at line 2, then one TableWrite per field on lines 3 to 7.
+    for budget in 0..=5u32 {
+        let mut state = State::new();
+        dellingr::Program::compile(code, Some(b"fused".as_slice()))
+            .and_then(|program| state.load(&program))
+            .unwrap();
+        state.set_cost_budget(i64::from(budget)).unwrap();
+        let error = state
+            .call(ArgCount::Fixed(0), RetCount::Fixed(1))
+            .expect_err("the budget ends inside the constructor");
+        assert!(
+            matches!(error.kind(), ErrorKind::BudgetExceeded { used, .. } if *used == u64::from(budget)),
+            "budget {budget}: {error:?}"
+        );
+        assert_eq!(state.cost_used(), u64::from(budget), "budget {budget}");
+        assert_eq!(error.stack_trace()[0].line, 2 + budget, "budget {budget}");
+    }
+}
+
 #[test]
 fn duplicate_named_constructor_fields_keep_last_value() {
     let result = support::eval_number(

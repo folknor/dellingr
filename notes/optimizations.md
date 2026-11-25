@@ -582,118 +582,36 @@ profiling.
 - Every field site is resolved on every path, so a leaf whose skipped path
   reads a field the receiver lacks declines the call.
 
-### Compile-time table-shape prediction
+### Shared record layouts: the storage side
 
-This is two distinct work items that share a name; they have very
-different ROIs and should be considered separately.
+Residue of the compile-time table-shape prediction entry. The constructor
+side landed as an execution-side fusion (`Frame::template_init_run`: the
+leading run of static loads and pinned writes after a `NEW_TABLE_TEMPLATE`
+runs in one call); the batch-fill `DUPTABLE` form, a literal-prefilling
+bytecode plan and a compile-time `GET_FIELD_AT` were declined, with the
+reasons at `template_init_run` and `State::get_current_cached_field`.
 
-**(a) Pinned-shape constructor template / direct record build.**
+What remains open (2026-11-17 table hunter's lead rewrite): materialize each
+constructor's layout once in State-local runtime data, an instance holding a
+shape identity and dense values, the shape owning ordered names and the
+lookup index; structural mutation converts to dictionary storage carrying its
+history. Today every template instance copies the prototype's slot vector and
+clones its hashbrown index: `examples/alloc/record_tables.lua` allocates
+416 B per eight-field record, all in `reg_new_table_template` (alloc
+profile, bygg, 8b07d97), the index one of the two backing allocations.
 
-Shipped first slice on 2026-05-11: table constructors with more than
-four statically visible fields now emit `NewTablePresized(n)`, which
-allocates map-backed storage at the final constructor size instead of
-starting inline and promoting after the fourth insert. This is not the
-full record-build design below, but it validates that constructor
-allocation growth is worth caring about:
-`examples/alloc/record_tables.lua` moved from 345.6ms to 277.9ms
-against the pre-change binary on this host (~1.24x).
-
-Shipped second slice on 2026-05-11: pure named-field constructors with
-more than four unique keys now store a per-Chunk template of
-interned-string ids, allocate map storage with those keys pre-installed,
-and initialize values by pinned entry index. This avoids the repeated
-key lookup on each value write, while falling back to `NewTablePresized`
-for computed keys, array entries, vararg/spread entries, and duplicate
-named keys. The measured win over capacity-only was small and noisy on
-this host: `examples/alloc/record_tables.lua` moved from 264.4ms to
-258.4ms in the cleaner run (~1.02x), with an earlier run at ~1.05x.
-`examples/alloc/short_tables.lua` was effectively flat.
-
-Remaining idea: a stronger `DUPTABLE`-style opcode would batch-fill a
-pure named-field constructor at the end instead of preinstalling nil
-placeholders and then overwriting by index. That would remove the
-per-field bytecode dispatch and avoid the placeholder writes, while a
-single table-build helper could replay normal `insert` semantics in
-source order for nil values and duplicate keys.
-
-Why deferred: the current parser emits each field write immediately.
-Batch-filling means either delaying named-field writes while preserving
-fallback behavior for mixed constructors, or adding a more general
-builder instruction for values accumulated above the table on the VM
-stack. That is a larger bytecode/stack-shape change than the pinned
-write path, and the pinned path only proved a small remaining win after
-capacity pre-sizing.
-
-The bytecode keeps only literal ids; the State-local `TemplatePrototype`
-(built lazily in `RuntimeCaches`) holds the interned keys, which the bytecode
-runtime's literals already root, and each instance copies its slots and
-index instead of rehashing the keys.
-
-The 2026-11-17 performance hunt (codegen scope) proposed compiling a
-constructor plan holding its key layout, initialization sequence and value
-sources, with larger records sharing an immutable key/index structure between
-instances and compiler-proven initialization writing known slots directly (the
-result is private until the expression completes). Today each instance
-copies a per-runtime prototype map holding every key as nil (no per-instance
-hashing; the index is still copied per instance rather than shared) and each pinned initialization
-(`registers.rs`) checks the constructor table, the indexed key, liveness
-bookkeeping and keeps a fallback insert. It must not evaluate every value and
-then charge all writes together: a later value may call code or fail, so
-evaluation and initialization interleave at today's points. Replay risks: nil
-entries and tombstones, pending positional batches in mixed constructors whose
-flush timing matters when keys overlap, duplicate-key overwrites, and
-snapshots serializing physical slots. Medium confidence in broad payoff,
-which depends on the table representation. Escape analysis and scalar
-replacement of temporary records are follow-ups.
-
-Shared layouts, the storage side (2026-11-17 table hunter's lead rewrite):
-materialize each constructor's layout once in State-local runtime data, an
-instance holding a shape identity and dense values, the shape owning ordered
-names and the lookup index; small records hold values inline without repeating
-keys; larger ones allocate a value block with no per-instance index;
-structural mutation converts to dictionary storage carrying its history.
-That removes construction hashing and map population, per-instance key and
-index storage and repeated tracing of identical name lists (if shapes are
-marked once). Field reads over many same-layout records no longer need it:
-GET_FIELD's dispatch hit reads the site's cached position in any receiver as
-a key-checked hint (`State::get_current_cached_field`). A shape identity
-proving a physical key-to-offset map must tell apart histories with equal
-live keys in equal order (a deleted and reinserted key leaves a vacant
-slot), which the hint ignores. Main risk is history: large templates reserve
-nil-valued keys while small constructors do not reserve a key for a nil
-initializer, deletion and reinsertion change order, and snapshots
-distinguish storage kinds and save dead controls and vacant positions, so
-conversion must preserve the logical slot history, and shared names need GC
-ownership beyond the creating bytecode's literal roots.
-
-**(b) Local-tracked shape inheritance (rewrite-the-analysis).**
-
-What: callsites that read fields on a local known (statically) to hold
-a pinned-shape table can skip the field IC's warmup and emit
-`OP_GET_FIELD_AT(reg, key, expected_idx)` that goes directly to
-`get_index(idx)` with a key-validate. Same machinery the integer-const
-opcode would need for its fast path - they should share a sketch.
-
-Why deferred (separately from a): dellingr's parser has no SSA, no
-data-flow scaffolding, and no local-aliasing analysis. Tracking shape
-inheritance "conservatively across reassignment, control flow, and
-function boundaries" is build-the-analysis-from-scratch, not
-add-a-pass. Reassignment, branch joins, and any escape into a
-RustFunc/Lua-call/closure-capture/table-field-store would each give
-up. An analysis that gives up frequently leaves most of the win on
-the table.
-
-Signal that would promote either: profiling showing first-iteration
-miss cost dominates after the runtime field IC is sufficient for
-steady state - short-loop workloads where the IC never warms up. (a)
-is also worthwhile independently if benchmarks show construction cost
-on record literals dominating their first-use cost - measure before
-committing.
-
-Whether the headline runtime-IC wins production game scripts more or
-less than constructor pre-sizing is unmeasured for dellingr; the two
-are complementary (cold/first-touch vs. warm/steady-state), not
-substitutes.
+Why deferred: field reads no longer need it (the key-checked position hint),
+so the payoff is allocation and footprint only. Resident bytes, including
+the index, pace collection and `gc_score` reports real backing capacity, so
+dropping per-instance index bytes is a versioned, changelogged pacing change,
+or the accounting must charge a fictional footprint that follows the old
+mutation history. A distinct shaped storage variant need not slow ordinary
+Map probes, but conversion must keep reserved nil keys, vacant positions and
+compaction and reinsertion behaviour, and layout keys must stay rooted by
+surviving instances after the creating runtime is gone. Fusing pinned writes
+after a dynamic value (`ADD_RK` then `INIT_FIELD_PINNED` in
+`record_tables`) is a separate execution-side fusion that needs a witness
+that the register still holds the constructed table.
 
 ### Share the stdlib install across States
 

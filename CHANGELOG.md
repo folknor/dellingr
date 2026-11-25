@@ -233,6 +233,12 @@ tick budgets and re-record replays.
 
 ### Performance
 
+- A table constructor with more than four named fields whose values are
+  locals, upvalues or literals (`{x = x, y = y, hp = 100, ...}`) now stores
+  its fields in one step after the allocation instead of one instruction
+  each: `bench/static_records` went from about 1.6 to 1.47 s on bygg. Each
+  field still charges at its own line, so costs, budget failures, errors and
+  snapshots are unchanged. Not replay-visible.
 - A field read (`r.x`, `obj:method()`) over many tables built in the same
   key order no longer takes the full lookup for each new table: the site
   checks the position its key held in the last table it resolved. A sweep

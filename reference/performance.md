@@ -497,6 +497,24 @@ stat` against fb1081f: cycles 2.53G to 2.00G, instructions 10.44G to
 the fb1081f regression above: the code whose generation shifted no longer
 runs per construction.
 
+## Static constructor writes fused after the allocation, 2026-11-25
+
+After a `NEW_TABLE_TEMPLATE`, the leading run of free value loads and
+pinned writes into the new table runs in one outlined call
+(`Frame::template_init_run`), each write still admitting its own charge at
+its own cursor. Matched interleaved pairs on bygg against 8b07d97, release,
+3 rounds best of 3 (`brokkr bench --rounds 3 --iterations 3 --commit`):
+
+| Workload | 8b07d97 | Change | Paired rounds faster |
+|---|---|---|---|
+| `static_records` | 1601 ms | 1471 ms | 3 of 3 |
+| `record_tables` | 1577 ms | 1553 ms | 3 of 3 |
+| `short_tables` | 3514 ms | 3528 ms | 1 of 3 |
+| `method_step` | 2255 ms | 2258 ms | 1 of 3 |
+
+`record_tables` fuses only its first field (the rest follow an `ADD_RK`).
+Native bytes per level: release unchanged, dev 16 bytes more.
+
 ## Stores through a metatable without `__newindex`, 2026-11-18
 
 A store into a table with a metatable used to look the key up on the

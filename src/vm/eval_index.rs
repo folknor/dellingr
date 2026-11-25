@@ -88,6 +88,16 @@ impl State {
     /// each), `method_step` and `same_obj_read` flat. The earlier form that
     /// renewed and refilled the entry on every cross-receiver hit, with the
     /// generic `Val` comparison, made `wide_sweep` slower (5.1 to 5.9 s).
+    ///
+    /// A compile-time position (a `GET_FIELD_AT` carrying the constructor
+    /// layout's index for a local known to hold a template table) was
+    /// declined: for a site whose receivers share a layout this hint gives
+    /// the same keyed-position read after one miss, so the compiler form only
+    /// saves that miss, and proving which constructor a local holds needs the
+    /// dataflow the `codegen.rs` header refuses. Where it could still help is
+    /// a site whose receivers have competing layouts, which re-miss here
+    /// because a cross-receiver hit does not refresh the entry; that is the
+    /// multi-position question, not a compile-time one.
     #[inline(always)]
     pub(super) fn get_current_cached_field(
         &self,

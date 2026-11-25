@@ -15,6 +15,7 @@ examples! {
     alloc_list_literals: "examples/alloc/list_literals.lua",
     alloc_record_tables: "examples/alloc/record_tables.lua",
     alloc_short_tables: "examples/alloc/short_tables.lua",
+    alloc_static_records: "examples/alloc/static_records.lua",
     basic: "examples/basic.lua",
     calls_factory_closure: "examples/calls/factory_closure.lua",
     calls_fixedarg: "examples/calls/fixedarg.lua",

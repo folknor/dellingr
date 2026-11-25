@@ -8,6 +8,7 @@ examples/alloc/gc_scalar_churn.lua|8397a64179ed4a9de32c2b8d9023db4a|1010241
 examples/alloc/list_literals.lua|f1242d5988d552fa7c7f3d23855f9696|19371500
 examples/alloc/record_tables.lua|759fd927309e69e0623bf3eff2fcff13|10812000
 examples/alloc/short_tables.lua|e9c83a5f4ee78010eb0182c070505bb5|7206000
+examples/alloc/static_records.lua|e4b06b2405ded3bf4515ca750eb84976|4955500
 examples/basic.lua|d6b50edb698f26f46baa74d35d43267c|104
 examples/calls/factory_closure.lua|ba0ce1aca4a8cd0297f00ba2c6b6b4bf|3006503
 examples/calls/fixedarg.lua|3f10a6a9186212512d5919045adb81d6|5002000

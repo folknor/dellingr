@@ -242,6 +242,10 @@ xxhash = "5befb079865e20e3343cd9beaa8e84be"
 file = "bench/record_tables.lua"
 xxhash = "9ebd1f3da641203c82de3ee42b0c251c"
 
+[data.workloads.bench.static_records]
+file = "bench/static_records.lua"
+xxhash = "7b837e19b952532d8c542649a9811e03"
+
 [data.workloads.bench.list_literals]
 file = "bench/list_literals.lua"
 xxhash = "69948cfa2e1cb8ea44e935f481d3fa16"
@@ -518,6 +522,10 @@ xxhash = "6c3b54c67fadaa55c51db6f64916d331"
 [data.workloads.hotpath.record_tables]
 file = "examples/alloc/record_tables.lua"
 xxhash = "759fd927309e69e0623bf3eff2fcff13"
+
+[data.workloads.hotpath.static_records]
+file = "examples/alloc/static_records.lua"
+xxhash = "e4b06b2405ded3bf4515ca750eb84976"
 
 [data.workloads.hotpath.list_literals]
 file = "examples/alloc/list_literals.lua"

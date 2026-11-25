@@ -206,9 +206,10 @@ them:
 - `optimizations.md` "Field-site position hints: residue": the lookup
   hunter's shared layouts (landed as GET_FIELD's key-checked position hint;
   the shape-id IC refused); the table hunter's shared layouts sit under
-  "Compile-time table-shape prediction".
-- `optimizations.md` "Compile-time table-shape prediction": codegen hunter's
-  constructor plans.
+  "Shared record layouts: the storage side".
+- `optimizations.md` "Shared record layouts: the storage side": codegen
+  hunter's constructor plans (the leading static run landed as an
+  execution-side fusion; the storage-side layouts remain).
 - `optimizations.md` "Growing-producer residue after the reusable result
   buffer": the heap hunter's checked builder residue (decide-once producers
   and the reusable result buffer landed; a per-append builder was measured
