@@ -224,9 +224,26 @@ impl Frame {
     /// once, the dispatched hot runs of `arithmetic`'s `fib` hold one charge
     /// each between calls, so there is nothing to batch. The template
     /// runner's pinned writes are the one straight-line multi-charge run
-    /// found; one admission test per run there is unmeasured. Keeping the
-    /// batch a by-value register rather than this `&mut` slot (each charge
-    /// loads and stores it) is likewise unmeasured, not refuted.
+    /// found; [`Frame::template_init_run`] says why it keeps this rule per
+    /// write.
+    ///
+    /// The batch stays a `&mut` slot that each charge loads and stores
+    /// (release keeps `pending` at the bottom of `Frame::run`'s frame,
+    /// because its address escapes into the outlined helpers). Removing the
+    /// escape was built and measured: the cold settle by value, zeroing after
+    /// an admitted settle, and every outlined helper in `run_frame` given a
+    /// copy written back before its `Result` was looked at, as `with_cursor!`
+    /// does for the cursor. The batch then lived in `r12`, but the dispatch
+    /// loop spilled several hoisted `State` field addresses in its place, and
+    /// release `Frame::run` grew from 312 to 392 bytes per native level.
+    /// Matched interleaved `--commit` pairs on bygg, 9b778db against the
+    /// variant, 3 rounds best of 3: `arithmetic` 1743 to 1727 ms and
+    /// `closed_mode` 4281 to 4252 ms faster, `method` 530.0 to 530.7 ms and
+    /// `static_records` 1355 to 1370 ms slower, each 3 of 3. No demonstrated
+    /// gain pays for the stack. Threading the batch by value through every
+    /// helper's signature carries it through the same loop under the same
+    /// register pressure; reopen that only with evidence that its different
+    /// call boundaries relieve the pressure this variant exposed.
     #[inline(always)]
     pub(super) fn accrue(
         state: &mut State,
@@ -318,6 +335,16 @@ impl Frame {
     /// 8b07d97, 3 rounds best of 3: `static_records` 1601 to 1471 ms (3 of 3),
     /// `record_tables` 1577 to 1553 ms, `short_tables` and `method_step` flat.
     /// Release native bytes per level unchanged; dev 16 bytes more.
+    ///
+    /// Admitting the whole run once instead of per write was weighed and
+    /// refused. A guard that keeps the charged prefix and the outgoing batch
+    /// exact (`pending + writes * weight < flush_at`) holds only when the
+    /// per-write loop would settle nothing, so it skips one add and one
+    /// predicted branch per write and no settlement; a wider guard against
+    /// the budget's room would move interval settlements. Knowing the write
+    /// count costs a second decode pass over the run or constructor metadata
+    /// in the bytecode. Reopen only if generated code shows the per-write
+    /// accounting limiting template throughput.
     #[inline(never)]
     pub(super) fn template_init_run(
         frame: &Frame,

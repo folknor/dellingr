@@ -28,9 +28,9 @@ translate into cycles.
 
 Residue: the code slice's pointer and length are still reloaded from spill
 slots at the dispatch head; nothing shown recovers them. The other weight
-sources: register bounds checks and "Cost accounting on every arithmetic
-op" (the pending batch is an escaped `&mut` slot loaded and stored per
-charge) have their own entries below; `GET_UPVAL` indirection is settled
+sources: register bounds checks have their own entry below; the pending
+cost batch's escaped `&mut` slot is settled (a register batch was built,
+measured and refused at `Frame::accrue`); `GET_UPVAL` indirection is settled
 (capture slice selected once per activation in `run_frame`, closed-cell
 fast path refused at `State::upvalue_value`, region widenings refused at
 `Layout::load` and `Layout::finish`).
@@ -52,30 +52,6 @@ windows was tried and lost (`State.stack` in `src/vm.rs`). Untried safe shapes, 
 if release asm drops the subordinate checks; and a register borrow kept
 across heap-only fast paths (a raw `GET_TABLE` hit writing its result
 through the borrow that read its inputs). Medium each; check the asm first.
-
-### Cost accounting on every arithmetic op
-
-Every positive dispatch charge goes through `Frame::accrue` (one rule:
-settle at `next >= flush_at`, else keep pending). Generic statically priced
-straight-line regions were refused (2026-11-25; reasoning at `Frame::accrue`):
-outside typed loop regions, `arithmetic`'s hot `fib` holds one charge per
-run between calls. Two unmeasured residues remain:
-
-- By-value batch: `pending` lives on the stack (`add (%rsp)` / `mov
-  %rdx,(%rsp)` per charge in release) because its address escapes into the
-  outlined helpers. The store/load chain gates the next charge's threshold
-  branch, so it is not shown hidden. Threading the batch by value through
-  every `local_cost` helper (returning it with errors) needs a matched
-  `--commit` A/B on `arithmetic`/`method` and native-stack rows before and
-  after. The old "3.6% error-path flush" figure is no estimate: its pair was
-  unmatched (live tree against `--commit`), its commit also removed a field
-  cache, and the code shape has since moved (one invocation-owned batch,
-  settled on every exit).
-- Template runs: `Frame::template_init_run`'s pinned writes are the one
-  straight-line multi-charge run found (`static_records`: eight writes). A
-  read-only prescan summing the run's weights could admit it once when all
-  but the last fit strictly under the room, falling back to per-write
-  charging; positions stay observable-identical. Unmeasured.
 
 ## Full coherent rewrites
 
