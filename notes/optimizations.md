@@ -754,37 +754,32 @@ string library), though its time is dominated by the matching itself; the
 rewrite moved it about 1.7% there (plantasjen, df80d81 against the
 rewrite), within the unrelated control's shift.
 
-### Method IC: past two classes per site, and what the second entry costs
+### Method IC: three or more receiver metatables at one canonical site
 
-Shipped: each field cache slot holds two method entries (two-way LRU by a
-victim byte, entries never move, each validated on its own), so a site
-serving two one-level classes keeps both. Matched interleaved pairs on
-plantasjen, warm ms per call, 7375bb4 against the change on top of it:
-`method_polymorphic` 88.9/89.7 to 86.7/86.5 (about -3%; -1.5% to -4.6%
-across three builds of the same mechanism, B faster in every pair),
-`same_obj_read` -1.2%, `method_chain` +0.5%, `arithmetic` +0.5%.
+Each allocated GET_FIELD or SELF slot holds two one-level method entries
+(two-way LRU, keyed by receiver metatable identity) beside the field, route
+and string-method cells; `size_of::<FieldLookupCacheSlot>()` was 184 bytes
+at 77954a3, 80 of them the method entries. The SELF-only family split is
+refused (reason at `FieldLookupCacheSlot`). The registered method kernels
+(`method`, `method_polymorphic`) now run in typed loop regions, whose
+per-run cache keys up to eight metatables, so they no longer exercise this
+IC; no registered workload has a canonical site cycling three or more
+one-level receiver metatables.
 
-Open:
+The case that would: a canonical site (a host callback `tick(obj)` doing
+`obj:step()`, or a shared accessor for a prototype default) cycling three
+or more metatables, including per-instance metatables that share one
+`__index` table, which exhaust identity-keyed entries though the route is
+the same. First shape to try: a hit-only key-checked position pair after the
+receiver's raw miss (the remembered `__index` position on the live
+metatable still holds `__index`, its value is a table, and the remembered
+position there still holds the site's key with a non-nil value; any failed
+check falls through), the cross-receiver own-field hint applied twice. If
+positions are stable but incompatible, a bounded overflow consulted only
+after the inline entries miss. A State-global (metatable, key) backstop is
+untested, not refused.
 
-- `method` (one class, one level) measured +1.8% (73.7 to 75.2), sign
-  consistent within a build but -1.9% on an earlier build of the same
-  mechanism. Skipping the victim read on a position-0 hit (a diagnostic,
-  not a policy) left it at +1.9%, so nothing on the executed hit path
-  explains it; code or data placement is the working hypothesis, not a
-  proven one. Revisit if a later layout shift leaves it standing. A
-  five-launch same-binary control of `method` on the change (plantasjen,
-  2026-10-24) read 75.08, 75.47, 76.91, 75.12 and 75.81 ms, a 2.4% spread,
-  so the +1.8% sits inside launch noise and the polymorphic -3% only just
-  clears it.
-- The slot grew from 88 to 136 bytes, paid by every GET_FIELD and SELF site,
-  not only polymorphic method sites. A separate per-slot method vector, or
-  method slots only on SELF sites (a compiler cache-family split), would
-  stop charging own-field sites.
-- Three or more cacheable classes at one site thrash two entries. A third
-  or fourth entry is unmeasured: no registered workload has more than two
-  one-level classes at a site, and each entry is 40 more bytes per slot.
-
-Signal: a workload with three-plus classes at one method site, or a
+Signal: a workload of that kind with measured replacement misses, or a
 memory profile where field cache slots matter.
 
 Note: caching misses was tried and dropped. An exact absence proof (no hash

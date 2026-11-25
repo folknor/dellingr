@@ -285,6 +285,16 @@ pub(super) const METHOD_ENTRIES: usize = 2;
 // The victim cell names "the other position", which only two entries have.
 const _: () = assert!(METHOD_ENTRIES == 2);
 
+/// One per allocated GET_FIELD or SELF site. Every such slot carries the
+/// method entries, and that is deliberate: both opcodes go through the shared
+/// resolver, so a GET_FIELD site reading an inherited value (a class default)
+/// can fill them, and a SELF site calling a function stored on the receiver
+/// uses `field_entry`. Opcode does not predict which cells a site uses, so a
+/// compiler split giving method entries only to SELF sites would drop
+/// inherited-read coverage from GET_FIELD; it was weighed and refused. A third
+/// method entry waits on a canonical (non-region) site measured cycling three
+/// or more receiver metatables, for instance per-instance metatables sharing
+/// one `__index` table.
 #[derive(Debug, Default)]
 pub(super) struct FieldLookupCacheSlot {
     field_entry: Cell<Option<FieldLookupCacheEntry>>,
