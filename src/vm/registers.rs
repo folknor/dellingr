@@ -15,7 +15,7 @@
 
 use super::super::error::{ConstructorTableOperation, ErrorKind, InternalFault, TypeError};
 use super::caches::TableKeySlot;
-use super::frame::Frame;
+use super::frame::{DispatchWord, Frame};
 use super::metamethod::{IndexOutcome, IndexStart};
 use super::object::{Captures, Upvalue, UpvalueRef};
 use super::{Error, Result, State, Val};
@@ -69,7 +69,7 @@ impl State {
     /// cached store reads the register in place (see
     /// `GlobalEnv::write_cached` for why it takes a reference).
     #[inline(always)]
-    pub(super) fn write_global(
+    pub(super) fn write_global<const WIDTH: usize>(
         &mut self,
         frame: &Frame,
         name: u16,
@@ -77,7 +77,9 @@ impl State {
         src: usize,
     ) {
         let cache = frame.runtime.caches.global(cache_slot);
-        let val = &self.stack[src];
+        debug_assert!(frame.top <= self.stack.len());
+        let regs = self.stack.register_window::<WIDTH>(frame.stack_bottom);
+        let val = &regs[src];
         if let Some(cache) = cache
             && self.global_env.write_cached(&mut self.heap, cache, val)
         {
@@ -100,10 +102,15 @@ impl State {
     /// table's construction stays out of `Frame::run`.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     #[inline(never)]
-    pub(super) fn reg_new_table_template(&mut self, frame: &Frame, dst: usize, template: u16) {
+    pub(super) fn reg_new_table_template<const WIDTH: usize, R: Copy + Into<usize>>(
+        &mut self,
+        frame: &Frame,
+        dst: R,
+        template: u16,
+    ) {
         let prototype = frame.runtime.template(usize::from(template));
         let obj = self.allocator().alloc_table_with_template(prototype);
-        self.stack[dst] = Val::obj(obj);
+        frame.registers::<WIDTH>(self)[dst.into()] = Val::obj(obj);
     }
 
     /// `R[dst] = receiver.name`. Only a current own-field cache hit runs in
@@ -137,11 +144,11 @@ impl State {
     /// the release build into outlining this function, a call on the hit
     /// path, and inlined into the dispatch loop it grew that frame.
     #[inline]
-    pub(super) fn reg_get_field(
+    pub(super) fn reg_get_field<const WIDTH: usize, R: Copy + Into<usize>>(
         &mut self,
         frame: &Frame,
         inst: Instr,
-        dst: usize,
+        dst: R,
         receiver: Val,
         local_cost: &mut u64,
         call_site: usize,
@@ -149,15 +156,15 @@ impl State {
         let cache_slot = inst.cache_slot();
         let key = frame.literal(inst.c());
         if let Some(val) = self.field_cache_hit(frame, receiver, key, cache_slot) {
-            self.stack[dst] = val;
+            frame.registers::<WIDTH>(self)[dst.into()] = val;
             return Ok(());
         }
         let cache = frame.runtime.caches.field(cache_slot);
         match self.resolve_index(receiver, IndexStart::Receiver, key, cache, local_cost)? {
-            IndexOutcome::Value(val) => self.stack[dst] = val,
+            IndexOutcome::Value(val) => frame.registers::<WIDTH>(self)[dst.into()] = val,
             IndexOutcome::Call(units) => crate::native_call!(
                 "reg_get_field->index_call",
-                self.index_call(dst, units, call_site)
+                self.index_call(frame.stack_bottom + dst.into(), units, call_site)
             )?,
         }
         Ok(())
@@ -213,17 +220,18 @@ impl State {
     ///
     /// It takes the instruction rather than its decoded operands, which
     /// keeps the hint lookup's locals out of `Frame::run` in the dev profile.
-    pub(super) fn reg_get_table(
+    pub(super) fn reg_get_table<const WIDTH: usize, W: DispatchWord>(
         &mut self,
         frame: &Frame,
-        inst: Instr,
-        dst: usize,
-        base: usize,
+        word: W,
         local_cost: &mut u64,
         call_site: usize,
     ) -> Result<()> {
-        let tbl_val = self.stack[base + inst.b() as usize];
-        let key_val = self.stack[base + inst.c() as usize];
+        let dst = word.reg_a();
+        let regs = frame.registers::<WIDTH>(self);
+        let tbl_val = regs[word.reg_b().into()];
+        let key_val = regs[word.reg_c().into()];
+        let inst = word.canonical();
         let start = match tbl_val
             .as_object_ptr()
             .and_then(|ptr| self.heap.as_table_ref(ptr))
@@ -241,7 +249,7 @@ impl State {
                 match tbl.get_metatable() {
                     Some(metatable) if val.is_nil() => IndexStart::AfterRawMiss(metatable),
                     _ => {
-                        self.stack[dst] = val;
+                        frame.registers::<WIDTH>(self)[dst.into()] = val;
                         return Ok(());
                     }
                 }
@@ -249,10 +257,10 @@ impl State {
             None => IndexStart::Receiver,
         };
         match self.resolve_index(tbl_val, start, key_val, None, local_cost)? {
-            IndexOutcome::Value(val) => self.stack[dst] = val,
+            IndexOutcome::Value(val) => frame.registers::<WIDTH>(self)[dst.into()] = val,
             IndexOutcome::Call(units) => crate::native_call!(
                 "reg_get_table->index_call",
-                self.index_call(dst, units, call_site)
+                self.index_call(frame.stack_bottom + dst.into(), units, call_site)
             )?,
         }
         Ok(())
@@ -262,18 +270,19 @@ impl State {
     /// loop; everything else is one outlined store (`State::store_field`),
     /// and only a `__newindex` function handler continues into
     /// `newindex_call`.
-    pub(super) fn reg_set_field(
+    pub(super) fn reg_set_field<const WIDTH: usize, R: Copy + Into<usize>>(
         &mut self,
         frame: &Frame,
         inst: Instr,
-        table: usize,
-        src: usize,
+        table: R,
+        src: R,
         local_cost: &mut u64,
         call_site: usize,
     ) -> Result<()> {
         let (name, cache_slot) = (inst.b(), inst.cache_slot());
-        let receiver = self.stack[table];
-        let val = self.stack[src];
+        let regs = frame.registers::<WIDTH>(self);
+        let receiver = regs[table.into()];
+        let val = regs[src.into()];
         let key = frame.literal(name);
         let cache = frame.runtime.caches.set_field(cache_slot);
         if !val.is_nil()
@@ -308,20 +317,23 @@ impl State {
     /// `R[table][R[key]] = R[src]`. A plain table, or an existing key, is
     /// stored inline; a key absent from a table with a metatable continues
     /// past the lookup that proved it absent.
-    pub(super) fn reg_set_table(
+    pub(super) fn reg_set_table<const WIDTH: usize, R: Copy + Into<usize>>(
         &mut self,
-        table: usize,
-        key: usize,
-        src: usize,
+        frame: &Frame,
+        table: R,
+        key: R,
+        src: R,
         local_cost: &mut u64,
         call_site: usize,
     ) -> Result<()> {
-        let key_val = self.stack[key];
-        let val = self.stack[src];
-        if self.try_insert_table_direct(table, key_val, val)? {
+        let regs = frame.registers::<WIDTH>(self);
+        let receiver = regs[table.into()];
+        let key_val = regs[key.into()];
+        let val = regs[src.into()];
+        if self.try_insert_table_direct(receiver, key_val, val)? {
             return Ok(());
         }
-        let ptr = self.stack[table]
+        let ptr = receiver
             .as_object_ptr()
             .expect("the direct store accepted only a table");
         if let Some(units) = self.store_absent_key(ptr, key_val, val, local_cost)? {
@@ -350,10 +362,9 @@ impl State {
     /// register ranges, not value types, so the check stays fallible.
     fn constructor_table(
         &mut self,
-        table: usize,
+        tbl_val: Val,
         operation: ConstructorTableOperation,
     ) -> Result<super::table::TableEditor<'_>> {
-        let tbl_val = self.stack[table];
         let typ = tbl_val.typ(&self.heap);
         match tbl_val.as_object_ptr() {
             Some(ptr) if self.heap.as_table_ref(ptr).is_some() => Ok(self
@@ -370,32 +381,37 @@ impl State {
     }
 
     /// A constructor's `name = R[src]`.
-    pub(super) fn reg_init_field(
+    pub(super) fn reg_init_field<const WIDTH: usize, R: Copy + Into<usize>>(
         &mut self,
         frame: &Frame,
-        table: usize,
+        table: R,
         name: u16,
-        src: usize,
+        src: R,
     ) -> Result<()> {
         let key = frame.literal(name);
-        let val = self.stack[src];
-        self.constructor_table(table, ConstructorTableOperation::InitField)?
+        let regs = frame.registers::<WIDTH>(self);
+        let receiver = regs[table.into()];
+        let val = regs[src.into()];
+        self.constructor_table(receiver, ConstructorTableOperation::InitField)?
             .insert(key, val)?;
         Ok(())
     }
 
     /// A template constructor's `name = R[src]` at its pinned entry.
-    pub(super) fn reg_init_field_pinned(
+    pub(super) fn reg_init_field_pinned<const WIDTH: usize, R: Copy + Into<usize>>(
         &mut self,
         frame: &Frame,
-        table: usize,
+        table: R,
         name: u16,
-        src: usize,
+        src: R,
         entry: u8,
     ) -> Result<()> {
         let key = frame.literal(name);
-        let val = self.stack[src];
-        let mut tbl = self.constructor_table(table, ConstructorTableOperation::InitFieldPinned)?;
+        let regs = frame.registers::<WIDTH>(self);
+        let receiver = regs[table.into()];
+        let val = regs[src.into()];
+        let mut tbl =
+            self.constructor_table(receiver, ConstructorTableOperation::InitFieldPinned)?;
         if !tbl.init_at_index(usize::from(entry), key, val) {
             tbl.insert(key, val)?;
         }
@@ -403,10 +419,18 @@ impl State {
     }
 
     /// A constructor's `[R[key]] = R[src]`.
-    pub(super) fn reg_init_index(&mut self, table: usize, key: usize, src: usize) -> Result<()> {
-        let key_val = self.stack[key];
-        let val = self.stack[src];
-        self.constructor_table(table, ConstructorTableOperation::InitIndex)?
+    pub(super) fn reg_init_index<const WIDTH: usize, R: Copy + Into<usize>>(
+        &mut self,
+        frame: &Frame,
+        table: R,
+        key: R,
+        src: R,
+    ) -> Result<()> {
+        let regs = frame.registers::<WIDTH>(self);
+        let receiver = regs[table.into()];
+        let val = regs[src.into()];
+        let key_val = regs[key.into()];
+        self.constructor_table(receiver, ConstructorTableOperation::InitIndex)?
             .insert(key_val, val)?;
         Ok(())
     }
@@ -449,16 +473,17 @@ impl State {
     }
 
     /// `R[dst] = #R[src]`.
-    pub(super) fn reg_len(
+    pub(super) fn reg_len<const WIDTH: usize, R: Copy + Into<usize>>(
         &mut self,
-        dst: usize,
-        src: usize,
+        frame: &Frame,
+        dst: R,
+        src: R,
         local_cost: &mut u64,
         call_site: usize,
     ) -> Result<()> {
-        let val = self.stack[src];
+        let val = frame.registers::<WIDTH>(self)[src.into()];
         if let Some(s) = val.as_string(&self.heap) {
-            self.stack[dst] = Val::num(s.len() as f64);
+            frame.registers::<WIDTH>(self)[dst.into()] = Val::num(s.len() as f64);
             return Ok(());
         }
         if let Some(tbl) = val
@@ -466,12 +491,15 @@ impl State {
             .and_then(|ptr| self.heap.as_table_ref(ptr))
             && tbl.get_metatable().is_none()
         {
-            self.stack[dst] = Val::num(tbl.array_len() as f64);
+            frame.registers::<WIDTH>(self)[dst.into()] = Val::num(tbl.array_len() as f64);
             return Ok(());
         }
         match self.resolve_length(val, local_cost)? {
-            Some(len) => self.stack[dst] = len,
-            None => crate::native_call!("reg_len->len_call", self.len_call(dst, call_site))?,
+            Some(len) => frame.registers::<WIDTH>(self)[dst.into()] = len,
+            None => crate::native_call!(
+                "reg_len->len_call",
+                self.len_call(frame.stack_bottom + dst.into(), call_site)
+            )?,
         }
         Ok(())
     }
@@ -486,14 +514,6 @@ impl State {
             self.call_unguarded(ArgCount::Fixed(2), RetCount::Fixed(1))
         )?;
         self.pop_into(dst);
-        Ok(())
-    }
-
-    /// `R[dst] = R[first] .. ... .. R[first + count - 1]`, read from the
-    /// registers in place.
-    pub(super) fn reg_concat(&mut self, dst: usize, first: usize, count: usize) -> Result<()> {
-        let val = self.concat_values(first, count)?;
-        self.stack[dst] = val;
         Ok(())
     }
 
@@ -544,7 +564,12 @@ impl State {
     /// gives the lookup its largest share), with a same-binary comparison.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     #[inline(never)]
-    pub(super) fn reg_closure(&mut self, frame: &Frame, dst: usize, nested: u16) -> Result<()> {
+    pub(super) fn reg_closure<const WIDTH: usize, R: Copy + Into<usize>>(
+        &mut self,
+        frame: &Frame,
+        dst: R,
+        nested: u16,
+    ) -> Result<()> {
         let runtime = self.resolve_bytecode_runtime(frame.nested_bytecode(nested))?;
         let descs = &runtime.bytecode.upvalues;
         // Built straight into the closure's list, in descriptor order: none
@@ -559,7 +584,7 @@ impl State {
             UpvalueDesc::Upvalue(idx) => frame.upvalues.as_slice()[*idx as usize],
         }));
         let obj = self.alloc_closure(runtime, upvalues);
-        self.stack[dst] = Val::obj(obj);
+        frame.registers::<WIDTH>(self)[dst.into()] = Val::obj(obj);
         Ok(())
     }
 

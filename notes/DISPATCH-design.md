@@ -128,6 +128,25 @@ checks cost issue slots.
     Those are the named candidates for a later window adoption, which
     needs its own typed-access ruling and matched A/B.
 
+## Rulings from link 3
+
+19. The tier switch at `Frame::run_frame` selects a monomorphization of
+    one dispatch function. The word view carries the register type into
+    outlined handlers, including the checked lookahead for the fused
+    generic-for edge. Both instantiations use one lexical native-call
+    inventory edge. In dev builds the narrow getters validate out of line
+    and borrow the opcode metadata table: inlining direct indexing of the
+    associated constant put copies in the native dispatch frame and
+    overflowed the dev stack probe. Padding growth is outlined separately
+    from the ordinary borrow.
+20. Table and length handlers use the physical window for ordinary
+    operands and immediate results. The handler-call path still pops its
+    return value into the checked live prefix. Template initialization's
+    separate fused runner stays checked alongside the range consumers and
+    typed numeric regions. Its speculative scan checks arbitrary upcoming
+    opcodes, so it cannot use a register getter until it has identified
+    the operation. It is outside this link's dispatch body.
+
 ## Links
 
 1. Done (with 1a): private stack type with logical end, every crate site
@@ -143,21 +162,17 @@ checks cost issue slots.
    `narrow_view`, `NarrowCode::fetch` and the `reg_*` getters are unused
    outside tests until link 3 (`expect(dead_code)` on each, remove as
    adopted).
-3. Dispatch arms (`run_frame`, `registers.rs` fast paths, `eval_control.rs`
-   numeric-for) on the per-arm window. Match `code.narrow_view()` once per
-   `run_frame` entry and run one dispatch body specialized per tier (the
-   next entry after a call, tail call or return selects the running
-   frame's tier). Compute `ra` per arm through `reg_a`, never in a shared
-   prologue: unmarked fields (`CLOSE`, `RETURN`, counts, literals, jumps)
-   keep the canonical getters. Window widths carry the slack of ruling 17.
-   `numeric_loop.rs` stays on the checked API (ruling 18). Gate: native
-   bytes dev and release re-measured under the envelope (ruling 11), matched
-   A/B against 02589f4 (ruling 12) on closed_mode, benchmark, wide_sweep,
-   key_sweep, arithmetic, and release asm inspection of the live-prefix
-   checks that survive outside window arms. Medium-large.
-   3a. Only if 3 does not beat 02589f4: recover the non-window paths by
-       reusing one live slice across several accesses within an arm, or by
-       an unchecked live prefix (sparred separately, see ruling 12). Medium.
+3. Built: tier-specialized dispatch with per-arm operands, fixed windows
+   with slack, register helpers and numeric-for handlers using the
+   windows, and continued checked access for ranges and call boundaries.
+   The native-call inventory tracks the dispatch edge and the
+   native-stack table is refreshed. Native envelope and matched A/B
+   verdict recorded below.
+   3a. Required: the combined candidate was slower on every workload.
+       Test checked live-slice reuse and the extra physical borrow
+       branches as separate candidates. Measure code alignment if the
+       mechanism remains unclear. Repeat the correctness and native gates
+       and the matched A/B of the final tip against 02589f4. Medium.
 4. Green agent: full gate, `reference/` and `docs/` touched by the stack
    contract (Frame doc, `docs/limits.md` value stack, native-calls table),
    close the notes entry with the measured result, delete this file.
@@ -196,3 +211,47 @@ key_sweep +79.1 (+2.7%, 3 of 3), arithmetic +26.7 (+1.5%, 3 of 3),
 benchmark +43.8 (+1.4%, 2 of 3). Likely mechanism, unconfirmed in asm: each
 `self.stack[i]` now checks `end <= buf.len()` forming the live slice and
 then `i < end`, two checks where the Vec had one. Layout is not excluded.
+
+Link 3 native-stack probe on bygg, rustc 1.102.0-nightly
+(65ce8611f 2026-11-18), relative to da09880: dev rows -416 to -368
+bytes, max 11856 to 11456. Release rows +128 to +320 bytes, max
+1824 to 1984. Release plus snapshot rows +128 to +320 bytes, max
+1760 to 1920. The row numbers are scenario cycles (two levels for
+`index_rust` and `newindex_rust`).
+
+Release disassembly on bygg: both `reg_get_table` tiers use direct
+scaled register loads without per-register bounds branches. The physical
+window borrow still compares its end with the initialized backing length
+before cold padding growth and checks the range after growth, including
+the start/end ordering. Outside the window, `reg_set_list` checks logical
+end against backing length, receiver against logical end, and the
+operand range. The outlined handler result path (`index_call`) still
+checks the pop and destination. `reg_vararg` retains checked ranges.
+These checks provide concrete targets for any follow-up measurement.
+
+
+Link 3 matched A/B on bygg, 02589f4 versus 4f771513, invocation
+3e1136cd. Three interleaved rounds, one iteration per cell. The measured
+commit contains the link 3 code; the final amend records this evidence.
+
+| Workload | Baseline median ms | Candidate median ms | Median paired delta ms | Delta / baseline median | Faster / slower |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `closed_mode` | 4282.4 | 4776.2 | +466.1 | +10.9% | 0 / 3 |
+| `wide_sweep` | 2011.6 | 2614.3 | +606.1 | +30.1% | 0 / 3 |
+| `key_sweep` | 2904.8 | 3541.7 | +637.8 | +22.0% | 0 / 3 |
+| `arithmetic` | 1760.6 | 1889.0 | +151.5 | +8.6% | 0 / 3 |
+| `benchmark` | 3169.7 | 3407.7 | +237.3 | +7.5% | 0 / 3 |
+
+First-round sidecars confirm slower WARM blocks in all five workloads.
+The native stack envelope and all correctness sweeps passed. The push
+gate stays closed.
+
+Open for the link 3a spar: choose where to attack the loss. In both
+`reg_get_table` instantiations the release hot path still compares the
+window end with backing length twice, with a separate start/end check.
+Ruling 4's expected single range check per borrow was not realized by
+this codegen. The checked live-prefix sites above remain viable
+candidates too. The measurements establish the overall loss but do not
+attribute it between window formation, the remaining checked sites and
+layout. An unchecked live prefix still requires the separate ruling
+described in ruling 12.

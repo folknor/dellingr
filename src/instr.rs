@@ -234,7 +234,7 @@ define_builtins! {
 pub(crate) struct Instr(u64);
 
 mod code;
-pub(crate) use code::Code;
+pub(crate) use code::{Code, NarrowCode};
 
 // Keep the version in src root for both feature shapes; the opcode fixture reads it through instr.
 #[path = "snapshot_format.rs"]
@@ -942,10 +942,6 @@ impl NarrowInstr {
     }
 
     /// The canonical word, bit for bit.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "narrow dispatch adopts the getters")
-    )]
     #[inline(always)]
     pub(crate) const fn canonical(self) -> Instr {
         self.0
@@ -953,40 +949,30 @@ impl NarrowInstr {
 
     #[inline(always)]
     const fn uses(self) -> RegisterUses {
-        match Instr::OPCODES[self.0.opcode() as usize] {
+        // Borrow the table so dev builds do not materialize it on the stack.
+        let opcodes = &Instr::OPCODES;
+        match opcodes[self.0.opcode() as usize] {
             Some(metadata) => metadata.registers,
             None => RegisterUses::NONE,
         }
     }
 
     /// The A register. Valid only when the opcode marks A as a register use.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "narrow dispatch adopts the getters")
-    )]
-    #[inline(always)]
+    #[cfg_attr(not(debug_assertions), inline(always))]
     pub(crate) fn reg_a(self) -> u8 {
         debug_assert!(self.uses().a && self.0.a() <= u16::from(u8::MAX));
         self.0.a() as u8
     }
 
     /// The B register. Valid only when the opcode marks B as a register use.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "narrow dispatch adopts the getters")
-    )]
-    #[inline(always)]
+    #[cfg_attr(not(debug_assertions), inline(always))]
     pub(crate) fn reg_b(self) -> u8 {
         debug_assert!(self.uses().b && self.0.b() <= u16::from(u8::MAX));
         self.0.b() as u8
     }
 
     /// The C register. Valid only when the opcode marks C as a register use.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "narrow dispatch adopts the getters")
-    )]
-    #[inline(always)]
+    #[cfg_attr(not(debug_assertions), inline(always))]
     pub(crate) fn reg_c(self) -> u8 {
         debug_assert!(self.uses().c && self.0.c() <= u16::from(u8::MAX));
         self.0.c() as u8

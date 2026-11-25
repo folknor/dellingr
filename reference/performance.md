@@ -1325,6 +1325,29 @@ harness builds, so code layout is not excluded, but the gap is well beyond
 the layout spread `AGENTS.md` records. The harness callback now uses the
 batch.
 
+## Tier-specialized register dispatch, 2026-11-25
+
+Matched interleaved wall runs on bygg, 02589f4 versus 4f771513,
+invocation 3e1136cd. Every candidate round was slower. The first paired
+run for each workload also showed slower WARM blocks in the sidecar.
+
+| Workload | Baseline median ms | Candidate median ms | Median paired delta ms | Delta / baseline median | Faster / slower |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `closed_mode` | 4282.4 | 4776.2 | +466.1 | +10.9% | 0 / 3 |
+| `wide_sweep` | 2011.6 | 2614.3 | +606.1 | +30.1% | 0 / 3 |
+| `key_sweep` | 2904.8 | 3541.7 | +637.8 | +22.0% | 0 / 3 |
+| `arithmetic` | 1760.6 | 1889.0 | +151.5 | +8.6% | 0 / 3 |
+| `benchmark` | 3169.7 | 3407.7 | +237.3 | +7.5% | 0 / 3 |
+
+Release disassembly of both `GET_TABLE` tiers showed direct array
+indexing by the register operands after the physical window borrow.
+The borrow still emitted multiple checks, and the live-prefix checks
+remained at call results and range consumers. The wall runs do not
+isolate a cause. Against da09880, the largest recurring cycle at
+4f771513 fell from 11856 to 11456 bytes in dev and rose from 1824 to
+1984 in release and from 1760 to 1920 in release with snapshot. The
+native envelope passed.
+
 ## Native stack frames and cycles
 
 The log behind reference/native-calls.md's current table: the frame-size

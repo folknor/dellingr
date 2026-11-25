@@ -95,18 +95,21 @@ impl ValueStack {
     }
 
     /// Borrow the physical register window while leaving the live end alone.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "Dispatch starts borrowing windows in link 3")
-    )]
+    #[cfg_attr(not(debug_assertions), inline(always))]
     pub(super) fn register_window<const WIDTH: usize>(&mut self, base: usize) -> &mut [Val; WIDTH] {
         let limit = base + WIDTH;
         if self.buf.len() < limit {
-            self.buf.resize(limit, Val::NIL);
+            self.grow_padding(limit);
         }
         (&mut self.buf[base..limit])
             .try_into()
             .expect("the window range has exactly WIDTH slots")
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn grow_padding(&mut self, limit: usize) {
+        self.buf.resize(limit, Val::NIL);
     }
 }
 

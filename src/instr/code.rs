@@ -47,10 +47,6 @@ impl PartialEq for Code {
 
 impl Code {
     /// The register tier dispatch may rely on.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "narrow dispatch adopts the tier")
-    )]
     pub(crate) fn tier(&self) -> RegisterTier {
         self.tier
     }
@@ -82,12 +78,8 @@ impl Code {
     /// The narrow view of a `Narrow` function's words; `None` for `Wide`.
     /// The shared borrow keeps the words unchanged for as long as the view
     /// lives.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "narrow dispatch adopts the view")
-    )]
     pub(crate) fn narrow_view(&self) -> Option<NarrowCode<'_>> {
-        (self.tier == RegisterTier::Narrow).then_some(NarrowCode(&self.words))
+        (self.tier() == RegisterTier::Narrow).then_some(NarrowCode(&self.words))
     }
 }
 
@@ -119,17 +111,9 @@ impl DerefMut for Code {
 /// A `Narrow` function's words, borrowed from its `Code`: every word was
 /// checked by `NarrowInstr::new` when the tier was installed, and `Code`
 /// drops the tier on any edit, so each fetched word is a narrow word.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "narrow dispatch adopts the view")
-)]
 #[derive(Clone, Copy)]
 pub(crate) struct NarrowCode<'a>(&'a [Instr]);
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "narrow dispatch adopts the view")
-)]
 impl NarrowCode<'_> {
     /// The narrow word at `pc`. Panics past the end, as a slice index does.
     #[inline(always)]
@@ -137,5 +121,11 @@ impl NarrowCode<'_> {
         // Checked by `Code::install_tier`, unchanged since: see the module
         // comment.
         NarrowInstr(self.0[pc])
+    }
+
+    /// The narrow word at `pc`, if the instruction exists.
+    #[inline(always)]
+    pub(crate) fn get(self, pc: usize) -> Option<NarrowInstr> {
+        self.0.get(pc).copied().map(NarrowInstr)
     }
 }
