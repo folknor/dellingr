@@ -126,48 +126,10 @@ table, Lua function or gmatch iterator result, the cases whose type is read
 through the heap. Found while landing the error-path-only type
 classification in `decode_with`.
 
-### Constructor and cache-slot housekeeping (2026-11-25)
+### Patterns example replacement label (2026-11-25)
 
-- The save golden program (`tests/common/save_golden_program.rs`) has no
-  constructor with more than four named fields, so no `NEW_TABLE_TEMPLATE`,
-  `INIT_FIELD_PINNED` or `NEW_TABLE_PRESIZED` reaches the golden bytes. A
-  change to template emission or encoding is caught only by
-  `nil_template_control_survives_snapshot` and the verifier rejection tests.
-  Adding one moves the golden, so it is a reviewed regeneration.
-- A comment in `tests/integration/snapshot/save_state.rs` (the open
-  constructor test) still names `NewTableTracked`, an opcode the register VM
-  removed; the test is about open constructors not leaking a base.
-- The `disable-inline-caches` paragraph at the top of `src/vm/caches.rs` has
-  one over-long, mis-wrapped line.
-
-### String library and cost-history housekeeping (2026-11-25)
-
-- The doc comment on `subject_floor` in `src/lua_std/string.rs` opens with
-  a displaced paragraph about reference Lua raising "unfinished capture"
-  (`get_onecapture`, `LuaCapture::Unfinished`), which describes a
-  capture-reading helper, not the stack floor. Move it to the function it
-  belongs to.
-- `examples/strings/patterns.lua` labels `string.gsub(log, "%d+", "<NUM>")`
-  "gsub with function replacement"; it is a string replacement. The file is
-  pinned, so fix the comment at its next re-pin.
-- A gmatch miss now leaves the iterator exhausted (`pos` one past the
-  subject end, `resumed` false), and `gmatch_miss_exhausts_the_iterator`
-  pins the repeat-call cost. No test pins the saved record of an iterator
-  exhausted by a miss, so a save/load round trip of that state, the other
-  replay-visible half, is unguarded.
-- `COST_MODEL_HISTORY` in `tests/integration/cost/cost_golden.rs` is
-  append-only by convention, and `docs/budget.md` says a changed fixture row
-  needs a new version. Neither says whether the fingerprint of a version that
-  is still unreleased may be replaced in place
-  when further changes fold into it, which is how unreleased cost changes
-  have been landing. The intent needs stating.
-
-### Dispatch-loop doc housekeeping (2026-11-25)
-
-- The doc comment on `Frame::eval_batched` in `src/vm/frame.rs` says the
-  caller settles `local_cost` "on error"; `Frame::run` settles the pending
-  batch on every exit, Ok or Err, as its own comment says. Reword the
-  `eval_batched` doc to match.
+At the next re-pin of `examples/strings/patterns.lua`, label
+`string.gsub(log, "%d+", "<NUM>")` as a string replacement.
 
 ### Stale workload-file headers (2026-11-25)
 

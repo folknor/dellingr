@@ -375,7 +375,8 @@ Snapshots save and restore the costing along with the counters (see
 The units each site measures are part of the cost model. Changing any of them
 or a default weight, including making a free function charge, changes
 `cost_used` for existing scripts and replays, so it needs a
-`COST_MODEL_VERSION` bump. Do not "fix" a flat charge to be proportional.
+new `COST_MODEL_VERSION` if the current version has shipped. Do not "fix" a
+flat charge to be proportional.
 
 ## `COST_MODEL_VERSION`
 
@@ -384,10 +385,10 @@ site measures, which charge the work is attributed to, how each charge is
 admitted against a budget (atomic or per unit), the default weights, and
 compiler emission.
 
-- It moves whenever `cost_used` for identical source changes under the default
-  model, and also when work moves from one charge to another or a charge's
-  units or admission change, even if default costs stay the same: a
-  non-default model prices the two charges differently.
+- Use an unreleased version when `cost_used` for identical source changes
+  under the default model, when work moves between charges, or when a
+  charge's units or admission change. A non-default model can price two
+  charges differently even when default costs stay the same.
 - A cost fingerprint is the version plus the costing (`CostModel::iter` for a
   metered State, or Off). It is a valid key for stored cost fingerprints.
 - Snapshots load only under an exact version match.
@@ -400,13 +401,18 @@ functions are probed for a zero charge, and the `ipairs` probe also calls the
 iterator it returns. Specialized tests read named pins (mostly cost deltas)
 from the same fixture, so those values are versioned too.
 
-Changing a fixture row requires a new version and an appended
+Changing a released fixture row requires an unreleased version and its
 (version, fingerprint) pair in `COST_MODEL_HISTORY` in
-`tests/integration/cost/cost_golden.rs`. The test fails unless the last pair
-is the current version with the current rows' fingerprint, and fails if those
-rows match a fingerprint recorded under another version. The history is
-append-only by convention: editing an existing pair in place would hide a cost
-change under an old version, so a diff that touches one needs review.
+`tests/integration/cost/cost_golden.rs`. Released pairs are frozen. Further
+changes can replace the unreleased pair's fingerprint in place. The test
+requires the last pair to match the current version and rows' fingerprint and
+rejects fingerprints recorded under another version.
+
+Between releases, internal versions such as `COST_MODEL_VERSION` and
+`FORMAT_VERSION` can be retained or bumped as needed, and current golden
+fixtures can be rewritten in place. Review the reason for a golden change
+before running its explicit regeneration tool. Released values and archived
+goldens such as `save_released_v*.bin` are frozen.
 The Unreleased changelog section must state "`COST_MODEL_VERSION` is N"
 exactly once, with N the current version.
 These probes cover fixed inputs; they do not prove that every possible

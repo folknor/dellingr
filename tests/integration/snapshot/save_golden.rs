@@ -19,7 +19,7 @@
 
 use std::path::PathBuf;
 
-use dellingr::{DefaultCallbacks, State};
+use dellingr::{ArgCount, DefaultCallbacks, RetCount, State};
 
 use save_golden_program::{golden_bytes, payload_after_header};
 
@@ -107,11 +107,29 @@ fn golden_fixture_round_trips() {
     let mut loaded = State::load_state(&bytes, Box::new(DefaultCallbacks), support::no_setup)
         .expect("fixture loads");
 
+    loaded.get_global("exhausted_iterator").unwrap();
+    let before = loaded.cost_used();
+    loaded.call(ArgCount::Fixed(0), RetCount::All).unwrap();
+    assert_eq!(
+        loaded.get_top(),
+        0,
+        "an exhausted iterator returns no values"
+    );
+    assert_eq!(
+        loaded.cost_used(),
+        before,
+        "an exhausted iterator does not rescan"
+    );
+
     support::run(
         &mut loaded,
         r#"
             if iterator() ~= "b" then error("iterator position was not restored") end
             if empty_iterator() ~= "" then error("empty iterator was not restored") end
+            local templated, presized = constructor_tables()
+            if templated.a ~= 1 or templated.e ~= 5 or presized.a ~= 5 or presized.d ~= 4 then
+                error("constructor bytecode was not restored")
+            end
             sibling_write()
             if sibling_read() ~= 2 then error("shared upvalue cell was not restored") end
             result = captured()

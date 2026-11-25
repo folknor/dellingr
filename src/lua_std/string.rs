@@ -224,9 +224,6 @@ fn check_string_or_number(state: &mut State, idx: isize, function_name: &str) ->
     state.check_type_in(idx, &[LuaType::String, LuaType::Number], function_name)
 }
 
-/// Reference Lua raises "unfinished capture" only when a library function
-/// reads a capture whose `(` the match never closed (`get_onecapture`), so
-/// every consumer of a capture value routes `LuaCapture::Unfinished` here.
 /// The stack top to keep below a pattern function's results while they are
 /// copied out of its subject: up to the subject's slot when it is read there
 /// (slot 1, so nothing else stays), nothing for a number's owned rendering.
@@ -234,6 +231,9 @@ fn subject_floor(subject: &StringArg) -> isize {
     subject.slot().unwrap_or(0)
 }
 
+/// Reference Lua raises "unfinished capture" only when a library function
+/// reads a capture whose `(` the match never closed (`get_onecapture`), so
+/// every consumer of a capture value routes `LuaCapture::Unfinished` here.
 fn unfinished_capture_error(state: &State, function: StringPatternFunction) -> Error {
     pattern_runtime_error(state, function, PatternError::UnfinishedCapture)
 }

@@ -485,8 +485,8 @@ fn save_state_rejects_suspended_environment() {
 
 #[test]
 fn state_is_quiescent_after_error_in_table_constructor() {
-    // Same guard for pending constructor bases: an error between
-    // NewTableTracked and its SetList must not leak a base.
+    // An error evaluating the open constructor's final call must leave
+    // no pending constructor base behind.
     let mut state = State::new();
     support::load(
         &mut state,

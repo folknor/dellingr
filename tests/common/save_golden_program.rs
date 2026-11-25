@@ -31,6 +31,11 @@ const GOLDEN_PROGRAM: &str = r#"
     instantiated_once()()
     function never_instantiated() return function() return "never" end end
 
+    function constructor_tables()
+        return { a = 1, b = 2, c = 3, d = 4, e = 5 },
+               { a = 1, b = 2, c = 3, d = 4, a = 5 }
+    end
+
     ordered = { 1, 2, 3, extra = "tail" }
     math.golden_delta = { marker = "environment delta" }
     golden_pointer = tostring(ordered)
@@ -45,6 +50,8 @@ const GOLDEN_PROGRAM: &str = r#"
     sibling_read, sibling_write = siblings()
     iterator = string.gmatch("a b", "%a+")
     iterator()
+    exhausted_iterator = string.gmatch("abc", "%d")
+    exhausted_iterator()
     empty_iterator = string.gmatch("", "")
     dead = { gone = true, kept = true }
     dead.gone = nil

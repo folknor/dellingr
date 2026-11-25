@@ -435,7 +435,8 @@ impl Frame {
     }
 
     /// Dispatch loop body for [`Frame::run`]. `local_cost` holds accrued but
-    /// not yet flushed opcode cost; the caller settles it on error.
+    /// not yet flushed opcode cost. The caller settles the pending batch on
+    /// every exit, whether successful or erroneous.
     #[inline(always)]
     fn eval_batched(
         frames: &mut Vec<Frame>,

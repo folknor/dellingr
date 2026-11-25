@@ -3,8 +3,8 @@
 //! `COST_MODEL_VERSION` covers the cost of a given source: per-opcode charges,
 //! native library charges and compiler emission (which opcodes a source turns
 //! into, e.g. constant folding). If one of these assertions fails, the cost of
-//! identical source changed: bump `COST_MODEL_VERSION`, document the new
-//! version in `src/cost_meter.rs`, and update the versioned fixture.
+//! identical source changed. Review it under the versioning policy in
+//! `docs/budget.md` before updating the fixture.
 //!
 //! Snapshot equality and budget-derived expectations remain in their owning
 //! suites: they are relations, not independent absolute cost goldens to copy.
@@ -99,7 +99,7 @@ fn cost_used_after_runtime_error_matches_golden_corpus() {
                 state.cost_used(),
                 expected,
                 "{name} (budget {budget:?}): cost_used after a runtime error must count \
-                 the executed costed opcodes; a change here needs a COST_MODEL_VERSION bump"
+                 the executed costed opcodes; review changes under docs/budget.md"
             );
         }
     }
@@ -183,7 +183,7 @@ fn cost_used_matches_golden_corpus() {
     assert!(
         drift.is_empty(),
         "cost_used for identical source changed under COST_MODEL_VERSION {COST_MODEL_VERSION}; \
-         bump COST_MODEL_VERSION, document the new version, and update the fixture:\n{}",
+         review the change under docs/budget.md before updating the fixture:\n{}",
         drift.join("\n")
     );
 }
@@ -220,13 +220,11 @@ fn fixture_fingerprint(fixture: &str) -> u64 {
     fingerprint
 }
 
-/// Append-only record of (cost model version, fixture row fingerprint). A
-/// changed fixture row passes only by bumping `COST_MODEL_VERSION` and
-/// appending a new pair: the last entry must be the current version with the
-/// current fingerprint, and no fingerprint may appear under two versions.
-/// Never edit or remove an existing entry; a diff that does is the signal a
-/// reviewer looks for. The history starts at version 8, when this fixture
-/// replaced the in-test corpus.
+/// Record of (cost model version, fixture row fingerprint). Released pairs
+/// are frozen. Append a pair for a new version or replace the unreleased
+/// version's fingerprint after review. The last entry must match the current
+/// version and fingerprint, and fingerprints are unique across versions.
+/// The history starts at version 8, when this fixture replaced the in-test corpus.
 const COST_MODEL_HISTORY: &[(u16, u64)] = &[(8, 0x7731_8aae_9088_6a97), (9, 0xc724_4687_ecc5_8014)];
 
 const PIN_CONSUMER_SOURCES: &[(&str, &str)] = &[
@@ -312,9 +310,8 @@ fn golden_corpus_fingerprint_matches_cost_model_version() {
     assert_eq!(
         COST_MODEL_HISTORY.last(),
         Some(&(COST_MODEL_VERSION, fingerprint)),
-        "cost fixture rows changed: bump COST_MODEL_VERSION, document it in \
-         src/cost_meter.rs, update the fixture header and append the new \
-         (version, fingerprint) pair to COST_MODEL_HISTORY"
+        "cost fixture rows changed: see docs/budget.md for when to append a new \
+         COST_MODEL_HISTORY pair or replace the unreleased fingerprint"
     );
 }
 

@@ -414,6 +414,18 @@ fn golden_payload_covers_persisted_graph_shapes() {
         format_pointer_ids: _,
     } = &payload;
     assert!(*has_standard_environment && *next_format_pointer_id > 1);
+    for opcode in [
+        Instr::OP_NEW_TABLE_TEMPLATE,
+        Instr::OP_INIT_FIELD_PINNED,
+        Instr::OP_NEW_TABLE_PRESIZED,
+    ] {
+        assert!(bytecode.iter().any(|chunk| {
+            chunk
+                .code
+                .iter()
+                .any(|&word| Instr::from_raw(word).opcode() == opcode)
+        }));
+    }
     // Runtime membership covers both nested cases: a chunk instantiated
     // without a surviving closure of its own, and one never instantiated.
     let closure_chunks: BTreeSet<u32> = payload
@@ -555,8 +567,8 @@ fn golden_payload_covers_persisted_graph_shapes() {
             .all(|record| !record.pins.is_empty())
     );
     let verified = verify::verify_payload(payload).expect("golden verifies");
-    // Both gmatch iterator kinds are in the golden, the general one resumed
-    // (it was called once before the save).
+    // The golden covers a resumed iterator, an exhausted iterator and the
+    // empty-pattern record.
     let payload = verified.into_inner();
     assert!(
         payload
@@ -564,6 +576,15 @@ fn golden_payload_covers_persisted_graph_shapes() {
             .iter()
             .any(|object| matches!(object, SavedObject::GmatchIter { resumed: true, .. }))
     );
+    // The unsuccessful search of "abc" advances to one past its end.
+    assert!(payload.objects.iter().any(|object| matches!(
+        object,
+        SavedObject::GmatchIter {
+            pos: 4,
+            resumed: false,
+            ..
+        }
+    )));
     assert!(
         payload
             .objects
