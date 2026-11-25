@@ -163,6 +163,22 @@ its next re-pin, not on its own.
   standalone run takes a few seconds in a release build". The whole run now
   takes well under a second on bygg, so the sizing claim no longer holds.
 
+### The hash index's GC charge depends on the target (2026-11-26)
+
+Resident bytes charge array slots and hash entries at fixed literals
+(`RESIDENT_BYTES_PER_ARRAY_SLOT`, `RESIDENT_BYTES_PER_HASH_ENTRY`, never
+`size_of`, because collection timing is replay-visible), but
+`HashSlots::resident_bytes` adds the index's `allocation_size()`, which
+hashbrown documents as "informational only". Its value follows bucket count
+plus `Group::WIDTH` control bytes and `size_of::<usize>()`, so it differs
+between the SSE2, NEON and generic group backends and between 32- and 64-bit
+targets, and can move on a hashbrown upgrade. Collection timing, and with it
+`%p` ids of rebuilt strings and `State::object_count()`, can then differ
+between a replay on x86-64 and one on aarch64. `docs/determinism.md` only
+promises timing "for a given build". Either charge the index by a fixed
+per-bucket literal from its capacity, or state the target dependence in
+`docs/determinism.md` and `docs/limits.md`.
+
 ## Deferred forward-looking ideas
 
 ### Execution trace hook for a stepping debugger

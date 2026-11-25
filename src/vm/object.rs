@@ -1208,8 +1208,9 @@ impl GcHeap {
     fn collect(&mut self) {
         let resident = &mut self.resident;
         // Sweep phase: free unmarked objects of each arena in ascending slot
-        // order. Only occupied words are visited and only dead objects are
-        // touched, so the cost does not track an arena's high-water mark.
+        // order. Each sweep reads one summary word per 4096 slots of the
+        // arena's historical length (an emptied arena included), visits only
+        // occupied bitmap words and touches only the payloads it frees.
         // Nothing observable follows the order of the arenas.
         self.tables.sweep(|_, table| {
             resident.remove(table.resident_bytes());

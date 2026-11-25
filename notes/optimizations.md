@@ -120,14 +120,31 @@ that legitimately nests calls made from Rust past 150.
 
 ### Per-kind arenas keep their high-water storage (2026-11-26)
 
-Tables, closures and gmatch iterators each have their own arena
-(`GcHeap`), so slots freed in one kind are never reused by another: a
-State that peaks on iterators and later on closures holds both peaks'
-slot vectors, and `Occupancy::sweep` walks each arena's summary vector to
-its historical length on every collection. An empty-arena early-out in the
-sweep is cheap; releasing an emptied arena's storage needs a proof that no
-weak handle (runtime caches between prunes) can alias a restarted
-generation. No workload has the alternating shape; promote on one.
+A State that peaks in one object arena keeps that arena's slot vectors
+after the peak dies. The closure arena can empty in a State that runs
+chunks on demand and keeps no Lua function alive between jobs. When a
+sweep leaves the closure or gmatch arena empty, that arena could be reset
+to its fresh state behind a byte threshold. That reset is sound with
+today's cleanup, as `Occupancy::sweep`'s doc records. It would change the
+high-water promise in `docs/limits.md` "State-local growth". Restarted
+generations would also let a stale handle alias at once rather than after
+2^15 reuses. Promote on a host workload with a large closure batch
+followed by a long quiet phase. The empty-arena sweep early-out was
+refused, and the reasons are at the same doc.
+
+### Every table slot carries the four-pair inline variant (2026-11-26)
+
+`TableStorage::Inline` holds `[(Val, Val); TABLE_INLINE_CAPACITY]` (64
+bytes with an 8-byte `Val`) inside the `Table`, so every table arena slot
+pays for it, including pure arrays and map-storage dictionaries, whose
+inline pairs are dead space (`arena::Slot<Table>` size is pinned in
+`object.rs`). Closures and iterators no longer share that slot size since
+the per-kind arenas. A layout around compact records with optional numeric
+or dictionary storage would shrink the slot; boxing the inline pairs or the
+whole `Table` trades the footprint for an allocation and a dependent load
+on every small record. The table hunter's point from the 2026-11-17 hunt.
+No measurement yet: promote on a memory profile or a workload where table
+slot size shows.
 
 ---
 

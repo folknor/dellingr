@@ -161,6 +161,19 @@ impl Occupancy {
     /// non-empty words are visited. A word's bitmaps are committed before
     /// its slots are freed, so `free` sees consistent occupancy even if it
     /// unwinds.
+    ///
+    /// The outer loop runs to the summary's historical length even when the
+    /// pool is empty. An empty-pool early-out was considered and left out:
+    /// a million-slot peak costs 245 word loads per collection, and the
+    /// early-out would not help a pool with one survivor. Releasing an
+    /// emptied object arena's storage was also left out for want of a
+    /// workload that peaks and then stays low. If one appears, the closure
+    /// and gmatch arenas can restart once a sweep leaves them empty: runtime
+    /// caches hold only table handles, and `format_pointer_ids` is pruned
+    /// every collection. The reset needs a byte threshold so routine
+    /// iterator churn does not reallocate. The table arena never empties
+    /// (the global table lives in it), so reclaiming its storage would need
+    /// releasable slot pages that keep their indices' generations.
     pub(crate) fn sweep(&mut self, mut free: impl FnMut(usize)) {
         for summary_idx in 0..self.summary.len() {
             let mut summary_bits = self.summary[summary_idx];
