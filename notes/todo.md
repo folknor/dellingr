@@ -163,6 +163,16 @@ its next re-pin, not on its own.
   standalone run takes a few seconds in a release build". The whole run now
   takes well under a second on bygg, so the sizing claim no longer holds.
 
+### No test pins the field hint answering from a dead cache entry (2026-11-25)
+
+`get_current_cached_field` (src/vm/eval_index.rs) answers a receiver whose
+key sits at the cached slot even when the cached table is dead, and writes
+nothing back. No test pins that: the default build mostly reaches field
+sites through `try_numeric_leaf`, which refills instead, so a Lua-level test
+sees the hint only under `fault-injection`. Wanted: a test that drives the
+canonical `GET_FIELD` path (or calls the hint directly) after a non-pruning
+collection and checks both the answer and the unchanged dead entry.
+
 ## Deferred forward-looking ideas
 
 ### Execution trace hook for a stepping debugger

@@ -401,9 +401,12 @@ impl ObjectPtr {
 /// How many collections may pass between two runs of the runtime-cache
 /// prune (`State::drop_dead_cache_entries`).
 ///
-/// The prune is only an alias guard. Every cache hit compares the cached
+/// The prune is only an alias guard. Every cache hit that trusts a cached
+/// slot without checking its key compares the cached
 /// handle with a live one before it dereferences anything, so an entry
-/// naming a freed object just misses, unless its slot's generation has come
+/// naming a freed object never answers as that object (a field site may
+/// still use its position as a key-checked hint in another table), unless
+/// its slot's generation has come
 /// all the way round to the cached value. That takes 2^15 reuses: the arena
 /// (`object/arena.rs`, slotmap 1.1's stepping narrowed to 16 bits so a
 /// handle fits in an eight-byte value) keeps a `u16` version per slot, bumped once by a remove and once by an insert

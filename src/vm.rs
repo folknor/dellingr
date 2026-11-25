@@ -2318,11 +2318,24 @@ mod runtime_tests {
     }
 
     /// Between prunes a collection leaves an entry naming a freed object in
-    /// place, and the entry only misses: the next lookup through the site
-    /// answers from the live table and refills the entry. The pruning
-    /// collection then clears it.
+    /// place; here a later lookup through the site refills it from a live
+    /// table, and a pruning collection clears it once that table has died
+    /// too.
+    ///
+    /// The refilling receivers hold `pad` in the slot where the warming
+    /// table held `k`, on purpose. A receiver with `k` at the cached slot
+    /// can be answered by the dispatch hint (`get_current_cached_field`),
+    /// which key-checks that slot in any table and writes nothing back, so
+    /// the dead handle would stay. Whether such a call reaches the hint
+    /// depends on the call path: the default build's standalone numeric
+    /// leaf (`try_numeric_leaf`) accepts a cached slot only for the exact
+    /// receiver and so refills, while `fault-injection` turns that leaf off
+    /// and the canonical `GET_FIELD` hint answers. With `k` at the cached
+    /// slot this test failed only in the instrumentation-faults shape; with
+    /// another key there, the loop's lookups miss the hint on every path and
+    /// the entry ends up naming one of the loop's tables.
     #[test]
-    fn collections_between_prunes_keep_dead_entries_that_only_miss() {
+    fn collections_between_prunes_keep_dead_entries_until_refill() {
         fn field_handles(state: &State) -> Vec<Val> {
             cache_cells(state)
                 .0
@@ -2353,13 +2366,13 @@ mod runtime_tests {
         );
         run(
             &mut state,
-            "for i = 1, 8 do if get({ k = i }) ~= i then error('stale hit') end end",
+            "for i = 1, 8 do if get({ pad = 0, k = i }) ~= i then error('stale hit') end end",
         );
         let refilled = field_handles(&state);
         assert_eq!(refilled.len(), 1);
         assert_ne!(
             refilled[0], stale[0],
-            "the dead entry missed and was refilled"
+            "the lookup missed the dead entry and refilled it"
         );
         state.heap.force_runtime_cache_prune();
         state.gc_collect();

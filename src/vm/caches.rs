@@ -423,8 +423,13 @@ impl SetFieldLookupCacheSlot {
 /// depends on which values a site saw before. A negative entry has to prove
 /// absence exactly to keep that (absent globals do, by hash slot count); field
 /// and method entries cache hits only. Their handles
-/// are weak: an entry naming a freed object misses, because every hit
-/// compares the cached handle with a live one first, and collection clears
+/// are weak: an entry naming a freed object never answers as that object,
+/// because every hit that trusts a cached slot without checking its key
+/// compares the cached handle with a live one first, and the prune below
+/// keeps generations from wrapping. (The
+/// field site's cross-receiver hint, `get_current_cached_field`, still uses
+/// a dead entry's position as a key-checked guess in another table, and
+/// writes nothing back.) Collection clears
 /// such entries (`drop_dead_entries`) often enough that no slot can come
 /// round to a cached generation (`object::CACHE_PRUNE_INTERVAL`).
 ///
