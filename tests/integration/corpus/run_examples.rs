@@ -21,9 +21,11 @@
 //!
 //! `brokkr check` runs the standalone tests in their own lane per feature
 //! shape: the default and snapshot sweeps skip them, and a sibling sweep of
-//! each shape runs only them, several at a time (`parallel` in `brokkr.toml`).
-//! They spend their time in child processes, so they overlap well, while the
-//! rest of the crate, at-cap memory tests included, stays serial.
+//! each shape runs them, several at a time (`parallel` in `brokkr.toml`),
+//! together with the numeric-loop budget sweeps, which are in-process compute
+//! with small memory. The corpus tests spend their time in child processes,
+//! so both overlap well, while the rest of the crate, at-cap memory tests
+//! included, stays serial.
 //! `standalone_tests_run_in_one_parallel_lane_per_shape` holds `brokkr.toml`
 //! to that partition.
 //!
@@ -662,9 +664,9 @@ fn check_list<'a>(check: &'a toml::Table, key: &str) -> Option<Vec<&'a str>> {
 }
 
 /// What decides which build a `[[check]]` entry tests: its features (as a
-/// set), defaults, profile, target selection and feature unification as
-/// written. brokkr's `auto` (an absent key) promotes a parallel sweep of the
-/// whole workspace to `workspace` under `brokkr check` but not under
+/// set), defaults, profile, test-target selection, environment, rustflags,
+/// compilation target and feature unification as written. brokkr's `auto`
+/// (an absent key) promotes a parallel sweep of the whole workspace to `workspace` under `brokkr check` but not under
 /// `brokkr test` or `-p`, so only the same written mode builds the same thing
 /// everywhere.
 fn build_shape(check: &toml::Table) -> String {
@@ -676,7 +678,7 @@ fn build_shape(check: &toml::Table) -> String {
         .unwrap_or("auto");
     format!(
         "features {features:?}, unification {unification}, no_default_features {:?}, \
-         profile {:?}, tests {:?}, lib_tests {:?}",
+         profile {:?}, tests {:?}, lib_tests {:?}, env {:?}, rustflags {:?}, target {:?}",
         check
             .get("no_default_features")
             .and_then(toml::Value::as_bool)
@@ -684,23 +686,77 @@ fn build_shape(check: &toml::Table) -> String {
         check.get("profile").and_then(toml::Value::as_str),
         check_list(check, "tests"),
         check.get("lib_tests").and_then(toml::Value::as_bool),
+        check.get("env").map(ToString::to_string),
+        check.get("rustflags").map(ToString::to_string),
+        check.get("target").map(ToString::to_string),
     )
+}
+
+/// The tests a dev shape's parallel lane carries: the standalone corpus tests
+/// and the numeric-loop budget sweeps (in-process compute, small memory; see
+/// that module's doc).
+fn parallel_lane_selectors() -> Vec<String> {
+    let (_crate, numeric) = crate::runtime::numeric_loop_execution::MODULE
+        .split_once("::")
+        .expect("a module path starts with its crate");
+    let mut selectors = vec![standalone_selector(), format!("{numeric}::")];
+    selectors.sort_unstable();
+    selectors
 }
 
 /// `brokkr check` runs the standalone tests once per feature shape, in a lane
 /// of their own (see the module comment). Every sweep that runs the
-/// integration crate without an `only` filter skips them; each such sweep has
-/// exactly one sibling of the same build that runs only them, in brokkr's
-/// shared-process parallel lane; a build may also have a standalone lane
-/// without such a parent (the release corpus), but never two lanes; and no
-/// other sweep names or selects them.
-/// The selector comes from the module's own path, so renaming the module
-/// fails here rather than moving the corpus into the serial lane or out of
-/// both. brokkr refuses a sweep in which no test ran, which covers an
-/// expansion that produced no tests.
+/// integration crate without an `only` filter skips exactly the parallel-lane
+/// selectors (`parallel_lane_selectors`); each such sweep has exactly one
+/// sibling of the same build that runs only those selectors, in brokkr's
+/// shared-process parallel lane, so the pair together runs the whole crate; a
+/// build may also have a standalone lane without such a parent (the release
+/// corpus), which runs the corpus selector alone, but never two lanes; and no
+/// other sweep names or selects the lane's tests.
+/// The selectors come from the modules' own paths, so renaming a module
+/// fails here rather than moving its tests into the serial lane or out of
+/// both. brokkr refuses a filter that selects no test, which covers either
+/// family's expansion producing none.
 #[test]
 fn standalone_tests_run_in_one_parallel_lane_per_shape() {
     let selector = standalone_selector();
+    let lane = parallel_lane_selectors();
+    let numeric = lane
+        .iter()
+        .find(|candidate| **candidate != selector)
+        .expect("the lane carries a selector beside the corpus")
+        .clone();
+    // Full names of the numeric module's tests, read from its source, so a
+    // short filter that selects one of them by substring is caught as the
+    // corpus names are.
+    let numeric_source = include_str!("../runtime/numeric_loop_execution.rs");
+    assert!(
+        !numeric_source.contains("cfg_attr(")
+            && numeric_source.matches("#[test").count()
+                == numeric_source.matches("#[test]").count(),
+        "the numeric-loop module registers tests only by a literal test attribute"
+    );
+    let numeric_tests: Vec<String> = numeric_source
+        .split("#[test]")
+        .skip(1)
+        .map(|rest| {
+            let name = rest
+                .trim_start()
+                .strip_prefix("fn ")
+                .and_then(|name| Some(&name[..name.find('(')?]))
+                .expect("each numeric-loop test attribute is directly followed by its fn");
+            format!("{numeric}{name}")
+        })
+        .collect();
+    assert!(
+        !numeric_tests.is_empty(),
+        "no tests found in the numeric-loop module source"
+    );
+    let sorted = |list: &[&str]| {
+        let mut list: Vec<String> = list.iter().map(|item| (*item).to_owned()).collect();
+        list.sort_unstable();
+        list
+    };
     let standalone_tests: Vec<String> = examples::EXAMPLES
         .iter()
         .map(|example| format!("{selector}{}", example.name))
@@ -732,7 +788,15 @@ fn standalone_tests_run_in_one_parallel_lane_per_shape() {
                 None => check.get("lib_tests").and_then(toml::Value::as_bool) != Some(true),
             };
 
-        if only.as_deref() == Some(&[selector.as_str()]) {
+        if let Some(only) = only.as_deref()
+            && only.contains(&selector.as_str())
+        {
+            let only = sorted(only);
+            assert!(
+                only == lane || only == [selector.clone()],
+                "[[check]] {name} runs the standalone tests and must select exactly \
+                 {lane:?} or the corpus selector alone, not {only:?}"
+            );
             assert!(
                 runs_integration,
                 "[[check]] {name} selects the standalone tests but does not run the integration crate"
@@ -759,19 +823,22 @@ fn standalone_tests_run_in_one_parallel_lane_per_shape() {
                 "[[check]] {name} must pin feature_unification, as its main sweep does: under \
                  auto, brokkr check promotes the parallel lane to workspace unification"
             );
-            siblings.push((name, build_shape(check)));
+            siblings.push((name, build_shape(check), only));
             continue;
         }
         let selects_standalone = |filter: &str| {
             standalone_tests
                 .iter()
                 .any(|test| test.contains(filter) || filter.contains(selector.as_str()))
+                || numeric_tests
+                    .iter()
+                    .any(|test| test.contains(filter) || filter.contains(numeric.as_str()))
         };
         if runs_integration && only.is_none() {
             assert!(
-                skip.contains(&selector.as_str()),
-                "[[check]] {name} runs the integration crate and must skip {selector:?}, \
-                 which its standalone sibling runs"
+                sorted(&skip) == lane,
+                "[[check]] {name} runs the integration crate and must skip exactly {lane:?}, \
+                 which its parallel sibling runs, not {skip:?}"
             );
             // The rest of the crate, at-cap memory tests included, runs one
             // test at a time in one process.
@@ -797,7 +864,22 @@ fn standalone_tests_run_in_one_parallel_lane_per_shape() {
         }
     }
 
-    assert!(!parents.is_empty(), "no sweep runs the integration crate");
+    // The pairs that must exist, so deleting a whole pair (or the release
+    // corpus lane) fails here rather than passing a check of what is left.
+    let mut parent_names: Vec<&str> = parents.iter().map(|(name, _)| *name).collect();
+    parent_names.sort_unstable();
+    assert_eq!(
+        parent_names,
+        ["default", "snapshot"],
+        "the serial integration sweeps"
+    );
+    let mut sibling_names: Vec<&str> = siblings.iter().map(|(name, _, _)| *name).collect();
+    sibling_names.sort_unstable();
+    assert_eq!(
+        sibling_names,
+        ["default-corpus", "release-corpus", "snapshot-corpus"],
+        "the parallel-lane sweeps"
+    );
     let profiles = config
         .get("test")
         .and_then(|test| test.get("profiles"))
@@ -838,8 +920,8 @@ fn standalone_tests_run_in_one_parallel_lane_per_shape() {
     for (parent, shape) in &parents {
         let matching: Vec<&str> = siblings
             .iter()
-            .filter(|(_, sibling_shape)| sibling_shape == shape)
-            .map(|(name, _)| *name)
+            .filter(|(_, sibling_shape, _)| sibling_shape == shape)
+            .map(|(name, _, _)| *name)
             .collect();
         assert_eq!(
             matching.len(),
@@ -848,20 +930,34 @@ fn standalone_tests_run_in_one_parallel_lane_per_shape() {
         );
     }
     // A build with no full serial sweep (the release corpus) still gets one
-    // standalone lane at most, so no build runs the corpus twice.
-    for (sibling, shape) in &siblings {
+    // standalone lane at most, so no build runs the corpus twice. A sibling
+    // with a parent runs exactly what the parent skips; one without runs the
+    // corpus alone, since nothing else of that build is partitioned.
+    for (sibling, shape, only) in &siblings {
+        let parent_count = parents
+            .iter()
+            .filter(|(_, parent_shape)| parent_shape == shape)
+            .count();
         assert!(
-            parents
-                .iter()
-                .filter(|(_, parent_shape)| parent_shape == shape)
-                .count()
-                <= 1,
+            parent_count <= 1,
             "standalone sweep {sibling} ({shape}) has more than one sweep of the same build that skips it"
         );
+        if parent_count == 1 {
+            assert_eq!(
+                only, &lane,
+                "standalone sweep {sibling} must run exactly what its serial parent skips"
+            );
+        } else {
+            assert_eq!(
+                only,
+                std::slice::from_ref(&selector),
+                "standalone sweep {sibling} has no serial parent and runs the corpus alone"
+            );
+        }
         assert_eq!(
             siblings
                 .iter()
-                .filter(|(_, other_shape)| other_shape == shape)
+                .filter(|(_, other_shape, _)| other_shape == shape)
                 .count(),
             1,
             "standalone sweep {sibling} ({shape}) shares its build with another standalone sweep"

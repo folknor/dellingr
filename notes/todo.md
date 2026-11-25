@@ -184,6 +184,17 @@ outside production code are the error formatter's message table in
 `save_state/error.rs`. Add an integrity test that loads one and checks the
 `Duplicate { form: Materialized, .. }` error.
 
+### Numeric-loop budget sweeps recompile per outcome (2026-11-25)
+
+`tests/integration/runtime/numeric_loop_execution.rs` builds a State and
+compiles its source for every (model, threshold, budget) outcome; the
+slowest test calls its outcome helper about ten thousand times and is the
+pole of each dev parallel lane in `brokkr check` (about 10 s on bygg, against
+the 20 s per-test cap). Compiling each source once into a `Program` and
+loading it into a fresh State per outcome keeps every comparison and may
+shorten the lane. Unmeasured; check whether State construction or the
+compile dominates first.
+
 ## Deferred forward-looking ideas
 
 ### Execution trace hook for a stepping debugger

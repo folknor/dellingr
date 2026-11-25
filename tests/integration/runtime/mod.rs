@@ -12,7 +12,7 @@ mod inherited_routes;
 mod interrupt_rust_entry;
 mod newindex_absence;
 mod newindex_depth_routes;
-mod numeric_loop_execution;
+pub(crate) mod numeric_loop_execution;
 mod plain_field_miss;
 mod restricted_global_lookup;
 #[cfg(feature = "snapshot")]

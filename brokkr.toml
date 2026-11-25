@@ -120,13 +120,19 @@ stage = "pre-clippy"
 #
 # Each shape's example corpus gate, one test per example under
 # `corpus::run_examples::standalone::`, runs in a sibling sweep of the same
-# build, "default-corpus" and "snapshot-corpus", which runs only those tests
-# in the parallel lane; the shape's main sweep skips them, and the rest of the
-# crate (million-slot at-cap tests and their memory peaks included) stays
-# serial. The corpus tests spend their time in the CLI and reference Lua
-# processes they start, so they overlap well. The test
+# build, "default-corpus" and "snapshot-corpus", in the parallel lane, together
+# with `runtime::numeric_loop_execution::`; the shape's main sweep skips both,
+# and the rest of the crate (million-slot at-cap tests and their memory peaks
+# included) stays serial. The corpus tests spend their time in the CLI and
+# reference Lua processes they start, and the numeric-loop budget sweeps,
+# which were most of each serial sweep's time, are in-process compute with
+# small memory, so both overlap well. A new test lands serial unless it is
+# placed in one of those two modules. The dev lanes take one slot per core
+# (`budget = "cores"`), which beat the cache-domain default here; the release
+# corpus lane is short and keeps the default. The test
 # `corpus::run_examples::standalone_tests_run_in_one_parallel_lane_per_shape`
-# holds these entries to that partition.
+# holds these entries to that partition: the parent skips exactly what the
+# sibling runs.
 #
 # Every dev entry of these two shapes, doc twins included, pins
 # `feature_unification = "workspace"`. brokkr promotes a parallel sweep that
@@ -144,14 +150,14 @@ stage = "pre-clippy"
 [[check]]
 name = "default"
 features = ["bench-harness"]
-skip = ["corpus::run_examples::standalone::"]
+skip = ["corpus::run_examples::standalone::", "runtime::numeric_loop_execution::"]
 feature_unification = "workspace"
 
 [[check]]
 name = "default-corpus"
 features = ["bench-harness"]
-only = ["corpus::run_examples::standalone::"]
-parallel = {}
+only = ["corpus::run_examples::standalone::", "runtime::numeric_loop_execution::"]
+parallel = { budget = "cores" }
 feature_unification = "workspace"
 
 [[check]]
@@ -163,16 +169,16 @@ features = ["snapshot", "bench-harness"]
 # picked up automatically, without an allowlist that can silently lose them.
 # Keep the shape running every test until feature independence has a
 # mechanical contract; module names and the absence of cfg in a test do not
-# prove independence. The one filter is the corpus partition above:
+# prove independence. The one filter is the parallel-lane partition above:
 # "snapshot-corpus" runs exactly what it skips.
-skip = ["corpus::run_examples::standalone::"]
+skip = ["corpus::run_examples::standalone::", "runtime::numeric_loop_execution::"]
 feature_unification = "workspace"
 
 [[check]]
 name = "snapshot-corpus"
 features = ["snapshot", "bench-harness"]
-only = ["corpus::run_examples::standalone::"]
-parallel = {}
+only = ["corpus::run_examples::standalone::", "runtime::numeric_loop_execution::"]
+parallel = { budget = "cores" }
 feature_unification = "workspace"
 
 # Explicit dev lanes keep doctests out of instrumentation and release probes.

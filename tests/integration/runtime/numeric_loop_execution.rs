@@ -1,5 +1,15 @@
 //! Numeric `for` execution: ascending, stepped, descending and empty ranges,
 //! and the typed loop region against canonical dispatch.
+//!
+//! The budget sweeps here are most of the integration crate's compute, so
+//! `brokkr check` runs this module in each dev shape's parallel lane, beside
+//! the standalone corpus tests, instead of the serial one (brokkr.toml, the
+//! comment above the default sweep). Tests placed here therefore run
+//! concurrently: each builds its own `State` and must keep to small memory.
+
+/// This module's path; the lane partition in `corpus::run_examples` derives
+/// its selector from it, so a rename fails there instead of moving the tests.
+pub(crate) const MODULE: &str = module_path!();
 
 use dellingr::{ArgCount, Charge, CostModel, Costing, RetCount, State};
 

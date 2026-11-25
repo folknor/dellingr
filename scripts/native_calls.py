@@ -322,18 +322,33 @@ class Source:
             enc = self.enclosing(m.start(2))
             yield name, m.start(2), enc, self.call_owner(m, enc)
 
+    def receiver_text(self, start):
+        """The run of whitespace, word and dot characters ending at `start`.
+
+        Every receiver pattern below matches only such characters and is
+        anchored at `start`, so searching this run finds what searching the
+        whole prefix would. Slicing the whole prefix made each call linear in
+        the file's length and the scan quadratic, about 20 s of every check.
+        """
+        j = start
+        code = self.code
+        while j > 0 and (code[j - 1].isalnum() or code[j - 1] in "_.") or (
+                j > 0 and code[j - 1].isspace()):
+            j -= 1
+        return code[j:start]
+
     def call_owner(self, m, enc):
         sep = m.group(1)
         start = m.start(1)
         self_owner = enc.owner if enc else None
         if sep == "::":
-            seg = re.search(r"([A-Za-z_]\w*)\s*$", self.code[:start])
+            seg = re.search(r"([A-Za-z_]\w*)\s*$", self.receiver_text(start))
             seg = seg.group(1) if seg else "?"
             if seg == "Self":
                 return self_owner or "?"
             return seg if seg[:1].isupper() else None
         if sep == ".":
-            chain = re.search(r"([A-Za-z_][\w.]*)$", self.code[:start].rstrip())
+            chain = re.search(r"([A-Za-z_][\w.]*)$", self.receiver_text(start).rstrip())
             receiver = chain.group(1) if chain else ""
             if receiver == "self":
                 return self_owner or "?"

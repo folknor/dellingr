@@ -106,7 +106,7 @@ Host-side work a script cannot drive (State construction, compilation, collectio
 ## Conventions
 
 - `.scratch/` is gitignored throwaway space, wiped by every `brokkr check`; nothing that must be kept goes there.
-- `target/` is a symlink to a shared cargo cache.
+- `target/` may be a symlink to a shared cargo cache on some hosts; never hard-code a path under it.
 - `notes/optimizations.md` and `notes/todo.md` are working backlogs (perf and non-perf); items are deleted as they land. `notes/work.md` holds the current fix loop's plan, driven by `notes/fix-loop.md`.
 - Some doc comments still mention `FleetCallbacks` etc. from the game project the crate was lifted out of.
 
