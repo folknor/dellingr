@@ -280,7 +280,7 @@ mod tests {
     fn with_code(code: Vec<Instr>) -> Bytecode {
         Bytecode {
             line_info: vec![1; code.len()],
-            code,
+            code: code.into(),
             number_literals: vec![-0.0],
             string_literals: vec![b"x\n\xff".to_vec()],
             table_templates: vec![vec![0]],

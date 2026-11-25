@@ -1043,7 +1043,7 @@ mod tree_tests {
     fn chunk(code: Vec<Instr>, max_stack: u16) -> Bytecode {
         Bytecode {
             line_info: vec![1; code.len()],
-            code,
+            code: code.into(),
             max_stack,
             is_vararg: true,
             ..Bytecode::default()
@@ -1127,14 +1127,49 @@ mod tree_tests {
                 let mut bc = chunk(vec![inst, ret], 300);
                 bc.string_literals.push(b"field".to_vec());
                 assert_eq!(validate_bytecode(&bc).unwrap(), expected);
+                assert_installs(bc, expected);
             }
         }
 
+        // CLOSE and an empty RETURN name one past the last register; they
+        // keep the function narrow and their full-width A.
         let endpoints = chunk(
             vec![Instr::close(256), Instr::ret(256, RetCount::Fixed(0))],
             256,
         );
         assert_eq!(validate_bytecode(&endpoints).unwrap(), RegisterTier::Narrow);
+        assert_installs(endpoints, RegisterTier::Narrow);
+        // A RETURN of a value at 256 grants no narrow getter, but its range
+        // still selects the wide tier.
+        let returned = chunk(vec![Instr::ret(256, RetCount::Fixed(1))], 257);
+        assert_eq!(validate_bytecode(&returned).unwrap(), RegisterTier::Wide);
+        assert_installs(returned, RegisterTier::Wide);
+    }
+
+    /// Installing the verdict gives that tier and keeps every word.
+    fn assert_installs(mut bc: Bytecode, tier: crate::compiler::RegisterTier) {
+        let words: Vec<Instr> = bc.code.to_vec();
+        let verdict = validate_bytecode(&bc).unwrap();
+        bc.code.install_tier(verdict);
+        assert_eq!(bc.code.tier(), tier);
+        assert_eq!(bc.code.to_vec(), words);
+        let view = bc.code.narrow_view();
+        assert_eq!(
+            view.is_some(),
+            tier == crate::compiler::RegisterTier::Narrow
+        );
+        if let Some(view) = view {
+            for (pc, inst) in words.iter().enumerate() {
+                assert_eq!(view.fetch(pc).canonical(), *inst);
+            }
+            // An edit, even through a clone, drops the narrow claim.
+            let mut edited = bc.code.clone();
+            assert!(edited.narrow_view().is_some());
+            edited.iter_mut().for_each(|_| {});
+            assert!(edited.narrow_view().is_none());
+            assert!(bc.code.narrow_view().is_some());
+        }
+        assert!(crate::instr::Code::default().narrow_view().is_none());
     }
 
     #[test]

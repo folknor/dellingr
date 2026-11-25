@@ -233,6 +233,9 @@ define_builtins! {
 #[repr(transparent)]
 pub(crate) struct Instr(u64);
 
+mod code;
+pub(crate) use code::Code;
+
 // Keep the version in src root for both feature shapes; the opcode fixture reads it through instr.
 #[path = "snapshot_format.rs"]
 pub(crate) mod snapshot_format;
@@ -311,6 +314,52 @@ pub(crate) enum OperandPool {
     Upvalue,
 }
 
+/// The A, B and C fields an opcode uses as a register that its frame
+/// reserves: the fields a narrow-tier register getter
+/// (`NarrowInstr::reg_a` and its siblings) may read, and the fields
+/// `NarrowInstr::new` requires to fit a `u8`.
+///
+/// This is permission to use a narrow getter, not the verifier's register
+/// policy, and it is declared apart from the verifier on purpose: a
+/// truncating getter on a field nobody checked would let an operand of 256
+/// alias register 0. Endpoints are not register uses: `CLOSE` A and
+/// `RETURN` A may name one past the frame's last register (`CLOSE 256` in a
+/// 256-slot frame closes nothing), so they keep full-width access. A `RETURN`
+/// of values does name registers, but its first is read only as the start of
+/// a range, which stays on the checked stack API. Implicit fixed offsets
+/// (`SELF`'s `a + 1`, a numeric or generic `for`'s `a + 3`) are not separate
+/// fields: their logical bound is the verifier's, their physical bound the
+/// dispatch window's slack.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct RegisterUses {
+    a: bool,
+    b: bool,
+    c: bool,
+}
+
+impl RegisterUses {
+    const NONE: Self = Self::new(false, false, false);
+    const A: Self = Self::new(true, false, false);
+    const AB: Self = Self::new(true, true, false);
+    const AC: Self = Self::new(true, false, true);
+    const ABC: Self = Self::new(true, true, true);
+
+    const fn new(a: bool, b: bool, c: bool) -> Self {
+        Self { a, b, c }
+    }
+
+    /// Whether every marked field is one `layout` encodes as a 16-bit field.
+    const fn within(self, layout: Layout) -> bool {
+        let (a, b, c) = match layout {
+            Layout::A | Layout::Aj => (true, false, false),
+            Layout::Ab | Layout::Abd | Layout::Abj => (true, true, false),
+            Layout::Abc | Layout::Abcd => (true, true, true),
+            Layout::J => (false, false, false),
+        };
+        (a || !self.a) && (b || !self.b) && (c || !self.c)
+    }
+}
+
 #[derive(Clone, Copy)]
 enum PoolField {
     B,
@@ -320,6 +369,7 @@ enum PoolField {
 #[derive(Clone, Copy)]
 struct OpcodeMetadata {
     layout: Layout,
+    registers: RegisterUses,
     charge: OpcodeCharge,
     arithmetic: Option<fn(f64, f64) -> f64>,
     foldable: bool,
@@ -346,93 +396,94 @@ macro_rules! opcode_arithmetic {
 }
 
 // Explicit numbers are snapshot data. Every opcode declares its operand
-// layout (which fixes its reserved bits), how it charges (`OpcodeCharge`,
+// layout (which fixes its reserved bits), which fields are register uses
+// that a narrow-tier register getter may read (`RegisterUses`), how it charges (`OpcodeCharge`,
 // naming the cost-registry charge when costed), and, for the
 // arithmetic forms, the function the constant folder and the dispatch share.
 // Pool descriptors also drive verification and disassembly without changing encoding.
 macro_rules! opcode_rows {
     ($callback:ident) => {
         $callback! {
-            OP_MOVE = 0, Ab, Free;
-            OP_LOAD_NIL = 1, Ab, Free;
-            OP_LOAD_BOOL = 2, Ab, Free;
-            OP_LOAD_NUM = 3, Ab, Free {Number, B};
-            OP_LOAD_STR = 4, Ab, Free {String, B};
-            OP_GET_UPVAL = 5, Ab, Free {Upvalue, B};
-            OP_SET_UPVAL = 6, Ab, Free {Upvalue, B};
-            OP_CLOSE = 7, A, Free;
-            OP_GET_GLOBAL = 8, Abd, Free {String, B};
-            OP_SET_GLOBAL = 9, Abd, Free {String, B};
-            OP_GET_BUILTIN = 10, Ab, Free;
-            OP_SET_BUILTIN = 11, Ab, Free;
-            OP_NEW_TABLE = 12, A, Once(NewTable);
-            OP_NEW_TABLE_PRESIZED = 13, Ab, Once(NewTable);
-            OP_NEW_TABLE_TEMPLATE = 14, Ab, Once(NewTable) {Template, B};
-            OP_GET_FIELD = 15, Abcd, Free {String, C};
-            OP_GET_TABLE = 16, Abcd, Free;
-            OP_SET_FIELD = 17, Abcd, Once(TableWrite) {String, B};
-            OP_SET_TABLE = 18, Abc, Once(TableWrite);
-            OP_INIT_FIELD = 19, Abc, Once(TableWrite) {String, B};
-            OP_INIT_FIELD_PINNED = 20, Abcd, Once(TableWrite) {String, B};
-            OP_INIT_INDEX = 21, Abc, Once(TableWrite);
-            OP_SET_LIST = 22, Abc, PerElement(ArrayElement);
-            OP_SELF = 23, Abcd, Free {String, C};
-            OP_ADD_RR = 24, Abc, Once(Add) [lua_add, true];
-            OP_ADD_RK = 25, Abc, Once(Add) [lua_add, true] {Number, C};
-            OP_ADD_KR = 26, Abc, Once(Add) [lua_add, true] {Number, B};
-            OP_SUB_RR = 27, Abc, Once(Sub) [lua_sub, true];
-            OP_SUB_RK = 28, Abc, Once(Sub) [lua_sub, true] {Number, C};
-            OP_SUB_KR = 29, Abc, Once(Sub) [lua_sub, true] {Number, B};
-            OP_MUL_RR = 30, Abc, Once(Mul) [lua_mul, true];
-            OP_MUL_RK = 31, Abc, Once(Mul) [lua_mul, true] {Number, C};
-            OP_MUL_KR = 32, Abc, Once(Mul) [lua_mul, true] {Number, B};
-            OP_DIV_RR = 33, Abc, Once(Div) [lua_div, true];
-            OP_DIV_RK = 34, Abc, Once(Div) [lua_div, true] {Number, C};
-            OP_DIV_KR = 35, Abc, Once(Div) [lua_div, true] {Number, B};
-            OP_MOD_RR = 36, Abc, Once(Mod) [lua_modulo, true];
-            OP_MOD_RK = 37, Abc, Once(Mod) [lua_modulo, true] {Number, C};
-            OP_MOD_KR = 38, Abc, Once(Mod) [lua_modulo, true] {Number, B};
-            OP_POW_RR = 39, Abc, Once(Pow) [crate::crmath::pow, false];
-            OP_POW_RK = 40, Abc, Once(Pow) [crate::crmath::pow, false] {Number, C};
-            OP_POW_KR = 41, Abc, Once(Pow) [crate::crmath::pow, false] {Number, B};
-            OP_UNM = 42, Ab, Once(Negate);
-            OP_NOT = 43, Ab, Free;
-            OP_LEN = 44, Ab, Free;
-            OP_CONCAT = 45, Abc, Free;
-            OP_LT = 46, Abc, Free;
-            OP_LE = 47, Abc, Free;
-            OP_GT = 48, Abc, Free;
-            OP_GE = 49, Abc, Free;
-            OP_EQ = 50, Abc, Free;
-            OP_NE = 51, Abc, Free;
-            OP_JMP = 52, J, Free;
-            OP_BR_LT = 53, Abj, Free;
-            OP_BR_LE = 54, Abj, Free;
-            OP_BR_GT = 55, Abj, Free;
-            OP_BR_GE = 56, Abj, Free;
-            OP_BR_EQ = 57, Abj, Free;
-            OP_BR_NE = 58, Abj, Free;
-            OP_TEST_FALSE = 59, Aj, Free;
-            OP_TEST_TRUE = 60, Aj, Free;
-            OP_FOR_PREP = 61, Aj, Free;
-            OP_FOR_LOOP = 62, Aj, Free;
-            OP_TFOR_CALL = 63, Abd, Free;
-            OP_TFOR_LOOP = 64, Aj, Free;
-            OP_CALL = 65, Abcd, Free;
-            OP_RETURN = 66, Ab, Free;
-            OP_VARARG = 67, Ab, Free;
-            OP_CLOSURE = 68, Ab, Free {Nested, B};
-            OP_TAILCALL = 69, Abd, Free;
-            OP_BR_LT_RK = 70, Abj, Free {Number, B};
-            OP_BR_LE_RK = 71, Abj, Free {Number, B};
-            OP_BR_GT_RK = 72, Abj, Free {Number, B};
-            OP_BR_GE_RK = 73, Abj, Free {Number, B};
-            OP_BR_EQ_RK = 74, Abj, Free {Number, B};
-            OP_BR_NE_RK = 75, Abj, Free {Number, B};
-            OP_BR_EQ_RS = 76, Abj, Free {String, B};
-            OP_BR_NE_RS = 77, Abj, Free {String, B};
-            OP_BR_EQ_NIL = 78, Aj, Free;
-            OP_BR_NE_NIL = 79, Aj, Free;
+            OP_MOVE = 0, Ab, AB, Free;
+            OP_LOAD_NIL = 1, Ab, A, Free;
+            OP_LOAD_BOOL = 2, Ab, A, Free;
+            OP_LOAD_NUM = 3, Ab, A, Free {Number, B};
+            OP_LOAD_STR = 4, Ab, A, Free {String, B};
+            OP_GET_UPVAL = 5, Ab, A, Free {Upvalue, B};
+            OP_SET_UPVAL = 6, Ab, A, Free {Upvalue, B};
+            OP_CLOSE = 7, A, NONE, Free;
+            OP_GET_GLOBAL = 8, Abd, A, Free {String, B};
+            OP_SET_GLOBAL = 9, Abd, A, Free {String, B};
+            OP_GET_BUILTIN = 10, Ab, A, Free;
+            OP_SET_BUILTIN = 11, Ab, A, Free;
+            OP_NEW_TABLE = 12, A, A, Once(NewTable);
+            OP_NEW_TABLE_PRESIZED = 13, Ab, A, Once(NewTable);
+            OP_NEW_TABLE_TEMPLATE = 14, Ab, A, Once(NewTable) {Template, B};
+            OP_GET_FIELD = 15, Abcd, AB, Free {String, C};
+            OP_GET_TABLE = 16, Abcd, ABC, Free;
+            OP_SET_FIELD = 17, Abcd, AC, Once(TableWrite) {String, B};
+            OP_SET_TABLE = 18, Abc, ABC, Once(TableWrite);
+            OP_INIT_FIELD = 19, Abc, AC, Once(TableWrite) {String, B};
+            OP_INIT_FIELD_PINNED = 20, Abcd, AC, Once(TableWrite) {String, B};
+            OP_INIT_INDEX = 21, Abc, ABC, Once(TableWrite);
+            OP_SET_LIST = 22, Abc, A, PerElement(ArrayElement);
+            OP_SELF = 23, Abcd, AB, Free {String, C};
+            OP_ADD_RR = 24, Abc, ABC, Once(Add) [lua_add, true];
+            OP_ADD_RK = 25, Abc, AB, Once(Add) [lua_add, true] {Number, C};
+            OP_ADD_KR = 26, Abc, AC, Once(Add) [lua_add, true] {Number, B};
+            OP_SUB_RR = 27, Abc, ABC, Once(Sub) [lua_sub, true];
+            OP_SUB_RK = 28, Abc, AB, Once(Sub) [lua_sub, true] {Number, C};
+            OP_SUB_KR = 29, Abc, AC, Once(Sub) [lua_sub, true] {Number, B};
+            OP_MUL_RR = 30, Abc, ABC, Once(Mul) [lua_mul, true];
+            OP_MUL_RK = 31, Abc, AB, Once(Mul) [lua_mul, true] {Number, C};
+            OP_MUL_KR = 32, Abc, AC, Once(Mul) [lua_mul, true] {Number, B};
+            OP_DIV_RR = 33, Abc, ABC, Once(Div) [lua_div, true];
+            OP_DIV_RK = 34, Abc, AB, Once(Div) [lua_div, true] {Number, C};
+            OP_DIV_KR = 35, Abc, AC, Once(Div) [lua_div, true] {Number, B};
+            OP_MOD_RR = 36, Abc, ABC, Once(Mod) [lua_modulo, true];
+            OP_MOD_RK = 37, Abc, AB, Once(Mod) [lua_modulo, true] {Number, C};
+            OP_MOD_KR = 38, Abc, AC, Once(Mod) [lua_modulo, true] {Number, B};
+            OP_POW_RR = 39, Abc, ABC, Once(Pow) [crate::crmath::pow, false];
+            OP_POW_RK = 40, Abc, AB, Once(Pow) [crate::crmath::pow, false] {Number, C};
+            OP_POW_KR = 41, Abc, AC, Once(Pow) [crate::crmath::pow, false] {Number, B};
+            OP_UNM = 42, Ab, AB, Once(Negate);
+            OP_NOT = 43, Ab, AB, Free;
+            OP_LEN = 44, Ab, AB, Free;
+            OP_CONCAT = 45, Abc, AB, Free;
+            OP_LT = 46, Abc, ABC, Free;
+            OP_LE = 47, Abc, ABC, Free;
+            OP_GT = 48, Abc, ABC, Free;
+            OP_GE = 49, Abc, ABC, Free;
+            OP_EQ = 50, Abc, ABC, Free;
+            OP_NE = 51, Abc, ABC, Free;
+            OP_JMP = 52, J, NONE, Free;
+            OP_BR_LT = 53, Abj, AB, Free;
+            OP_BR_LE = 54, Abj, AB, Free;
+            OP_BR_GT = 55, Abj, AB, Free;
+            OP_BR_GE = 56, Abj, AB, Free;
+            OP_BR_EQ = 57, Abj, AB, Free;
+            OP_BR_NE = 58, Abj, AB, Free;
+            OP_TEST_FALSE = 59, Aj, A, Free;
+            OP_TEST_TRUE = 60, Aj, A, Free;
+            OP_FOR_PREP = 61, Aj, A, Free;
+            OP_FOR_LOOP = 62, Aj, A, Free;
+            OP_TFOR_CALL = 63, Abd, A, Free;
+            OP_TFOR_LOOP = 64, Aj, A, Free;
+            OP_CALL = 65, Abcd, A, Free;
+            OP_RETURN = 66, Ab, NONE, Free;
+            OP_VARARG = 67, Ab, A, Free;
+            OP_CLOSURE = 68, Ab, A, Free {Nested, B};
+            OP_TAILCALL = 69, Abd, A, Free;
+            OP_BR_LT_RK = 70, Abj, A, Free {Number, B};
+            OP_BR_LE_RK = 71, Abj, A, Free {Number, B};
+            OP_BR_GT_RK = 72, Abj, A, Free {Number, B};
+            OP_BR_GE_RK = 73, Abj, A, Free {Number, B};
+            OP_BR_EQ_RK = 74, Abj, A, Free {Number, B};
+            OP_BR_NE_RK = 75, Abj, A, Free {Number, B};
+            OP_BR_EQ_RS = 76, Abj, A, Free {String, B};
+            OP_BR_NE_RS = 77, Abj, A, Free {String, B};
+            OP_BR_EQ_NIL = 78, Aj, A, Free;
+            OP_BR_NE_NIL = 79, Aj, A, Free;
         }
     };
 }
@@ -440,7 +491,7 @@ macro_rules! opcode_rows {
 macro_rules! define_opcodes {
     (
         $(
-            $name:ident = $number:literal, $layout:ident, $charging:ident $(($charge:ident))?
+            $name:ident = $number:literal, $layout:ident, $registers:ident, $charging:ident $(($charge:ident))?
                 $([$arithmetic:path, $foldable:literal])? $({$pool:ident, $field:ident})?;
         )+
     ) => {
@@ -461,8 +512,12 @@ macro_rules! define_opcodes {
                         !matches!(charge, OpcodeCharge::PerElement(_))
                             || $number == Self::OP_SET_LIST
                     );
+                    // A narrow register getter may only read a field the
+                    // layout encodes.
+                    assert!(RegisterUses::$registers.within(Layout::$layout));
                     entries[$number] = Some(OpcodeMetadata {
                         layout: Layout::$layout,
+                        registers: RegisterUses::$registers,
                         charge,
                         arithmetic,
                         foldable,
@@ -854,6 +909,96 @@ impl Instr {
     }
 }
 
+/// An instruction whose register-use fields (`RegisterUses`) all fit a
+/// `u8`: the word a narrow-tier function's dispatch reads, so a register
+/// index into a 256-slot window needs no bounds check. The bits are the
+/// canonical word's, unchanged. `NarrowInstr::new` builds one by checking
+/// every marked field; the only other builder is a `Code` narrow view, over
+/// words that check passed when the tier was installed.
+///
+/// The canonical getters stay full width. Only the `reg_*` getters narrow,
+/// and only for a field the opcode marks: an unmarked field (an endpoint, a
+/// literal index, a count) truncated to `u8` could alias a valid register.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+pub(crate) struct NarrowInstr(Instr);
+
+impl NarrowInstr {
+    /// `inst` as a narrow word, or `None` when its opcode is unknown or a
+    /// register-use field does not fit a `u8`.
+    pub(crate) const fn new(inst: Instr) -> Option<Self> {
+        let Some(metadata) = Instr::OPCODES[inst.opcode() as usize] else {
+            return None;
+        };
+        const fn fits(used: bool, field: u16) -> bool {
+            !used || field <= u8::MAX as u16
+        }
+        let uses = metadata.registers;
+        if fits(uses.a, inst.a()) && fits(uses.b, inst.b()) && fits(uses.c, inst.c()) {
+            Some(Self(inst))
+        } else {
+            None
+        }
+    }
+
+    /// The canonical word, bit for bit.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "narrow dispatch adopts the getters")
+    )]
+    #[inline(always)]
+    pub(crate) const fn canonical(self) -> Instr {
+        self.0
+    }
+
+    #[inline(always)]
+    const fn uses(self) -> RegisterUses {
+        match Instr::OPCODES[self.0.opcode() as usize] {
+            Some(metadata) => metadata.registers,
+            None => RegisterUses::NONE,
+        }
+    }
+
+    /// The A register. Valid only when the opcode marks A as a register use.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "narrow dispatch adopts the getters")
+    )]
+    #[inline(always)]
+    pub(crate) fn reg_a(self) -> u8 {
+        debug_assert!(self.uses().a && self.0.a() <= u16::from(u8::MAX));
+        self.0.a() as u8
+    }
+
+    /// The B register. Valid only when the opcode marks B as a register use.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "narrow dispatch adopts the getters")
+    )]
+    #[inline(always)]
+    pub(crate) fn reg_b(self) -> u8 {
+        debug_assert!(self.uses().b && self.0.b() <= u16::from(u8::MAX));
+        self.0.b() as u8
+    }
+
+    /// The C register. Valid only when the opcode marks C as a register use.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "narrow dispatch adopts the getters")
+    )]
+    #[inline(always)]
+    pub(crate) fn reg_c(self) -> u8 {
+        debug_assert!(self.uses().c && self.0.c() <= u16::from(u8::MAX));
+        self.0.c() as u8
+    }
+}
+
+impl std::fmt::Debug for NarrowInstr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("NarrowInstr").field(&self.0).finish()
+    }
+}
+
 // Constructors. Registers, literal and nested indices are u16 operands; the
 // verifier bounds each against its function.
 impl Instr {
@@ -1225,6 +1370,94 @@ mod tests {
         ArgCount, ArithOp, ArithOperands, Builtin, CompareOp, Instr, OPEN_COUNT, RetCount,
     };
     use crate::cost_model::Charge;
+
+    /// The register-use column, restated by hand from the verifier's
+    /// register checks so a dropped or extra mark in the opcode rows fails
+    /// here: the fields each opcode always checks as at least one register.
+    /// `CLOSE` and `RETURN` A are endpoints or range starts and unmarked.
+    fn expected_register_uses(name: &str) -> &'static str {
+        let arith = ["ADD", "SUB", "MUL", "DIV", "MOD", "POW"];
+        if let Some(form) = arith
+            .iter()
+            .find_map(|op| name.strip_prefix(&format!("OP_{op}_")))
+        {
+            return match form {
+                "RR" => "ABC",
+                "RK" => "AB",
+                "KR" => "AC",
+                _ => panic!("unknown arithmetic form {name}"),
+            };
+        }
+        match name {
+            "OP_CLOSE" | "OP_JMP" | "OP_RETURN" => "",
+            "OP_MOVE" | "OP_UNM" | "OP_NOT" | "OP_LEN" | "OP_CONCAT" | "OP_GET_FIELD"
+            | "OP_SELF" | "OP_BR_LT" | "OP_BR_LE" | "OP_BR_GT" | "OP_BR_GE" | "OP_BR_EQ"
+            | "OP_BR_NE" => "AB",
+            "OP_GET_TABLE" | "OP_SET_TABLE" | "OP_INIT_INDEX" | "OP_LT" | "OP_LE" | "OP_GT"
+            | "OP_GE" | "OP_EQ" | "OP_NE" => "ABC",
+            "OP_SET_FIELD" | "OP_INIT_FIELD" | "OP_INIT_FIELD_PINNED" => "AC",
+            _ => "A",
+        }
+    }
+
+    /// `NarrowInstr::new` checks exactly the marked fields, one at a time:
+    /// an unmarked field may hold anything, each marked one alone at 256
+    /// rejects the word, and the narrow getters return the field unchanged.
+    #[test]
+    fn narrow_words_check_exactly_the_register_uses() {
+        use super::NarrowInstr;
+        for &(opcode, name) in Instr::OPCODE_NAMES {
+            let expected = expected_register_uses(name);
+            let uses = Instr::OPCODES[usize::from(opcode)].unwrap().registers;
+            assert_eq!(
+                (uses.a, uses.b, uses.c),
+                (
+                    expected.contains('A'),
+                    expected.contains('B'),
+                    expected.contains('C')
+                ),
+                "{name}"
+            );
+            let marks = [uses.a, uses.b, uses.c];
+            // Marked fields at `value`, except `wide` (one field index) at
+            // 256; unmarked fields at 256.
+            let word = |value: u16, wide: Option<usize>| {
+                let field = |index: usize| {
+                    if !marks[index] || wide == Some(index) {
+                        0x100
+                    } else {
+                        value
+                    }
+                };
+                Instr::pack(opcode, field(0), field(1), field(2), 0)
+            };
+            let narrow = NarrowInstr::new(word(255, None)).expect("marked fields at 255 narrow");
+            assert_eq!(narrow.canonical(), word(255, None));
+            if uses.a {
+                assert_eq!(narrow.reg_a(), 255);
+            }
+            if uses.b {
+                assert_eq!(narrow.reg_b(), 255);
+            }
+            if uses.c {
+                assert_eq!(narrow.reg_c(), 255);
+            }
+            for (index, marked) in marks.into_iter().enumerate() {
+                if marked {
+                    assert!(
+                        NarrowInstr::new(word(0, Some(index))).is_none(),
+                        "{name} field {index}"
+                    );
+                }
+            }
+        }
+        for opcode in 0..=u8::MAX {
+            if !Instr::known_opcode(opcode) {
+                let raw = u64::from(opcode) << 56;
+                assert!(NarrowInstr::new(Instr::from_raw(raw)).is_none());
+            }
+        }
+    }
 
     // The hand-maintained fixture records the opcode rows' replay-visible
     // number, operand layout and charging declaration (which pins every

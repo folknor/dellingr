@@ -17,6 +17,7 @@ use std::sync::Arc;
 use super::Instr;
 use super::Result;
 use super::error;
+use crate::instr::Code;
 use crate::instr::MAX_CACHE_SLOTS;
 
 /// Describes where an upvalue comes from when creating a closure.
@@ -30,10 +31,12 @@ pub(crate) enum UpvalueDesc {
 }
 
 /// Width required by verified frame registers, including implicit ranges.
+/// The default is `Wide`, the tier that claims nothing: only a producer's
+/// verdict makes a function `Narrow` (`instr::Code`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum RegisterTier {
-    #[default]
     Narrow,
+    #[default]
     Wide,
 }
 
@@ -50,7 +53,9 @@ pub(crate) enum RegisterTier {
 /// per-`State` lookup caches live in the State's per-Bytecode runtime bundle.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Bytecode {
-    pub(crate) code: Vec<Instr>,
+    /// The instructions, with the register tier the producer that verified
+    /// them installed (`Code`).
+    pub(crate) code: Code,
     pub(crate) number_literals: Vec<f64>,
     pub(crate) string_literals: Vec<Vec<u8>>,
     /// Table constructor templates. Each entry stores string-literal indices
@@ -76,7 +81,6 @@ pub(crate) struct Bytecode {
     /// The registers a frame of this function reserves: parameters, locals
     /// and temporaries.
     pub(crate) max_stack: u16,
-    pub(crate) register_tier: RegisterTier,
     pub(crate) nested: Vec<Arc<Bytecode>>,
     /// Describes the upvalues this function captures.
     pub(crate) upvalues: Vec<UpvalueDesc>,
@@ -141,7 +145,7 @@ impl Bytecode {
         let mut tfor_cursor_len = 0usize;
         let mut table_key_len = 0usize;
 
-        for inst in &mut self.code {
+        for inst in self.code.iter_mut() {
             let slot = match inst.opcode() {
                 // An out-of-range literal id has no slot entry; it stays
                 // uncached and the verifier rejects it right after.
@@ -267,8 +271,10 @@ fn finalize_at_depth(bc: &mut Bytecode, depth: usize) -> Result<()> {
     // VM panic, which is precisely the failure mode this crate refuses.
     // Reporting it as a compile error keeps a compiler bug catchable instead
     // of fatal.
-    bc.register_tier =
-        verify::validate_bytecode(bc).map_err(|error| validation_error(bc, error))?;
+    // The verdict is installed on the words it was computed from, with
+    // nothing in between (`Code`).
+    let tier = verify::validate_bytecode(bc).map_err(|error| validation_error(bc, error))?;
+    bc.code.install_tier(tier);
     for child in &bc.nested {
         verify::validate_child(bc, child.as_ref()).map_err(|error| validation_error(bc, error))?;
     }
@@ -304,11 +310,11 @@ mod tests {
 
     fn assert_verified_tree(bytecode: &Bytecode, seen: &mut OpenShapes) {
         assert_eq!(
-            bytecode.register_tier,
+            bytecode.code.tier(),
             verify::validate_bytecode(bytecode)
                 .expect("compiler output must pass bytecode verification")
         );
-        for instruction in &bytecode.code {
+        for instruction in bytecode.code.iter() {
             match instruction.opcode() {
                 Instr::OP_CALL => {
                     if instruction.call_args() == crate::ArgCount::Dynamic {

@@ -1224,7 +1224,7 @@ mod tests {
     #[test]
     fn verifier_rejects_end_of_bytecode_jump() {
         let bytecode = Bytecode {
-            code: vec![Instr::jump(1), Instr::ret(0, RetCount::Fixed(0))],
+            code: vec![Instr::jump(1), Instr::ret(0, RetCount::Fixed(0))].into(),
             line_info: vec![1, 1],
             ..Bytecode::default()
         };
@@ -1243,7 +1243,7 @@ mod tests {
     #[test]
     fn verifier_rejects_backward_loop_exits() {
         let back_edge = Bytecode {
-            code: vec![Instr::tfor_loop(0, -1), Instr::ret(0, RetCount::Fixed(0))],
+            code: vec![Instr::tfor_loop(0, -1), Instr::ret(0, RetCount::Fixed(0))].into(),
             line_info: vec![1, 1],
             max_stack: 4,
             ..Bytecode::default()
@@ -1251,7 +1251,7 @@ mod tests {
         crate::compiler::verify::validate_bytecode(&back_edge)
             .expect("a backward TFOR_LOOP is a polled back edge");
         let bytecode = Bytecode {
-            code: vec![Instr::for_prep(0, -1), Instr::ret(0, RetCount::Fixed(0))],
+            code: vec![Instr::for_prep(0, -1), Instr::ret(0, RetCount::Fixed(0))].into(),
             line_info: vec![1, 1],
             max_stack: 4,
             ..Bytecode::default()
@@ -1298,7 +1298,7 @@ mod tests {
     fn check_invalid_numeric_for_controls(code: Vec<Instr>) {
         let bytecode = Bytecode {
             line_info: vec![1; code.len()],
-            code,
+            code: code.into(),
             number_literals: vec![1.0],
             max_stack: 4,
             ..Bytecode::default()
@@ -1363,7 +1363,7 @@ mod tests {
     fn check_window_below_open_upvalue(window: &[Instr], captured: u8) {
         use crate::compiler::UpvalueDesc;
         let child = Bytecode {
-            code: vec![Instr::get_upval(0, 0), Instr::ret(0, RetCount::Fixed(1))],
+            code: vec![Instr::get_upval(0, 0), Instr::ret(0, RetCount::Fixed(1))].into(),
             line_info: vec![1; 2],
             max_stack: 1,
             upvalues: vec![UpvalueDesc::Local(captured)],
@@ -1378,7 +1378,7 @@ mod tests {
         code.push(Instr::ret(0, RetCount::Fixed(0)));
         let bytecode = Bytecode {
             line_info: vec![1; code.len()],
-            code,
+            code: code.into(),
             number_literals: vec![7.0],
             string_literals: vec![b"f".to_vec()],
             max_stack: 4,

@@ -29,7 +29,8 @@ checks cost issue slots.
 4. Dispatch gets one special view: a fixed-size array window starting at the
    frame base, in static tiers: `&mut [Val; 256]` for functions whose highest
    effective register fits in `u8`, `&mut [Val; 65536]` with `u16` operands
-   otherwise. Indexing by the narrowed operand is then provably in bounds; one
+   otherwise (both widened by the fixed-offset slack of ruling 17).
+   Indexing by the narrowed operand is then provably in bounds; one
    range check per borrow remains. No masking: an invalid index must not alias
    a valid register.
 5. Tier and narrowed operands are fixed when executable code is built, by
@@ -50,7 +51,8 @@ checks cost issue slots.
    borrow across several arms, which needs the executor and boundary-driver
    split) is a later link adopted only on its own matched A/B.
 8. Padding is allocated to `max(logical end, base + tier width)` when a window
-   is borrowed: a State that never runs a wide frame pays 2 KiB, not 512 KiB.
+   is borrowed: a State that never runs a wide frame pays about 2 KiB, not
+   512 KiB.
    Retaining it as a high-water mark is acceptable.
 9. Instruction fetch stays `code[*ip]` checked. A paged executable stream would
    make the fetch index a `u8` but adds page-transition dispatch and live
@@ -71,41 +73,84 @@ checks cost issue slots.
     to Bytecode. Snapshot serialization still uses the original instruction
     words and fields.
 
-## Open decision from link 2
+## Rulings from link 2a (spar session 01a21343)
 
-Settle the executable operand representation and numeric-loop plan ownership
-before finishing narrowing. The canonical instruction word mixes register
-indices with counts, pool indices and jump offsets. A typed operand side
-stream can preserve those words for dispatch and serialization but adds a
-second fetch and more memory per instruction. A repacked executable word
-can use one fetch but needs a layout and a way to retain or recover the
-canonical words, including wide non-register operands.
-
-NumericLoops currently builds fused regions and frame-register maps per
-State in BytecodeRuntime. Recognition takes the State's CostState and the
-result carries the selected weights. Ruling 5 places narrowing of those
-maps at compile and snapshot load, where no State cost model is available.
-One route is to split cost-independent recognition and register mapping
-from per-State charge binding. Another is to permit checked narrowing of
-the derived maps at runtime-bundle construction while keeping the tier and
-canonical instruction operands fixed at the producers. The latter needs an
-explicit ruling on the timing exception. Decide both the representation
-and the map ownership in spar before dispatch is built against them.
+14. Executable operands are the canonical words. No side stream, no
+    repacked stream: each register already sits in its own u16 field, so a
+    narrow read is the low byte of that field, one fetch, and snapshot
+    bytes and every canonical reader stay unchanged. Refused: a typed side
+    stream (second fetch, more memory per instruction) and a repacked word
+    (a second layout plus retained or recovered canonical words).
+15. `Bytecode::code` is `instr::Code`: a private boxed slice of canonical
+    words plus the tier. It derefs to `[Instr]` for every reader; any
+    mutable access drops the tier to Wide first; Wide is the default and
+    what a built vector becomes. Wide indexes soundly whatever the words
+    hold, so only Narrow is a claim. `Code::install_tier` takes the
+    verifier's verdict and also requires every word to pass
+    `NarrowInstr::new`; a disagreement is a VM bug, debug-asserted, and
+    leaves the function Wide in release (slower, never aliased), so no new
+    error variant. The verdict is installed by the producer that computed
+    it, on the words it verified, with nothing in between: compile
+    finalization, and snapshot materialization from the admitted
+    `SavedBytecode` words. The width check never substitutes for the
+    verdict: `FOR_LOOP 253` fits a u8 while touching slot 256.
+16. Narrowing is permission per field use, not per word. The opcode rows
+    in `instr.rs` carry a mandatory register-use column (A, B, C marks; a
+    const assertion keeps marks inside the layout). `NarrowInstr` keeps the
+    full-width canonical getters and adds `reg_a`/`reg_b`/`reg_c`, valid
+    only on marked fields (debug-asserted). Endpoints are unmarked:
+    `CLOSE 256` and `RETURN 256, 0` are admitted Narrow, and a truncating
+    getter on them would alias register 0. `RETURN` A is unmarked
+    altogether (its first is only a range start, kept on the checked API);
+    `CALL` A, `VARARG` A, `LOAD_NIL` A and `CONCAT` B are marked because
+    the verifier always checks at least one slot there. The view
+    `Code::narrow_view` -> `NarrowCode::fetch` wraps words without a
+    recheck; it lives in `instr/code.rs` so the private-field invariant
+    and the `NarrowInstr` constructor share one module.
+17. Fixed implicit offsets are covered by window slack, amending ruling 4:
+    the windows are `[Val; 256 + K]` and `[Val; 65536 + K]` with K the
+    largest fixed offset a window arm adds (3: numeric for `a + 3`, the
+    fused `TFOR_LOOP` back edge's `a + 3` from the step's own A, `SELF`
+    `a + 1`). The offset is added to the frame-relative widened index, so
+    the physical bound is provable and nothing wraps; the logical bound is
+    still the verifier's (`registers(a, 4)`, `registers(a, 2)`). Ranges
+    such as `TFOR_CALL`'s results at `base + 3 + i` stay checked.
+18. Numeric-loop register maps stay u16, built per State with their cost
+    binding; no recognition/cost split and no timing exception. Every map
+    register derives from the owning frame's verified operands or
+    effective ranges, which is all ruling 5 needed from them. Their stack
+    accesses stay on the checked API, extending ruling 6: guard loads,
+    publication, call-clear ranges and leaf parameter reads are per entry,
+    per checkpoint, ranges, or address another function's frame (a leaf
+    call writes `function + 1 + register` in the callee's frame). Not all
+    are rare: `OpKind::Record` and `RecordTest` stores, `Bind` reads and
+    the successful `ipairs` step's two or three writes recur per pass.
+    Those are the named candidates for a later window adoption, which
+    needs its own typed-access ruling and matched A/B.
 
 ## Links
 
 1. Done (with 1a): private stack type with logical end, every crate site
    moved to it, padding machinery, no dispatch change; native-calls table
    re-measured. Matched A/B against 02589f4 measured a regression (below).
-2. Partial: shared verifier selects the tier for both producers, with
-   tests for implicit offsets, one-past endpoints and forged snapshot
-   operands at tier boundaries. Executable operands remain outstanding.
-   2a. Resolve the open decision in spar, then build checked executable
-       operand narrowing for both producers and cover the derived maps as
-       ruled. Medium, or medium-large if numeric-loop recognition and cost
-       binding need to be split. Finish before link 3.
+2. Done (with 2a): the shared verifier selects the tier for both
+   producers; `instr::Code` carries it with the canonical words, installed
+   by each producer under the `NarrowInstr` width check (rulings 14-16);
+   the register-use column is in the opcode rows; tests cover the column
+   at 255/256 per opcode, tier and install at the implicit-offset
+   boundaries, both endpoint forms and a valued `RETURN 256`. The
+   numeric-loop maps needed nothing (ruling 18). `Code::tier`,
+   `narrow_view`, `NarrowCode::fetch` and the `reg_*` getters are unused
+   outside tests until link 3 (`expect(dead_code)` on each, remove as
+   adopted).
 3. Dispatch arms (`run_frame`, `registers.rs` fast paths, `eval_control.rs`
-   numeric-for, `numeric_loop.rs` entry) on the per-arm window. Gate: native
+   numeric-for) on the per-arm window. Match `code.narrow_view()` once per
+   `run_frame` entry and run one dispatch body specialized per tier (the
+   next entry after a call, tail call or return selects the running
+   frame's tier). Compute `ra` per arm through `reg_a`, never in a shared
+   prologue: unmarked fields (`CLOSE`, `RETURN`, counts, literals, jumps)
+   keep the canonical getters. Window widths carry the slack of ruling 17.
+   `numeric_loop.rs` stays on the checked API (ruling 18). Gate: native
    bytes dev and release re-measured under the envelope (ruling 11), matched
    A/B against 02589f4 (ruling 12) on closed_mode, benchmark, wide_sweep,
    key_sweep, arithmetic, and release asm inspection of the live-prefix

@@ -2552,8 +2552,17 @@ fn build_bytecode_node(
     source: Option<Arc<[u8]>>,
     register_tier: crate::compiler::RegisterTier,
 ) -> Arc<Bytecode> {
+    let mut code: crate::instr::Code = src
+        .code
+        .iter()
+        .map(|raw| Instr::from_raw(*raw))
+        .collect::<Vec<_>>()
+        .into();
+    // Admission verified exactly these words (`SavedBytecode::code`, read
+    // only), so its verdict is installed on them here.
+    code.install_tier(register_tier);
     Arc::new(Bytecode {
-        code: src.code.iter().map(|raw| Instr::from_raw(*raw)).collect(),
+        code,
         number_literals: src
             .number_literals
             .iter()
@@ -2569,7 +2578,6 @@ fn build_bytecode_node(
         num_params: src.num_params,
         num_locals: src.num_locals,
         max_stack: src.max_stack,
-        register_tier,
         nested,
         upvalues: src.upvalues.clone(),
         is_vararg: src.is_vararg,
@@ -3786,7 +3794,7 @@ mod tests {
                 )
                 .unwrap();
                 let runtime = state.bytecode_caches.values().next().unwrap();
-                assert_eq!(runtime.bytecode.register_tier, tier);
+                assert_eq!(runtime.bytecode.code.tier(), tier);
             } else {
                 let error = rejected_bytecode(vec![bc], Vec::new());
                 assert_invalid(&error, 0, Some(0));
