@@ -260,14 +260,17 @@ about 0.8 ms and load about 1.5 ms of a 2000-unit world (teardown included).
 What a perf profile of that build still shows, none of it measured as a
 change yet:
 
-- **Save:** `finish_object` spends about 16% converting each table's
-  `(Option<SavedVal>, Option<SavedVal>)` pending slots into the final pairs,
-  a second pass over every entry. Writing the saved pairs in place, with
-  "unfilled" tracked some other way, would remove it. About 5.5% is a
-  `reserve_rehash` of an `IndexMap<usize, Arc<BytecodeRuntime>>` (the
-  `bytecode_caches` shape) inside the measured loop. Find out where that
-  map grows before treating it as save cost. Id-map probes and `string_id`
-  are each under 5%.
+- **Save:** after the pending-slot conversion pass and the id-map regrowth
+  were removed (a later profile, same day), `run_tasks` itself is about a
+  third, `SavedVal::encode` 10%, `object_ids` probes 6%, the placeholder
+  fill of each table's entry vector 6%, `Table::snapshot_entries` and its
+  per-table `Vec` 10% together, `string_id` 4%. Building the saved pairs
+  straight from `snapshot_entries` instead of a placeholder vector filled
+  by tasks would cut two of those, but the task stack is what gives ids
+  their DFS order, so it must not change which value is encoded when.
+  Perf symbol names here are unreliable: identical code folding gives one
+  `reserve_rehash` body every map instantiation with the same bucket
+  layout, which is why the old profile named `bytecode_caches`.
 - **Load:** the time is spread out. Decode of `SavedVal` and `SavedObject`
   is about 17%, `rebuild_from_snapshot` 5%, `validate_table_shape` 5%, and
   the remaining duplicate-key sets of tables past eight hash keys under 4%

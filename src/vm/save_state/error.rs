@@ -114,10 +114,10 @@ pub(super) enum SaveFault {
     UnfilledObjectSlot,
     UnfilledUpvalueSlot,
     UnfilledRootSlot,
-    UnfilledTableKeySlot,
-    UnfilledTableValueSlot,
-    UnfilledMetatableSlot,
-    UnfilledClosureUpvalueSlot,
+    /// An object write did not target the slot its cursor expected next.
+    ObjectSlotOutOfOrder,
+    /// An object was expanded out of id order.
+    ObjectExpandedOutOfOrder,
     MissingObjectSlot,
     MissingRootSlot,
     MissingUpvalueSlot,
@@ -128,7 +128,6 @@ pub(super) enum SaveFault {
     TableDestinationNotTable,
     MetatableDestinationNotTable,
     GmatchDestinationNotIterator,
-    UnfilledGmatchSlot,
     UnregisteredFunctionPathNotFound,
 }
 
@@ -138,10 +137,8 @@ impl fmt::Display for SaveFault {
             Self::UnfilledObjectSlot => "unfilled object slot",
             Self::UnfilledUpvalueSlot => "unfilled upvalue slot",
             Self::UnfilledRootSlot => "unfilled root slot",
-            Self::UnfilledTableKeySlot => "unfilled table key slot",
-            Self::UnfilledTableValueSlot => "unfilled table value slot",
-            Self::UnfilledMetatableSlot => "unfilled metatable slot",
-            Self::UnfilledClosureUpvalueSlot => "unfilled closure upvalue slot",
+            Self::ObjectSlotOutOfOrder => "object slot written out of order",
+            Self::ObjectExpandedOutOfOrder => "object expanded out of id order",
             Self::MissingObjectSlot => "missing object slot",
             Self::MissingRootSlot => "missing root slot",
             Self::MissingUpvalueSlot => "missing upvalue slot",
@@ -154,7 +151,6 @@ impl fmt::Display for SaveFault {
             Self::GmatchDestinationNotIterator => {
                 "gmatch iterator destination is not a gmatch iterator"
             }
-            Self::UnfilledGmatchSlot => "unfilled gmatch iterator string slot",
             Self::UnregisteredFunctionPathNotFound => {
                 "unregistered function path was not found from its root"
             }

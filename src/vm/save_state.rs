@@ -429,9 +429,32 @@ struct SaveBuilder<'a> {
     bytecode_ids: DetMap<usize, u32>,
     upvalues: Vec<Option<SavedVal>>,
     upvalue_ids: DetMap<usize, u32>,
-    objects: Vec<Option<PendingObject>>,
+    /// Final object records, appended when each is expanded. Slots a child
+    /// value fills later hold a `Nil` or `0` placeholder until written.
+    /// `object_cursors[id]` is the slot index the next write to object `id`
+    /// must target: the task stack writes each object's slots in one fixed
+    /// order (`object_slot_count`), so every write checks it lands on the
+    /// expected slot and `into_payload` checks every cursor reached its end.
+    /// That keeps the filled-exactly-once check the old `Option` slots gave
+    /// without a second pass converting them.
+    objects: Vec<SavedObject>,
+    object_cursors: Vec<usize>,
     object_ids: DetMap<ObjectPtr, u32>,
     roots: Vec<Option<SavedVal>>,
+}
+
+/// How many child slots a saved object fills after expansion, in write
+/// order: a table's key and value per entry then its metatable, a
+/// closure's captures, a gmatch iterator's subject then pattern.
+fn object_slot_count(object: &SavedObject) -> usize {
+    match object {
+        SavedObject::Table {
+            entries, metatable, ..
+        } => entries.len() * 2 + usize::from(metatable.is_some()),
+        SavedObject::Closure { upvalues, .. } => upvalues.len(),
+        SavedObject::GmatchIter { .. } => 2,
+        SavedObject::GmatchEmptyIter { .. } => 0,
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -797,29 +820,6 @@ fn render_path(breadcrumbs: &[Breadcrumb], path: PathId) -> String {
     text
 }
 
-enum PendingObject {
-    Table {
-        array_len: u64,
-        array_slots: u32,
-        entries: Vec<(Option<SavedVal>, Option<SavedVal>)>,
-        metatable: Option<Option<SavedVal>>,
-    },
-    Closure {
-        chunk: u32,
-        upvalues: Vec<Option<u32>>,
-    },
-    GmatchIter {
-        subject: Option<SavedVal>,
-        pattern: Option<SavedVal>,
-        pos: u64,
-        resumed: bool,
-    },
-    GmatchEmptyIter {
-        pos: u64,
-        len: u64,
-    },
-}
-
 /// What `SaveBuilder::walk` encoded besides the arenas it filled.
 struct SaveWalk {
     globals: SavedObject,
@@ -879,7 +879,7 @@ pub(super) fn save_coverage(root: &GcRoot<'_>) -> SaveCoverage {
 
 impl<'a> SaveBuilder<'a> {
     fn new(state: &'a State) -> Self {
-        Self {
+        let mut builder = Self {
             state,
             env_reverse: build_env_reverse(state),
             strings: Vec::new(),
@@ -889,8 +889,36 @@ impl<'a> SaveBuilder<'a> {
             upvalues: Vec::new(),
             upvalue_ids: DetMap::default(),
             objects: Vec::new(),
+            object_cursors: Vec::new(),
             object_ids: DetMap::default(),
             roots: Vec::new(),
+        };
+        builder.reserve_from_heap();
+        builder
+    }
+
+    /// Size the string and object arenas and their id maps from the heap's
+    /// live counts, which bound what a save can reach, so a large save does
+    /// not regrow and rehash them as it walks. Capacity never reaches the
+    /// bytes: ids come from arena lengths and the maps are lookup-only.
+    /// Best effort: a heap mostly held by anchors or awaiting a sweep can
+    /// make the hint far larger than the save, so a failed reservation
+    /// releases every buffer reserved here and the walk grows them as
+    /// needed instead of aborting a save that would have fit.
+    fn reserve_from_heap(&mut self) {
+        let strings = self.state.heap.string_count();
+        let objects = self.state.heap.object_count();
+        let reserved = self.strings.try_reserve_exact(strings).is_ok()
+            && self.string_ids.try_reserve_exact(strings).is_ok()
+            && self.objects.try_reserve_exact(objects).is_ok()
+            && self.object_cursors.try_reserve_exact(objects).is_ok()
+            && self.object_ids.try_reserve_exact(objects).is_ok();
+        if !reserved {
+            self.strings = Vec::new();
+            self.string_ids = DetMap::default();
+            self.objects = Vec::new();
+            self.object_cursors = Vec::new();
+            self.object_ids = DetMap::default();
         }
     }
 
@@ -968,13 +996,18 @@ impl<'a> SaveBuilder<'a> {
             env_tables,
             format_pointer_ids,
         } = walk;
-        let objects = self
-            .objects
-            .into_iter()
-            .map(|obj| {
-                Self::finish_object(obj.ok_or(SaveError::from(SaveFault::UnfilledObjectSlot))?)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        // Every assigned id was expanded, and every expanded object had all
+        // its child slots written.
+        if self.objects.len() != self.object_ids.len()
+            || self
+                .objects
+                .iter()
+                .zip(&self.object_cursors)
+                .any(|(object, cursor)| *cursor != object_slot_count(object))
+        {
+            return Err(SaveError::from(SaveFault::UnfilledObjectSlot));
+        }
+        let objects = self.objects;
         let upvalues = self
             .upvalues
             .into_iter()
@@ -1291,17 +1324,14 @@ impl<'a> SaveBuilder<'a> {
                         }
                         id
                     };
-                    let pending = self
-                        .objects
-                        .get_mut(object as usize)
-                        .ok_or(SaveError::from(SaveFault::MissingObjectSlot))?;
-                    let Some(PendingObject::Closure { upvalues, .. }) = pending else {
+                    let SavedObject::Closure { upvalues, .. } = self.object_slot(object, index)?
+                    else {
                         return Err(SaveError::from(SaveFault::UpvalueDestinationNotClosure));
                     };
                     let slot = upvalues
                         .get_mut(index)
                         .ok_or(SaveError::from(SaveFault::MissingClosureUpvalueSlot))?;
-                    *slot = Some(id);
+                    *slot = id;
                 }
             }
         }
@@ -1312,12 +1342,28 @@ impl<'a> SaveBuilder<'a> {
         if let Some(id) = self.object_ids.get(&ptr) {
             return Ok(*id);
         }
-        let id = u32::try_from(self.objects.len())
-            .map_err(|_| too_large(SaveCollection::Objects, self.objects.len()))?;
+        let id = u32::try_from(self.object_ids.len())
+            .map_err(|_| too_large(SaveCollection::Objects, self.object_ids.len()))?;
         self.object_ids.insert(ptr, id);
-        self.objects.push(None);
         tasks.push(EncodeTask::Object { ptr, id });
         Ok(id)
+    }
+
+    /// The record of object `object`, after checking that `slot` is the
+    /// slot its cursor expects next and advancing the cursor past it.
+    fn object_slot(&mut self, object: u32, slot: usize) -> Result<&mut SavedObject, SaveError> {
+        let index = object as usize;
+        let cursor = self
+            .object_cursors
+            .get_mut(index)
+            .ok_or(SaveError::from(SaveFault::MissingObjectSlot))?;
+        if *cursor != slot {
+            return Err(SaveError::from(SaveFault::ObjectSlotOutOfOrder));
+        }
+        *cursor += 1;
+        self.objects
+            .get_mut(index)
+            .ok_or(SaveError::from(SaveFault::MissingObjectSlot))
     }
 
     fn expand_object(
@@ -1357,11 +1403,11 @@ impl<'a> SaveBuilder<'a> {
                         },
                     });
                 }
-                PendingObject::Table {
+                SavedObject::Table {
                     array_len,
                     array_slots,
-                    entries: vec![(None, None); entry_count],
-                    metatable: metatable.map(|_| None),
+                    entries: vec![(SavedVal::Nil, SavedVal::Nil); entry_count],
+                    metatable: metatable.map(|_| SavedVal::Nil),
                 }
             }
             RawObject::LuaFn(closure) => {
@@ -1374,9 +1420,9 @@ impl<'a> SaveBuilder<'a> {
                         index: idx,
                     });
                 }
-                PendingObject::Closure {
+                SavedObject::Closure {
                     chunk,
-                    upvalues: vec![None; captures.len()],
+                    upvalues: vec![0; captures.len()],
                 }
             }
             RawObject::Gmatch(GmatchObject {
@@ -1404,9 +1450,9 @@ impl<'a> SaveBuilder<'a> {
                         pattern: false,
                     },
                 });
-                PendingObject::GmatchIter {
-                    subject: None,
-                    pattern: None,
+                SavedObject::GmatchIter {
+                    subject: SavedVal::Nil,
+                    pattern: SavedVal::Nil,
                     pos: pos as u64,
                     resumed,
                 }
@@ -1414,16 +1460,18 @@ impl<'a> SaveBuilder<'a> {
             RawObject::Gmatch(GmatchObject {
                 iter: GmatchIter::Empty { pos, len },
                 ..
-            }) => PendingObject::GmatchEmptyIter {
+            }) => SavedObject::GmatchEmptyIter {
                 pos: *pos as u64,
                 len: *len as u64,
             },
         };
-        let slot = self
-            .objects
-            .get_mut(id as usize)
-            .ok_or(SaveError::from(SaveFault::MissingObjectSlot))?;
-        *slot = Some(pending);
+        // The expansion task is the next one popped after the reference
+        // that assigned the id, so objects arrive in id order.
+        if id as usize != self.objects.len() {
+            return Err(SaveError::from(SaveFault::ObjectExpandedOutOfOrder));
+        }
+        self.objects.push(pending);
+        self.object_cursors.push(0);
         Ok(())
     }
 
@@ -1447,103 +1495,53 @@ impl<'a> SaveBuilder<'a> {
             }
             ValueDestination::TableKey { object, entry }
             | ValueDestination::TableValue { object, entry } => {
-                let pending = self
-                    .objects
-                    .get_mut(object as usize)
-                    .ok_or(SaveError::from(SaveFault::MissingObjectSlot))?;
-                let Some(PendingObject::Table { entries, .. }) = pending else {
+                let is_key = matches!(destination, ValueDestination::TableKey { .. });
+                let slot_index = entry * 2 + usize::from(!is_key);
+                let SavedObject::Table { entries, .. } = self.object_slot(object, slot_index)?
+                else {
                     return Err(SaveError::from(SaveFault::TableDestinationNotTable));
                 };
                 let slot = entries
                     .get_mut(entry)
                     .ok_or(SaveError::from(SaveFault::MissingTableEntrySlot))?;
-                if matches!(destination, ValueDestination::TableKey { .. }) {
-                    slot.0 = Some(value);
+                if is_key {
+                    slot.0 = value;
                 } else {
-                    slot.1 = Some(value);
+                    slot.1 = value;
                 }
             }
             ValueDestination::Metatable { object } => {
-                let pending = self
-                    .objects
-                    .get_mut(object as usize)
-                    .ok_or(SaveError::from(SaveFault::MissingObjectSlot))?;
-                let Some(PendingObject::Table { metatable, .. }) = pending else {
+                let entry_count = match self.objects.get(object as usize) {
+                    Some(SavedObject::Table { entries, .. }) => entries.len(),
+                    Some(_) => {
+                        return Err(SaveError::from(SaveFault::MetatableDestinationNotTable));
+                    }
+                    None => return Err(SaveError::from(SaveFault::MissingObjectSlot)),
+                };
+                let SavedObject::Table {
+                    metatable: Some(metatable),
+                    ..
+                } = self.object_slot(object, entry_count * 2)?
+                else {
                     return Err(SaveError::from(SaveFault::MetatableDestinationNotTable));
                 };
-                *metatable = Some(Some(value));
+                *metatable = value;
             }
             ValueDestination::GmatchString { object, pattern } => {
-                let pending = self
-                    .objects
-                    .get_mut(object as usize)
-                    .ok_or(SaveError::from(SaveFault::MissingObjectSlot))?;
-                let Some(PendingObject::GmatchIter {
+                let SavedObject::GmatchIter {
                     subject,
                     pattern: saved_pattern,
                     ..
-                }) = pending
+                } = self.object_slot(object, usize::from(pattern))?
                 else {
                     return Err(SaveError::from(SaveFault::GmatchDestinationNotIterator));
                 };
-                *(if pattern { saved_pattern } else { subject }) = Some(value);
+                *(if pattern { saved_pattern } else { subject }) = value;
             }
         }
         Ok(())
     }
 
-    fn finish_object(object: PendingObject) -> Result<SavedObject, SaveError> {
-        match object {
-            PendingObject::Table {
-                array_len,
-                array_slots,
-                entries,
-                metatable,
-            } => Ok(SavedObject::Table {
-                array_len,
-                array_slots,
-                entries: entries
-                    .into_iter()
-                    .map(|(key, value)| {
-                        Ok((
-                            key.ok_or(SaveError::from(SaveFault::UnfilledTableKeySlot))?,
-                            value.ok_or(SaveError::from(SaveFault::UnfilledTableValueSlot))?,
-                        ))
-                    })
-                    .collect::<Result<Vec<_>, SaveError>>()?,
-                metatable: match metatable {
-                    None => None,
-                    Some(Some(value)) => Some(value),
-                    Some(None) => {
-                        return Err(SaveError::from(SaveFault::UnfilledMetatableSlot));
-                    }
-                },
-            }),
-            PendingObject::Closure { chunk, upvalues } => Ok(SavedObject::Closure {
-                chunk,
-                upvalues: upvalues
-                    .into_iter()
-                    .map(|value| {
-                        value.ok_or(SaveError::from(SaveFault::UnfilledClosureUpvalueSlot))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?,
-            }),
-            PendingObject::GmatchIter {
-                subject,
-                pattern,
-                pos,
-                resumed,
-            } => Ok(SavedObject::GmatchIter {
-                subject: subject.ok_or(SaveError::from(SaveFault::UnfilledGmatchSlot))?,
-                pattern: pattern.ok_or(SaveError::from(SaveFault::UnfilledGmatchSlot))?,
-                pos,
-                resumed,
-            }),
-            PendingObject::GmatchEmptyIter { pos, len } => {
-                Ok(SavedObject::GmatchEmptyIter { pos, len })
-            }
-        }
-    }
     fn encode_bytecode(&mut self, bc: &Arc<Bytecode>) -> Result<u32, SaveError> {
         let key = Arc::as_ptr(bc) as usize;
         if let Some(id) = self.bytecode_ids.get(&key) {
