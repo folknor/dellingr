@@ -397,7 +397,7 @@ impl State {
         let caller_bottom = self.in_flight.stack_bottom;
         let destination = caller_bottom - 1;
         self.close_upvalues(caller_bottom);
-        self.stack.drain(destination..callee);
+        self.stack.remove_range(destination..callee);
         let caller = self
             .in_flight
             .call_stack
@@ -1386,7 +1386,7 @@ impl State {
         // register beneath them and let the tail shift. The stack only ever
         // shrinks here, so the cap needs no preflight.
         self.stack.truncate(first + keep);
-        self.stack.drain(frame.stack_bottom - 1..first);
+        self.stack.remove_range(frame.stack_bottom - 1..first);
         Ok(returned)
     }
 

@@ -298,7 +298,7 @@ pub struct State<Tail: ?Sized = [()]> {
     meta_names: MetaNames,
     /// The main stack which stores values. Host-held: it may hold values the
     /// host pushed between calls, but must be empty for a snapshot.
-    pub(super) stack: Vec<Val>,
+    stack: stack::ValueStack,
     /// Execution-lifetime state: frame bases, activation records, varargs,
     /// open upvalues, transient roots and depths (see `inventory`).
     pub(super) in_flight: InFlight,
@@ -598,7 +598,7 @@ impl State {
             string_metatable: None,
             string_mt_index_shape: None,
             meta_names,
-            stack: Vec::with_capacity(tuning::INITIAL_VM_STACK_CAPACITY),
+            stack: stack::ValueStack::with_capacity(tuning::INITIAL_VM_STACK_CAPACITY),
             in_flight: InFlight::new(),
             heap,
             bytecode_caches: IndexMap::default(),

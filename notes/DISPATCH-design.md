@@ -55,20 +55,64 @@ checks cost issue slots.
 9. Instruction fetch stays `code[*ip]` checked. A paged executable stream would
    make the fetch index a `u8` but adds page-transition dispatch and live
    cursor state for at most the 1-3% an unchecked fetch measured; refused.
+10. Link 1 gives ordinary checked access through the live slice, including
+    GC and host views. Stack mutations live on the private type, with eager
+    range removal because every former drain discarded its removed values.
+    The window helper takes a const width so both future tiers use the same
+    padding code. Dispatch will supply those widths in link 3.
 
 ## Links
 
-1. Private stack type with logical end, every crate site moved to it, padding
-   machinery, no dispatch change. Gate: full `brokkr check`, native bytes
-   unchanged in release, a matched A/B showing no regression. Large: every
-   `state.stack` site in `src/vm` and `src/lua_std`.
+1. Done (with 1a): private stack type with logical end, every crate site
+   moved to it, padding machinery, no dispatch change; native-calls table
+   re-measured. Matched A/B against 02589f4 measured a regression (below).
 2. Executable operand narrowing and tier selection at both producers, with
    verifier-side tests for implicit offsets and forged snapshot operands at
    tier boundaries. Medium.
 3. Dispatch arms (`run_frame`, `registers.rs` fast paths, `eval_control.rs`
    numeric-for, `numeric_loop.rs` entry) on the per-arm window. Gate: native
-   bytes dev and release, matched A/B on closed_mode, benchmark, wide_sweep,
-   key_sweep, arithmetic. Medium-large.
+   bytes dev and release re-measured under the envelope (ruling 11), matched
+   A/B against 02589f4 (ruling 12) on closed_mode, benchmark, wide_sweep,
+   key_sweep, arithmetic, and release asm inspection of the live-prefix
+   checks that survive outside window arms. Medium-large.
+   3a. Only if 3 does not beat 02589f4: recover the non-window paths by
+       reusing one live slice across several accesses within an arm, or by
+       an unchecked live prefix (sparred separately, see ruling 12). Medium.
 4. Green agent: full gate, `reference/` and `docs/` touched by the stack
    contract (Frame doc, `docs/limits.md` value stack, native-calls table),
    close the notes entry with the measured result, delete this file.
+
+## Rulings from link 1a (spar session 01a21328)
+
+11. Exact equality of native bytes per level is not a gate for any link.
+    The binding contract is the envelope (`docs/limits.md`, "Envelope");
+    the table in `reference/native-calls.md` is a per-build measurement and
+    is re-measured and replaced when a frame moves. The "same numbers
+    before and after" sentence there binds only the native-call marker
+    macro. Link 1 (the commit "Move the value stack behind a private
+    buffer with a logical end"; benched as its pre-amend twin 1b152ad,
+    identical code), bygg, against 02589f4: release rows -64 to
+    +48 (mostly +16; max 1808 to 1824), release+snapshot max 1744 to 1760,
+    dev every row about +900 to +1000 (max `callable_rust` 10864 to 11856,
+    about 145 KiB more at 150 levels of the largest cycle). Envelope tests
+    pass. Do not assume link 3 recovers the dev growth; the probe cannot
+    attribute it.
+12. Link 1 stays committed on local main, but main is not pushed while the
+    regression below stands. The item gate is the combined change against
+    02589f4, never against link 1. A failed combined A/B keeps the push
+    gate closed; a fix (slice reuse or unchecked prefix) needs its own
+    fresh matched A/B of the final tip against 02589f4 plus the correctness
+    and native-stack checks. An unchecked prefix (`get_unchecked(..end)` in
+    the Deref) would rest on ValueStack's own `end <= buf.len()` invariant,
+    not on the verifier, so ruling 1 does not cover it, but it puts a
+    memory-safety obligation on every future mutator and needs its own
+    ruling. If the window design is abandoned, back out every dependent
+    change and verify the resulting tip, not just a revert of link 1.
+
+Link 1 matched A/B, bygg, `--rounds 3 --commit 02589f4 --commit 1b152ad`,
+invocation bb228d88, median paired difference: closed_mode +252.6 ms
+(4293.5 to 4546.1, +5.9%, slower 3 of 3), wide_sweep +148.5 (+7.4%, 3 of 3),
+key_sweep +79.1 (+2.7%, 3 of 3), arithmetic +26.7 (+1.5%, 3 of 3),
+benchmark +43.8 (+1.4%, 2 of 3). Likely mechanism, unconfirmed in asm: each
+`self.stack[i]` now checks `end <= buf.len()` forming the live slice and
+then `i < end`, two checks where the Vec had one. Layout is not excluded.

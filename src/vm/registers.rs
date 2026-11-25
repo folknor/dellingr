@@ -620,7 +620,7 @@ mod tests {
             Val::num(30.0),
             Val::num(40.0),
         ];
-        state.stack.clone_from(&original);
+        state.stack.extend_from_slice(&original);
         state.in_flight.vararg_stack.extend_from_slice(&[
             Val::num(50.0),
             Val::num(60.0),
@@ -640,7 +640,7 @@ mod tests {
             .expect_err("the open vararg preflight is refused");
 
         assert!(matches!(error.kind(), ErrorKind::StackOverflow { .. }));
-        assert_eq!(state.stack, original);
+        assert_eq!(&state.stack[..], original);
         assert_eq!(
             state.finish_fault_injection(),
             vec![crate::FaultEvent {
