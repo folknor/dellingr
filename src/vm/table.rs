@@ -16,6 +16,7 @@ use super::object::{GcHeap, Markable, ObjectPtr, ResidentBytes, StringPtr};
 #[cfg(feature = "snapshot")]
 use crate::error::{InternalFault, SnapshotTableFault};
 
+use crate::limits::tuning::RESIDENT_BYTES_PER_ARRAY_SLOT;
 use crate::limits::tuning::TABLE_INLINE_CAPACITY as INLINE_CAPACITY;
 
 /// Tag bit marking a slot index (as handed to inline caches and the `pairs`
@@ -764,7 +765,7 @@ impl Table {
             TableStorage::Inline { .. } => 0,
             TableStorage::Map(map, _) => map.resident_bytes(),
         };
-        self.array.capacity() * size_of::<Val>() + hash
+        self.array.capacity() * RESIDENT_BYTES_PER_ARRAY_SLOT + hash
     }
 
     pub(super) fn edit<'a>(
@@ -2134,7 +2135,7 @@ impl Table {
             self.array
                 .try_reserve(len - self.array.len())
                 .map_err(|_| TableError::GrowthFailed)?;
-            resident.add((self.array.capacity() - old) * size_of::<Val>());
+            resident.add((self.array.capacity() - old) * RESIDENT_BYTES_PER_ARRAY_SLOT);
         }
         Ok(())
     }
@@ -2314,7 +2315,7 @@ impl Table {
     fn shrink_array(&mut self, minimum: usize, resident: &mut ResidentBytes) {
         let old = self.array.capacity();
         self.array.shrink_to(minimum);
-        resident.remove((old - self.array.capacity()) * size_of::<Val>());
+        resident.remove((old - self.array.capacity()) * RESIDENT_BYTES_PER_ARRAY_SLOT);
     }
 
     /// Empty the window and restart it just above key `base`.

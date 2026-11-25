@@ -547,7 +547,7 @@ impl RuntimeCaches {
     /// cold, are filled only with live handles, collection is the only
     /// thing that frees, and this runs within `object::CACHE_PRUNE_INTERVAL`
     /// collections of any referent's death, long before its slot can be
-    /// reused 2^31 times, so `val_is_live` is exact for every handle here.
+    /// reused 2^15 times, so `val_is_live` is exact for every handle here.
     ///
     /// Every struct is destructured without `..`, so a new cache family,
     /// cell or handle field fails to compile until its verdict is decided.

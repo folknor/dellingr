@@ -11,45 +11,49 @@
 //! bits live beside it, so a sweep reads one summary bit per 4096 slots, one
 //! word per occupied 64-slot run, and touches only the payloads it frees.
 //!
-//! Handles, reuse order and version stepping reproduce slotmap 1.1's
-//! `SlotMap` exactly, which is what keeps this change unobservable:
+//! Reuse order and version stepping follow slotmap 1.1's `SlotMap`, with
+//! the version narrowed to 16 bits so a handle fits beside a tag in an
+//! eight-byte value; none of it is observable:
 //!
 //! - slot 0 is an unused sentinel; new slots append at version 1;
 //! - a removal steps the version by one (wrapping, so even means vacant) and
 //!   pushes the index on a LIFO free stack, the order slotmap's `free_head`
 //!   list gives; an insert pops it and steps the version by one more (to odd),
 //!   so one collection cycle moves a reused slot's version by exactly two
-//!   (`CACHE_PRUNE_INTERVAL` rests on that);
+//!   and a version comes round again after 2^15 reuses
+//!   (`CACHE_PRUNE_INTERVAL` rests on both);
 //! - a sweep frees dead slots in ascending index order, as `retain` did;
 //! - keys hash as one `write_u64(version << 32 | idx)` and order by
-//!   `(idx, version)`, as `slotmap::KeyData` does, so table hash layout is
-//!   unchanged too.
+//!   `(idx, version)`, as `slotmap::KeyData` does. Hash buckets are only
+//!   probed, never iterated, so the narrower version's hash feed reaches no
+//!   program-visible order.
 //!
-//! The `arena_matches_slotmap` test drives both side by side.
+//! The `arena_matches_slotmap` test drives both side by side, comparing
+//! versions modulo 2^16.
 
 use std::cell::Cell;
 use std::hash::{Hash, Hasher};
-use std::num::NonZeroU32;
+use std::num::NonZeroU16;
 
 /// A generational handle: slot index plus the slot's (odd) version when the
 /// value was inserted. A freed slot's version moves on, so an old handle
-/// stops resolving (until the version wraps after 2^31 reuses).
+/// stops resolving (until the version wraps after 2^15 reuses).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct SlotKey {
     idx: u32,
-    version: NonZeroU32,
+    version: NonZeroU16,
 }
 
 impl SlotKey {
     /// The key no slot ever carries.
     pub(crate) const NULL: Self = Self {
         idx: u32::MAX,
-        version: NonZeroU32::MIN,
+        version: NonZeroU16::MIN,
     };
 
     /// Slot index and version, for tests that pin the stepping.
     #[cfg(test)]
-    pub(crate) fn parts(self) -> (u32, u32) {
+    pub(crate) fn parts(self) -> (u32, u16) {
         (self.idx, self.version.get())
     }
 }
@@ -209,7 +213,7 @@ impl Iterator for Indices<'_> {
 /// Visible to the parent module so it can pin a pool's slot stride.
 pub(super) struct Slot<V> {
     /// Odd while occupied, even while vacant (slotmap's convention).
-    version: u32,
+    version: u16,
     value: Option<V>,
 }
 
@@ -259,7 +263,7 @@ impl<K: ArenaKey, V> Arena<K, V> {
             self.bits.occupy(idx as usize);
             return K::from_slot(SlotKey {
                 idx,
-                version: NonZeroU32::new(slot.version).expect("an odd version is nonzero"),
+                version: NonZeroU16::new(slot.version).expect("an odd version is nonzero"),
             });
         }
         // u32::MAX is the null key's index, so the last usable slot is below it.
@@ -274,7 +278,7 @@ impl<K: ArenaKey, V> Arena<K, V> {
         self.bits.occupy(idx as usize);
         K::from_slot(SlotKey {
             idx,
-            version: NonZeroU32::MIN,
+            version: NonZeroU16::MIN,
         })
     }
 
@@ -323,7 +327,7 @@ impl<K: ArenaKey, V> Arena<K, V> {
             let slot = &self.slots[idx];
             let key = K::from_slot(SlotKey {
                 idx: idx as u32,
-                version: NonZeroU32::new(slot.version).expect("an occupied slot's version is odd"),
+                version: NonZeroU16::new(slot.version).expect("an occupied slot's version is odd"),
             });
             (
                 key,
@@ -353,7 +357,7 @@ impl<K: ArenaKey, V> Arena<K, V> {
             let slot = &mut slots[idx];
             let key = K::from_slot(SlotKey {
                 idx: idx as u32,
-                version: NonZeroU32::new(slot.version).expect("an occupied slot's version is odd"),
+                version: NonZeroU16::new(slot.version).expect("an occupied slot's version is odd"),
             });
             let value = slot.value.take().expect("an occupied bit names a value");
             slot.version = slot.version.wrapping_add(1);
@@ -384,6 +388,11 @@ mod tests {
         (u64::from(key.version.get()) << 32) | u64::from(key.idx)
     }
 
+    /// A slotmap key projected onto the arena's 16-bit version.
+    fn narrowed(ffi: u64) -> u64 {
+        ffi & 0x0000_FFFF_FFFF_FFFF
+    }
+
     /// Drive the arena and a `slotmap::SlotMap` through the same inserts and
     /// sweeps, crossing word (64) and summary (4096) boundaries, emptying a
     /// whole word and reusing into it while older vacancies wait: every key,
@@ -402,7 +411,7 @@ mod tests {
             for _ in 0..count {
                 let a = arena.insert(next);
                 let r = reference.insert(next);
-                assert_eq!(ffi(a.0), r.data().as_ffi());
+                assert_eq!(ffi(a.0), narrowed(r.data().as_ffi()));
                 keys.push((a, r));
                 next += 1;
             }
@@ -432,7 +441,7 @@ mod tests {
             reference.retain(|key, value| {
                 let kept = keep(*value);
                 if !kept {
-                    reference_freed.push((key.data().as_ffi(), *value));
+                    reference_freed.push((narrowed(key.data().as_ffi()), *value));
                 }
                 kept
             });
@@ -441,7 +450,7 @@ mod tests {
             let live: Vec<_> = arena.iter().map(|(k, v)| (ffi(k.0), *v)).collect();
             let reference_live: Vec<_> = reference
                 .iter()
-                .map(|(k, v)| (k.data().as_ffi(), *v))
+                .map(|(k, v)| (narrowed(k.data().as_ffi()), *v))
                 .collect();
             assert_eq!(live, reference_live);
             for (a, r) in &keys {
@@ -458,10 +467,10 @@ mod tests {
     fn version_wraps_like_slotmap() {
         let mut arena: Arena<TestKey, ()> = Arena::new();
         let key = arena.insert(());
-        arena.slots[1].version = u32::MAX;
+        arena.slots[1].version = u16::MAX;
         let stale = TestKey(SlotKey {
             idx: 1,
-            version: NonZeroU32::new(u32::MAX).expect("nonzero"),
+            version: NonZeroU16::new(u16::MAX).expect("nonzero"),
         });
         assert!(arena.contains(stale));
         assert!(!arena.contains(key));
@@ -470,6 +479,9 @@ mod tests {
         let reused = arena.insert(());
         assert_eq!(reused.0.parts(), (1, 1));
         assert!(!arena.contains(stale));
+        // The wrap is the alias the prune interval guards against: the
+        // first handle ever issued for this slot resolves again.
+        assert!(arena.contains(key));
     }
 
     #[test]

@@ -195,17 +195,11 @@ free dead values).
 
 ### 16-byte `Val` copies that miss store forwarding
 
-What: a `Val` written as a tag byte plus two 8-byte words (payloads sit at
-offsets 1, 4 or 8 depending on the variant) and read back as one 16-byte
-vector load stalls on store forwarding. Seen in `ADD_RR` right after a
-`GET_FIELD` filled its operand, about 6% of samples on same_obj_read at the
-time. `#[repr(C, u8)]` on `Val` (every payload at offset 8) measured within
-noise, so layout alone is not the fix.
-
-Sketch: read operands as tag plus payload rather than as a whole `Val`
-where the handler only needs the number, or make producers and consumers
-use the same widths. The full answer is the 8-byte NaN-boxed `Val` under
-"Full coherent rewrites", which removes the split entirely.
+Folded into the NaN-boxed `Val` chain (`notes/NANBOX-design.md`), which
+removes the tag/payload split. The original evidence (about 6% of samples on
+same_obj_read in `ADD_RR` after `GET_FIELD`; `#[repr(C, u8)]` within noise)
+has no retrievable run record and predates the typed numeric regions that
+now carry same_obj_read's loops, so it is not a basis for a separate fix.
 
 ### bench/arithmetic +11% wall after compare-and-branch fusion landed (2026-09-03)
 
@@ -395,99 +389,14 @@ that legitimately nests calls made from Rust past 150.
 
 ### 8-byte NaN-boxed `Val` (C-O7)
 
-What: `Val` (`src/vm/lua_val.rs`) is 16 bytes (tag + payload). NaN-boxing
-(non-number payloads in the NaN space of an f64) halves stack, table and
-upvalue memory traffic, makes `stack: Vec<Val>` copies twice as dense, and
-removes the split tag/payload copies that miss store forwarding (see the
-16-byte `Val` copies entry above). It is the standard reason reference VMs
-beat tagged-enum interpreters on memory-bound workloads.
-
-Why deferred: full-rewrite class. A read-only survey (2026-10-23, after
-6539ac7) put it at about 20 files in `src/vm`, heaviest in `table.rs`,
-`save_state.rs` and its verifier, `table_ops.rs`, `metamethod.rs`,
-`global_env.rs` and the dispatch code; `lua_std` and the compiler do not
-touch the VM's `Val` (`codegen.rs` has its own, unrelated one). The plan is
-to do it after the release that ships the register VM rather than bundle it
-in, because it needs no user migration (below).
-
-Observable surface (the 2026-10-23 survey; re-check before starting):
-- **Invisible to scripts, replays, saves and the public API.** NaN never
-  renders with a sign or payload (`number_to_text`, `string.format`
-  including `%a` and `%q`), NaN is not a valid table key, and saves write
-  every NaN as `CANONICAL_NAN_BITS` (`saved_num_bits`). `tostring`/`%p` ids
-  for tables, functions and Rust functions come from the counter in
-  `format_pointer_ids`, not from handle bits or addresses. `pairs` follows
-  insertion order. The snapshot encoder is explicit per variant, so no
-  `FORMAT_VERSION` bump; `tests/integration/snapshot/save_golden.rs` compares saves byte for byte
-  and is the oracle. No charge depends on representation, so no
-  `COST_MODEL_VERSION` bump. `Val` is `pub(crate)`.
-- **No host-visible edge:** every exit that hands the host an `f64`
-  (`to_number`, `raw_field`, a numeric `ErrorValue`) already returns the
-  canonical NaN (`numeral::canonical_nan`), so canonicalizing on entry
-  changes nothing the host sees.
-
-Requirements the rewrite must meet:
-- **Canonicalize NaN where arbitrary bits enter:** `push_number`, and the
-  snapshot decoder (`decode_val`, `build_bytecode_node`), which today loads a
-  forged save's NaN payload verbatim. Harmless now; under NaN-boxing such bits
-  would decode as a pointer, so this becomes a safety requirement. Arithmetic
-  needs no canonicalization if the tag space avoids the two standard quiet
-  NaN patterns (`0x7FF8...` and `0xFFF8...`), since Rust arithmetic produces
-  only those or passes an input NaN through.
-- **Cache aliasing (done).** The inline caches trust a cached handle
-  without re-checking the key, so a dead object's entry matching a new object
-  in the same slot would read or write the wrong field. Every hit compares the
-  cached handle with a live one first, so a dead entry only misses until its
-  slot's generation wraps; collection clears such entries every
-  `CACHE_PRUNE_INTERVAL` collections (`object.rs`, `State::drop_dead_cache_entries`
-  over `RuntimeCaches::drop_dead_entries`), which is safe because only the
-  sweep frees, so a slot is reused at most once per collection. Whatever
-  replaces the arena must keep that property and its stepping (the
-  `version_steps_by_two_per_reuse` test), and a narrower generation must
-  bring the interval below half its period: with g generation bits the
-  interval must stay under 2^(g-1) collections. Any new side table holding
-  weak handles needs the same pruning.
-- **Handles.** Objects (`GcHeap`) and the string pool already sit in the
-  in-crate generational arena (`object/arena.rs`), whose keys are 64 bits
-  (index plus generation, slotmap's encoding) and would have to narrow.
-  Keeping a 32-bit index avoids a new limit on
-  live objects; a narrower index is a new cap that needs a docs/limits.md
-  entry and an error kind.
-- **Rust functions.** A `Val::RustFn` is already a 32-bit index into the
-  State's function table (`vm/rust_fn.rs`), so it narrows without change.
-- **Table storage.** `TableKeyKind::Live(Val)` / `Vacant(usize)` and the
-  `Option<Val>` uses need niche encodings, or tables stay 16 bytes per value
-  and lose most of the gain.
-- **Native stack.** Frames of `Frame::run` and the functions live across
-  native re-entry will move; re-measure against the docs/limits.md envelope
-  with `brokkr test native_bytes_per_level`.
-
-A cheaper intermediate, if the full version is judged too large, is denser
-`Table` storage entries alone; the full version is where the payoff is.
-
-The 2026-11-17 performance hunt (heap scope, its lead rewrite; dispatch scope,
-its third) argued for designing compact values, typed object arenas and
-collector metadata as one rewrite. Beyond value width: `Val::Obj` names
-neither a table nor a closure, so access resolves the slotmap key and examines
-`RawObject`, and even `Val::typ` dereferences the heap; `RawObject`
-(`object.rs`) reserves table-sized slots while closures live behind a separate
-`Box`, so every closure is a large slot plus its own allocation (the table
-hunter added that `TableStorage` embeds four full key/value pairs inline, so
-every table, and through `RawObject` every closure slot, pays for that
-variant). The proposed shape: eight-byte tagged values; distinct table,
-closure and string tags; separate typed arenas addressed by compact indices; a
-structural split between strong values and weak handles, with generation
-metadata only in weak caches, validated before producing a strong value;
-allocation and mark metadata in pages with occupancy bitmaps. The collector
-part of that landed on its own: the object, string and upvalue pools keep
-occupancy and mark bits beside their slots, and the sweep frees
-`occupied & !marked` over non-empty words only, so a past allocation peak no
-longer raises later collection work. What remains is typed arenas and compact
-handles. Both hunters warned against squeezing the 64-bit slotmap key into the
-payload or truncating generations (weak-cache and lifetime assumptions), and
-against a wrapper over the existing enum. The dispatch hunter suggested
-getting unboxed numeric intermediates in fused handlers first, then measuring
-what materialized-value cost remains.
+Running as a chain under `notes/NANBOX-design.md` (rulings and link plan).
+Link 1 landed: 16-bit arena generations, `CACHE_PRUNE_INTERVAL` `1 << 14`,
+fixed-literal resident charges. Remaining: link 2 (the `Val(u64)` rewrite
+and `u64` resident accounting) and link 3 (green gate). Typed arenas with
+distinct table/closure tags, the 2026-11-17 hunt's other half, are not in
+the chain and stay open here: `Val::Obj` names neither a table nor a
+closure, so access resolves the handle and examines `RawObject`, and
+`Val::typ` dereferences the heap; two tags are left spare for it.
 
 ---
 

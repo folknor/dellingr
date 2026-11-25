@@ -35,6 +35,18 @@ pub(crate) const DEFAULT_GC_THRESHOLD_GROWTH_FACTOR: usize = 2;
 /// differs between debug and release builds.
 pub(crate) const GC_RESIDENT_BYTES_PER_UNIT: usize = 256;
 
+/// Resident bytes charged per slot of a table's array capacity. A fixed
+/// literal for the same reason as [`GC_RESIDENT_BYTES_PER_UNIT`]: the charge
+/// is part of collection timing, so it must not follow the in-memory width of
+/// a value, which differs between targets and changes with the value
+/// representation.
+pub(crate) const RESIDENT_BYTES_PER_ARRAY_SLOT: usize = 16;
+
+/// Resident bytes charged per slot of a table hash part's entry capacity (a
+/// key and a value); fixed for the reason [`RESIDENT_BYTES_PER_ARRAY_SLOT`]
+/// gives. The hash index's own allocation is charged separately.
+pub(crate) const RESIDENT_BYTES_PER_HASH_ENTRY: usize = 32;
+
 /// Initial VM value-stack reservation.
 pub(crate) const INITIAL_VM_STACK_CAPACITY: usize = 256;
 

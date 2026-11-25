@@ -28,6 +28,7 @@ use hashbrown::HashTable;
 
 use super::{ResidentBytes, TableLookupKey, Val};
 use crate::det_hash::FixedState;
+use crate::limits::tuning::RESIDENT_BYTES_PER_HASH_ENTRY;
 
 #[inline(always)]
 fn hash_key(key: Val) -> u64 {
@@ -79,7 +80,7 @@ impl HashSlots {
     }
 
     pub(super) fn resident_bytes(&self) -> usize {
-        self.entries.capacity() * size_of::<(Val, Val)>() + self.index.allocation_size()
+        self.entries.capacity() * RESIDENT_BYTES_PER_HASH_ENTRY + self.index.allocation_size()
     }
 
     pub(super) fn reserve(&mut self, additional: usize, resident: &mut ResidentBytes) {
@@ -272,7 +273,7 @@ impl SlotMut<'_> {
         // Push first: a failed allocation leaves the old binding intact.
         self.entries.push((key, value));
         if self.entries.capacity() != capacity {
-            resident.add((self.entries.capacity() - capacity) * size_of::<(Val, Val)>());
+            resident.add((self.entries.capacity() - capacity) * RESIDENT_BYTES_PER_HASH_ENTRY);
         }
         *self.indexed = position;
         self.entries[old] = (Val::Nil, Val::Nil);

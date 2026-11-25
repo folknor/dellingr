@@ -147,8 +147,9 @@ implementation tuning values, not additional script-level resource limits.
 Automatic mode paces collections by a score: GC-managed objects, plus
 distinct interned strings, plus resident payload bytes divided (rounding down)
 by `GC_RESIDENT_BYTES_PER_UNIT` (256). Resident bytes are the backing capacity
-of table arrays and hash parts (including hash index storage) and the byte
-length of interned strings; a table's inline entries count only as the object.
+of table arrays and hash parts, charged at a fixed 16 bytes per array slot and
+32 per hash entry whatever a value's in-memory width, plus the hash index's
+allocation, and the byte length of interned strings; a table's inline entries count only as the object.
 `State::gc_score` reports the score. A host-set threshold
 (`gc_set_threshold`) counts objects plus distinct strings only, as
 `State::heap_size` does. The heap checks the active measure before each heap

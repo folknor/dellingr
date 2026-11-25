@@ -387,7 +387,7 @@ impl ArenaKey for StringKey {
 /// - When a slot is freed and reused, the generation increments
 /// - Accessing with an old key panics instead of causing memory corruption
 ///
-/// Generations wrap after about 2^31 reuses of one slot, so an old key is
+/// Generations wrap after 2^15 reuses of one slot, so an old key is
 /// not an identity proof forever: anything holding handles weakly must drop
 /// them before their slot can come round again (see `val_is_live` and
 /// [`CACHE_PRUNE_INTERVAL`]).
@@ -400,9 +400,9 @@ pub(crate) struct ObjectPtr(pub(crate) ObjectKey);
 /// The prune is only an alias guard. Every cache hit compares the cached
 /// handle with a live one before it dereferences anything, so an entry
 /// naming a freed object just misses, unless its slot's generation has come
-/// all the way round to the cached value. That takes 2^31 reuses: the arena
-/// (`object/arena.rs`, which reproduces slotmap 1.1's representation) keeps
-/// a `u32` version per slot, bumped once by a remove and once by an insert
+/// all the way round to the cached value. That takes 2^15 reuses: the arena
+/// (`object/arena.rs`, slotmap 1.1's stepping narrowed to 16 bits so a
+/// handle fits in an eight-byte value) keeps a `u16` version per slot, bumped once by a remove and once by an insert
 /// into the vacant slot (`version_steps_by_two_per_reuse` pins the step,
 /// the arena's `version_wraps_like_slotmap` the wrap). The sweep in `GcHeap::collect` is the only thing that frees an
 /// object, so one collection cycle reuses a slot at most once, and an entry
@@ -414,8 +414,9 @@ pub(crate) struct ObjectPtr(pub(crate) ObjectKey);
 /// result, cost, collection timing or snapshot. The other weak tables
 /// (compiled patterns, `%p` ids) still prune every collection: they hold
 /// memory, and a stale `%p` id would be visible.
-pub(super) const CACHE_PRUNE_INTERVAL: u32 = 1 << 16;
-const _: () = assert!(CACHE_PRUNE_INTERVAL > 0 && CACHE_PRUNE_INTERVAL < 1 << 31);
+pub(super) const CACHE_PRUNE_INTERVAL: u32 = 1 << 14;
+// A version comes round after 2^(bits - 1) reuses, at most one per collection.
+const _: () = assert!(CACHE_PRUNE_INTERVAL > 0 && CACHE_PRUNE_INTERVAL < 1 << (u16::BITS - 1));
 
 /// Arena keys are process-local, so diagnostics keep the pointer opaque.
 impl fmt::Debug for ObjectPtr {
@@ -1228,7 +1229,7 @@ impl GcHeap {
     /// this: `format_pointer_ids` and the pattern cache at every collection,
     /// runtime caches within [`CACHE_PRUNE_INTERVAL`] collections. Asked
     /// later than right after a sweep it is still exact for a freed handle
-    /// whose slot has not been reused 2^31 times since.
+    /// whose slot has not been reused 2^15 times since.
     pub(super) fn val_is_live(&self, val: &Val) -> bool {
         match val {
             Val::Obj(ptr) => self.objects.contains(ptr.0),
@@ -1710,7 +1711,7 @@ mod tests {
     /// here.
     #[test]
     fn version_steps_by_two_per_reuse() {
-        fn index_and_version(ptr: ObjectPtr) -> (u32, u32) {
+        fn index_and_version(ptr: ObjectPtr) -> (u32, u16) {
             ptr.0.0.parts()
         }
         let mut heap = GcHeap::with_threshold(100);

@@ -159,6 +159,13 @@ classification in `decode_with`.
   when further changes fold into it, which is how unreleased cost changes
   have been landing. The intent needs stating.
 
+### Dispatch-loop doc housekeeping (2026-11-25)
+
+- The doc comment on `Frame::eval_batched` in `src/vm/frame.rs` says the
+  caller settles `local_cost` "on error"; `Frame::run` settles the pending
+  batch on every exit, Ok or Err, as its own comment says. Reword the
+  `eval_batched` doc to match.
+
 ## Deferred forward-looking ideas
 
 ### Execution trace hook for a stepping debugger
