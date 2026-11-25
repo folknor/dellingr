@@ -132,19 +132,19 @@ generations would also let a stale handle alias at once rather than after
 followed by a long quiet phase. The empty-arena sweep early-out was
 refused, and the reasons are at the same doc.
 
-### Every table slot carries the four-pair inline variant (2026-11-26)
+### The table slot's array window is always resident (2026-11-26)
 
-`TableStorage::Inline` holds `[(Val, Val); TABLE_INLINE_CAPACITY]` (64
-bytes with an 8-byte `Val`) inside the `Table`, so every table arena slot
-pays for it, including pure arrays and map-storage dictionaries, whose
-inline pairs are dead space (`arena::Slot<Table>` size is pinned in
-`object.rs`). Closures and iterators no longer share that slot size since
-the per-kind arenas. A layout around compact records with optional numeric
-or dictionary storage would shrink the slot; boxing the inline pairs or the
-whole `Table` trades the footprint for an allocation and a dependent load
-on every small record. The table hunter's point from the 2026-11-17 hunt.
-No measurement yet: promote on a memory profile or a workload where table
-slot size shows.
+The table arena slot is 168 bytes in release (pinned in `object.rs`). The
+inline hash pairs are not the lever: the map variant overlaps them, so
+dropping inline storage recovers one word (measured; reasoning at
+`TableStorage`). The array part's state is: the `Vec` plus `base`, `vlen`,
+`lead` and `array_live`, 56 bytes on x86_64, carried by every record that
+never has an array part. Moving it behind an optional handle would shrink
+record slots by about a third, at a dependent load on array access. The
+correctness condition: absence must represent the complete default array
+state, and dropping an empty backing block must keep the logical window
+and the capacity-based resident charge (replay-visible GC pacing) as they
+are. Promote on a memory profile or a workload where table slot size shows.
 
 ---
 

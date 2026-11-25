@@ -189,8 +189,10 @@ them:
   hunter's single activation record and VM-owned continuations, with the heap,
   host and codegen hunters' overlapping points.
 - The heap hunter's compact value and typed arenas both landed; the table
-  hunter's `TableStorage` footprint point is now `optimizations.md` "Every
-  table slot carries the four-pair inline variant", and
+  hunter's `TableStorage` footprint point was measured and declined (the
+  inline pairs cost the slot one word; reasoning at `TableStorage`), its
+  residue is `optimizations.md` "The table slot's array window is always
+  resident", and
   `optimizations.md` "Per-kind arenas keep their high-water storage" is
   the arenas' follow-up.
 - `optimizations.md` "Field-site position hints: residue": the lookup

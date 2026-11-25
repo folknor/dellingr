@@ -294,6 +294,19 @@ impl Hash for TableKey {
 ///
 /// Dead slots retain their keys as strong references until compaction. This
 /// keeps cleared traversal controls valid across collection and snapshot load.
+///
+/// Footprint, measured on x86_64: the enum is 72 bytes, the four inline pairs
+/// 64 of them plus `len` and the tag; `HashSlots` is 56 and `SlotPolicy` 2.
+/// The inline pairs are not dead space in a map or pure-array table: storing
+/// `HashSlots` and `SlotPolicy` directly, with no inline variant, would round
+/// to 64 bytes with this layout, so dropping inline storage recovers one
+/// word of the table slot, not 64 bytes. The other one-word shapes (the tag
+/// folded into the tally's spare bits under a hand-tagged union, or
+/// `hash_migratable` moved into the map arm and rescanned from the inline
+/// pairs) were declined: the first trades an enum-enforced invariant for
+/// unsafe drop bookkeeping, the second turns the `== 0` gates on array
+/// appends into a scan, each for 8 bytes nobody has measured. The larger
+/// lever is the array window fields of `Table`, not this enum.
 #[derive(Debug)]
 enum TableStorage {
     /// Inline storage for small tables. Stores key-value pairs directly.
@@ -308,6 +321,11 @@ enum TableStorage {
     /// it costs no space in the larger inline variant.
     Map(HashSlots, SlotPolicy),
 }
+
+// The measured storage size the doc above reasons from; a change here moves
+// the table arena stride pinned in `object.rs`.
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(size_of::<TableStorage>() == 72);
 
 /// How a map keeps its hash slots. The default is every table's; the global
 /// table uses the other two settings (see `vm/global_env.rs`).
