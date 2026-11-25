@@ -1,10 +1,13 @@
 //! Lua 5.4-compatible `string.format`.
 
+use std::fmt::Write as _;
+
 use super::exact_integer_value;
 use super::string::append_bytes;
 use crate::cost_model::Charge;
 use crate::error::{ArgDetail, ArgError, Error, ErrorKind, LibraryError};
 use crate::limits::{MAX_FORMAT_FIELD_DIGITS, MAX_FORMAT_LEN};
+use crate::number_text::Sink;
 use crate::numeral::{exact_i64, parse_lua_numeral};
 use crate::vm::TostringRendering;
 use crate::{LuaType, Result, State};
@@ -72,7 +75,7 @@ pub(crate) fn format(state: &mut State) -> Result<u8> {
     };
     let template_len = template(state, coerced_template.as_deref())?.len();
     let argument_count = state.get_top();
-    let mut output = Vec::new();
+    let mut output = state.take_result_buffer();
     let mut argument = 1usize;
     // Charges (docs/budget.md, "String costs"): 1 per directive, admitted
     // after the directive parses and validates and before its argument is
@@ -122,8 +125,14 @@ pub(crate) fn format(state: &mut State) -> Result<u8> {
         state.charge(Charge::StringFormat, 1)?;
     }
 
+    // A template with no `%` is not returned as slot 1 itself: the result
+    // is interned after `set_top(0)`, so the allocation policy may collect
+    // with the template and the arguments unrooted, and a dynamic template
+    // can be swept and re-interned with a new `%p` identity. Returning
+    // slot 1 would keep it alive through that collection, a replay-visible
+    // change of what survives.
     state.set_top(0)?;
-    state.push_owned_bytes(output)?;
+    state.push_result_buffer(output)?;
     Ok(1)
 }
 
@@ -148,8 +157,10 @@ fn append_literal(out: &mut Vec<u8>, run: &[u8], template_len: usize) -> Result<
     append_bytes(out, run)
 }
 
-/// Upper bound on the output capacity `append_literal` reserves up front.
-const FORMAT_CAPACITY_HINT: usize = 4096;
+/// Upper bound on the output capacity `append_literal` reserves up front:
+/// the largest buffer the State keeps for reuse, so a short result's
+/// hinted buffer is recycled.
+const FORMAT_CAPACITY_HINT: usize = crate::vm::RESULT_BUFFER_CAPACITY;
 
 /// Admit a piece of `len` bytes into `out`: the aggregate cap check every
 /// directive makes after its rendering's own errors and before its bytes.
@@ -643,8 +654,61 @@ fn format_integer_parts(
     Ok(())
 }
 
-// Outlined: the decimal conversion's scratch stays off `format_argument`,
-// whose frame is live across a `%s` argument's `__tostring` call.
+/// Capacity of a [`FloatBody`]: the longest body is `%.99f` of the largest
+/// finite binary64, 309 integral digits, a point and 99 fractional digits.
+const FLOAT_BODY_CAPACITY: usize = 512;
+
+/// A float directive's body (no sign, no padding), or a `%q` number,
+/// rendered on the stack: no allocation per directive.
+struct FloatBody {
+    bytes: [u8; FLOAT_BODY_CAPACITY],
+    len: usize,
+}
+
+impl FloatBody {
+    fn new() -> Self {
+        Self {
+            bytes: [0; FLOAT_BODY_CAPACITY],
+            len: 0,
+        }
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+
+    fn make_ascii_uppercase(&mut self) {
+        self.bytes[..self.len].make_ascii_uppercase();
+    }
+}
+
+impl Sink for FloatBody {
+    fn put(&mut self, bytes: &[u8]) {
+        let end = self.len + bytes.len();
+        self.bytes[self.len..end].copy_from_slice(bytes);
+        self.len = end;
+    }
+
+    fn put_zeros(&mut self, count: usize) {
+        let end = self.len + count;
+        self.bytes[self.len..end].fill(b'0');
+        self.len = end;
+    }
+}
+
+impl std::fmt::Write for FloatBody {
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        let end = self.len + text.len();
+        let slot = self.bytes.get_mut(self.len..end).ok_or(std::fmt::Error)?;
+        slot.copy_from_slice(text.as_bytes());
+        self.len = end;
+        Ok(())
+    }
+}
+
+// Outlined: the body's stack buffer and the decimal conversion's scratch
+// stay off `format_argument`, whose frame is live across a `%s` argument's
+// `__tostring` call. Nothing here calls back into Lua.
 #[inline(never)]
 fn format_float(
     out: &mut Vec<u8>,
@@ -668,21 +732,26 @@ fn format_float(
         FloatKind::ScientificUpper | FloatKind::GeneralUpper | FloatKind::HexFloatUpper
     );
     let precision = usize::from(directive.precision.unwrap_or(6));
-    let mut body = match kind {
-        FloatKind::ScientificLower | FloatKind::ScientificUpper => {
-            format_scientific(magnitude, precision, uppercase, directive.flags.alternate)
+    let alternate = directive.flags.alternate;
+    // Every body is rendered lowercase; an uppercase conversion folds the
+    // whole body (digits, `0x`, `p`, `e`, `inf`, `nan`) once at the end.
+    let mut body = FloatBody::new();
+    if !magnitude.is_finite() {
+        special_float(&mut body, magnitude);
+    } else {
+        match kind {
+            FloatKind::ScientificLower | FloatKind::ScientificUpper => {
+                crate::number_text::scientific(&mut body, magnitude, precision, alternate);
+            }
+            FloatKind::Fixed => format_fixed(&mut body, magnitude, precision, alternate),
+            FloatKind::GeneralLower | FloatKind::GeneralUpper => {
+                crate::number_text::general(&mut body, magnitude, precision, alternate);
+            }
+            FloatKind::HexFloatLower | FloatKind::HexFloatUpper => {
+                format_hex_float(&mut body, magnitude, directive.precision, alternate);
+            }
         }
-        FloatKind::Fixed => format_fixed(magnitude, precision, directive.flags.alternate),
-        FloatKind::GeneralLower | FloatKind::GeneralUpper => {
-            format_general(magnitude, precision, uppercase, directive.flags.alternate)
-        }
-        FloatKind::HexFloatLower | FloatKind::HexFloatUpper => format_hex_float(
-            magnitude,
-            directive.precision,
-            uppercase,
-            directive.flags.alternate,
-        ),
-    };
+    }
     if uppercase {
         body.make_ascii_uppercase();
     }
@@ -696,56 +765,24 @@ fn format_float(
     } else {
         b""
     };
-    pad_float(out, sign, &body, directive)
+    pad_float(out, sign, body.as_bytes(), directive)
 }
 
-fn format_scientific(number: f64, precision: usize, uppercase: bool, alternate: bool) -> Vec<u8> {
-    if !number.is_finite() {
-        return special_float(number, uppercase);
-    }
-    crate::number_text::scientific(number, precision, alternate)
-}
-
-fn format_fixed(number: f64, precision: usize, alternate: bool) -> Vec<u8> {
-    if !number.is_finite() {
-        return special_float(number, false);
-    }
-    let mut text = format!("{number:.precision$}");
+/// `%f` body of a finite nonnegative magnitude.
+fn format_fixed(body: &mut FloatBody, magnitude: f64, precision: usize, alternate: bool) {
+    write!(body, "{magnitude:.precision$}")
+        .expect("a bounded-precision fixed conversion fits a float body");
     if alternate && precision == 0 {
-        text.push('.');
+        body.put(b".");
     }
-    text.into_bytes()
 }
 
-fn format_general(number: f64, precision: usize, uppercase: bool, alternate: bool) -> Vec<u8> {
-    if !number.is_finite() {
-        return special_float(number, uppercase);
-    }
-    crate::number_text::general(number, precision, alternate)
+fn special_float(body: &mut FloatBody, magnitude: f64) {
+    body.put(if magnitude.is_nan() { b"nan" } else { b"inf" });
 }
 
-fn special_float(number: f64, uppercase: bool) -> Vec<u8> {
-    let mut bytes = if number.is_nan() {
-        b"nan".to_vec()
-    } else {
-        b"inf".to_vec()
-    };
-    if uppercase {
-        bytes.make_ascii_uppercase();
-    }
-    bytes
-}
-
-fn format_hex_float(
-    number: f64,
-    precision: Option<u8>,
-    uppercase: bool,
-    alternate: bool,
-) -> Vec<u8> {
-    if !number.is_finite() {
-        return special_float(number, uppercase);
-    }
-
+/// `%a` body of a finite nonnegative magnitude, lowercase.
+fn format_hex_float(body: &mut FloatBody, number: f64, precision: Option<u8>, alternate: bool) {
     let bits = number.to_bits();
     let exponent_bits =
         i32::try_from((bits >> 52) & 0x7ff).expect("the f64 exponent field fits in i32");
@@ -761,7 +798,8 @@ fn format_hex_float(
         (1u128 << 52) | u128::from(fraction)
     };
 
-    let (leading, fraction_text) = match precision {
+    // The fraction as `digits` hex digits of `value`, then `zeros` zeros.
+    let (leading, value, digits, zeros) = match precision {
         Some(requested) if requested < 13 => {
             let digits = usize::from(requested);
             let dropped_bits = 52 - digits * 4;
@@ -781,54 +819,37 @@ fn format_hex_float(
             } else {
                 (1u128 << (digits * 4)) - 1
             };
-            let fraction = rounded & fraction_mask;
-            let text = if digits == 0 {
-                String::new()
-            } else if uppercase {
-                format!("{fraction:0digits$X}")
-            } else {
-                format!("{fraction:0digits$x}")
-            };
-            (leading, text)
+            (leading, rounded & fraction_mask, digits, 0)
         }
         Some(requested) => {
-            let digits = usize::from(requested);
             let leading =
                 u8::try_from(significand >> 52).expect("hexadecimal leading digit fits in u8");
             let fraction = significand & ((1u128 << 52) - 1);
-            let mut text = if uppercase {
-                format!("{fraction:013X}")
-            } else {
-                format!("{fraction:013x}")
-            };
-            text.extend(std::iter::repeat_n('0', digits - 13));
-            (leading, text)
+            (leading, fraction, 13, usize::from(requested) - 13)
         }
         None => {
             let leading =
                 u8::try_from(significand >> 52).expect("hexadecimal leading digit fits in u8");
-            let fraction = significand & ((1u128 << 52) - 1);
-            let mut text = if uppercase {
-                format!("{fraction:013X}")
-            } else {
-                format!("{fraction:013x}")
-            };
+            let mut fraction = significand & ((1u128 << 52) - 1);
+            let mut digits = 13;
             // bounded: at most the 13 hexadecimal fraction digits.
-            while text.ends_with('0') {
-                text.pop();
+            while digits > 0 && fraction & 0xf == 0 {
+                fraction >>= 4;
+                digits -= 1;
             }
-            (leading, text)
+            (leading, fraction, digits, 0)
         }
     };
 
-    let prefix = if uppercase { "0X" } else { "0x" };
-    let marker = if uppercase { 'P' } else { 'p' };
-    let dot = if fraction_text.is_empty() && !alternate {
-        ""
-    } else {
-        "."
-    };
-    format!("{prefix}{leading:x}{dot}{fraction_text}{marker}{exponent:+}").into_bytes()
+    write!(body, "0x{leading:x}").expect("a hex float fits a float body");
+    if digits > 0 || alternate {
+        body.put(b".");
+    }
+    if digits > 0 {
+        write!(body, "{value:0digits$x}").expect("a hex float fits a float body");
+    }
+    body.put_zeros(zeros);
+    write!(body, "p{exponent:+}").expect("a hex float fits a float body");
 }
 
 fn pad_float(out: &mut Vec<u8>, sign: &[u8], body: &[u8], directive: &Directive) -> Result<()> {
@@ -875,40 +896,17 @@ fn pad_bytes(out: &mut Vec<u8>, bytes: &[u8], width: Option<u8>, left: bool) -> 
 }
 
 fn quote_argument(state: &mut State, idx: isize, argument: usize, out: &mut Vec<u8>) -> Result<()> {
-    let bytes = match state.typ(idx) {
+    let bytes: &[u8] = match state.typ(idx) {
         LuaType::String => return quote_string(out, state.to_bytes(idx)?),
-        LuaType::Number => {
-            let number = state.to_number(idx)?;
-            if number.is_nan() {
-                b"(0/0)".to_vec()
-            } else if number == f64::INFINITY {
-                b"1e9999".to_vec()
-            } else if number == f64::NEG_INFINITY {
-                b"-1e9999".to_vec()
-            } else if let Some(integer) =
-                exact_i64(number).filter(|_| number.to_bits() != (-0.0_f64).to_bits())
-            {
-                // With no integer subtype, use decimal for all integral
-                // values in i64 range. Lua 5.4 uses this form for its integer
-                // subtype only. `-0.0` keeps the hex form so the literal
-                // round-trips its sign.
-                integer.to_string().into_bytes()
-            } else {
-                let mut bytes = format_hex_float(number.abs(), None, false, false);
-                if number.is_sign_negative() {
-                    bytes.insert(0, b'-');
-                }
-                bytes
-            }
-        }
+        LuaType::Number => return quote_number(out, state.to_number(idx)?),
         LuaType::Boolean => {
             if state.to_boolean(idx) {
-                b"true".to_vec()
+                b"true"
             } else {
-                b"false".to_vec()
+                b"false"
             }
         }
-        LuaType::Nil => b"nil".to_vec(),
+        LuaType::Nil => b"nil",
         LuaType::Table | LuaType::Function => {
             return Err(format_arg_error(
                 state,
@@ -917,7 +915,39 @@ fn quote_argument(state: &mut State, idx: isize, argument: usize, out: &mut Vec<
             ));
         }
     };
-    append_bytes(out, &bytes)
+    append_bytes(out, bytes)
+}
+
+/// `%q` of a number, rendered on the stack. Outlined like `format_float`,
+/// so its buffer stays off `format_argument`'s frame.
+#[inline(never)]
+fn quote_number(out: &mut Vec<u8>, number: f64) -> Result<()> {
+    append_bytes(out, quoted_number(number).as_bytes())
+}
+
+/// The literal `%q` writes for a number.
+fn quoted_number(number: f64) -> FloatBody {
+    let mut text = FloatBody::new();
+    if number.is_nan() {
+        text.put(b"(0/0)");
+    } else if number == f64::INFINITY {
+        text.put(b"1e9999");
+    } else if number == f64::NEG_INFINITY {
+        text.put(b"-1e9999");
+    } else if let Some(integer) =
+        exact_i64(number).filter(|_| number.to_bits() != (-0.0_f64).to_bits())
+    {
+        // With no integer subtype, use decimal for all integral values in
+        // i64 range. Lua 5.4 uses this form for its integer subtype only.
+        // `-0.0` keeps the hex form so the literal round-trips its sign.
+        write!(text, "{integer}").expect("an i64 fits a float body");
+    } else {
+        if number.is_sign_negative() {
+            text.put(b"-");
+        }
+        format_hex_float(&mut text, number.abs(), None, false);
+    }
+    text
 }
 
 /// Quote `bytes` onto `out`. The quoting's own size checks measure the
@@ -970,11 +1000,12 @@ fn quote_string(out: &mut Vec<u8>, bytes: &[u8]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::format_hex_float;
+    use super::{FloatBody, format_hex_float};
+    use crate::number_text::Sink;
     use crate::numeral::parse_lua_numeral;
 
     #[test]
-    fn find_percent_matches_a_bytewise_scan() {
+    fn percent_scan_matches_a_bytewise_scan() {
         // Every length across two words plus a tail, with `%` at each
         // position, alone and after a byte just above and below it, and next
         // to high bytes that an inexact zero-byte test misreads.
@@ -1058,14 +1089,15 @@ mod tests {
                     }
 
                     for precision in 0..=13 {
-                        let mut formatted =
-                            format_hex_float(number.abs(), Some(precision), false, false);
+                        let mut body = FloatBody::new();
                         if number.is_sign_negative() {
-                            formatted.insert(0, b'-');
+                            body.put(b"-");
                         }
+                        format_hex_float(&mut body, number.abs(), Some(precision), false);
+                        let formatted = body.as_bytes();
                         let text =
-                            std::str::from_utf8(&formatted).expect("hex float output is ASCII");
-                        let parsed = parse_lua_numeral(&formatted)
+                            std::str::from_utf8(formatted).expect("hex float output is ASCII");
+                        let parsed = parse_lua_numeral(formatted)
                             .expect("formatted hex floats are valid Lua numerals");
                         let rounded_bits = rounded_hex_bits(number, precision);
                         assert_eq!(

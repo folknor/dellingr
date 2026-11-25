@@ -332,8 +332,10 @@ fn append_subject_range(
 /// The growing producers (`gsub`, `string.format`, `table.concat`) append
 /// into a plain `Vec` on purpose: a small-buffer builder that tests inline
 /// or heap storage on every append was measured 3 to 15 percent slower on
-/// long-result workloads to save one allocation on a short result. Short
-/// storage is decided once, where a producer knows its length up front.
+/// long-result workloads to save one allocation on a short result. Their
+/// storage is decided once, at the push (`State::push_result_buffer`), and
+/// the `Vec` is the State's reusable result buffer, so a short result
+/// allocates nothing in steady state.
 pub(super) fn append_bytes(out: &mut Vec<u8>, bytes: &[u8]) -> Result<()> {
     let next = crate::limits::checked_string_growth(out.len(), bytes.len())?;
     out.reserve(next - out.len());
@@ -519,12 +521,13 @@ fn gsub_with_string(
     max_replacements: Option<usize>,
 ) -> Result<u8> {
     let repl = state.string_arg(3)?;
+    let result = state.take_result_buffer();
     let scanned = if string_arg_len(state, pattern)? == 0 {
         state.with_string_arg_slices(
             [s, &repl],
             Charge::StringGsub,
             |[subject, repl], _, interrupt| {
-                gsub_empty_with_string(subject, repl, interrupt, max_replacements)
+                gsub_empty_with_string(result, subject, repl, interrupt, max_replacements)
             },
         )?
     } else if crate::patterns::is_plain(state.string_arg_bytes(pattern)?) {
@@ -533,6 +536,7 @@ fn gsub_with_string(
             Charge::StringGsub,
             |[subject, needle, repl], mut meter, interrupt| {
                 gsub_plain_with_string(
+                    result,
                     subject,
                     needle,
                     repl,
@@ -549,6 +553,7 @@ fn gsub_with_string(
             Charge::StringGsub,
             |[subject, repl], mut meter, interrupt| {
                 gsub_lua_with_string(
+                    result,
                     &mut matcher,
                     subject,
                     repl,
@@ -566,12 +571,13 @@ fn gsub_with_string(
 /// The empty pattern: a replacement at every position, which examines no
 /// subject byte and so charges nothing beyond the call.
 fn gsub_empty_with_string(
+    mut result: Vec<u8>,
     subject: &[u8],
     repl: &[u8],
     interrupt: &AtomicBool,
     max_replacements: Option<usize>,
 ) -> std::result::Result<GsubScan, GsubStop> {
-    let mut result = Vec::with_capacity(subject.len());
+    result.reserve(subject.len());
     let mut count = 0usize;
     for i in 0..=subject.len() {
         // A safepoint per position: no matcher runs here, and a long
@@ -600,6 +606,7 @@ fn gsub_empty_with_string(
 /// A plain pattern: `scan_subslice` per match, charged and polled per
 /// candidate exactly as `find_subslice` does.
 fn gsub_plain_with_string(
+    mut result: Vec<u8>,
     subject: &[u8],
     needle: &[u8],
     repl: &[u8],
@@ -607,7 +614,6 @@ fn gsub_plain_with_string(
     interrupt: &AtomicBool,
     max_replacements: Option<usize>,
 ) -> std::result::Result<GsubScan, GsubStop> {
-    let mut result = Vec::new();
     let mut pos = 0usize;
     let mut count = 0usize;
     // safepoint: every iteration searches with `scan_subslice`, which polls
@@ -647,6 +653,7 @@ fn gsub_plain_with_string(
 /// `gsub_lua_pattern`; captures are read off the matcher as the
 /// replacement names them.
 fn gsub_lua_with_string(
+    mut result: Vec<u8>,
     matcher: &mut LuaPattern,
     subject: &[u8],
     repl: &[u8],
@@ -655,7 +662,6 @@ fn gsub_lua_with_string(
     max_replacements: Option<usize>,
 ) -> std::result::Result<GsubScan, GsubStop> {
     let s_len = subject.len();
-    let mut result = Vec::new();
     let mut pos = 0usize;
     let mut copied = 0usize;
     let mut count = 0usize;
@@ -1136,7 +1142,8 @@ fn gsub_empty_pattern(
     max_replacements: Option<usize>,
 ) -> Result<u8> {
     let s_len = string_arg_len(state, s)?;
-    let mut result = Vec::with_capacity(s_len);
+    let mut result = state.take_result_buffer();
+    result.reserve(s_len);
     let mut count = 0usize;
     for i in 0..=s_len {
         // A safepoint per position: no matcher runs here, and a long
@@ -1156,7 +1163,7 @@ fn gsub_empty_pattern(
     }
 
     state.set_top(0)?;
-    state.push_owned_bytes(result)?;
+    state.push_result_buffer(result)?;
     state.push_number(count as f64)?;
     Ok(2)
 }
@@ -1172,7 +1179,7 @@ fn gsub_plain_pattern(
     let s_len = string_arg_len(state, s)?;
     let pattern_len = string_arg_len(state, pattern)?;
     // Sized at the first match: a call with no match returns the subject.
-    let mut result = Vec::new();
+    let mut result = state.take_result_buffer();
     let mut pos = 0usize;
     let mut count = 0usize;
 
@@ -1221,11 +1228,12 @@ fn finish_gsub(
     if count == 0 {
         state.set_top(subject_floor(s))?;
         state.push_string_arg(s)?;
+        state.return_result_buffer(result);
     } else {
         let s_len = string_arg_len(state, s)?;
         append_subject_range(state, &mut result, s, copied..s_len)?;
         state.set_top(0)?;
-        state.push_owned_bytes(result)?;
+        state.push_result_buffer(result)?;
     }
     state.push_number(count as f64)?;
     Ok(2)
@@ -1242,7 +1250,7 @@ fn gsub_lua_pattern(
     let mut matcher = pattern_matcher(state, pattern)?;
     let s_len = string_arg_len(state, s)?;
     // Sized at the first match: a call with no match returns the subject.
-    let mut result = Vec::new();
+    let mut result = state.take_result_buffer();
     let mut captures = Vec::new();
     let mut pos = 0usize;
     // The subject before `copied` is in `result`; the bytes from `copied` to

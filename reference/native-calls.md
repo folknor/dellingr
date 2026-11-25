@@ -227,16 +227,17 @@ marker, which is the quickest way to see what a change touched.
 The recurring native stack of each scenario's cycle, as printed by the
 on-demand probe `brokkr test native_bytes_per_level`, which covers dev and
 release through the sweeps configured in `brokkr.toml`. Measured on the
-commit that selects the running closure's capture slice once per
-activation in `Frame::run_frame`, on top of a1b9172, on bygg (x86-64 Linux)
-with `rustc 1.102.0-nightly (65ce8611f 2026-11-18)` and that host's global
-Cargo configuration. Against a1b9172 measured the same day, that change
-moved every release row up 16 bytes (the slice stays live across the
-dispatch loop) and every dev row down 32; native-call coverage did not
-move. Release is Cargo's default release profile
+commit that gives the growing string producers a reusable State result
+buffer and renders `string.format` float bodies on the stack, on top of
+2f78fa8, on bygg (x86-64 Linux) with
+`rustc 1.102.0-nightly (65ce8611f 2026-11-18)` and that host's global
+Cargo configuration. Against 2f78fa8, that change moved release `format`
+down 48 bytes (the per-directive body `Vec` left `format_float`'s
+caller), a few dev rows and release-snapshot rows by 16 bytes either way
+(layout), and nothing else. Release is Cargo's default release profile
 (the repository sets no overrides). Dev's default and snapshot builds
 agree in every row; the release snapshot build differs from release
-default in the `error_tostring` and `gsub_pattern_*` rows.
+default in the `host_invoke` and `gsub_pattern_*` rows.
 
 These are compiler-dependent measurements of one build, not limits and not
 assertions of headroom for another build; a different compiler version or
@@ -271,12 +272,12 @@ separately.
 | `host_call` | 11920 | 960 | 960 |
 | `host_anchor` | 12512 | 1136 | 1136 |
 | `host_invoke` | 12480 | 1024 | 992 |
-| `host_tostring_bytes` | 13168 | 1344 | 1344 |
-| `host_to_string_with_meta` | 13344 | 1392 | 1392 |
+| `host_tostring_bytes` | 13152 | 1344 | 1344 |
+| `host_to_string_with_meta` | 13328 | 1392 | 1392 |
 | `tostring` | 12304 | 1136 | 1136 |
 | `print` | 12800 | 1344 | 1344 |
-| `format` | 13664 | 1424 | 1424 |
-| `error_tostring` | 12992 | 1440 | 1456 |
+| `format` | 13664 | 1376 | 1376 |
+| `error_tostring` | 12992 | 1440 | 1440 |
 | `sort_comparator` | 13952 | 1472 | 1472 |
 | `sort_comparator_right` | 13952 | 1472 | 1472 |
 | `sort_comparator_sortdown` | 13952 | 1472 | 1472 |
@@ -302,13 +303,13 @@ separately.
 | `move_write` | 12608 | 1104 | 1104 |
 | `unpack_length` | 12080 | 1088 | 1088 |
 | `unpack_read` | 12368 | 1088 | 1088 |
-| `gsub_empty_function` | 13152 | 1600 | 1600 |
+| `gsub_empty_function` | 13168 | 1600 | 1600 |
 | `gsub_plain_function` | 13008 | 1568 | 1568 |
-| `gsub_pattern_function` | 16416 | 3232 | 3200 |
-| `gsub_pattern_captures` | 16416 | 3232 | 3200 |
-| `gsub_empty_table` | 13280 | 1520 | 1520 |
+| `gsub_pattern_function` | 16416 | 3232 | 3216 |
+| `gsub_pattern_captures` | 16416 | 3232 | 3216 |
+| `gsub_empty_table` | 13296 | 1520 | 1520 |
 | `gsub_plain_table` | 13136 | 1488 | 1488 |
-| `gsub_pattern_table` | 16544 | 3152 | 3120 |
+| `gsub_pattern_table` | 16544 | 3152 | 3136 |
 | `tfor_lua` | 10608 | 672 | 672 |
 | `tfor_ipairs` | 12464 | 1072 | 1072 |
 | `tfor_host_iterator` | 12320 | 960 | 960 |

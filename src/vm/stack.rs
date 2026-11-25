@@ -9,6 +9,10 @@ use super::lua_val::Val;
 use super::{ErrorKind, MAX_STACK_SIZE, Result, RustFnHandle, RustFnId, State};
 use crate::error::InternalFault;
 
+/// The largest result-buffer capacity `return_result_buffer` keeps:
+/// `string.format`'s up-front literal hint, so its buffers recycle.
+pub(crate) const RESULT_BUFFER_CAPACITY: usize = 4096;
+
 impl State {
     /// Returns the index of the top element in the stack. Because indices start
     /// at 1, this result is equal to the number of elements in the stack (and
@@ -163,6 +167,42 @@ impl State {
         let val = self.alloc_string_owned(bytes)?;
         self.push_unchecked(val);
         Ok(())
+    }
+
+    /// The spare result buffer for a growing producer (`gsub`,
+    /// `string.format`, `table.concat`), empty, or a new one when it is
+    /// out (a nested producer, or one whose last result was long). The
+    /// producer appends to it as a plain `Vec`, with no storage test per
+    /// append, and hands it to `push_result_buffer`. An error drops it.
+    pub(crate) fn take_result_buffer(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.result_buffer)
+    }
+
+    /// Push a producer's finished result, deciding its storage once. A
+    /// short result is interned borrowed (an inline copy, no allocation)
+    /// and the buffer is kept for the next producer; a long one is adopted
+    /// as `push_owned_bytes` does. Both pushes share the refusal order,
+    /// the collection point and the root set, so nothing replay-visible
+    /// depends on which one ran.
+    pub(crate) fn push_result_buffer(&mut self, buffer: Vec<u8>) -> Result<()> {
+        if buffer.len() <= super::object::INLINE_STRING_BYTES {
+            self.push_bytes(&buffer)?;
+            self.return_result_buffer(buffer);
+            Ok(())
+        } else {
+            self.push_owned_bytes(buffer)
+        }
+    }
+
+    /// Give back a result buffer that produced no string. Kept only when
+    /// the spare is out and its capacity is small: a `gsub` sized to a
+    /// 16 MiB subject must not stay pinned outside the heap's accounting.
+    /// A nested producer's buffer already in place wins.
+    pub(crate) fn return_result_buffer(&mut self, mut buffer: Vec<u8>) {
+        if self.result_buffer.capacity() == 0 && buffer.capacity() <= RESULT_BUFFER_CAPACITY {
+            buffer.clear();
+            self.result_buffer = buffer;
+        }
     }
 
     /// Pushes a byte range of a string already on the stack as a Lua string,

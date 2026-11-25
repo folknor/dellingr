@@ -186,6 +186,10 @@ xxhash = "c7d3a61dd5dc7b986c626438d69a650c"
 file = "bench/format_literals.lua"
 xxhash = "7eae0d9472643385ecdd9d8d9d1bf6b3"
 
+[data.workloads.bench.short_results]
+file = "bench/short_results.lua"
+xxhash = "b1454e1c429e2b2597e920c1e218aa98"
+
 [data.workloads.bench.same_obj_read]
 file = "bench/same_obj_read.lua"
 xxhash = "cdb6bfdf21a72c08d4b1d683d7d85d07"
@@ -458,6 +462,10 @@ xxhash = "96ec84440b1c475ed994e90e25e7011c"
 [data.workloads.hotpath.format_literals]
 file = "examples/strings/format_literals.lua"
 xxhash = "ab951754e92c34654003b4893b4161aa"
+
+[data.workloads.hotpath.short_results]
+file = "examples/strings/short_results.lua"
+xxhash = "eedc0c13830e87054e95a009597a2441"
 
 [data.workloads.hotpath.same_obj_read]
 file = "examples/fields/same_obj_read.lua"

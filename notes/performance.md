@@ -221,14 +221,17 @@ them:
   was measured there and refused for the field caches).
 - `optimizations.md` "Compile-time table-shape prediction": codegen hunter's
   constructor plans.
-- `optimizations.md` "Short results of growing producers still allocate":
-  the heap hunter's checked builder residue (the decide-once producers
-  landed; a per-append builder was measured and rejected).
+- `optimizations.md` "Growing-producer residue after the reusable result
+  buffer": the heap hunter's checked builder residue (decide-once producers
+  and the reusable result buffer landed; a per-append builder was measured
+  and rejected).
 - `optimizations.md` "gmatch iterator residue after the typed iterator":
   the failed-search exhaustion proposal (a cost-model decision), the
   unexplained dev frame growth, and uncached number patterns (the native
   iterator and its held program landed).
-- `optimizations.md` "`string.format` cached plan": strings hunter's cached format plan, deferred after the scan and capacity changes.
+- `optimizations.md` "`string.format` cached plan": strings hunter's
+  cached format plan, deferred after the scan and capacity changes and
+  refused again once the output buffer became reusable.
 - `todo.md` "Sparse storage for the array part's stragglers": table hunter's
   numeric storage separated from the logical array boundary.
 - `optimizations.md` "Rust-to-Lua call forms": host hunter's note that the

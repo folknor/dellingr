@@ -55,8 +55,8 @@ impl NumberText {
     }
 }
 
-/// Where rendered bytes go: inline text or a growing byte buffer.
-trait Sink {
+/// Where rendered bytes go: inline text or a bounded stack buffer.
+pub(crate) trait Sink {
     fn put(&mut self, bytes: &[u8]);
     fn put_zeros(&mut self, count: usize);
 }
@@ -84,16 +84,6 @@ impl std::fmt::Write for NumberText {
         }
         self.put(text.as_bytes());
         Ok(())
-    }
-}
-
-impl Sink for Vec<u8> {
-    fn put(&mut self, bytes: &[u8]) {
-        self.extend_from_slice(bytes);
-    }
-
-    fn put_zeros(&mut self, count: usize) {
-        self.resize(self.len() + count, b'0');
     }
 }
 
@@ -292,23 +282,19 @@ fn write_general(sink: &mut impl Sink, magnitude: f64, precision: usize, alterna
 
 /// `%g`/`%G` body (no sign, no padding) of a finite nonnegative magnitude,
 /// lowercase.
-pub(crate) fn general(magnitude: f64, precision: usize, alternate: bool) -> Vec<u8> {
-    let mut out = Vec::new();
-    write_general(&mut out, magnitude, precision, alternate);
-    out
+pub(crate) fn general(out: &mut impl Sink, magnitude: f64, precision: usize, alternate: bool) {
+    write_general(out, magnitude, precision, alternate);
 }
 
 /// `%e`/`%E` body (no sign, no padding) of a finite nonnegative magnitude,
 /// lowercase.
-pub(crate) fn scientific(magnitude: f64, precision: usize, alternate: bool) -> Vec<u8> {
+pub(crate) fn scientific(out: &mut impl Sink, magnitude: f64, precision: usize, alternate: bool) {
     let decimal = decimal(magnitude, precision + 1);
     let digits = decimal.digits();
-    let mut out = Vec::with_capacity(precision + 7);
     out.put(&digits[..1]);
     if precision > 0 || alternate {
         out.put(b".");
     }
     out.put(&digits[1..]);
-    put_exponent(&mut out, decimal.exponent);
-    out
+    put_exponent(out, decimal.exponent);
 }

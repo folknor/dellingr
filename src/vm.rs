@@ -54,6 +54,7 @@ pub use save_state::{
     SavedReference, SnapshotError, SnapshotField, TableCorruption, TableLoadLocation,
     TableRestoreFailure,
 };
+pub(crate) use stack::RESULT_BUFFER_CAPACITY;
 pub(crate) use string_arg::StringArg;
 pub(crate) use table_ops::{ConcatRead, TostringRendering};
 
@@ -348,6 +349,12 @@ pub struct State<Tail: ?Sized = [()]> {
     /// no VM values (frames own only `Arc`s), so it is no GC root, and it is
     /// capacity rather than state, so a snapshot ignores it.
     pub(in crate::vm) frame_stacks: Vec<Vec<frame::Frame>>,
+    /// A spare result buffer for the growing string producers (`gsub`,
+    /// `string.format`, `table.concat`; see `State::take_result_buffer`).
+    /// Always empty, capacity at most `RESULT_BUFFER_CAPACITY`. Bytes only,
+    /// so it is no GC root, and capacity rather than state, so a snapshot
+    /// ignores it.
+    pub(in crate::vm) result_buffer: Vec<u8>,
     /// Host callbacks for print output, error handling, etc.
     pub(super) callbacks: Box<dyn HostCallbacks>,
     /// User-defined data that RustFuncs can access.
@@ -600,6 +607,7 @@ impl State {
             pattern_compilations: 0,
             poisoned: false,
             frame_stacks: Vec::new(),
+            result_buffer: Vec::new(),
             callbacks,
             user_data: None,
             #[cfg(feature = "fault-injection")]

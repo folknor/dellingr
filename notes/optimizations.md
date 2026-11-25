@@ -792,23 +792,24 @@ Why deferred: it fits the envelope with room to spare and nothing is
 failing; this buys margin, not correctness. Signal: the envelope tests
 tightening, or a reason to raise `MAX_NATIVE_CALL_DEPTH`.
 
-### Short results of growing producers still allocate (2026-11-25)
+### Growing-producer residue after the reusable result buffer (2026-11-25)
 
-`..`, `upper`/`lower`/`reverse`, number `sub`, number `tostring` and the
-`table.concat` separator build short results in stack storage
-(`reference/performance.md`, "Short producer results built in stack
-storage"). `string.format`, `gsub` and the `table.concat` result still
-build in a `Vec`, so their short results pay one allocate-and-free. A
-per-append small-buffer builder for them was measured and rejected (a
-storage test on every append cost 3 to 15 percent on long-result
-workloads). Open, unmeasured: a decide-once shape for them (for format,
-the template length is a bound only when there are no directives), and
-the format float-body scratch `Vec`s (`number_text::general`/`scientific`,
-`format_fixed`, `special_float`). Also open: `format_literals` measured
-507 to 534 ms across the change though its hot path runs none of the
-changed producers; read as layout, unconfirmed (a five-launch
-same-binary control was not run). `table.concat`'s separator copy grew the
-release `concat_*` native frames by 48 bytes.
+`string.format`, `gsub` and `table.concat` now build in the State's
+reusable result buffer and decide storage once at the push
+(`reference/performance.md`, "Growing producers reuse one result
+buffer"). Left open:
+
+- `format_literals` is slower across that change (median 506 to 530 ms,
+  0 of 5 faster), and was slower by the same amount across the stack-storage
+  change before it, although its executed path is unchanged: allocation and
+  per-function call counts on its hotpath file are identical in both arms.
+  Read as layout, unconfirmed (no five-launch same-binary control run).
+  `patterns` (+0.9%, 1 of 5 faster) and `mixed` (+0.5%, 0 of 5) are inside
+  the floor; `mixed`'s counts are identical too.
+- A long result that hits an existing string drops its buffer; the
+  post-policy probe could hand the unused `Vec` back for reuse (within the
+  same capacity cap). A pre-policy hit shortcut would move the collection
+  point and is not an option. Unmeasured.
 
 ### gmatch iterator residue after the typed iterator
 
@@ -1036,7 +1037,11 @@ path is recorded yet; nothing here is a candidate until one is.
   and a bounded capacity hint on the first literal run cut about 25% of the
   cycles in the same profile, and `format`'s
   own time had no hot spot left (wall, bygg, two matched `--commit` pairs in
-  both orders against b85864e: 646, 643 to 524, 520 ms). The scan now uses `memchr`. A plan cache keyed by template
+  both orders against b85864e: 646, 643 to 524, 520 ms; measured with the
+  word scan, before `memchr` replaced it unmeasured). Re-argued and refused
+  again on 2026-11-25: a plan cannot size `%s` output before its
+  `__tostring` runs, so it cannot remove the output buffer, and that buffer
+  is now the State's reusable result buffer anyway. A plan cache keyed by template
   identity would now save only the parse and the per-run scans. Reopen only if a
   warm, directive-dense workload with cheap arguments profiles the parse as
   meaningful; `--hotpath kernel` cannot answer it (`format` and
@@ -1049,6 +1054,5 @@ path is recorded yet; nothing here is a candidate until one is.
   the precedent), must survive nested `__tostring` calls that can evict it,
   and must keep today's event order (missing argument before parse, parse
   and validation before the charge, charge before rendering, a poll per
-  `%`). Residual allocations: float bodies from `number_text`/`format!`,
-  `%s` of a non-string without a string-returning handler
-  (`TostringRendering::Bytes`), and `%q` of a non-string.
+  `%`). Residual allocation: `%s` of a non-string without a
+  string-returning handler (`TostringRendering::Bytes`).

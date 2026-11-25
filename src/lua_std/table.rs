@@ -257,7 +257,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         check_sequence_keys(state, i, j, LibraryFunction::Concat)?;
         state.charge(Charge::TableConcat, 1)?;
 
-        let mut result = Vec::new();
+        let mut result = state.take_result_buffer();
         for idx in i..=j {
             // The range is the script's number, not storage it allocated.
             state.poll_interrupt()?;
@@ -291,7 +291,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
         }
 
         state.set_top(0)?;
-        state.push_owned_bytes(result)?;
+        state.push_result_buffer(result)?;
         Ok(1)
     }),
     // table.move(a1, f, e, t [, a2]) - costs one per copied element

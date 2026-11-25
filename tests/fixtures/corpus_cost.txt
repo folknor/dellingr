@@ -93,6 +93,7 @@ examples/strings/mixed.lua|245208e07e6a7073a04075ee83f09964|844817
 examples/strings/number_coercion.lua|3959b09b7302fb5e72aee9a6fe1ba422|25
 examples/strings/pattern_reference.lua|bd56d479fdcaf3af1d8455c608523873|914
 examples/strings/patterns.lua|b30f9fbcb791eadddf21de1e129e1e79|2562208
+examples/strings/short_results.lua|eedc0c13830e87054e95a009597a2441|41803
 examples/strings/string_format_reference.lua|de69e99a173fc6889a36406f92ea0aa8|28
 examples/table_multivalue.lua|dd1ba28c5bb5cd48a49a26ef497316aa|23
 examples/table_multivalue_nested.lua|189803fa5085a686e79cc8a060e57922|17

@@ -207,6 +207,32 @@ back on a `Vec`. A per-append storage test taxes every append of a long
 result to save one allocation on a short one, so storage is decided once,
 where the length is known.
 
+## Growing producers reuse one result buffer, 2026-11-25
+
+`string.format`, `gsub` and `table.concat` take the State's spare result
+buffer (`State::take_result_buffer`), append to it as a plain `Vec`, and
+decide storage once at the push: a result of at most 22 bytes is interned
+by slice (inline, no allocation) and the buffer goes back for the next
+producer, a longer one is adopted as before. The spare is kept only up to
+4096 bytes of capacity (format's literal hint), so a `gsub` sized to a
+large subject is not pinned outside the heap's accounting. Float
+directive bodies and `%q` numbers render into a 512-byte stack buffer in
+outlined leaves instead of a `Vec` each. Release wall, five matched
+`--commit` rounds of 2f78fa8 against the change on bygg, medians: the new
+`short_results` probe 852 to 765 ms (5 of 5 faster), `fill` 1537 to 1470
+(5 of 5), `gsub_replace` 394 to 391 (3 of 5), `mixed` 2211 to 2218 (0 of
+5), `patterns` 769 to 776 (1 of 5), `format_literals` 506 to 530 (0 of
+5). `format_literals` and `mixed` have identical allocation and call
+counts in both arms (their results are long), so their moves are read as
+layout. Release `format` native frames fell 48 bytes
+([native-calls.md](native-calls.md)).
+
+Not done: returning a percent-free template as slot 1 itself. The result
+is interned after `set_top(0)`, so the allocation policy can collect with
+the template unrooted; returning slot 1 would keep a dynamic template
+alive through that collection and preserve a `%p` identity the current
+path can lose, which is replay-visible.
+
 ## gmatch iterators hold their compiled program, 2026-11-24
 
 A gmatch step used to resolve its program from the pattern cache on every

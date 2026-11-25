@@ -300,6 +300,7 @@ impl State {
                 pattern_compilations: _,
             poisoned: _,
             frame_stacks: _,
+            result_buffer: _,
             callbacks: _,
             user_data: _,
             rng: _,
@@ -348,9 +349,10 @@ impl State {
             #[cfg(test)]
                 pattern_compilations: _,
             poisoned: _,
-            frame_stacks: _, // Frames own only Arcs; their chunks are in call_stack.
-            callbacks: _,    // Host-owned; the host cannot hold a Val.
-            user_data: _,    // Host-owned; the host cannot hold a Val.
+            frame_stacks: _,  // Frames own only Arcs; their chunks are in call_stack.
+            result_buffer: _, // Bytes only.
+            callbacks: _,     // Host-owned; the host cannot hold a Val.
+            user_data: _,     // Host-owned; the host cannot hold a Val.
             rng: _,
             registry,
             format_pointer_ids: _, // Weak: pruned by for_each_gc_cleanup after sweep.
@@ -424,6 +426,7 @@ impl State {
                 pattern_compilations: _,
             poisoned: _, // Checked separately, before any rest-state question.
             frame_stacks,
+            result_buffer: _, // Persistent capacity, always empty.
             callbacks: _,
             user_data: _,
             rng: _,

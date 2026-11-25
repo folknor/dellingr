@@ -100,6 +100,7 @@ examples! {
     strings_number_coercion: "examples/strings/number_coercion.lua",
     strings_pattern_reference: "examples/strings/pattern_reference.lua",
     strings_patterns: "examples/strings/patterns.lua",
+    strings_short_results: "examples/strings/short_results.lua",
     strings_string_format_reference: "examples/strings/string_format_reference.lua",
     table_multivalue: "examples/table_multivalue.lua",
     table_multivalue_nested: "examples/table_multivalue_nested.lua",
