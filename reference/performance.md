@@ -17,6 +17,60 @@ figures are in reference/native-calls.md ("Current native bytes per level");
 the history of the largest cycle across both profiles is under "Native stack
 frames and cycles" below.
 
+## Code-alignment recipe sweeps, 2026-11-25
+
+`brokkr bench layout` is `wall` built under one of the `data.layouts`
+recipes in `brokkr.d/bench.toml`: `none` (the plain release build), `f5` and
+`f6` (`-align-all-functions` 5 and 6, 32- and 64-byte function entries),
+`l64` (`-align-loops=64`) and `f6l64` (both). `--commit A --commit B
+--layout all` pairs the two commits within each recipe, three ABBA rounds
+per recipe, the recipes run one after another. The recipes pin entry and
+loop offsets but leave function order and block placement free, so a delta
+that holds in every recipe is robust across the tested recipes and one
+that moves with them is sensitive to them; neither verdict names a cause.
+Host bygg, both runs below on 2026-11-25 at a0aa551's tree, `--rounds 3`,
+paired medians of the wall.
+
+**`numeric_index`, 212d8e6 (control runner split by loop head) against
+63e5a4c**, invocation e70a7dc7: `none` +70.4 ms (slower 3 of 3, about
++1.5%, the residue recorded at the change), `f5` -28.8 (faster 2 of 3),
+`f6` -25.4 (2 of 3), `f6l64` -26.0 (2 of 3), `l64` -56.9 (3 of 3). 212d8e6
+retires about 0.5% fewer instructions (161.9G against 162.7G). The cycle
+residue is sensitive to the tested recipes; cause unattributed,
+investigation closed. The control runner has changed in several commits
+since, so 212d8e6's default-recipe placement no longer exists in any
+shipped build, and nothing here shows a cost at HEAD.
+
+**`patterns`, eb33341 (owned results interned without a second copy)
+against 81090d3**, invocation 4d87c84a: `none` -15.8 ms (faster 2 of 3),
+`f5` +10.8 (slower 2 of 3), `f6` +36.3 (3 of 3), `f6l64` +42.5 (3 of 3),
+`l64` +8.8 (3 of 3). The default recipe read +11.5 ms, slower 11 of 12, in
+invocation c5f3b532 a day earlier ("Owned results interned without a second
+copy" below). Slower median in four of five recipes, cause unattributed.
+The intern hit was symmetric between the arms (both dropped the producer's
+`Vec`; only a miss differed, copy into a box against conversion of the
+`Vec`), so the hit path is not implicated, and the producers measured
+there were since rewritten (stack-built short results, the reusable result
+buffer), so the pair is provenance rather than a lead at HEAD.
+
+Two older layout-signature observations were closed unreproduced the same
+day, because no arm of either can be built by the current harness (it
+exists from b585548) and the measured path is gone:
+
+- `method` about 2% slower after the slot-token move (de47a5d against
+  c969d9f, plantasjen, 2026-11-04; +2.2%, +1.7% in matched pairs, with no
+  added steady-state work found in `resolve_index` or `Frame::run`). The
+  `method` workload has since moved into a typed loop region that resolves
+  the method at entry, so it no longer runs that lookup per call.
+- `arithmetic` +11% after compare-and-branch fusion (fd4d333..6cc8493
+  against 1efb68e, plantasjen, 2026-09-03), persisting with fusion emission
+  disabled; later same-signature readings on `fill` (b33d4a1 against
+  67f07aa), `benchmark` and `constants` (afcd2f0 against c2932f8) and
+  `arithmetic` on the register loop (the call-site recording move against
+  6539ac7, 2026-10-23). The fused evaluator was deleted with the register VM.
+  Binary-dependent, split between placement and native codegen
+  unattributed.
+
 ## Release profile change, 2026-10-25
 
 Host plantasjen (AMD Ryzen 9 5900X, x86-64 Linux 7.3, governor
@@ -1154,7 +1208,8 @@ instructions the same way). The head is now a const parameter
 and cull back to 63e5a4c's counts, `ipairs` unchanged at 67.16G. The warm
 call recovered only partly (about 90.5 ms at 63e5a4c, 93 at 908777f, 92.0
 after, pinned launches on bygg), a cycle residue with fewer instructions, not
-attributed. `native_bytes_per_level` is unchanged
+attributed; a recipe sweep later found it sensitive to code alignment ("Code-alignment
+recipe sweeps" above). `native_bytes_per_level` is unchanged
 in dev and release: the entry hook sits in `Frame::tfor_fused_loop`,
 inlined only in release, since a live bool or call-pc local in the
 `TFOR_CALL` arm cost 16 to 48 bytes a level.

@@ -52,6 +52,29 @@ profile = "release"
 features = ["bench-harness"]
 params.workload = { from = "data.workloads.bench", required = true, help = "seconds-scale workload from bench/" }
 
+# `layout` is `wall` built under a code-alignment recipe from
+# `data.layouts`: a sensitivity probe, not a verdict bench. A matched pair
+# run with `--layout all` shows whether a delta holds across the recipes
+# (robust) or moves with them (sensitive); `--versus layout` on one commit
+# shows how far the recipes alone move a workload. Neither identifies a
+# cause: alignment pins entry and loop offsets but leaves function order and
+# block placement free. A separate bench so `wall` keeps its plain build.
+[bench.layout]
+script_file = "bench.lua"
+target = "dellingr-bench"
+profile = "release"
+features = ["bench-harness"]
+params.workload = { from = "data.workloads.bench", required = true, help = "seconds-scale workload from bench/" }
+params.layout = { from = "data.layouts", default = "none", help = "code-alignment recipe" }
+rustflags = [{ from_param = "layout" }]
+
+[data.layouts]
+none = []
+f5 = ["-Cllvm-args=-align-all-functions=5"]
+f6 = ["-Cllvm-args=-align-all-functions=6"]
+l64 = ["-Cllvm-args=-align-loops=64"]
+f6l64 = ["-Cllvm-args=-align-all-functions=6", "-Cllvm-args=-align-loops=64"]
+
 [bench.kernel]
 script_file = "bench.lua"
 target = "dellingr-bench"

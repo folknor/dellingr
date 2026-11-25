@@ -18,40 +18,6 @@ plantasjen) unless noted.
 
 ## Investigate
 
-### bench/method about 2% slower after the slot-token move (2026-11-04)
-
-What: moving inline-cache validation into `Table`'s slot tokens (parent
-c969d9f, plantasjen) left `method` about 2% slower than its parent in
-matched pairs (+2.2%, +1.7%); `write`, `global` and `method_polymorphic`
-moved under that, `same_obj_read` was sign-inconsistent, and native bytes per
-level went down or stayed equal in every row. Two shape fixes found on the
-way are in the code (one flat global probe; a force-inlined
-`Table::slot_is_current` on the SET_FIELD hit), and each recovered a
-measured loss. Restoring the old `cached_method_at` body changed nothing;
-`resolve_index` and `Frame::run` differ in register allocation and block
-order with no added steady-state work found on the path.
-
-Why not yet: no mechanism; the size is in the band code layout alone moves.
-Signal: a perf annotate of `resolve_index` or `Frame::run` on `method` that
-shows a specific reload or spill the old build did not have.
-
-### patterns about 1% slower with owned-buffer interning (2026-11-24)
-
-What: matched `--commit` rounds on bygg (reference/performance.md, "Owned
-results interned without a second copy"): eb33341 against 81090d3 slower in
-11 of 12 rounds, +11.5 ms; at fe88e6a, adoption against a borrowed-copy
-diagnostic build slower by 15 and 9 ms (8 of 8, 5 of 8). Adoption stays
-for `mixed` (2.9% faster). The `sequence_len` slowdown once filed beside
-this one did not survive matched arms.
-
-Why not yet: no mechanism. The workload's owned producers are `gsub`,
-`reverse` and number `tostring`; hit/miss counts and allocator calls for
-them were not taken. Signal: a cost localized to one producer or the intern
-path, backed by hit/miss and allocation counts, or a comparison holding code
-layout fixed. Wall A/B alone cannot settle it: a one-branch hybrid of the two
-behaviours moved `format_literals` 4% past both. Nothing supports a
-per-producer opt-out yet.
-
 ### Per-instruction weight of the register dispatch loop (2026-10-23)
 
 The entries below share one measurement. perf on plantasjen (Zen 3),
@@ -192,69 +158,6 @@ A closed-cell fast path in the canonical arm was refused (reason at
 `State::upvalue_value`). Hoisting the read into a register at compile time
 is refused (codegen.rs header: it drops scratch register overwrites that
 free dead values).
-
-### bench/arithmetic +11% wall after compare-and-branch fusion landed (2026-09-03)
-
-What: after A-O7 (commits fd4d333..6cc8493), `bench/arithmetic` measures
-4.0s vs 3.6s at pre-fusion 1efb68e in interleaved matched pairs
-(plantasjen), while `bench/benchmark` (its pre-2026-10-24 workload) is flat
-and `--hotpath`
-instrumented WARM blocks are consistently *faster* on the fused binary
-(15ms vs 17ms per block, -6 to -12%).
-
-Isolation performed: the regression persists byte-for-byte with fusion
-emission disabled in the parser (identical bytecode to baseline, only
-the dispatch arms present), with one range arm vs six individual arms,
-and with `eval_compare` restored self-contained. It tracks the binary,
-not the executed path. Conclusion: release code-layout perturbation of
-the dispatch loop, hitting the bench where dispatch overhead is the
-largest fraction of per-op work (arithmetic is the lightest-op kernel;
-its hot `if n < 2` recursion is call+dispatch bound). This is the same
-codegen fragility a 2026-05-06 attempt at a cross-receiver field-cache
-branch met (recorded in e0bef7b's notes text).
-
-Five same-binary launches of `bench/arithmetic` at 71afe0e (plantasjen)
-all report 4000ms - launch-to-launch spread is below the 100ms reporting
-granularity here, so launch noise cannot account for the delta; it is a
-property of the binary.
-
-Not chasing it further this pass: the mechanism measurably wins under
-instrumentation and on the composite; the loss is layout lottery, and
-chasing alignment is open-ended (B-O6's "verify with asm first"
-applies). What would settle it: a placebo experiment (rebuild 1efb68e
-with an unused-function-sized text shift and re-pair) to characterize
-dellingr's own binary-to-binary band, or an asm/alignment look at
-`Frame::eval` on this host. The register VM (2026-10-22) rebuilt this
-dispatch loop wholesale; the second and third instances below predate
-it, so re-measure on the register loop before acting on them.
-
-Second instance (bygg, 2026-10-14): `bench/fill` early WARM_BLOCKs went from
-52 ms at b33d4a1 to a flat 54 ms at 67f07aa (+4%, interleaved, stable across
-launches), a commit whose changes are all off the fill hot path. `--hotpath`
-on both showed identical call counts and unchanged per-function shares, and
-the instrumented build's warm average differed by only 1.3%. Same signature
-as above: a property of the binary, not of the executed path.
-
-Third instance (plantasjen, 2026-10-22): afcd2f0 against c2932f8 in two
-interleaved `--commit` pairs, `bench/benchmark` 7100/7100 vs 6900/6800 (the
-pre-2026-10-24 `benchmark` workload, before it was re-pinned to repeat the
-composite kernel) and `bench/constants` 3100/3100 vs 3000/3000, with the
-`arithmetic` control level. `--hotpath` on `constants` showed identical per-function shares (the
-rest is the dispatch loop itself); on `benchmark` only
-`instr_branch_fused` moved (15 to 22 ns, unchanged code), and reading the
-compare operands in place, as `eval_float_float` does, did not move the
-walls. afcd2f0's own `benchmark` cells spread 7100-7300 across that day.
-
-Fourth instance, on the register loop (plantasjen, 2026-10-23): the commit
-that moved call-site recording off the table-op hit paths (measured as
-eb034f1, the same code before a notes-only amend) against its parent
-6539ac7 in two interleaved `--commit` pairs. Warm averages: `same_obj_read` -2.0/-2.3%,
-`method` -3.5/-1.8%, `record_tables` -2.7/-1.8%, `fill` flat, while
-`arithmetic` went +1.5/+1.6% (walls 3400 to 3500 both rounds) and the
-composite +0.5/+0.5%. The arithmetic kernel executes none of the changed
-instructions; `perf annotate` of `Frame::run` shows the same hot sites with
-different register assignment and spill slots (the frame shrank 32 bytes),
-so it is the same binary-level signature.
 
 ### Residual ~2x in `strings/patterns` - decided not to chase (2026-07-25)
 
@@ -536,7 +439,14 @@ buffer"). Left open:
 - A long result that hits an existing string drops its buffer; the
   post-policy probe could hand the unused `Vec` back for reuse (within the
   same capacity cap). A pre-policy hit shortcut would move the collection
-  point and is not an option. Unmeasured.
+  point and is not an option. Unmeasured. `patterns` is the probe: its
+  three long results (the two `gsub(log, ...)` calls and the last `gsub`
+  in `replace`) repeat their content every kernel call but are not
+  retained across calls, so whether they hit after the allocation policy
+  runs is the first count to take, by site, beside buffers actually reused
+  and alloc/realloc/free calls. The 2026-11-24 owned-interning pair on this
+  workload does not implicate the hit path (reference/performance.md,
+  "Code-alignment recipe sweeps").
 
 ---
 
@@ -638,19 +548,6 @@ operation on each path would take such mixed arrays; it needs a per-path
 "bound" fact the solver lacks. No workload holds such an array. Loops with
 three or more variables are still declined (the extra ones are nil every
 step).
-
-### `numeric_index` cycle residue after the head split (2026-11-24)
-
-The control runner's `IPAIRS` split (`State::run_control_shape`) took
-bench/numeric_index from 168.4G to 161.9G retired instructions, under
-63e5a4c's 162.7G, but its warm call stayed about 92.0 ms against 63e5a4c's
-90.5 (908777f 93; pinned `perf stat` launches on bygg, not a stored bench).
-Fewer instructions and more cycles: the hypothesis is placement (the
-indirect operation dispatch sits at a different offset in its cache line,
-and the `Head` field shifts several plan-field offsets by eight bytes);
-no cycle penalty from either has been shown. Unattributed. A
-layout-fixed comparison or a cycle-level profile of the two copies would
-settle it; more wall A/B will not.
 
 ---
 
