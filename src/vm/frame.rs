@@ -197,8 +197,49 @@ impl Frame {
         Ok(())
     }
 
+    /// The one batching rule for a positive dispatch charge whose new pending
+    /// total is `next`: settle when it reaches the flush threshold, else keep
+    /// it pending. Every dispatch-side charge site (fixed opcode charges, the
+    /// template runner's field writes, the typed regions' per-operation
+    /// fallback, SET_LIST's element charge) computes `next` and comes here,
+    /// so the rule is written once. The threshold is the batching interval,
+    /// lowered for a finite budget to what it has left, so pending cost is
+    /// settled before it would exhaust the budget: the interval does not
+    /// change the charged prefix or `cost_used` at `BudgetExceeded`, and a
+    /// spent budget (threshold 0) sends the next positive charge straight to
+    /// admission, which `charge_cost` owns. A refused settle leaves the batch
+    /// unchanged and records nothing; any other error settles the batch in
+    /// [`Frame::run`].
+    ///
+    /// Region accounting (pricing straight-line runs once at entry) was
+    /// weighed against this per-charge rule and not built: outside the typed
+    /// loop regions, which already charge an iteration's summed weights at
+    /// once, the dispatched hot runs of `arithmetic`'s `fib` hold one charge
+    /// each between calls, so there is nothing to batch. The template
+    /// runner's pinned writes are the one straight-line multi-charge run
+    /// found; one admission test per run there is unmeasured. Keeping the
+    /// batch a by-value register rather than this `&mut` slot (each charge
+    /// loads and stores it) is likewise unmeasured, not refuted.
+    #[inline(always)]
+    pub(super) fn accrue(
+        state: &mut State,
+        local_cost: &mut u64,
+        #[cfg(feature = "cost-check-interval")] ip: usize,
+        #[cfg(feature = "cost-check-interval")] units: u64,
+        next: u64,
+    ) -> Result<()> {
+        if next >= state.cost_flush_at() {
+            Self::settle_cost(state, local_cost, next)?;
+        } else {
+            *local_cost = next;
+        }
+        #[cfg(feature = "cost-check-interval")]
+        crate::cost_meter::interval_test::record(ip, units);
+        Ok(())
+    }
+
     /// Charge one opcode's fixed charge at the State's weight, skipping a
-    /// zero weight. The same batching rule as `run_frame`'s `add_cost!`.
+    /// zero weight, through [`Frame::accrue`].
     /// A function rather than macro text in every dispatch arm: a dev build
     /// gives each expansion's weight, sum and threshold temporaries their own
     /// slots in the dispatch frame, live across every native re-entry, and
@@ -223,13 +264,10 @@ impl Frame {
             let next = *local_cost + units;
             #[cfg(feature = "cost-check-interval")]
             let next = (*local_cost).saturating_add(units);
-            if next >= state.cost_flush_at() {
-                Self::settle_cost(state, local_cost, next)?;
-            } else {
-                *local_cost = next;
-            }
+            #[cfg(not(feature = "cost-check-interval"))]
+            return Self::accrue(state, local_cost, next);
             #[cfg(feature = "cost-check-interval")]
-            crate::cost_meter::interval_test::record(ip, units);
+            return Self::accrue(state, local_cost, ip, units, next);
         }
         Ok(())
     }
@@ -246,7 +284,7 @@ impl Frame {
     /// receiver's type check removed. Every scratch-register write still
     /// happens (a freed scratch register stays a GC root, docs/limits.md), and
     /// each pinned write admits its `TableWrite` charge separately, at its
-    /// own cursor, with the zero-weight bypass of `fixed_cost!`, so the
+    /// own cursor through `charge_fixed`, zero-weight bypass included, so the
     /// charged prefix, the pending batch and `cost_used` are those of
     /// dispatching it. The loads are free and infallible and nothing in the
     /// run allocates, calls or polls an interrupt. The receiver check can go
@@ -314,17 +352,10 @@ impl Frame {
                     *ip += 1;
                     const CHARGE: Option<Charge> = Instr::fixed_charge(Instr::OP_INIT_FIELD_PINNED);
                     if let Some(charge) = CHARGE {
-                        let units = state.cost.weight(charge);
-                        if units != 0 {
-                            let next = (*local_cost).saturating_add(units);
-                            if next >= state.cost_flush_at() {
-                                Self::settle_cost(state, local_cost, next)?;
-                            } else {
-                                *local_cost = next;
-                            }
-                            #[cfg(feature = "cost-check-interval")]
-                            crate::cost_meter::interval_test::record(*ip, units);
-                        }
+                        #[cfg(not(feature = "cost-check-interval"))]
+                        Self::charge_fixed(state, local_cost, charge)?;
+                        #[cfg(feature = "cost-check-interval")]
+                        Self::charge_fixed(state, local_cost, *ip, charge)?;
                     }
                     let key = frame.literal(inst.b());
                     let val = state.stack[base + inst.c() as usize];
@@ -387,7 +418,7 @@ impl Frame {
             // or Err, so `cost_used` after a return or a failed callback
             // does not depend on the batching interval. A positive batch
             // stays below the flush threshold, which a finite budget caps at
-            // its room (add_cost! settles first when it would reach it), so
+            // its room (`accrue` settles first when it would reach it), so
             // this charge is always admitted; a refused settle leaves
             // nothing pending. On error the original error propagates.
             let admitted = state.cost_meter().consume(pending);
@@ -477,39 +508,10 @@ impl Frame {
         // a loop dispatching closed captures (bench/closed_mode), which was
         // judged worth it inside the native stack envelope (docs/limits.md).
         let upvalues = frame.upvalues.as_slice();
-        /// Macro to accumulate cost and flush when threshold is reached.
-        /// `@unbounded $cost` is a charge of any size (a SET_LIST element
-        /// count times its weight); fixed charges go through `charge_fixed`,
-        /// which applies the same rule.
-        macro_rules! add_cost {
-            (@next $next:expr, $cost:expr) => {{
-                let next = $next;
-                // This decides when to flush, not whether to accept a charge.
-                // consume_cost owns the runtime meter's admission rule. The
-                // threshold is the batching interval, lowered for a finite
-                // budget to what it has left, so pending cost is settled
-                // before it would exhaust the budget: the interval does not
-                // change the charged prefix or `cost_used` at
-                // `BudgetExceeded`, and a spent budget (threshold 0) sends the
-                // next positive charge straight to admission. Any other error
-                // settles the pending batch in `Frame::run`.
-                if next >= state.cost_flush_at() {
-                    Self::settle_cost(state, local_cost, next)?;
-                } else {
-                    *local_cost = next;
-                }
-                #[cfg(feature = "cost-check-interval")]
-                crate::cost_meter::interval_test::record(*ip, $cost);
-            }};
-            (@unbounded $cost:expr) => {
-                add_cost!(@next (*local_cost).saturating_add($cost), $cost)
-            };
-        }
-
         // Which charge an arm makes is a compile-time constant; its weight is
         // the State's, fixed when the State was built. A free opcode, or a
-        // charge weighted 0 (every charge, when costing is off), must not run
-        // add_cost!(0): its budget check could reject structural work. Range
+        // charge weighted 0 (every charge, when costing is off), must not
+        // reach `accrue`: its budget check could reject structural work. Range
         // arms retain their shared body and require all members to have the
         // same fixed charge.
         macro_rules! fixed_cost {
@@ -737,7 +739,13 @@ impl Frame {
                         .cost
                         .cost(Instr::SET_LIST_ELEMENT_CHARGE, count as u64);
                     if units != 0 {
-                        add_cost!(@unbounded units);
+                        // A weighted element count can be any size, so this
+                        // sum saturates where fixed charges need not.
+                        let next = (*local_cost).saturating_add(units);
+                        #[cfg(not(feature = "cost-check-interval"))]
+                        Self::accrue(state, local_cost, next)?;
+                        #[cfg(feature = "cost-check-interval")]
+                        Self::accrue(state, local_cost, *ip, units, next)?;
                     }
                     state.reg_set_list(ra, count, inst.c())?;
                     if inst.set_list_count().is_none() {

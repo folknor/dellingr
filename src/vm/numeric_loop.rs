@@ -80,8 +80,8 @@
 //!   `FOR_LOOP`, are added in one step when their sum stays below the flush
 //!   threshold, which leaves the pending batch exactly where per-operation
 //!   charging would. Otherwise the iteration charges operation by operation,
-//!   as `add_cost!` does, with the cursor naming each operation before its
-//!   charge, so a refusal names the same instruction and leaves the same
+//!   through dispatch's own `Frame::accrue`, with the cursor naming each
+//!   operation before its charge, so a refusal names the same instruction and leaves the same
 //!   completed prefix. Zero weights are skipped as dispatch skips them. A
 //!   fused field read's two instructions are both free, so no refusal falls
 //!   between them.
@@ -4003,24 +4003,24 @@ impl State {
         }
     }
 
-    /// One fixed charge of `weight` (nonzero) at cursor `ip`, exactly as the
-    /// dispatch loop's `add_cost!` makes it.
+    /// One fixed charge of `weight` (nonzero) at cursor `ip`, through the
+    /// dispatch loop's own rule (`Frame::accrue`).
     fn charge_dispatch(&mut self, local_cost: &mut u64, ip: usize, weight: u64) -> Result<()> {
         #[cfg(not(feature = "cost-check-interval"))]
-        let next = *local_cost + weight;
-        #[cfg(feature = "cost-check-interval")]
-        let next = (*local_cost).saturating_add(weight);
-        if next >= self.cost_flush_at() {
-            self.charge_cost(next)?;
-            *local_cost = 0;
-        } else {
-            *local_cost = next;
+        {
+            let _ = ip;
+            Frame::accrue(self, local_cost, *local_cost + weight)
         }
         #[cfg(feature = "cost-check-interval")]
-        crate::cost_meter::interval_test::record(ip, weight);
-        #[cfg(not(feature = "cost-check-interval"))]
-        let _ = ip;
-        Ok(())
+        {
+            Frame::accrue(
+                self,
+                local_cost,
+                ip,
+                weight,
+                (*local_cost).saturating_add(weight),
+            )
+        }
     }
 
     fn publish_mirror(&mut self, body: &Body, base: usize, x: &[f64], written: u32) {

@@ -148,46 +148,27 @@ for the same registers as handler temporaries.
 
 ### Cost accounting on every arithmetic op
 
-What: `add_cost!` runs on every costed op: a weight load and zero check, an
-add into the local batch and one compare against the flush threshold
-`CostState` keeps in `State`. Arithmetic ops cost 1 each, so the bookkeeping
-is still a large fraction of their work.
+Every positive dispatch charge goes through `Frame::accrue` (one rule:
+settle at `next >= flush_at`, else keep pending). Generic statically priced
+straight-line regions were refused (2026-11-25; reasoning at `Frame::accrue`):
+outside typed loop regions, `arithmetic`'s hot `fib` holds one charge per
+run between calls. Two unmeasured residues remain:
 
-Sketch: charge straight-line runs of fixed-cost ops once per basic block
-(the compiler knows the block's static cost), or keep the batch in a
-register and check the flush condition only at block boundaries. Must keep
-the charged prefix and `cost_used` at `BudgetExceeded` byte-identical
-(docs/budget.md, `tests/cost_*`), which is the hard part.
-
-The 2026-11-17 performance hunt (cost-charging scope, source-only) made this
-its lead rewrite: statically priced straight-line regions. The ingredients
-exist: `Instr::static_units` gives fixed charges and closed `SET_LIST` counts,
-the verifier finds control-flow targets, a State's cost model is immutable,
-`BytecodeRuntime` is a State-specific bundle shared by a chunk's closures and
-frames, and dispatch publishes an authoritative cursor on escape. Price an
-execution plan once per State: region boundaries, priced totals and ordered
-charge positions for prefix reconstruction. At region entry decide whether all
-its positive charges can begin (for charges `c1..cn` and positive remaining
-`R`, when `c1 + ... + c(n-1) < R`; the last may cross); if so run handlers with
-no per-op meter update or weight lookup and account once at completion, or for
-the executed prefix on early exit. An unaffordable region runs with exact
-per-charge checks, so charges `3, 5, 2` against budget 4 still execute two ops
-and charge 8. Never precharge and subtract (saturation loses information);
-keep the entry state and derive the prefix from the cursor on escape. A type
-failure in a charged op has already incurred its charge, a blocked charge adds
-nothing, an error in a free op keeps earlier charges, a metamethod call
-publishes only the prefix before the handler. Potential metamethod calls are
-side exits, not region splits. Open `SET_LIST` and native library charges stay
-outside fixed totals. It must change the execution structure: a region table
-beside `fixed_cost!`, or an "already admitted" flag tested in each handler,
-keeps the problem; generate the ordinary and exact-accounting paths from one
-source of opcode semantics. `Costing::Off` could then run genuinely
-accounting-free. Risks: tiny regions cost more at boundaries than they save,
-plan metadata takes cache, generated variants grow code, side exits and source
-attribution get harder. It wants codegen to expose region structure and charge
-provenance, with canonical saved instructions unchanged. The hunter rated
-whole-function or loop-trip precharging a weaker target than straight-line
-regions.
+- By-value batch: `pending` lives on the stack (`add (%rsp)` / `mov
+  %rdx,(%rsp)` per charge in release) because its address escapes into the
+  outlined helpers. The store/load chain gates the next charge's threshold
+  branch, so it is not shown hidden. Threading the batch by value through
+  every `local_cost` helper (returning it with errors) needs a matched
+  `--commit` A/B on `arithmetic`/`method` and native-stack rows before and
+  after. The old "3.6% error-path flush" figure is no estimate: its pair was
+  unmatched (live tree against `--commit`), its commit also removed a field
+  cache, and the code shape has since moved (one invocation-owned batch,
+  settled on every exit).
+- Template runs: `Frame::template_init_run`'s pinned writes are the one
+  straight-line multi-charge run found (`static_records`: eight writes). A
+  read-only prescan summing the run's weights could admit it once when all
+  but the last fit strictly under the room, falling back to per-write
+  charging; positions stay observable-identical. Unmeasured.
 
 ### `GET_UPVAL` indirection
 
@@ -806,16 +787,6 @@ path is recorded yet; nothing here is a candidate until one is.
   trim `Frame::run` further. Mind the `bench/write` lesson from 2026-10-23:
   removing a never-taken slow branch from this inlined helper made the steady
   state 14% slower, so measure before trusting the idea.
-
-- **Error-path cost flush costs ~3.6% on `arithmetic`:** charging pending
-  batched cost on runtime errors moved the dispatch loop into an inner
-  `eval_batched` (`src/vm/frame.rs`) that takes `local_cost` as `&mut u64`.
-  Two interleaved `--bench` pairs on bygg, e475e51 (before) vs 8d3151a
-  (after): 2800 / 2900 ms both times, sign-consistent. Not yet separated
-  from layout: run the five-launch same-binary control, then try keeping
-  `local_cost` a by-value local inside the loop and returning it alongside
-  the error (e.g. `Err((e, pending))` from the inner loop) so it can stay in
-  a register.
 
 - **Rust-callee `stack.remove(idx)` (B-O5), rejected:** the return-value
   half shipped 2026-07-26 (commit a96cff4). Keeping the callee as frame
