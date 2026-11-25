@@ -2450,7 +2450,14 @@ impl NumericLeaf {
         }
         // The body runs to the first `RETURN`, which every forward edge of
         // the body must reach: one past it would run code the plan does not
-        // model.
+        // model. An earlier `RETURN 0` (a void guard clause) could be taken
+        // as an edge to the end, since a void return is free, settles
+        // nothing and adds no safepoint; it is not, for want of a workload
+        // whose hot method is excluded only by such a guard. Returning a
+        // table (`return self`) also declines, as the result is read as a
+        // number. A function that calls is not a leaf: a fallback at the
+        // `CALL` after a committed store or a run callee would replay
+        // effects.
         let end = bytecode
             .code
             .iter()

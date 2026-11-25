@@ -723,6 +723,17 @@ impl Generator<'_> {
                 self.free_reg(reg);
             }
             Place::Field { object, name } => {
+                // `t.k = t.k + n` is not fused into one field-update opcode
+                // (weighed and refused 2026-11-25). Only adjacent
+                // `GET_FIELD; ARITH; SET_FIELD` on one receiver and key would
+                // match (`self.x = self.x + self.vx * dt` puts a read and a
+                // `MUL` between), the hot ones already run as field leaves,
+                // and the opcode would owe two ordered charges (`Add`, then
+                // `TableWrite`) where the opcode table declares one, the add
+                // register written and the store absent when `TableWrite` is
+                // refused, and its own cache-slot family: a read resolved
+                // through `__index` and the store do not share a slot. The
+                // reopen condition is at the `GET_FIELD` arm in `run_frame`.
                 let obj = self.expr(object)?;
                 let obj = self.operand_before(obj, value.may_execute)?;
                 let (obj_reg, obj) = self.operand_reg(obj)?;

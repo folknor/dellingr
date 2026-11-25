@@ -708,6 +708,17 @@ impl Frame {
                 // pass the cursor down: their handlers record it as the call
                 // site only on the path that can call out
                 // (`State::record_call_site`).
+                // No next-opcode peek from here into an arithmetic op and a
+                // `SET_FIELD` of the same field: the field update the peek
+                // would serve is mostly not adjacent, its hot forms run as
+                // field leaves or record regions, and the closest built
+                // peek (a `MOVE` after a fixed-count return) gave no
+                // repeatable win while a miss pays the test. Reopen on a
+                // registered workload that spends material time dispatching
+                // adjacent same-key updates canonically, with a matched
+                // `--commit` A/B net of misses and `native_bytes_per_level`
+                // in dev and release. The fused opcode alternative is
+                // refused at field assignment in `codegen.rs`.
                 Instr::OP_GET_FIELD => {
                     fixed_cost!(Instr::OP_GET_FIELD);
                     let receiver = state.stack[base + inst.b() as usize];

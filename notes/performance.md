@@ -173,8 +173,7 @@ only in native locals are absent from the root inventory, so they must be
 restored before allocation or re-entry. Backward-transfer interrupt polls stay
 placed.
 
-**Classification:** rewrite, dispatch hunter's highest conviction. Subsumes
-`optimizations.md` "Compiler-recognized field-update fusion". Afterwards, if
+**Classification:** rewrite, dispatch hunter's highest conviction. Afterwards, if
 it works, broader instruction-description machinery is a follow-up.
 
 ## Accounts added to existing entries

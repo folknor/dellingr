@@ -227,27 +227,6 @@ either on one with persistent alternating-offset misses. A cross-receiver
 store hint is refused on cost, not soundness (reasoning at
 `State::store_field`).
 
-### Compiler-recognized field-update fusion
-
-Field updates in method bodies run as field leaves without an activation
-(`vm/numeric_loop.rs`), straight-line or branching forward on number
-comparisons and field truthiness up to the first `RETURN`; that takes the
-activation, every dispatch and (from a region over records) the per-site
-lookup misses, more than a fused opcode would. Residue: the same update
-inside a function that calls, or returns early, or reads a field only on
-a path the receiver lacks it on (every site is resolved on every path, so
-such a call declines). There an `OP_FIELD_ADD` (or next-opcode fusion in
-the `GET_FIELD` arm) would save two of an adjacent update's three
-dispatches; most updates are not adjacent (`self.x = self.x + self.vx * dt`
-puts a read and a `MUL` between the read and the add). It owes the
-canonical register state and cursor when the add succeeds and the store's
-`TableWrite` charge is refused, and must prove the receiver register still
-holds the same table at the store.
-
-Signal that would promote it: a workload whose hot non-leaf function
-(one that calls) does such updates, with the dispatches showing in
-profiling.
-
 ### Branching leaves: field sites resolved on every path (2026-11-25)
 
 Every field site of a leaf is resolved before it runs, so a leaf whose
