@@ -126,7 +126,10 @@ impl State {
     /// TForCall: Call iterator(state, control) from the registers at `base`,
     /// store results in the loop variable registers after them. The
     /// dispatch arm tries `tfor_fast_step` first, then records the call site
-    /// and publishes the cost batch before this runs.
+    /// and publishes the cost batch before this runs. A Lua iterator runs as
+    /// a nested invocation; running it as an activation of the calling loop
+    /// was measured and not built (`State::index_call` has the numbers and
+    /// the shape to reopen with).
     pub(super) fn instr_tfor_call(&mut self, base: usize, num_vars: u8) -> Result<()> {
         // Push iterator function, state, and control onto stack for call
         let iterator = self.stack[base];

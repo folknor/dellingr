@@ -14,6 +14,8 @@ examples/calls/factory_closure.lua|ba0ce1aca4a8cd0297f00ba2c6b6b4bf|3006503
 examples/calls/fixedarg.lua|3f10a6a9186212512d5919045adb81d6|5002000
 examples/calls/general.lua|e0da6c83a6ff16f8995ebcf96a347cc5|2880000
 examples/calls/global.lua|c2dbedfee234dd0fef1acb770d658e5b|1501000
+examples/calls/handler_plain.lua|dc1382298526dd1837e34554ef3a96d5|27901
+examples/calls/handler_reentry.lua|864afe8d3e57396b73c94a545e578c31|27903
 examples/calls/heap_leaves.lua|9842759c50eb11a2b9bf0679b344e153|903602
 examples/calls/host_records.lua|6d707a7823d6642d3cc7b270ceec4322|298433
 examples/calls/library_leaves.lua|70d4b2ae1fd0cf56753174fd5d0c3635|2048305

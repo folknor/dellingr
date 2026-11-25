@@ -313,6 +313,14 @@ xxhash = "3d87b6e87edaa28e17783d5c9a89b3d3"
 file = "bench/rust_boundary.lua"
 xxhash = "488c7cc9b818ba7a69cdede59b518cfd"
 
+[data.workloads.bench.handler_reentry]
+file = "bench/handler_reentry.lua"
+xxhash = "6734840253f15ac2ca7d265323bb4ae0"
+
+[data.workloads.bench.handler_plain]
+file = "bench/handler_plain.lua"
+xxhash = "b01263d1e5816daea5cf123bd3084765"
+
 [data.workloads.bench.host_records]
 file = "bench/host_records.lua"
 xxhash = "7a1d35f5ba905be00f80aaca3e1bad90"
@@ -597,6 +605,14 @@ xxhash = "3d87b6e87edaa28e17783d5c9a89b3d3"
 [data.workloads.hotpath.rust_boundary]
 file = "examples/calls/rust_boundary.lua"
 xxhash = "0443637fb717226cb1239958b85ee341"
+
+[data.workloads.hotpath.handler_reentry]
+file = "examples/calls/handler_reentry.lua"
+xxhash = "864afe8d3e57396b73c94a545e578c31"
+
+[data.workloads.hotpath.handler_plain]
+file = "examples/calls/handler_plain.lua"
+xxhash = "dc1382298526dd1837e34554ef3a96d5"
 
 [data.workloads.hotpath.host_records]
 file = "examples/calls/host_records.lua"

@@ -166,6 +166,26 @@ impl State {
     /// Call the `__index` function handler whose window the resolver pushed
     /// and take its result into `dst`, returning the resolver's units
     /// whatever the outcome.
+    ///
+    /// The handler runs as a nested invocation through `call_unguarded`, and
+    /// running it (and the `newindex_call`, `len_call` and generic-for Lua
+    /// iterator handlers) as an activation of the calling loop instead was
+    /// considered and not built. The probe pair `handler_reentry` against
+    /// `handler_plain` (the same six calls per trip as plain Lua calls, the
+    /// same charged cost) measured on bygg at 01a96ff about 34.6 against
+    /// 28.9 ms per run, about 6 ns of about 38 ns per call on a loop that
+    /// does nothing else, and about 2 percent of `rust_boundary` if that gap
+    /// transfers. The two programs differ in dispatch shape too, so the gap
+    /// is an estimate, not a bound. The shape that would not tax ordinary
+    /// returns: the dispatch driver returns to Rust when `frames.len()`
+    /// reaches a per-invocation boundary instead of 1; a handler pushes its
+    /// frame on the same vector and a continuation record saves the old
+    /// boundary, the destination, the resolver units and the logical native
+    /// depth (tail calls replace the frame at that depth, so it survives
+    /// them, unlike `CallInfo.chain`). The completion settles the cost batch,
+    /// validates the count while the callee is live and restores the
+    /// boundary. Reopen with that build measured against this one on the
+    /// same probes, then plain calls and `rust_boundary` in a matched A/B.
     #[inline(never)]
     fn index_call(&mut self, dst: usize, units: u32, call_site: usize) -> Result<()> {
         self.record_call_site(call_site);

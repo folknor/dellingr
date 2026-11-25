@@ -66,51 +66,39 @@ copies the callee's layout instead of cloning an `Arc`, so a Lua call keeps
 one `Arc` pair (the frame's runtime); the `CallInfo`/frame merge is not a
 standalone item any more (reasoning in the `Frame` doc). What is still open:
 
-- Continuations. A handler or iterator run as an activation of the current
-  invocation needs its frame on that invocation's frame vector and a
-  continuation owner; the `CallInfo` stack can stay separate. Sites: `index_call`, `newindex_call` and `len_call`
-  (`registers.rs`), the generic-for Lua iterator fallback (`eval_control.rs`),
-  each custom sort comparison (`table_ops.rs`) and `gsub` function
-  replacements each run a whole nested invocation lifecycle (native-depth
-  accounting, boundary machinery, fresh dispatch, entry-result collection,
-  teardown), not an allocation, since `run_invocation` reuses its vectors.
-  `IndexOutcome::Call` (`metamethod.rs`) is already the seam. Suspend the
-  operation instead: an index continuation knows where the result goes and
-  which metamethod units to release; newindex releases units and resumes; an
-  iterator continuation projects results into loop registers; a sort
-  continuation keeps heap-sort phase, indices and operands. The handler is
-  then an ordinary activation on the same stack. Sort must become a resumable
-  driver: an adapter still calling `call_unguarded` per comparison keeps the
-  cost. Obligations: keep the logical native-depth limit for the eliminated
-  re-entry paths (letting formerly failing recursion succeed changes
-  script-visible errors); exact comparison order and sort writeback timing;
-  metamethod-depth ownership until the operation completes; where errors are
-  located and reported; interrupt polls in resumable loops and at admissions.
-  Arbitrary host Rust functions still need a real boundary. The codegen and
-  table-and-math-libraries hunters raised the iterator and sort halves
-  independently. Measured against the claim "the nested invocation is the
-  cost" on bygg (de2a001, release): a 2000-element comparator sort, 37746
-  comparisons, cost about 1.5 s per probe run where the same number of plain
-  Lua-to-Lua calls of the same comparator cost about 1.2 s beyond the loop.
-  The re-entry plus all the native heap work is at most ~20 percent of a
-  comparison, so the sort half was not pursued (reasoning at `table_sort`).
-  That number bounds only the comparator: the first step here is a probe of
-  a tiny `__index` handler and a Lua iterator against equivalent plain Lua
-  calls, then `rust_boundary` (registered at both scales; it runs both paths)
-  for whether the saving shows in a mixed kernel. Design points settled in
-  the 2026-11-25 spar: the caller instruction at `ip - 1` decodes where
-  results go (`GET_FIELD`/`GET_TABLE`/`LEN` write the first result or nil to
-  `R[A]`; `SELF` likewise without replaying its `R[A+1]` write; `SET_*`
-  discard; `TFOR_CALL` projects into the loop registers from `R[A+3]`, and a
-  fused `TFOR_LOOP` must be the real next instruction), each after validating
-  the full returned count. The resolver's metamethod units and the logical
-  native-depth increment need an outstanding-call owner of their own: the
-  record's `chain` field is wrong, since `tail_call_from_lua` releases it
-  before the tail callee runs, while today the units are held until the
-  whole handler call returns. Keep the exit order too: the handler's cost
-  batch settles before result validation, a callee error is reported while
-  the callee still supplies source and traceback, and a refused admission
-  is reported at the caller opcode.
+- Continuations for `__index`/`__newindex`/`__len` function handlers
+  (`index_call`, `newindex_call`, `len_call` in `registers.rs`) and the
+  generic-for Lua iterator (`instr_tfor_call`): probed, not built. Sort
+  comparisons and `gsub` replacements were refused earlier (`table_sort`;
+  gsub as replay-visible). The probe pair `handler_reentry` / `handler_plain`
+  (registered at both scales; six calls per trip, equal charged cost) ran
+  34.6 against 28.9 ms per warm run on bygg at 01a96ff, best of 3: about
+  6 ns of about 38 ns per call on a loop of nothing else, about 2 percent of
+  `rust_boundary` if the gap transfers. The two programs differ in
+  dispatch shape (operand staging, `while` against fused `TFOR_LOOP`), so
+  this is an estimate, not a bound either way. Reopen by building the shape
+  below and measuring it against the nested build on the same two probes,
+  then plain-call workloads and `rust_boundary` in a matched A/B; a
+  proxy- or iterator-heavy game script is the case it would serve.
+  Shape (2026-11-25 spars): `eval_batched` returns to Rust when
+  `frames.len()` reaches a per-invocation return boundary instead of the
+  constant 1, so ordinary returns keep `return_to_caller` and its
+  `OP_CALL` decode untouched (watch the codegen of a loaded boundary in
+  `Frame::run`). A handler pushes its frame on the same vector; a
+  continuation record holds the previous boundary, the destination (decoded
+  per caller opcode: `GET_*`/`LEN`/`SELF` write the first result or nil to
+  `R[A]`, `SELF` without replaying `R[A+1]`, `SET_*` discard, `TFOR_CALL`
+  projects from `R[A+3]` and keeps the real `TFOR_LOOP` back-edge poll),
+  the resolver's metamethod units and the logical native-depth increment
+  (replay-visible, must stay). Tail calls replace the frame at the
+  boundary depth, so the record survives them, unlike `CallInfo.chain`,
+  which `tail_call_from_lua` releases first. Completion keeps today's exit
+  order: settle the cost batch, validate the full count while the callee is
+  live, close its upvalues, then write caller slots; a refused admission is
+  reported at the caller opcode after the temporary window is cleared.
+  Errors unwind across continuation boundaries in today's order. Keep the
+  temporary call window and admission order (reusing destination registers
+  could change what fits the stack cap).
 
 Measurement lesson worth keeping: on plantasjen (Zen 3) the first flattened
 version moved frames and records by value and lost 14-22% to store-forwarding

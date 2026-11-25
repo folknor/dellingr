@@ -21,6 +21,8 @@ examples! {
     calls_fixedarg: "examples/calls/fixedarg.lua",
     calls_general: "examples/calls/general.lua",
     calls_global: "examples/calls/global.lua",
+    calls_handler_plain: "examples/calls/handler_plain.lua",
+    calls_handler_reentry: "examples/calls/handler_reentry.lua",
     calls_heap_leaves: "examples/calls/heap_leaves.lua",
     calls_host_records: "examples/calls/host_records.lua",
     calls_library_leaves: "examples/calls/library_leaves.lua",
