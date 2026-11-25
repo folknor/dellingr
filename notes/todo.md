@@ -118,6 +118,14 @@ Cosmetic:
   fixed-width integer"; the trait doc now lists the actual set (8- to 64-bit,
   signed and unsigned).
 
+### `State::invoke` result-type errors are tested only for strings (2026-11-25)
+
+Only one test checks the "received" type a failed `State::invoke` result
+reports, and only for a string result. Nothing pins the reported type for a
+table, Lua function or gmatch iterator result, the cases whose type is read
+through the heap. Found while landing the error-path-only type
+classification in `decode_with`.
+
 ## Deferred forward-looking ideas
 
 ### Execution trace hook for a stepping debugger
