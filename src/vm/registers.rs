@@ -38,9 +38,9 @@ impl State {
     #[inline(always)]
     pub(super) fn set_upvalue_value(&mut self, frame: &Frame, index: u16, val: Val) {
         let uv_ref = frame.upvalues.as_slice()[usize::from(index)];
-        match self.upvalue_pool.get(uv_ref).clone() {
-            Upvalue::Open(stack_idx) => self.stack[stack_idx] = val,
-            Upvalue::Closed(_) => *self.upvalue_pool.get_mut(uv_ref) = Upvalue::Closed(val),
+        match self.upvalue_pool.get_mut(uv_ref) {
+            Upvalue::Open(stack_idx) => self.stack[*stack_idx] = val,
+            Upvalue::Closed(cell) => *cell = val,
         }
     }
 

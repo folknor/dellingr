@@ -211,16 +211,6 @@ measuring. Candidates are caching the upvalue slice pointer per activation
 into a register at compile time is refused (codegen.rs header: it drops
 scratch register overwrites that free dead values).
 
-### `SET_UPVAL` clones the pool slot before matching (2026-11-24)
-
-`State::set_upvalue_value` (`vm/registers.rs`) clones the whole `Upvalue`
-(tag plus `Val`) out of the pool to decide open or closed, then writes
-through `get_mut` on the closed arm: a copy and a second slot lookup per
-store. Matching on a borrowed slot (copying only the open stack index)
-would drop both. Unmeasured; `queue` (`tail = tail + 1` through an
-upvalue) is the registered workload that executes it per iteration. Found
-by the UPVAL scout, not part of that item.
-
 ### 16-byte `Val` copies that miss store forwarding
 
 What: a `Val` written as a tag byte plus two 8-byte words (payloads sit at
