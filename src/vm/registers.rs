@@ -116,6 +116,19 @@ impl State {
     /// each table once and returns before any handler runs; only a function
     /// handler continues into `index_call`.
     ///
+    /// A string receiver (`s:upper()`) always takes that call: its warm hit
+    /// is answered by the string-method cache inside the resolver. Answering
+    /// it here instead was built at 0661bcb in two placements, the hit-only
+    /// read (`get_cached_string_method` without its renew) inlined behind a
+    /// `Val::Str` test, and the same read as an outlined leaf called before
+    /// the resolver. Both grew `Frame::run` on every native level in
+    /// release: `index_field` and `string_library_index` 640 to 688 bytes
+    /// inlined, 640 to 672 outlined, most other shapes 16 more. No workload
+    /// is dominated by string-method dispatch (typed loop regions decline
+    /// string receivers, and `patterns` is dominated by matching), so a
+    /// saved call does not buy that. A reopen must add no call site or live
+    /// value to this arm, such as a hit-only prelude inside `resolve_index`.
+    ///
     /// `call_site` is the dispatch cursor. The call function, the one path
     /// that can call out, records it first (`State::record_call_site`); the
     /// same holds for the other table and length handlers below. The record

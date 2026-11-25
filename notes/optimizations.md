@@ -732,28 +732,6 @@ compiled program"). Left open:
 
 ## IC extensions (same shape as existing ICs)
 
-### String method calls take one outlined call
-
-What: `s:upper()` and every other method call on a string receiver is a
-`SELF` whose receiver is not a heap object, so `reg_get_field`'s inline
-own-field hit cannot answer and the op calls the outlined
-`State::resolve_index`, whose string step answers from the string-method
-cache. Since the register-native rewrite on top of df80d81 there is no
-stack round trip, call-site record or reentrant frame on that path; what
-is left is the call itself and the resolver's prologue.
-
-Sketch: check the string-method cache inline in `reg_get_field`, after
-the own-field hit, with the validation `get_cached_string_method` does
-(string metatable `__index` slot and library table version). Mind
-`Frame::run`'s frame: `reg_get_field` inlines into it, and it is live
-across every native re-entry, so measure `native_bytes_per_level` too.
-
-Measure with `bench/patterns`, whose kernel calls string methods in its hot
-loop (`self:match`, `:reverse()`, `:gsub()`, and a `:trim()` added to the
-string library), though its time is dominated by the matching itself; the
-rewrite moved it about 1.7% there (plantasjen, df80d81 against the
-rewrite), within the unrelated control's shift.
-
 ### Method IC: three or more receiver metatables at one canonical site
 
 Each allocated GET_FIELD or SELF slot holds two one-level method entries

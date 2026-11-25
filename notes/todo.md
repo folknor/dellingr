@@ -126,6 +126,20 @@ table, Lua function or gmatch iterator result, the cases whose type is read
 through the heap. Found while landing the error-path-only type
 classification in `decode_with`.
 
+### Constructor and cache-slot housekeeping (2026-11-25)
+
+- The save golden program (`tests/common/save_golden_program.rs`) has no
+  constructor with more than four named fields, so no `NEW_TABLE_TEMPLATE`,
+  `INIT_FIELD_PINNED` or `NEW_TABLE_PRESIZED` reaches the golden bytes. A
+  change to template emission or encoding is caught only by
+  `nil_template_control_survives_snapshot` and the verifier rejection tests.
+  Adding one moves the golden, so it is a reviewed regeneration.
+- A comment in `tests/integration/snapshot/save_state.rs` (the open
+  constructor test) still names `NewTableTracked`, an opcode the register VM
+  removed; the test is about open constructors not leaking a base.
+- The `disable-inline-caches` paragraph at the top of `src/vm/caches.rs` has
+  one over-long, mis-wrapped line.
+
 ## Deferred forward-looking ideas
 
 ### Execution trace hook for a stepping debugger
