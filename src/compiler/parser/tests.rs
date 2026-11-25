@@ -970,7 +970,7 @@ fn nested_chunks_preserve_shape_and_source_name() {
 
     assert_eq!(chunk.source.as_deref(), Some(&b"nested-lines.lua"[..]));
     assert_eq!(
-        chunk.code.to_vec(),
+        chunk.code,
         vec![
             Instr::closure(0, 0),
             Instr::set_global(0, 0, None),
@@ -985,7 +985,7 @@ fn nested_chunks_preserve_shape_and_source_name() {
 
     let g = &f.nested[0];
     assert_eq!(g.source.as_deref(), Some(&b"nested-lines.lua"[..]));
-    assert_eq!(g.code.to_vec(), vec![Instr::ret(0, RetCount::Fixed(0))]);
+    assert_eq!(g.code, vec![Instr::ret(0, RetCount::Fixed(0))]);
 }
 
 #[test]

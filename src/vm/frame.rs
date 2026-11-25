@@ -14,104 +14,7 @@ use super::State;
 use super::Val;
 use super::object::{Captures, UpvalueRef};
 use crate::cost_model::Charge;
-use crate::instr::{ArgCount, CompareOp, NarrowCode, NarrowInstr, RetCount};
-
-// The dispatch body is monomorphized for the checked code view and its
-// physical window width. The register type travels into outlined helpers
-// so they also retain the operand's range when they index the window.
-trait DispatchCode {
-    type Word: DispatchWord;
-    fn fetch(&self, pc: usize) -> Self::Word;
-    fn get(&self, pc: usize) -> Option<Self::Word>;
-}
-
-impl DispatchCode for &[Instr] {
-    type Word = Instr;
-
-    #[inline(always)]
-    fn fetch(&self, pc: usize) -> Instr {
-        self[pc]
-    }
-
-    #[inline(always)]
-    fn get(&self, pc: usize) -> Option<Instr> {
-        <[Instr]>::get(self, pc).copied()
-    }
-}
-
-impl DispatchCode for NarrowCode<'_> {
-    type Word = NarrowInstr;
-
-    #[inline(always)]
-    fn fetch(&self, pc: usize) -> NarrowInstr {
-        (*self).fetch(pc)
-    }
-
-    #[inline(always)]
-    fn get(&self, pc: usize) -> Option<NarrowInstr> {
-        (*self).get(pc)
-    }
-}
-
-pub(super) trait DispatchWord: Copy {
-    type Register: Copy + Into<usize>;
-    fn canonical(self) -> Instr;
-    fn reg_a(self) -> Self::Register;
-    fn reg_b(self) -> Self::Register;
-    fn reg_c(self) -> Self::Register;
-}
-
-impl DispatchWord for Instr {
-    type Register = u16;
-
-    #[inline(always)]
-    fn canonical(self) -> Instr {
-        self
-    }
-
-    #[inline(always)]
-    fn reg_a(self) -> u16 {
-        self.a()
-    }
-
-    #[inline(always)]
-    fn reg_b(self) -> u16 {
-        self.b()
-    }
-
-    #[inline(always)]
-    fn reg_c(self) -> u16 {
-        self.c()
-    }
-}
-
-impl DispatchWord for NarrowInstr {
-    type Register = u8;
-
-    #[inline(always)]
-    fn canonical(self) -> Instr {
-        self.canonical()
-    }
-
-    #[inline(always)]
-    fn reg_a(self) -> u8 {
-        self.reg_a()
-    }
-
-    #[inline(always)]
-    fn reg_b(self) -> u8 {
-        self.reg_b()
-    }
-
-    #[inline(always)]
-    fn reg_c(self) -> u8 {
-        self.reg_c()
-    }
-}
-
-const REGISTER_SLACK: usize = 3;
-const NARROW_WINDOW: usize = 256 + REGISTER_SLACK;
-const WIDE_WINDOW: usize = 65536 + REGISTER_SLACK;
+use crate::instr::{ArgCount, CompareOp, RetCount};
 
 /// A `Frame` represents a single stack-frame of a Lua function.
 ///
@@ -231,18 +134,12 @@ impl Frame {
     /// rather than a macro: a dev build gives each expansion's locals their
     /// own slots in the dispatch frame, live across every native re-entry.
     #[inline]
-    fn tfor_loop<const WIDTH: usize, W: DispatchWord>(
-        state: &mut State,
-        frame: &Frame,
-        ip: &mut usize,
-        step: W,
-    ) -> Result<()> {
+    fn tfor_loop(state: &mut State, ip: &mut usize, base: usize, step: Instr) -> Result<()> {
         const _: () = assert!(Instr::fixed_charge(Instr::OP_TFOR_LOOP).is_none());
-        let rl: usize = step.reg_a().into();
-        if !frame.registers::<WIDTH>(state)[rl + 3].is_nil() {
-            Self::branch(state, ip, step.canonical().sj())?;
-            let regs = frame.registers::<WIDTH>(state);
-            regs[rl + 2] = regs[rl + 3];
+        let rl = base + step.a() as usize;
+        if !state.stack[rl + 3].is_nil() {
+            Self::branch(state, ip, step.sj())?;
+            state.stack[rl + 2] = state.stack[rl + 3];
         }
         Ok(())
     }
@@ -255,16 +152,17 @@ impl Frame {
     /// stay out of the dispatch frame, which is live across every native
     /// re-entry.
     #[cfg_attr(not(debug_assertions), inline(always))]
-    fn tfor_fused_loop<const WIDTH: usize, W: DispatchWord>(
+    fn tfor_fused_loop(
         state: &mut State,
         frame: &Frame,
         ip: &mut usize,
-        step: W,
+        base: usize,
+        step: Instr,
         local_cost: &mut u64,
     ) -> Result<()> {
-        Self::tfor_loop::<WIDTH, _>(state, frame, ip, step)?;
-        let rl: usize = step.reg_a().into();
-        if let Some(key) = frame.registers::<WIDTH>(state)[rl + 3].as_num()
+        Self::tfor_loop(state, ip, base, step)?;
+        let rl = base + step.a() as usize;
+        if let Some(key) = state.stack[rl + 3].as_num()
             && key.to_bits() == 1.0f64.to_bits()
         {
             state.enter_ipairs_region(frame, ip, local_cost)?;
@@ -629,42 +527,7 @@ impl Frame {
         local_cost: &mut u64,
         ip: &mut usize,
     ) -> Result<Leave> {
-        let code = &frame.runtime.bytecode.code;
-        // One call site in the native-call inventory, shared by the two
-        // monomorphizations of the dispatch body.
-        macro_rules! dispatch {
-            ($width:ident, $code:expr) => {
-                crate::native_call!(
-                    "run_frame->dispatch",
-                    Self::dispatch::<$width, _>(frame, state, local_cost, ip, &$code)
-                )
-            };
-        }
-        match code.narrow_view() {
-            Some(code) => dispatch!(NARROW_WINDOW, code),
-            None => dispatch!(WIDE_WINDOW, &code[..]),
-        }
-    }
-
-    #[cfg_attr(not(debug_assertions), inline(always))]
-    pub(super) fn registers<'a, const WIDTH: usize>(
-        &self,
-        state: &'a mut State,
-    ) -> &'a mut [Val; WIDTH] {
-        debug_assert!(
-            self.top <= state.stack.len(),
-            "ordinary dispatch requires a live frame"
-        );
-        state.stack.register_window::<WIDTH>(self.stack_bottom)
-    }
-
-    fn dispatch<const WIDTH: usize, C: DispatchCode>(
-        frame: &Frame,
-        state: &mut State,
-        local_cost: &mut u64,
-        ip: &mut usize,
-        code: &C,
-    ) -> Result<Leave> {
+        let code: &[Instr] = &frame.runtime.bytecode.code;
         let base = frame.stack_bottom;
         // The capture list is immutable once built and the frame outlives
         // the activation, so its representation is selected once here
@@ -723,140 +586,118 @@ impl Frame {
         // One arm per arithmetic opcode, each a direct call to its function
         // item with its operand kinds fixed.
         macro_rules! arith {
-            ($word:ident, $inst:ident, $f:path, rr) => {{
-                let regs = frame.registers::<WIDTH>(state);
-                let lhs = regs[Into::<usize>::into($word.reg_b())];
-                let rhs = regs[Into::<usize>::into($word.reg_c())];
+            ($inst:ident, $f:path, rr) => {{
+                let lhs = state.stack[base + $inst.b() as usize];
+                let rhs = state.stack[base + $inst.c() as usize];
                 match (lhs.as_num(), rhs.as_num()) {
                     (Some(x), Some(y)) => {
-                        regs[Into::<usize>::into($word.reg_a())] = Val::num($f(x, y));
+                        state.stack[base + $inst.a() as usize] = Val::num($f(x, y));
                     }
                     _ => return Err(state.arithmetic_operands_error(lhs, rhs)),
                 }
             }};
-            ($word:ident, $inst:ident, $f:path, rk) => {{
-                let regs = frame.registers::<WIDTH>(state);
-                let lhs = regs[Into::<usize>::into($word.reg_b())];
+            ($inst:ident, $f:path, rk) => {{
+                let lhs = state.stack[base + $inst.b() as usize];
                 let y = frame.get_number_constant($inst.c());
                 match lhs.as_num() {
-                    Some(x) => regs[Into::<usize>::into($word.reg_a())] = Val::num($f(x, y)),
+                    Some(x) => state.stack[base + $inst.a() as usize] = Val::num($f(x, y)),
                     _ => return Err(state.arithmetic_operands_error(lhs, Val::num(y))),
                 }
             }};
-            ($word:ident, $inst:ident, $f:path, kr) => {{
+            ($inst:ident, $f:path, kr) => {{
                 let x = frame.get_number_constant($inst.b());
-                let regs = frame.registers::<WIDTH>(state);
-                let rhs = regs[Into::<usize>::into($word.reg_c())];
+                let rhs = state.stack[base + $inst.c() as usize];
                 match rhs.as_num() {
-                    Some(y) => regs[Into::<usize>::into($word.reg_a())] = Val::num($f(x, y)),
+                    Some(y) => state.stack[base + $inst.a() as usize] = Val::num($f(x, y)),
                     _ => return Err(state.arithmetic_operands_error(Val::num(x), rhs)),
                 }
             }};
         }
 
         loop {
-            let word = code.fetch(*ip);
-            let inst = word.canonical();
+            let inst = code[*ip];
             *ip += 1;
+            let ra = base + inst.a() as usize;
             match inst.opcode() {
                 // Moves and constants
                 Instr::OP_MOVE => {
                     fixed_cost!(Instr::OP_MOVE);
-                    let ra: usize = word.reg_a().into();
-                    let regs = frame.registers::<WIDTH>(state);
-                    regs[ra] = regs[Into::<usize>::into(word.reg_b())];
+                    state.stack[ra] = state.stack[base + inst.b() as usize];
                 }
                 Instr::OP_LOAD_NIL => {
                     fixed_cost!(Instr::OP_LOAD_NIL);
-                    let ra = base + Into::<usize>::into(word.reg_a());
                     state.stack[ra..ra + inst.b() as usize].fill(Val::NIL);
                 }
                 Instr::OP_LOAD_BOOL => {
                     fixed_cost!(Instr::OP_LOAD_BOOL);
-                    let ra: usize = word.reg_a().into();
-                    frame.registers::<WIDTH>(state)[ra] = Val::boolean(inst.b() != 0);
+                    state.stack[ra] = Val::boolean(inst.b() != 0);
                 }
                 Instr::OP_LOAD_NUM => {
                     fixed_cost!(Instr::OP_LOAD_NUM);
-                    let ra: usize = word.reg_a().into();
-                    frame.registers::<WIDTH>(state)[ra] =
-                        Val::num(frame.get_number_constant(inst.b()));
+                    state.stack[ra] = Val::num(frame.get_number_constant(inst.b()));
                 }
                 Instr::OP_LOAD_STR => {
                     fixed_cost!(Instr::OP_LOAD_STR);
-                    let ra: usize = word.reg_a().into();
-                    frame.registers::<WIDTH>(state)[ra] = frame.literal(inst.b());
+                    state.stack[ra] = frame.literal(inst.b());
                 }
 
                 // Upvalues
                 Instr::OP_GET_UPVAL => {
                     fixed_cost!(Instr::OP_GET_UPVAL);
-                    let ra: usize = word.reg_a().into();
-                    frame.registers::<WIDTH>(state)[ra] = state.upvalue_value(upvalues, inst.b());
+                    state.stack[ra] = state.upvalue_value(upvalues, inst.b());
                 }
                 Instr::OP_SET_UPVAL => {
                     fixed_cost!(Instr::OP_SET_UPVAL);
-                    let ra: usize = word.reg_a().into();
-                    let val = frame.registers::<WIDTH>(state)[ra];
+                    let val = state.stack[ra];
                     state.set_upvalue_value(upvalues, inst.b(), val);
                 }
                 Instr::OP_CLOSE => {
                     fixed_cost!(Instr::OP_CLOSE);
-                    let ra = base + inst.a() as usize;
                     state.close_upvalues(ra);
                 }
 
                 // Globals and builtins
                 Instr::OP_GET_GLOBAL => {
                     fixed_cost!(Instr::OP_GET_GLOBAL);
-                    let ra: usize = word.reg_a().into();
-                    frame.registers::<WIDTH>(state)[ra] =
-                        state.read_global(frame, inst.b(), inst.cache_slot());
+                    state.stack[ra] = state.read_global(frame, inst.b(), inst.cache_slot());
                 }
                 Instr::OP_SET_GLOBAL => {
                     fixed_cost!(Instr::OP_SET_GLOBAL);
-                    let ra: usize = word.reg_a().into();
-                    state.write_global::<WIDTH>(frame, inst.b(), inst.cache_slot(), ra);
+                    state.write_global(frame, inst.b(), inst.cache_slot(), ra);
                 }
                 Instr::OP_GET_BUILTIN => {
                     fixed_cost!(Instr::OP_GET_BUILTIN);
-                    let ra: usize = word.reg_a().into();
-                    frame.registers::<WIDTH>(state)[ra] =
-                        state.global_env.read_builtin(&state.heap, inst.b() as u8);
+                    state.stack[ra] = state.global_env.read_builtin(&state.heap, inst.b() as u8);
                 }
                 Instr::OP_SET_BUILTIN => {
                     fixed_cost!(Instr::OP_SET_BUILTIN);
-                    let ra: usize = word.reg_a().into();
-                    let val = frame.registers::<WIDTH>(state)[ra];
-                    state
-                        .global_env
-                        .write_builtin(&mut state.heap, inst.b() as u8, &val);
+                    state.global_env.write_builtin(
+                        &mut state.heap,
+                        inst.b() as u8,
+                        &state.stack[ra],
+                    );
                 }
 
                 // Table creation
                 Instr::OP_NEW_TABLE => {
                     fixed_cost!(Instr::OP_NEW_TABLE);
-                    let ra: usize = word.reg_a().into();
-                    frame.registers::<WIDTH>(state)[ra] = state.alloc_table();
+                    state.stack[ra] = state.alloc_table();
                 }
                 Instr::OP_NEW_TABLE_PRESIZED => {
                     fixed_cost!(Instr::OP_NEW_TABLE_PRESIZED);
-                    let ra: usize = word.reg_a().into();
                     // B is a hash-capacity hint: the constructor's keyed-field
                     // count. The array part is reserved per SET_LIST batch.
-                    frame.registers::<WIDTH>(state)[ra] =
-                        state.alloc_table_with_capacity(inst.b() as usize);
+                    state.stack[ra] = state.alloc_table_with_capacity(inst.b() as usize);
                 }
                 Instr::OP_NEW_TABLE_TEMPLATE => {
                     fixed_cost!(Instr::OP_NEW_TABLE_TEMPLATE);
-                    let ra = word.reg_a();
-                    state.reg_new_table_template::<WIDTH, _>(frame, ra, inst.b());
+                    state.reg_new_table_template(frame, ra, inst.b());
                     with_cursor!(|cursor| Self::template_init_run(
                         frame,
                         state,
                         local_cost,
                         &mut cursor,
-                        base + Into::<usize>::into(ra),
+                        ra,
                         upvalues
                     ))?;
                 }
@@ -868,44 +709,39 @@ impl Frame {
                 // (`State::record_call_site`).
                 Instr::OP_GET_FIELD => {
                     fixed_cost!(Instr::OP_GET_FIELD);
-                    let ra = word.reg_a();
-                    let receiver =
-                        frame.registers::<WIDTH>(state)[Into::<usize>::into(word.reg_b())];
+                    let receiver = state.stack[base + inst.b() as usize];
                     crate::native_call!(
-                        "dispatch->reg_get_field:field",
-                        state.reg_get_field::<WIDTH, _>(frame, inst, ra, receiver, local_cost, *ip)
+                        "run_frame->reg_get_field:field",
+                        state.reg_get_field(frame, inst, ra, receiver, local_cost, *ip)
                     )?;
                 }
                 Instr::OP_SELF => {
                     fixed_cost!(Instr::OP_SELF);
-                    let ra = word.reg_a();
-                    let regs = frame.registers::<WIDTH>(state);
-                    let receiver = regs[Into::<usize>::into(word.reg_b())];
-                    regs[ra.into() + 1] = receiver;
+                    let receiver = state.stack[base + inst.b() as usize];
+                    state.stack[ra + 1] = receiver;
                     crate::native_call!(
-                        "dispatch->reg_get_field:self",
-                        state.reg_get_field::<WIDTH, _>(frame, inst, ra, receiver, local_cost, *ip)
+                        "run_frame->reg_get_field:self",
+                        state.reg_get_field(frame, inst, ra, receiver, local_cost, *ip)
                     )?;
                 }
                 Instr::OP_GET_TABLE => {
                     fixed_cost!(Instr::OP_GET_TABLE);
                     crate::native_call!(
-                        "dispatch->reg_get_table",
-                        state.reg_get_table::<WIDTH, _>(frame, word, local_cost, *ip)
+                        "run_frame->reg_get_table",
+                        state.reg_get_table(frame, inst, ra, base, local_cost, *ip)
                     )?;
                 }
 
                 // Table writes
                 Instr::OP_SET_FIELD => {
                     fixed_cost!(Instr::OP_SET_FIELD);
-                    let ra = word.reg_a();
                     crate::native_call!(
-                        "dispatch->reg_set_field",
-                        state.reg_set_field::<WIDTH, _>(
+                        "run_frame->reg_set_field",
+                        state.reg_set_field(
                             frame,
                             inst,
                             ra,
-                            word.reg_c(),
+                            base + inst.c() as usize,
                             local_cost,
                             *ip,
                         )
@@ -913,14 +749,12 @@ impl Frame {
                 }
                 Instr::OP_SET_TABLE => {
                     fixed_cost!(Instr::OP_SET_TABLE);
-                    let ra = word.reg_a();
                     crate::native_call!(
-                        "dispatch->reg_set_table",
-                        state.reg_set_table::<WIDTH, _>(
-                            frame,
+                        "run_frame->reg_set_table",
+                        state.reg_set_table(
                             ra,
-                            word.reg_b(),
-                            word.reg_c(),
+                            base + inst.b() as usize,
+                            base + inst.c() as usize,
                             local_cost,
                             *ip,
                         )
@@ -928,28 +762,24 @@ impl Frame {
                 }
                 Instr::OP_INIT_FIELD => {
                     fixed_cost!(Instr::OP_INIT_FIELD);
-                    let ra = word.reg_a();
-                    state.reg_init_field::<WIDTH, _>(frame, ra, inst.b(), word.reg_c())?;
+                    state.reg_init_field(frame, ra, inst.b(), base + inst.c() as usize)?;
                 }
                 Instr::OP_INIT_FIELD_PINNED => {
                     fixed_cost!(Instr::OP_INIT_FIELD_PINNED);
-                    let ra = word.reg_a();
-                    state.reg_init_field_pinned::<WIDTH, _>(
+                    state.reg_init_field_pinned(
                         frame,
                         ra,
                         inst.b(),
-                        word.reg_c(),
+                        base + inst.c() as usize,
                         inst.d(),
                     )?;
                 }
                 Instr::OP_INIT_INDEX => {
                     fixed_cost!(Instr::OP_INIT_INDEX);
-                    let ra = word.reg_a();
-                    state.reg_init_index::<WIDTH, _>(frame, ra, word.reg_b(), word.reg_c())?;
+                    state.reg_init_index(ra, base + inst.b() as usize, base + inst.c() as usize)?;
                 }
                 Instr::OP_SET_LIST => {
                     fixed_cost!(Instr::OP_SET_LIST);
-                    let ra = base + Into::<usize>::into(word.reg_a());
                     let count = match inst.set_list_count() {
                         Some(count) => usize::from(count),
                         None => state.stack.len() - (ra + 1),
@@ -975,98 +805,93 @@ impl Frame {
                 // Arithmetic
                 Instr::OP_ADD_RR => {
                     fixed_cost!(Instr::OP_ADD_RR);
-                    arith!(word, inst, lua_add, rr);
+                    arith!(inst, lua_add, rr);
                 }
                 Instr::OP_ADD_RK => {
                     fixed_cost!(Instr::OP_ADD_RK);
-                    arith!(word, inst, lua_add, rk);
+                    arith!(inst, lua_add, rk);
                 }
                 Instr::OP_ADD_KR => {
                     fixed_cost!(Instr::OP_ADD_KR);
-                    arith!(word, inst, lua_add, kr);
+                    arith!(inst, lua_add, kr);
                 }
                 Instr::OP_SUB_RR => {
                     fixed_cost!(Instr::OP_SUB_RR);
-                    arith!(word, inst, lua_sub, rr);
+                    arith!(inst, lua_sub, rr);
                 }
                 Instr::OP_SUB_RK => {
                     fixed_cost!(Instr::OP_SUB_RK);
-                    arith!(word, inst, lua_sub, rk);
+                    arith!(inst, lua_sub, rk);
                 }
                 Instr::OP_SUB_KR => {
                     fixed_cost!(Instr::OP_SUB_KR);
-                    arith!(word, inst, lua_sub, kr);
+                    arith!(inst, lua_sub, kr);
                 }
                 Instr::OP_MUL_RR => {
                     fixed_cost!(Instr::OP_MUL_RR);
-                    arith!(word, inst, lua_mul, rr);
+                    arith!(inst, lua_mul, rr);
                 }
                 Instr::OP_MUL_RK => {
                     fixed_cost!(Instr::OP_MUL_RK);
-                    arith!(word, inst, lua_mul, rk);
+                    arith!(inst, lua_mul, rk);
                 }
                 Instr::OP_MUL_KR => {
                     fixed_cost!(Instr::OP_MUL_KR);
-                    arith!(word, inst, lua_mul, kr);
+                    arith!(inst, lua_mul, kr);
                 }
                 Instr::OP_DIV_RR => {
                     fixed_cost!(Instr::OP_DIV_RR);
-                    arith!(word, inst, lua_div, rr);
+                    arith!(inst, lua_div, rr);
                 }
                 Instr::OP_DIV_RK => {
                     fixed_cost!(Instr::OP_DIV_RK);
-                    arith!(word, inst, lua_div, rk);
+                    arith!(inst, lua_div, rk);
                 }
                 Instr::OP_DIV_KR => {
                     fixed_cost!(Instr::OP_DIV_KR);
-                    arith!(word, inst, lua_div, kr);
+                    arith!(inst, lua_div, kr);
                 }
                 Instr::OP_MOD_RR => {
                     fixed_cost!(Instr::OP_MOD_RR);
-                    arith!(word, inst, lua_modulo, rr);
+                    arith!(inst, lua_modulo, rr);
                 }
                 Instr::OP_MOD_RK => {
                     fixed_cost!(Instr::OP_MOD_RK);
-                    arith!(word, inst, lua_modulo, rk);
+                    arith!(inst, lua_modulo, rk);
                 }
                 Instr::OP_MOD_KR => {
                     fixed_cost!(Instr::OP_MOD_KR);
-                    arith!(word, inst, lua_modulo, kr);
+                    arith!(inst, lua_modulo, kr);
                 }
                 Instr::OP_POW_RR => {
                     fixed_cost!(Instr::OP_POW_RR);
-                    arith!(word, inst, crate::crmath::pow, rr);
+                    arith!(inst, crate::crmath::pow, rr);
                 }
                 Instr::OP_POW_RK => {
                     fixed_cost!(Instr::OP_POW_RK);
-                    arith!(word, inst, crate::crmath::pow, rk);
+                    arith!(inst, crate::crmath::pow, rk);
                 }
                 Instr::OP_POW_KR => {
                     fixed_cost!(Instr::OP_POW_KR);
-                    arith!(word, inst, crate::crmath::pow, kr);
+                    arith!(inst, crate::crmath::pow, kr);
                 }
                 Instr::OP_UNM => {
                     fixed_cost!(Instr::OP_UNM);
-                    let ra: usize = word.reg_a().into();
-                    let regs = frame.registers::<WIDTH>(state);
-                    let operand = regs[Into::<usize>::into(word.reg_b())];
+                    let operand = state.stack[base + inst.b() as usize];
                     match operand.as_num() {
-                        Some(n) => regs[ra] = Val::num(-n),
+                        Some(n) => state.stack[ra] = Val::num(-n),
                         None => return Err(state.arithmetic_operands_error(operand, operand)),
                     }
                 }
                 Instr::OP_NOT => {
                     fixed_cost!(Instr::OP_NOT);
-                    let ra: usize = word.reg_a().into();
-                    let regs = frame.registers::<WIDTH>(state);
-                    regs[ra] = Val::boolean(!regs[Into::<usize>::into(word.reg_b())].truthy());
+                    state.stack[ra] = Val::boolean(!state.stack[base + inst.b() as usize].truthy());
                 }
                 Instr::OP_LEN => {
                     fixed_cost!(Instr::OP_LEN);
-                    let ra = word.reg_a();
                     crate::native_call!(
-                        "dispatch->reg_len",
-                        state.reg_len::<WIDTH, _>(frame, ra, word.reg_b(), local_cost, *ip)
+                        "run_frame->reg_len",
+                        state.reg_len(ra, base + inst.b() as usize, local_cost, *ip)
                     )?;
                 }
 
@@ -1080,25 +905,17 @@ impl Frame {
                 // uncharged too (docs/budget.md, "String costs").
                 Instr::OP_CONCAT => {
                     fixed_cost!(Instr::OP_CONCAT);
-                    let ra = word.reg_a();
-                    let value = state.concat_values(
-                        base + Into::<usize>::into(word.reg_b()),
-                        inst.c() as usize,
-                    )?;
-                    frame.registers::<WIDTH>(state)[Into::<usize>::into(ra)] = value;
+                    state.reg_concat(ra, base + inst.b() as usize, inst.c() as usize)?;
                 }
 
                 // Comparisons
                 Instr::OP_LT..=Instr::OP_NE => {
                     fixed_cost!(Instr::OP_LT, Instr::OP_NE);
-                    let ra: usize = word.reg_a().into();
-                    let regs = frame.registers::<WIDTH>(state);
                     let op = CompareOp::from_value_opcode(inst.opcode())
                         .expect("the range holds the value comparisons");
-                    let lhs = regs[Into::<usize>::into(word.reg_b())];
-                    let rhs = regs[Into::<usize>::into(word.reg_c())];
-                    let value = state.compare_vals(op, lhs, rhs)?;
-                    frame.registers::<WIDTH>(state)[ra] = Val::boolean(value);
+                    let lhs = state.stack[base + inst.b() as usize];
+                    let rhs = state.stack[base + inst.c() as usize];
+                    state.stack[ra] = Val::boolean(state.compare_vals(op, lhs, rhs)?);
                 }
 
                 // Control flow
@@ -1116,12 +933,10 @@ impl Frame {
                 // workload (see `cond_jump` in codegen.rs) and was flat.
                 Instr::OP_BR_LT..=Instr::OP_BR_NE => {
                     fixed_cost!(Instr::OP_BR_LT, Instr::OP_BR_NE);
-                    let ra: usize = word.reg_a().into();
-                    let regs = frame.registers::<WIDTH>(state);
                     let op = CompareOp::from_branch_opcode(inst.opcode())
                         .expect("the range holds the branch comparisons");
-                    let lhs = regs[ra];
-                    let rhs = regs[Into::<usize>::into(word.reg_b())];
+                    let lhs = state.stack[ra];
+                    let rhs = state.stack[base + inst.b() as usize];
                     if !state.compare_vals(op, lhs, rhs)? {
                         Self::branch(state, ip, inst.sj())?;
                     }
@@ -1132,11 +947,9 @@ impl Frame {
                 // the shared helper for its equality or type error.
                 Instr::OP_BR_LT_RK..=Instr::OP_BR_NE_RK => {
                     fixed_cost!(Instr::OP_BR_LT_RK, Instr::OP_BR_NE_RK);
-                    let ra: usize = word.reg_a().into();
-                    let regs = frame.registers::<WIDTH>(state);
                     let op = CompareOp::from_branch_number_opcode(inst.opcode())
                         .expect("the range holds the number-literal branches");
-                    let lhs = regs[ra];
+                    let lhs = state.stack[ra];
                     let k = frame.get_number_constant(inst.b());
                     #[expect(
                         clippy::float_cmp,
@@ -1160,43 +973,37 @@ impl Frame {
                 // Raw equality with an interned literal is handle equality.
                 Instr::OP_BR_EQ_RS => {
                     fixed_cost!(Instr::OP_BR_EQ_RS);
-                    let ra: usize = word.reg_a().into();
-                    if frame.registers::<WIDTH>(state)[ra] != frame.literal(inst.b()) {
+                    if state.stack[ra] != frame.literal(inst.b()) {
                         Self::branch(state, ip, inst.sj())?;
                     }
                 }
                 Instr::OP_BR_NE_RS => {
                     fixed_cost!(Instr::OP_BR_NE_RS);
-                    let ra: usize = word.reg_a().into();
-                    if frame.registers::<WIDTH>(state)[ra] == frame.literal(inst.b()) {
+                    if state.stack[ra] == frame.literal(inst.b()) {
                         Self::branch(state, ip, inst.sj())?;
                     }
                 }
                 Instr::OP_BR_EQ_NIL => {
                     fixed_cost!(Instr::OP_BR_EQ_NIL);
-                    let ra: usize = word.reg_a().into();
-                    if !frame.registers::<WIDTH>(state)[ra].is_nil() {
+                    if !state.stack[ra].is_nil() {
                         Self::branch(state, ip, inst.sj())?;
                     }
                 }
                 Instr::OP_BR_NE_NIL => {
                     fixed_cost!(Instr::OP_BR_NE_NIL);
-                    let ra: usize = word.reg_a().into();
-                    if frame.registers::<WIDTH>(state)[ra].is_nil() {
+                    if state.stack[ra].is_nil() {
                         Self::branch(state, ip, inst.sj())?;
                     }
                 }
                 Instr::OP_TEST_FALSE => {
                     fixed_cost!(Instr::OP_TEST_FALSE);
-                    let ra: usize = word.reg_a().into();
-                    if !frame.registers::<WIDTH>(state)[ra].truthy() {
+                    if !state.stack[ra].truthy() {
                         Self::branch(state, ip, inst.sj())?;
                     }
                 }
                 Instr::OP_TEST_TRUE => {
                     fixed_cost!(Instr::OP_TEST_TRUE);
-                    let ra: usize = word.reg_a().into();
-                    if frame.registers::<WIDTH>(state)[ra].truthy() {
+                    if state.stack[ra].truthy() {
                         Self::branch(state, ip, inst.sj())?;
                     }
                 }
@@ -1204,8 +1011,7 @@ impl Frame {
                 // `for` loops
                 Instr::OP_FOR_PREP => {
                     fixed_cost!(Instr::OP_FOR_PREP);
-                    let ra = word.reg_a();
-                    with_cursor!(|cursor| state.instr_for_prep::<WIDTH, _>(
+                    with_cursor!(|cursor| state.instr_for_prep(
                         frame,
                         ra,
                         &mut cursor,
@@ -1215,22 +1021,14 @@ impl Frame {
                 }
                 Instr::OP_FOR_LOOP => {
                     fixed_cost!(Instr::OP_FOR_LOOP);
-                    let ra = word.reg_a();
-                    with_cursor!(|cursor| state.instr_for_loop::<WIDTH, _>(
-                        frame,
-                        ra,
-                        &mut cursor,
-                        inst.sj()
-                    ))?;
+                    with_cursor!(|cursor| state.instr_for_loop(ra, &mut cursor, inst.sj()))?;
                 }
                 Instr::OP_TFOR_CALL => {
                     fixed_cost!(Instr::OP_TFOR_CALL);
-                    let ra = word.reg_a();
                     // A next/ipairs step stays in the loop with the batch
                     // pending. Every other step calls out, so it records the
                     // call site and publishes the batch first.
-                    if !state.tfor_fast_step::<WIDTH, _>(
-                        frame,
+                    if !state.tfor_fast_step(
                         ra,
                         inst.b() as u8,
                         inst.cache_slot(),
@@ -1239,43 +1037,42 @@ impl Frame {
                         state.record_call_site(*ip);
                         Self::flush_local_cost(state, local_cost)?;
                         crate::native_call!(
-                            "dispatch->instr_tfor_call",
-                            state.instr_tfor_call(base + Into::<usize>::into(ra), inst.b() as u8)
+                            "run_frame->instr_tfor_call",
+                            state.instr_tfor_call(ra, inst.b() as u8)
                         )?;
                     }
                     // Fusion keyed on the real next instruction: compiled
                     // code always follows TFOR_CALL with its TFOR_LOOP, so
                     // run that free back edge here rather than dispatch it.
                     // The cursor moves past it first, so its poll names it.
-                    if let Some(step) = code.get(*ip)
-                        && step.canonical().opcode() == Instr::OP_TFOR_LOOP
+                    if let Some(&step) = code.get(*ip)
+                        && step.opcode() == Instr::OP_TFOR_LOOP
                     {
                         *ip += 1;
-                        with_cursor!(|cursor| Self::tfor_fused_loop::<WIDTH, _>(
+                        with_cursor!(|cursor| Self::tfor_fused_loop(
                             state,
                             frame,
                             &mut cursor,
+                            base,
                             step,
                             local_cost
                         ))?;
                     }
                 }
-                Instr::OP_TFOR_LOOP => Self::tfor_loop::<WIDTH, _>(state, frame, ip, word)?,
+                Instr::OP_TFOR_LOOP => Self::tfor_loop(state, ip, base, inst)?,
 
                 // Functions (calls and returns)
                 Instr::OP_CLOSURE => {
                     fixed_cost!(Instr::OP_CLOSURE);
-                    let ra = word.reg_a();
-                    state.reg_closure::<WIDTH, _>(frame, ra, inst.b())?;
+                    state.reg_closure(frame, ra, inst.b())?;
                 }
                 Instr::OP_CALL => {
                     fixed_cost!(Instr::OP_CALL);
-                    let ra = base + Into::<usize>::into(word.reg_a());
                     state.record_call_site(*ip);
                     let args = state.call_window(ra, inst.call_args())?;
                     let results = inst.call_results();
                     if crate::native_call!(
-                        "dispatch->call_from_lua",
+                        "run_frame->call_from_lua",
                         state.call_from_lua(args, results, inst.call_is_method(), local_cost)
                     )? {
                         return Ok(Leave::Call);
@@ -1286,7 +1083,6 @@ impl Frame {
                 }
                 Instr::OP_RETURN => {
                     fixed_cost!(Instr::OP_RETURN);
-                    let ra = base + inst.a() as usize;
                     // No flush: a return into a Lua caller keeps the batch,
                     // and `Frame::run` settles it when the entry frame returns.
                     let count = match inst.return_count() {
@@ -1297,17 +1093,15 @@ impl Frame {
                 }
                 Instr::OP_VARARG => {
                     fixed_cost!(Instr::OP_VARARG);
-                    let ra = base + Into::<usize>::into(word.reg_a());
                     state.reg_vararg(ra, inst.vararg_count())?;
                 }
                 Instr::OP_TAILCALL => {
                     fixed_cost!(Instr::OP_TAILCALL);
-                    let ra = base + Into::<usize>::into(word.reg_a());
                     // The whole call is out of line (see the function). A
                     // plain match rather than `?` keeps the unoptimized
                     // build's frame from growing a residual temporary.
                     return match crate::native_call!(
-                        "dispatch->tail_call_from_lua",
+                        "run_frame->tail_call_from_lua",
                         state.tail_call_from_lua(inst, ra, *ip, local_cost)
                     ) {
                         // A Rust callee ran; its results sit in this frame's
@@ -1430,7 +1224,7 @@ mod tests {
     #[test]
     fn verifier_rejects_end_of_bytecode_jump() {
         let bytecode = Bytecode {
-            code: vec![Instr::jump(1), Instr::ret(0, RetCount::Fixed(0))].into(),
+            code: vec![Instr::jump(1), Instr::ret(0, RetCount::Fixed(0))],
             line_info: vec![1, 1],
             ..Bytecode::default()
         };
@@ -1449,7 +1243,7 @@ mod tests {
     #[test]
     fn verifier_rejects_backward_loop_exits() {
         let back_edge = Bytecode {
-            code: vec![Instr::tfor_loop(0, -1), Instr::ret(0, RetCount::Fixed(0))].into(),
+            code: vec![Instr::tfor_loop(0, -1), Instr::ret(0, RetCount::Fixed(0))],
             line_info: vec![1, 1],
             max_stack: 4,
             ..Bytecode::default()
@@ -1457,7 +1251,7 @@ mod tests {
         crate::compiler::verify::validate_bytecode(&back_edge)
             .expect("a backward TFOR_LOOP is a polled back edge");
         let bytecode = Bytecode {
-            code: vec![Instr::for_prep(0, -1), Instr::ret(0, RetCount::Fixed(0))].into(),
+            code: vec![Instr::for_prep(0, -1), Instr::ret(0, RetCount::Fixed(0))],
             line_info: vec![1, 1],
             max_stack: 4,
             ..Bytecode::default()
@@ -1504,7 +1298,7 @@ mod tests {
     fn check_invalid_numeric_for_controls(code: Vec<Instr>) {
         let bytecode = Bytecode {
             line_info: vec![1; code.len()],
-            code: code.into(),
+            code,
             number_literals: vec![1.0],
             max_stack: 4,
             ..Bytecode::default()
@@ -1569,7 +1363,7 @@ mod tests {
     fn check_window_below_open_upvalue(window: &[Instr], captured: u8) {
         use crate::compiler::UpvalueDesc;
         let child = Bytecode {
-            code: vec![Instr::get_upval(0, 0), Instr::ret(0, RetCount::Fixed(1))].into(),
+            code: vec![Instr::get_upval(0, 0), Instr::ret(0, RetCount::Fixed(1))],
             line_info: vec![1; 2],
             max_stack: 1,
             upvalues: vec![UpvalueDesc::Local(captured)],
@@ -1584,7 +1378,7 @@ mod tests {
         code.push(Instr::ret(0, RetCount::Fixed(0)));
         let bytecode = Bytecode {
             line_info: vec![1; code.len()],
-            code: code.into(),
+            code,
             number_literals: vec![7.0],
             string_literals: vec![b"f".to_vec()],
             max_stack: 4,

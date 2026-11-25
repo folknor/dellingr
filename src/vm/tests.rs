@@ -260,8 +260,7 @@ fn bytecode_concat_stores_joined_string() {
             Instr::concat(0, 0, 2),
             Instr::set_global(0, 0, None),
             Instr::ret(0, RetCount::Fixed(0)),
-        ]
-        .into(),
+        ],
         string_literals: vec!["key".into(), "a".into(), "b".into()],
         max_stack: 2,
         ..Bytecode::default()
@@ -281,8 +280,7 @@ fn bytecode_equality_stores_true_for_equal_numbers() {
             Instr::compare(crate::instr::CompareOp::Eq, 0, 0, 1),
             Instr::set_global(0, 0, None),
             Instr::ret(0, RetCount::Fixed(0)),
-        ]
-        .into(),
+        ],
         number_literals: vec![2.5],
         string_literals: vec!["a".into()],
         max_stack: 2,
@@ -306,8 +304,7 @@ fn bytecode_test_false_evaluates_boolean_rhs() {
             Instr::load_bool(0, false),
             Instr::set_global(0, 0, None),
             Instr::ret(0, RetCount::Fixed(0)),
-        ]
-        .into(),
+        ],
         string_literals: vec!["key".into()],
         max_stack: 1,
         ..Bytecode::default()
@@ -330,7 +327,7 @@ fn bytecode_test_false_continues_for_truthy_value() {
         Instr::ret(0, RetCount::Fixed(0)),
     ];
     let chunk = Bytecode {
-        code: code.into(),
+        code,
         number_literals: vec![5.0],
         string_literals: vec!["a".into()],
         max_stack: 1,
@@ -355,7 +352,7 @@ fn bytecode_less_than_branch_distinguishes_equal_and_ordered_numbers() {
         Instr::ret(0, RetCount::Fixed(0)),
     ];
     let chunk = Bytecode {
-        code: code.into(),
+        code,
         number_literals: vec![2.0, 2.0],
         string_literals: vec!["a".into()],
         max_stack: 2,
@@ -389,7 +386,7 @@ fn bytecode_global_while_loop_reaches_limit() {
         Instr::ret(0, RetCount::Fixed(0)),
     ];
     let chunk = Bytecode {
-        code: code.into(),
+        code,
         number_literals: vec![1.0, 10.0, 0.0],
         string_literals: vec!["a".into()],
         max_stack: 2,
@@ -420,7 +417,7 @@ fn bytecode_local_while_loop_reaches_limit() {
         Instr::ret(0, RetCount::Fixed(0)),
     ];
     let chunk = Bytecode {
-        code: code.into(),
+        code,
         number_literals: vec![1.0, 10.0, 1.0],
         string_literals: vec!["x".into()],
         num_locals: 1,
@@ -451,7 +448,7 @@ fn bytecode_for_prep_skips_empty_positive_range() {
         Instr::ret(0, RetCount::Fixed(0)),
     ];
     let chunk = Bytecode {
-        code: code.into(),
+        code,
         number_literals: vec![6.0, 2.0, 2.0],
         string_literals: vec!["a".into()],
         num_locals: 4,

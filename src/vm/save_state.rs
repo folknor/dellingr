@@ -2422,7 +2422,7 @@ fn materialize_bytecode(
     let mut out: Vec<Option<Arc<Bytecode>>> = vec![None; saved.len()];
     let mut visiting = vec![false; saved.len()];
     for idx in 0..saved.len() {
-        build_bytecode_tree(idx, payload, &source_names, &mut out, &mut visiting)?;
+        build_bytecode_tree(idx, saved, &source_names, &mut out, &mut visiting)?;
     }
     out.into_iter()
         .enumerate()
@@ -2464,7 +2464,7 @@ fn intern_bytecode_sources(saved: &[SavedBytecode]) -> Vec<Option<Arc<[u8]>>> {
 /// all match the recursive version this replaced.
 fn build_bytecode_tree(
     root: usize,
-    payload: &verify::VerifiedSavePayload,
+    saved: &[SavedBytecode],
     source_names: &[Option<Arc<[u8]>>],
     out: &mut [Option<Arc<Bytecode>>],
     visiting: &mut [bool],
@@ -2472,7 +2472,6 @@ fn build_bytecode_tree(
     if out[root].is_some() {
         return Ok(());
     }
-    let saved = payload.bytecode();
     visiting[root] = true;
     let mut stack: Vec<(usize, usize)> = vec![(root, 0)];
     while let Some((idx, cursor)) = stack.last_mut() {
@@ -2534,12 +2533,7 @@ fn build_bytecode_tree(
                 SaveLocation::Bytecode,
             )
         })?;
-        out[idx] = Some(build_bytecode_node(
-            src,
-            nested,
-            source,
-            payload.register_tier(idx),
-        ));
+        out[idx] = Some(build_bytecode_node(src, nested, source));
         visiting[idx] = false;
         stack.pop();
     }
@@ -2550,19 +2544,9 @@ fn build_bytecode_node(
     src: &SavedBytecode,
     nested: Vec<Arc<Bytecode>>,
     source: Option<Arc<[u8]>>,
-    register_tier: crate::compiler::RegisterTier,
 ) -> Arc<Bytecode> {
-    let mut code: crate::instr::Code = src
-        .code
-        .iter()
-        .map(|raw| Instr::from_raw(*raw))
-        .collect::<Vec<_>>()
-        .into();
-    // Admission verified exactly these words (`SavedBytecode::code`, read
-    // only), so its verdict is installed on them here.
-    code.install_tier(register_tier);
     Arc::new(Bytecode {
-        code,
+        code: src.code.iter().map(|raw| Instr::from_raw(*raw)).collect(),
         number_literals: src
             .number_literals
             .iter()
@@ -3756,59 +3740,6 @@ mod tests {
             0,
             Some(instruction),
         );
-    }
-
-    #[test]
-    fn snapshot_register_tier_boundaries() {
-        use crate::compiler::RegisterTier;
-
-        for (max_stack, inst, expected) in [
-            (
-                256,
-                Instr::self_(254, 0, 0, None),
-                Some(RegisterTier::Narrow),
-            ),
-            (256, Instr::self_(255, 0, 0, None), None),
-            (257, Instr::self_(255, 0, 0, None), Some(RegisterTier::Wide)),
-            (256, Instr::mov(256, 0), None),
-            (
-                u16::MAX - 1,
-                Instr::mov(u16::MAX - 2, 0),
-                Some(RegisterTier::Wide),
-            ),
-            (u16::MAX - 1, Instr::mov(u16::MAX - 1, 0), None),
-        ] {
-            let mut bc = valid_saved_bytecode();
-            bc.max_stack = max_stack;
-            bc.string_literals.push(b"field".to_vec());
-            bc.code.insert(0, inst.raw());
-            bc.line_info.insert(0, 1);
-            if let Some(tier) = expected {
-                let state = load_bytecode_with_globals(
-                    vec![bc],
-                    vec![SavedObject::Closure {
-                        chunk: 0,
-                        upvalues: Vec::new(),
-                    }],
-                    vec![("f".to_string(), SavedVal::Obj(0))],
-                )
-                .unwrap();
-                let runtime = state.bytecode_caches.values().next().unwrap();
-                assert_eq!(runtime.bytecode.code.tier(), tier);
-            } else {
-                let error = rejected_bytecode(vec![bc], Vec::new());
-                assert_invalid(&error, 0, Some(0));
-                assert!(matches!(
-                    error,
-                    SnapshotError::InvalidBytecode {
-                        reason: InvalidBytecodeReason::Validation(
-                            crate::compiler::verify::ValidationReason::RegisterOutOfRange
-                        ),
-                        ..
-                    }
-                ));
-            }
-        }
     }
 
     #[test]

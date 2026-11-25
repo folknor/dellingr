@@ -307,10 +307,8 @@ entries it removes.
   handler), the receiver a `__call` step inserts, or a Rust callee's own
   pushes; and by open results (`...`, or a call's or return's open count)
   growing past the frame.
-- The cap counts live slots on the shared value stack. The backing buffer can
-  retain initialized slots after the stack shrinks. Those slots are outside
-  the host stack and are excluded from garbage collection roots. Enforcing
-  the cap charges no cost.
+- The cap bounds the shared value stack, not total host memory. Enforcing it
+  charges no cost.
 - Each State can use up to `MAX_STACK_SIZE` value slots. Rust tests that
   push to the cap run in the ordinary Rust test process, without the
   virtual-memory cap used for standalone example runs by

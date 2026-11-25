@@ -147,6 +147,29 @@ checks cost issue slots.
     opcodes, so it cannot use a register getter until it has identified
     the operation. It is outside this link's dispatch body.
 
+## Rulings from link 3a (spar session 01a21369)
+
+21. The window design is abandoned and every dependent change backed out
+    (ruling 12's clause): src, brokkr.toml, docs/limits.md and the
+    native-calls table and inventory are 02589f4's again, `instr/code.rs`
+    deleted. Reason: under ruling 1 a safe window costs the padding
+    compare plus the slice range checks per borrow, so per-arm borrowing
+    (ruling 7) is at best check parity for one-register arms; the second
+    monomorphized dispatch body adds code size; the live-prefix end check
+    taxes every index outside dispatch. Three matched A/Bs, every one
+    slower. Codex correction, accepted: one window acquisition can beat
+    the baseline on three-operand arms (`SET_TABLE`), and a raw
+    `GET_TABLE` hit could write through the borrow that read its inputs,
+    so parity is not a hard cap; but nothing measured shows a net win and
+    none of links 2/2a (tier, `Code` wrapper, register-use column) is
+    useful without dispatch adoption.
+22. Kept: one tier-free verifier test of the implicit-offset and endpoint
+    admission contract (`SELF`, numeric and generic for, `TFOR_CALL`,
+    `CLOSE 256`, empty and valued `RETURN 256`). The refusal reasoning and
+    the two untried shapes (maximum-index guard on an existing slice,
+    borrow across heap-only fast paths) live at `State.stack` in
+    `src/vm.rs` and in the notes entry.
+
 ## Links
 
 1. Done (with 1a): private stack type with logical end, every crate site
@@ -168,14 +191,10 @@ checks cost issue slots.
    The native-call inventory tracks the dispatch edge and the
    native-stack table is refreshed. Native envelope and matched A/B
    verdict recorded below.
-   3a. Required: the combined candidate was slower on every workload.
-       Test checked live-slice reuse and the extra physical borrow
-       branches as separate candidates. Measure code alignment if the
-       mechanism remains unclear. Repeat the correctness and native gates
-       and the matched A/B of the final tip against 02589f4. Medium.
-4. Green agent: full gate, `reference/` and `docs/` touched by the stack
-   contract (Frame doc, `docs/limits.md` value stack, native-calls table),
-   close the notes entry with the measured result, delete this file.
+   3a. Done: chain backed out (rulings 21, 22), notes entry rewritten to
+       its residue, verdict A/B of the tip against 02589f4 below.
+4. Green agent: read the verdict A/B below (no mechanism-level loss; one
+   layout-band delta on key_sweep), then delete this file. Small.
 
 ## Rulings from link 1a (spar session 01a21328)
 
@@ -246,7 +265,17 @@ First-round sidecars confirm slower WARM blocks in all five workloads.
 The native stack envelope and all correctness sweeps passed. The push
 gate stays closed.
 
-Open for the link 3a spar: choose where to attack the loss. In both
+Link 3a verdict A/B, bygg, `--rounds 3 --commit 02589f4 --commit 010a4a0`
+(the back-out commit before this note was amended in; the amend changes
+only Markdown), invocation 2f20d514, median paired difference:
+closed_mode -25.3 ms (faster 3 of 3), wide_sweep +8.0 (slower 2 of 3),
+key_sweep +83.4 (+2.9%, slower 3 of 3), arithmetic -7.1 (faster 2 of 3),
+benchmark -4.8 (faster 2 of 3). The tip's non-test source differs from
+02589f4 only by a doc comment in `src/vm.rs` (shifting panic locations in
+rodata), so key_sweep's delta is code layout, inside the band AGENTS.md
+records for identical executed paths, not a mechanism.
+
+Open for the link 3a spar (superseded by rulings 21 and 22): choose where to attack the loss. In both
 `reg_get_table` instantiations the release hot path still compares the
 window end with backing length twice, with a separate start/end check.
 Ruling 4's expected single range check per borrow was not realized by

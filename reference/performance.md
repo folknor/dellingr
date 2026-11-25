@@ -1348,6 +1348,10 @@ isolate a cause. Against da09880, the largest recurring cycle at
 1984 in release and from 1760 to 1920 in release with snapshot. The
 native envelope passed.
 
+The whole design (padded stack, register tiers, tiered dispatch) was then
+backed out to the plain `Vec` stack of 02589f4; the reasoning is kept at
+`State.stack` in `src/vm.rs`.
+
 ## Native stack frames and cycles
 
 The log behind reference/native-calls.md's current table: the frame-size

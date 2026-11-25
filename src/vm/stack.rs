@@ -13,120 +13,6 @@ use crate::error::InternalFault;
 /// `string.format`'s up-front literal hint, so its buffers recycle.
 pub(crate) const RESULT_BUFFER_CAPACITY: usize = 4096;
 
-/// The shared value stack. Only the prefix ending at `end` is live.
-pub(super) struct ValueStack {
-    buf: Vec<Val>,
-    end: usize,
-}
-
-impl ValueStack {
-    pub(super) fn with_capacity(capacity: usize) -> Self {
-        Self {
-            buf: Vec::with_capacity(capacity),
-            end: 0,
-        }
-    }
-
-    pub(super) fn len(&self) -> usize {
-        self.end
-    }
-
-    pub(super) fn push(&mut self, value: Val) {
-        if self.end == self.buf.len() {
-            self.buf.push(value);
-        } else {
-            self.buf[self.end] = value;
-        }
-        self.end += 1;
-    }
-
-    fn pop(&mut self) -> Option<Val> {
-        let last = self.end.checked_sub(1)?;
-        let value = self.buf[last];
-        self.end = last;
-        Some(value)
-    }
-
-    pub(super) fn truncate(&mut self, len: usize) {
-        self.end = self.end.min(len);
-    }
-
-    #[cfg(feature = "snapshot")]
-    pub(super) fn clear(&mut self) {
-        self.end = 0;
-    }
-
-    pub(super) fn resize(&mut self, len: usize, value: Val) {
-        if len > self.end {
-            let initialized = len.min(self.buf.len());
-            self.buf[self.end..initialized].fill(value);
-            if len > initialized {
-                self.buf.resize(len, value);
-            }
-        }
-        self.end = len;
-    }
-
-    pub(super) fn extend_from_slice(&mut self, values: &[Val]) {
-        let reused = values.len().min(self.buf.len() - self.end);
-        let (prefix, suffix) = values.split_at(reused);
-        self.buf[self.end..self.end + reused].copy_from_slice(prefix);
-        self.buf.extend_from_slice(suffix);
-        self.end += values.len();
-    }
-
-    pub(super) fn insert(&mut self, index: usize, value: Val) {
-        assert!(index <= self.end);
-        let old_end = self.end;
-        self.push(value);
-        self.copy_within(index..old_end, index + 1);
-        self[index] = value;
-    }
-
-    pub(super) fn remove_range(&mut self, range: std::ops::Range<usize>) {
-        let count = self[range.clone()].len();
-        let end = self.end;
-        self.copy_within(range.end..end, range.start);
-        self.end -= count;
-    }
-
-    pub(super) fn remove(&mut self, index: usize) {
-        self.remove_range(index..index + 1);
-    }
-
-    /// Borrow the physical register window while leaving the live end alone.
-    #[cfg_attr(not(debug_assertions), inline(always))]
-    pub(super) fn register_window<const WIDTH: usize>(&mut self, base: usize) -> &mut [Val; WIDTH] {
-        let limit = base + WIDTH;
-        if self.buf.len() < limit {
-            self.grow_padding(limit);
-        }
-        (&mut self.buf[base..limit])
-            .try_into()
-            .expect("the window range has exactly WIDTH slots")
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn grow_padding(&mut self, limit: usize) {
-        self.buf.resize(limit, Val::NIL);
-    }
-}
-
-impl std::ops::Deref for ValueStack {
-    type Target = [Val];
-
-    fn deref(&self) -> &Self::Target {
-        &self.buf[..self.end]
-    }
-}
-
-impl std::ops::DerefMut for ValueStack {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.buf[..self.end]
-    }
-}
-
 impl State {
     /// Returns the index of the top element in the stack. Because indices start
     /// at 1, this result is equal to the number of elements in the stack (and
@@ -431,7 +317,7 @@ impl State {
             }));
         }
         let bottom = self.in_flight.stack_bottom;
-        self.stack.remove_range(bottom..bottom + count);
+        self.stack.drain(bottom..bottom + count);
         Ok(())
     }
 
@@ -762,39 +648,5 @@ impl State {
             }));
         }
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod value_stack_tests {
-    use super::{Val, ValueStack};
-
-    #[test]
-    fn stack_growth_replaces_stale_slots_and_shifts_stay_live() {
-        let mut stack = ValueStack::with_capacity(0);
-        let a = Val::num(1.0);
-        let b = Val::num(2.0);
-        let c = Val::num(3.0);
-        stack.extend_from_slice(&[a, b, c]);
-        let window = stack.register_window::<256>(1);
-        assert_eq!(window[0], b);
-        assert_eq!(window[255], Val::NIL);
-        window[255] = c;
-
-        stack.insert(1, c);
-        stack.remove_range(2..4);
-        assert_eq!(&stack[..], &[a, c]);
-        assert_eq!(stack.register_window::<256>(1)[255], c);
-
-        stack.truncate(1);
-        stack.resize(3, Val::NIL);
-        assert_eq!(&stack[..], &[a, Val::NIL, Val::NIL]);
-        assert_eq!(stack.pop(), Some(Val::NIL));
-        stack.push(b);
-        assert_eq!(&stack[..], &[a, Val::NIL, b]);
-
-        stack.resize(256, Val::NIL);
-        stack.extend_from_slice(&[a, b, c]);
-        assert_eq!(&stack[255..], &[Val::NIL, a, b, c]);
     }
 }

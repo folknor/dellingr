@@ -4891,10 +4891,10 @@ mod tests {
             .unwrap()
             .replace_for_test(window_table(MAX_ARRAY_LEN, Some(MAX_ARRAY_LEN)));
         state.push_boolean(false).unwrap();
-        let before = state.stack.to_vec();
+        let before = state.stack.clone();
         let error = state.table_insert_at(1, 1).unwrap_err();
         assert!(matches!(error.kind(), ErrorKind::TableGrowthFailed));
-        assert_eq!(&state.stack[..], before);
+        assert_eq!(state.stack, before);
         assert_eq!(
             state.heap.as_table_ref(ptr).unwrap().get(&n(MAX_ARRAY_LEN)),
             Val::boolean(true)

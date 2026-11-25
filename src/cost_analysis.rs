@@ -109,7 +109,7 @@ impl ScopeCost {
         // size, which holds as long as `MAX_SOURCE_BYTES` stays many orders
         // of magnitude below 2^64. Costs are those counts times model weights
         // of up to `u32::MAX`, so costs saturate instead.
-        for inst in chunk.code.iter() {
+        for inst in &chunk.code {
             scope.instructions += 1;
             if let Some((charge, units)) = inst.static_units() {
                 scope.units[charge as usize] += units;

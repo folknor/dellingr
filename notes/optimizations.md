@@ -33,13 +33,13 @@ dispatch) because outlined helpers took `&mut ip`; they now get a copy
 wide_sweep, key_sweep, composite -0.5 to -1%, arithmetic +0.8% (1 of 3
 faster). Release native bytes unchanged, dev +32 per level.
 
-Still open below this entry: register bounds checks (the padded stack chain),
+Still open below this entry: register bounds checks (the padded stack was backed out; residue below),
 "Cost accounting on every arithmetic op" (the pending batch is the same kind
 of escaped `&mut` slot, `0x8(%rsp)`, loaded and stored per charge), and
 `GET_UPVAL` indirection. The code slice's pointer and length are still
 reloaded from spill slots at the dispatch head; nothing shown recovers them.
 
-### Register access bounds checks: padded value stack (chain, design settled)
+### Register access bounds checks
 
 Measured 2026-11-25 on bygg, 4495fca, matched interleaved `--commit` pairs,
 3 rounds: making every value-stack index unchecked (throwaway newtype over
@@ -49,13 +49,16 @@ Measured 2026-11-25 on bygg, 4495fca, matched interleaved `--commit` pairs,
 72.6e9. This overturns the 2026-10 Zen 3 refusal.
 
 `unsafe` unchecked access is refused: the verifier would become a
-memory-safety boundary for snapshot files. The safe design (sparred with
-codex, session 01a21310) is in `notes/DISPATCH-design.md`: a private value
-stack with a logical end and initialized padding, borrowed per dispatch arm
-as a fixed-size array tier indexed by narrowed operands, so the physical bound
-is a type fact. Expected to recover a fraction of the experiment's gain
-(per-arm borrows keep one check per arm; the experiment also removed checks
-outside dispatch).
+memory-safety boundary for snapshot files. The padded-stack design (private
+stack with a logical end, fixed-size register windows per arm, narrow and
+wide tiers) was built and backed out on 2026-11-25: 7.5 to 30 percent slower
+on every workload, numbers and mechanism at `State.stack` in `src/vm.rs`.
+Untried safe shapes, each judged only by a matched A/B against the plain
+`Vec`: a single checked maximum-index guard on a multi-operand fast path
+(`SET_TABLE`, `GET_TABLE`) with safe indexing of the same slice, adopted only
+if release asm drops the subordinate checks; and a register borrow kept
+across heap-only fast paths (a raw `GET_TABLE` hit writing its result
+through the borrow that read its inputs). Medium each; check the asm first.
 
 ### Cost accounting on every arithmetic op
 

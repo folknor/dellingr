@@ -24,10 +24,11 @@ impl State {
     #[inline(always)]
     pub(super) fn try_insert_table_direct(
         &mut self,
-        tbl_val: Val,
+        table_idx: usize,
         key: Val,
         val: Val,
     ) -> Result<bool> {
+        let tbl_val = self.stack[table_idx];
         let ptr = tbl_val.as_object_ptr();
         match ptr.and_then(|ptr| self.heap.edit_table(ptr)) {
             Some(mut tbl) => {

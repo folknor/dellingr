@@ -87,7 +87,7 @@ pub(super) fn generate(chunk: &mut Bytecode, body: &FunctionBody) -> Result<()> 
             next = *line;
         }
     }
-    chunk.code = generator.code.into();
+    chunk.code = generator.code;
     chunk.line_info = generator.lines;
     chunk.max_stack = generator.max_stack;
     Ok(())

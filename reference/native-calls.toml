@@ -69,10 +69,6 @@ name = "run_frame"
 owner = "Frame"
 
 [[function]]
-name = "dispatch"
-owner = "Frame"
-
-[[function]]
 name = "call"
 owner = "State"
 root = "host-api"
@@ -360,34 +356,31 @@ id = "run->eval_batched"
 id = "eval_batched->run_frame"
 
 [[edge]]
-id = "run_frame->dispatch"
+id = "run_frame->reg_get_field:field"
 
 [[edge]]
-id = "dispatch->reg_get_field:field"
+id = "run_frame->reg_get_field:self"
 
 [[edge]]
-id = "dispatch->reg_get_field:self"
+id = "run_frame->reg_get_table"
 
 [[edge]]
-id = "dispatch->reg_get_table"
+id = "run_frame->reg_set_field"
 
 [[edge]]
-id = "dispatch->reg_set_field"
+id = "run_frame->reg_set_table"
 
 [[edge]]
-id = "dispatch->reg_set_table"
+id = "run_frame->reg_len"
 
 [[edge]]
-id = "dispatch->reg_len"
+id = "run_frame->instr_tfor_call"
 
 [[edge]]
-id = "dispatch->instr_tfor_call"
+id = "run_frame->call_from_lua"
 
 [[edge]]
-id = "dispatch->call_from_lua"
-
-[[edge]]
-id = "dispatch->tail_call_from_lua"
+id = "run_frame->tail_call_from_lua"
 
 # src/vm/registers.rs
 [[edge]]
@@ -670,11 +663,10 @@ lua = [
     "run_invocation->run",
     "run->eval_batched",
     "eval_batched->run_frame",
-    "run_frame->dispatch",
 ]
 # Lua calling a Rust function, which runs to completion inside the loop.
 rust = [
-    "dispatch->call_from_lua",
+    "run_frame->call_from_lua",
     "call_from_lua->begin_call",
     "begin_call->invoke_rust_fn",
 ]
@@ -682,18 +674,18 @@ rust = [
 # (`State::resolve_index`) has returned before the call, so table, string
 # and handler chains all take this path.
 get_field = [
-    "dispatch->reg_get_field:field",
+    "run_frame->reg_get_field:field",
     "reg_get_field->index_call",
     "index_call->call_unguarded",
 ]
 get_key = [
-    "dispatch->reg_get_table",
+    "run_frame->reg_get_table",
     "reg_get_table->index_call",
     "index_call->call_unguarded",
 ]
 # A __newindex function handler reached from a field store.
 set_field = [
-    "dispatch->reg_set_field",
+    "run_frame->reg_set_field",
     "reg_set_field->newindex_call",
     "newindex_call->call_unguarded",
 ]
@@ -730,7 +722,7 @@ path = ["@lua", "@get_field"]
 name = "index_method"
 path = [
     "@lua",
-    "dispatch->reg_get_field:self",
+    "run_frame->reg_get_field:self",
     "reg_get_field->index_call",
     "index_call->call_unguarded",
 ]
@@ -751,7 +743,7 @@ path = ["@lua", "@set_field"]
 name = "newindex_key"
 path = [
     "@lua",
-    "dispatch->reg_set_table",
+    "run_frame->reg_set_table",
     "reg_set_table->newindex_call",
     "newindex_call->call_unguarded",
 ]
@@ -764,7 +756,7 @@ path = ["@lua", "@set_field", "@rust_handler"]
 name = "length"
 path = [
     "@lua",
-    "dispatch->reg_len",
+    "run_frame->reg_len",
     "reg_len->len_call",
     "len_call->call_unguarded",
 ]
@@ -898,7 +890,7 @@ path = [
 name = "callable_rust"
 path = [
     "@lua",
-    "dispatch->call_from_lua",
+    "run_frame->call_from_lua",
     "call_from_lua->begin_call",
     "begin_call->begin_callable_call",
     "begin_callable_call->invoke_rust_fn",
@@ -915,7 +907,7 @@ path = [
 name = "tail_rust"
 path = [
     "@lua",
-    "dispatch->tail_call_from_lua",
+    "run_frame->tail_call_from_lua",
     "tail_call_from_lua->begin_call",
     "begin_call->invoke_rust_fn",
     "call->call_unguarded",
@@ -925,7 +917,7 @@ path = [
 name = "tail_callable_rust"
 path = [
     "@lua",
-    "dispatch->tail_call_from_lua",
+    "run_frame->tail_call_from_lua",
     "tail_call_from_lua->begin_call",
     "begin_call->begin_callable_call",
     "begin_callable_call->invoke_rust_fn",
@@ -1173,13 +1165,13 @@ path = [
 
 [[scenario]]
 name = "tfor_lua"
-path = ["@lua", "dispatch->instr_tfor_call", "instr_tfor_call->call_unguarded"]
+path = ["@lua", "run_frame->instr_tfor_call", "instr_tfor_call->call_unguarded"]
 
 [[scenario]]
 name = "tfor_ipairs"
 path = [
     "@lua",
-    "dispatch->instr_tfor_call",
+    "run_frame->instr_tfor_call",
     "instr_tfor_call->instr_tfor_call_rust_fn",
     "instr_tfor_call_rust_fn->invoke_rust_fn",
     "base_ipairs_iter->get_table_unguarded",
@@ -1190,7 +1182,7 @@ path = [
 name = "tfor_host_iterator"
 path = [
     "@lua",
-    "dispatch->instr_tfor_call",
+    "run_frame->instr_tfor_call",
     "instr_tfor_call->instr_tfor_call_rust_fn",
     "instr_tfor_call_rust_fn->invoke_rust_fn",
     "call->call_unguarded",

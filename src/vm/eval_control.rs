@@ -16,19 +16,17 @@ impl State {
     /// (`vm/numeric_loop.rs`) continues there, which returns with `ip` past
     /// the loop, or unchanged for canonical dispatch to run the body.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    pub(super) fn instr_for_prep<const WIDTH: usize, R: Copy + Into<usize>>(
+    pub(super) fn instr_for_prep(
         &mut self,
         frame: &Frame,
-        slot: R,
+        slot: usize,
         ip: &mut usize,
         body_len: i32,
         local_cost: &mut u64,
     ) -> Result<()> {
-        let slot = slot.into();
-        let regs = frame.registers::<WIDTH>(self);
-        let start_val = regs[slot];
-        let end_val = regs[slot + 1];
-        let step_val = regs[slot + 2];
+        let start_val = self.stack[slot];
+        let end_val = self.stack[slot + 1];
+        let step_val = self.stack[slot + 2];
         let step = step_val
             .as_num()
             .ok_or_else(|| self.type_error(TypeError::NumericForStep(step_val.typ(&self.heap))))?;
@@ -39,11 +37,9 @@ impl State {
             self.type_error(TypeError::NumericForInitialValue(start_val.typ(&self.heap)))
         })?;
         if check_numeric_for_condition(start, end, step) {
-            let regs = frame.registers::<WIDTH>(self);
-            regs[slot] = Val::num(start);
-            regs[slot + 1] = Val::num(end);
-            regs[slot + 2] = Val::num(step);
-            regs[slot + 3] = Val::num(start);
+            for (local_slot, n) in (slot..).zip([start, end, step, start]) {
+                self.stack[local_slot] = Val::num(n);
+            }
             if let Some(region) = frame.runtime.numeric_loops.get(*ip - 1) {
                 self.run_numeric_loop(region, frame, ip, local_cost)?;
             }
@@ -58,10 +54,9 @@ impl State {
     /// Numeric-for step; moves the dispatch cursor `ip` back to the body
     /// while the loop continues.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    pub(super) fn instr_for_loop<const WIDTH: usize, R: Copy + Into<usize>>(
+    pub(super) fn instr_for_loop(
         &mut self,
-        frame: &Frame,
-        slot: R,
+        slot: usize,
         ip: &mut usize,
         offset: i32,
     ) -> Result<()> {
@@ -75,12 +70,10 @@ impl State {
         // holding the controls as `f64` locals, selected at FOR_PREP by an
         // entry guard rather than a static proof, with this handler as the
         // fallback.
-        let slot = slot.into();
-        let regs = frame.registers::<WIDTH>(self);
         let (Some(mut var), Some(limit), Some(step)) = (
-            regs[slot].as_num(),
-            regs[slot + 1].as_num(),
-            regs[slot + 2].as_num(),
+            self.stack[slot].as_num(),
+            self.stack[slot + 1].as_num(),
+            self.stack[slot + 2].as_num(),
         ) else {
             return Err(invalid_numeric_for_controls());
         };
@@ -89,9 +82,8 @@ impl State {
             // Jump first: the jump back is an interrupt safepoint, and an
             // interrupted iteration writes no counter.
             Frame::branch(self, ip, offset)?;
-            let regs = frame.registers::<WIDTH>(self);
-            regs[slot] = Val::num(var);
-            regs[slot + 3] = Val::num(var);
+            self.stack[slot] = Val::num(var);
+            self.stack[slot + 3] = Val::num(var);
         }
         Ok(())
     }
@@ -110,22 +102,18 @@ impl State {
     /// `native_bytes_per_level` cycles, forcing it cost the dev build 48
     /// bytes per cycle and not forcing it cost the release build 16.
     #[cfg_attr(not(debug_assertions), inline(always))]
-    pub(super) fn tfor_fast_step<const WIDTH: usize, R: Copy + Into<usize>>(
+    pub(super) fn tfor_fast_step(
         &mut self,
-        frame: &Frame,
-        slot: R,
+        base: usize,
         num_vars: u8,
         cursor_slot: Option<u8>,
         caches: &RuntimeCaches,
     ) -> bool {
-        let slot = slot.into();
-        let regs = frame.registers::<WIDTH>(self);
-        let ValKind::RustFn(f) = regs[slot].kind() else {
+        let ValKind::RustFn(f) = self.stack[base].kind() else {
             return false;
         };
-        let state = regs[slot + 1];
-        let control = regs[slot + 2];
-        let base = frame.stack_bottom + slot;
+        let state = self.stack[base + 1];
+        let control = self.stack[base + 2];
         if f == crate::lua_std::NEXT {
             return self.instr_tfor_call_next(base, state, control, num_vars, cursor_slot, caches);
         }

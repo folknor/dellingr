@@ -298,7 +298,30 @@ pub struct State<Tail: ?Sized = [()]> {
     meta_names: MetaNames,
     /// The main stack which stores values. Host-held: it may hold values the
     /// host pushed between calls, but must be empty for a snapshot.
-    stack: stack::ValueStack,
+    ///
+    /// A plain `Vec` on purpose. A padded stack (initialized backing buffer
+    /// plus a logical end) giving dispatch fixed-size `[Val; 256 + 3]` or
+    /// `[Val; 65536 + 3]` register windows, with the verifier selecting a
+    /// narrow or wide register tier per function and dispatch
+    /// monomorphized per tier, was built and measured on 2026-11-25 (bygg,
+    /// matched interleaved pairs against the plain `Vec`) and backed out.
+    /// The logical end alone was 1.4 to 7.4 percent slower on every
+    /// workload (every index then checks the end against the buffer as well
+    /// as the index against the end); the full design 7.5 to 30 percent
+    /// slower (closed_mode +10.9, wide_sweep +30.1, key_sweep +22.0), 0 of
+    /// 3 rounds faster on each. Forming a safe window still emits the
+    /// padding compare plus the slice range checks, so a window borrowed per
+    /// arm pays about as many branches as the per-access checks it replaces,
+    /// and the second dispatch body costs code size. For scale: every
+    /// value-stack index unchecked (unsafe, not adoptable) measured
+    /// closed_mode -13 percent, composite -4. Shapes not yet tried, each
+    /// needing its own matched A/B against this `Vec`: one checked
+    /// maximum-index guard on a multi-operand fast path with safe indexing
+    /// of the same slice (adopt only if the release asm drops the
+    /// subordinate checks), and a register borrow held across heap-only fast
+    /// paths (a raw `GET_TABLE` hit writing its result through the borrow
+    /// that read its inputs).
+    pub(super) stack: Vec<Val>,
     /// Execution-lifetime state: frame bases, activation records, varargs,
     /// open upvalues, transient roots and depths (see `inventory`).
     pub(super) in_flight: InFlight,
@@ -598,7 +621,7 @@ impl State {
             string_metatable: None,
             string_mt_index_shape: None,
             meta_names,
-            stack: stack::ValueStack::with_capacity(tuning::INITIAL_VM_STACK_CAPACITY),
+            stack: Vec::with_capacity(tuning::INITIAL_VM_STACK_CAPACITY),
             in_flight: InFlight::new(),
             heap,
             bytecode_caches: IndexMap::default(),

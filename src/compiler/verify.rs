@@ -408,6 +408,22 @@ fn check_index(
 }
 
 /// The registers `first..first + count` exist in a frame of `frame` registers.
+fn check_registers(
+    pc: usize,
+    first: u16,
+    count: usize,
+    frame: usize,
+) -> Result<(), BytecodeValidationError> {
+    if usize::from(first)
+        .checked_add(count)
+        .is_some_and(|end| end <= frame)
+    {
+        Ok(())
+    } else {
+        Err(err(Some(pc), ValidationReason::RegisterOutOfRange))
+    }
+}
+
 /// A fixed count operand, or `None` when it is the open sentinel. Counts
 /// above `limit` other than the sentinel are corrupt.
 fn count_operand(
@@ -465,9 +481,7 @@ fn jump_target(pc: usize, inst: Instr, code_len: usize) -> Option<usize> {
 // validate_closures checks each closure's capture count and references before
 // materialization. A new entry path that supplies no captures must establish
 // the empty-upvalue contract itself.
-pub(crate) fn validate_bytecode(
-    view: &impl BytecodeView,
-) -> Result<super::RegisterTier, BytecodeValidationError> {
+pub(crate) fn validate_bytecode(view: &impl BytecodeView) -> Result<(), BytecodeValidationError> {
     let code_len = view.code_len();
     if code_len == 0 {
         return Err(err(None, ValidationReason::EmptyCode));
@@ -624,17 +638,7 @@ pub(crate) fn validate_bytecode(
         };
         check_index(pc, index, len, operand)
     };
-    let mut highest = 0;
-    let mut registers = |pc: usize, first: u16, count: usize| {
-        let end = usize::from(first) + count;
-        if end > frame {
-            return Err(err(Some(pc), ValidationReason::RegisterOutOfRange));
-        }
-        if count != 0 {
-            highest = highest.max(end - 1);
-        }
-        Ok(())
-    };
+    let reg = |pc: usize, value: u16| check_registers(pc, value, 1, frame);
 
     for pc in 0..code_len {
         let inst = Instr::from_raw(view.raw_instruction(pc));
@@ -656,19 +660,19 @@ pub(crate) fn validate_bytecode(
         let (a, b, c, d) = (inst.a(), inst.b(), inst.c(), inst.d());
 
         if let Some((_, operands)) = ArithOp::decode(op) {
-            registers(pc, a, 1)?;
+            reg(pc, a)?;
             match operands {
                 ArithOperands::RegReg => {
-                    registers(pc, b, 1)?;
-                    registers(pc, c, 1)?;
+                    reg(pc, b)?;
+                    reg(pc, c)?;
                 }
                 ArithOperands::RegConst => {
-                    registers(pc, b, 1)?;
+                    reg(pc, b)?;
                     pool(pc, inst)?;
                 }
                 ArithOperands::ConstReg => {
                     pool(pc, inst)?;
-                    registers(pc, c, 1)?;
+                    reg(pc, c)?;
                 }
             }
             continue;
@@ -686,13 +690,13 @@ pub(crate) fn validate_bytecode(
             | Instr::OP_BR_GE
             | Instr::OP_BR_EQ
             | Instr::OP_BR_NE => {
-                registers(pc, a, 1)?;
-                registers(pc, b, 1)?;
+                reg(pc, a)?;
+                reg(pc, b)?;
             }
             Instr::OP_GET_TABLE => {
-                registers(pc, a, 1)?;
-                registers(pc, b, 1)?;
-                registers(pc, c, 1)?;
+                reg(pc, a)?;
+                reg(pc, b)?;
+                reg(pc, c)?;
                 sequential(
                     pc,
                     inst.cache_slot(),
@@ -709,24 +713,24 @@ pub(crate) fn validate_bytecode(
             | Instr::OP_GE
             | Instr::OP_EQ
             | Instr::OP_NE => {
-                registers(pc, a, 1)?;
-                registers(pc, b, 1)?;
-                registers(pc, c, 1)?;
+                reg(pc, a)?;
+                reg(pc, b)?;
+                reg(pc, c)?;
             }
             // One register.
             Instr::OP_NEW_TABLE
             | Instr::OP_TEST_FALSE
             | Instr::OP_TEST_TRUE
             | Instr::OP_BR_EQ_NIL
-            | Instr::OP_BR_NE_NIL => registers(pc, a, 1)?,
+            | Instr::OP_BR_NE_NIL => reg(pc, a)?,
             Instr::OP_LOAD_NIL => {
                 if b == 0 {
                     return Err(err(Some(pc), ValidationReason::CountOperandInvalid));
                 }
-                registers(pc, a, usize::from(b))?;
+                check_registers(pc, a, usize::from(b), frame)?;
             }
             Instr::OP_LOAD_BOOL => {
-                registers(pc, a, 1)?;
+                reg(pc, a)?;
                 if b > 1 {
                     return Err(err(Some(pc), ValidationReason::BooleanOperandInvalid));
                 }
@@ -746,7 +750,7 @@ pub(crate) fn validate_bytecode(
             | Instr::OP_BR_NE_RK
             | Instr::OP_BR_EQ_RS
             | Instr::OP_BR_NE_RS => {
-                registers(pc, a, 1)?;
+                reg(pc, a)?;
                 pool(pc, inst)?;
             }
             Instr::OP_CLOSE => {
@@ -755,7 +759,7 @@ pub(crate) fn validate_bytecode(
                 }
             }
             Instr::OP_GET_GLOBAL | Instr::OP_SET_GLOBAL => {
-                registers(pc, a, 1)?;
+                reg(pc, a)?;
                 // Any string literal names a global: `_G` is an ordinary
                 // table keyed by the interned literal, so a name need not be
                 // UTF-8, as `_G["\255"]` need not be in a script.
@@ -790,20 +794,20 @@ pub(crate) fn validate_bytecode(
                 }
             }
             Instr::OP_GET_BUILTIN | Instr::OP_SET_BUILTIN => {
-                registers(pc, a, 1)?;
+                reg(pc, a)?;
                 if usize::from(b) >= Builtin::COUNT {
                     return Err(err(Some(pc), ValidationReason::BuiltinSlotOutOfRange));
                 }
             }
             Instr::OP_NEW_TABLE_PRESIZED => {
-                registers(pc, a, 1)?;
+                reg(pc, a)?;
                 if b > u16::from(u8::MAX) {
                     return Err(err(Some(pc), ValidationReason::CountOperandInvalid));
                 }
             }
             Instr::OP_GET_FIELD => {
-                registers(pc, a, 1)?;
-                registers(pc, b, 1)?;
+                reg(pc, a)?;
+                reg(pc, b)?;
                 pool(pc, inst)?;
                 sequential(
                     pc,
@@ -813,8 +817,8 @@ pub(crate) fn validate_bytecode(
                 )?;
             }
             Instr::OP_SELF => {
-                registers(pc, a, 2)?;
-                registers(pc, b, 1)?;
+                check_registers(pc, a, 2, frame)?;
+                reg(pc, b)?;
                 pool(pc, inst)?;
                 sequential(
                     pc,
@@ -824,9 +828,9 @@ pub(crate) fn validate_bytecode(
                 )?;
             }
             Instr::OP_SET_FIELD => {
-                registers(pc, a, 1)?;
+                reg(pc, a)?;
                 pool(pc, inst)?;
-                registers(pc, c, 1)?;
+                reg(pc, c)?;
                 sequential(
                     pc,
                     inst.cache_slot(),
@@ -835,22 +839,22 @@ pub(crate) fn validate_bytecode(
                 )?;
             }
             Instr::OP_INIT_FIELD | Instr::OP_INIT_FIELD_PINNED => {
-                registers(pc, a, 1)?;
+                reg(pc, a)?;
                 pool(pc, inst)?;
-                registers(pc, c, 1)?;
+                reg(pc, c)?;
             }
             Instr::OP_SET_LIST => {
-                registers(pc, a, 1)?;
+                reg(pc, a)?;
                 if let Some(count) = count_operand(pc, b, usize::from(u8::MAX))? {
-                    registers(pc, a, 1 + count)?;
+                    check_registers(pc, a, 1 + count, frame)?;
                 }
             }
             Instr::OP_CONCAT => {
-                registers(pc, a, 1)?;
+                reg(pc, a)?;
                 if c < 2 {
                     return Err(err(Some(pc), ValidationReason::ConcatTooFewValues));
                 }
-                registers(pc, b, usize::from(c))?;
+                check_registers(pc, b, usize::from(c), frame)?;
             }
             Instr::OP_JMP => {}
             Instr::OP_FOR_PREP => {
@@ -860,7 +864,7 @@ pub(crate) fn validate_bytecode(
                 if inst.sj() < 0 {
                     return Err(err(Some(pc), ValidationReason::BackwardLoopExit));
                 }
-                registers(pc, a, 4)?;
+                check_registers(pc, a, 4, frame)?;
             }
             // Back edges: their taken jumps poll when backward, so either
             // direction is admitted.
@@ -879,7 +883,7 @@ pub(crate) fn validate_bytecode(
                 // such proof: it is entered only from a successful FOR_PREP,
                 // checks its reads are numbers at entry, and admits only
                 // bodies that run no other code.
-                registers(pc, a, 4)?;
+                check_registers(pc, a, 4, frame)?;
             }
             Instr::OP_TFOR_CALL => {
                 if b > u16::from(u8::MAX) {
@@ -888,7 +892,7 @@ pub(crate) fn validate_bytecode(
                 if b == 0 {
                     return Err(err(Some(pc), ValidationReason::TforCallWithoutResults));
                 }
-                registers(pc, a, 3 + usize::from(b))?;
+                check_registers(pc, a, 3 + usize::from(b), frame)?;
                 sequential(
                     pc,
                     inst.cache_slot(),
@@ -903,8 +907,8 @@ pub(crate) fn validate_bytecode(
                 // The callee, its fixed arguments and its fixed results.
                 let args = count_operand(pc, b, MAX_FIXED_ARGS)?;
                 let results = count_operand(pc, c, MAX_FIXED_RESULTS)?;
-                registers(pc, a, 1 + args.unwrap_or(0))?;
-                registers(pc, a, results.unwrap_or(0))?;
+                check_registers(pc, a, 1 + args.unwrap_or(0), frame)?;
+                check_registers(pc, a, results.unwrap_or(0), frame)?;
             }
             Instr::OP_TAILCALL => {
                 // A call's callee and arguments; it has no result operand
@@ -913,18 +917,18 @@ pub(crate) fn validate_bytecode(
                     return Err(err(Some(pc), ValidationReason::BooleanOperandInvalid));
                 }
                 let args = count_operand(pc, b, MAX_FIXED_ARGS)?;
-                registers(pc, a, 1 + args.unwrap_or(0))?;
+                check_registers(pc, a, 1 + args.unwrap_or(0), frame)?;
             }
             Instr::OP_RETURN => match count_operand(pc, b, usize::from(u8::MAX))? {
-                Some(count) => registers(pc, a, count)?,
-                None => registers(pc, a, 1)?,
+                Some(count) => check_registers(pc, a, count, frame)?,
+                None => reg(pc, a)?,
             },
             Instr::OP_VARARG => {
                 if !view.is_vararg() {
                     return Err(err(Some(pc), ValidationReason::VarargInNonVarargFunction));
                 }
                 let count = count_operand(pc, b, MAX_FIXED_RESULTS)?;
-                registers(pc, a, count.unwrap_or(1).max(1))?;
+                check_registers(pc, a, count.unwrap_or(1).max(1), frame)?;
             }
             _ => return Err(err(Some(pc), ValidationReason::UnknownOpcode)),
         }
@@ -958,11 +962,7 @@ pub(crate) fn validate_bytecode(
     {
         return Err(err(None, ValidationReason::CacheSlotCountMismatch));
     }
-    Ok(if u8::try_from(highest).is_ok() {
-        super::RegisterTier::Narrow
-    } else {
-        super::RegisterTier::Wide
-    })
+    Ok(())
 }
 
 /// Whether `consumer` reads a range that starts at or below where `producer`
@@ -1043,7 +1043,7 @@ mod tree_tests {
     fn chunk(code: Vec<Instr>, max_stack: u16) -> Bytecode {
         Bytecode {
             line_info: vec![1; code.len()],
-            code: code.into(),
+            code,
             max_stack,
             is_vararg: true,
             ..Bytecode::default()
@@ -1106,13 +1106,12 @@ mod tree_tests {
         assert_rejects(&wide_return, ValidationReason::RegisterOutOfRange);
     }
 
+    /// Instructions that touch registers past their A operand need the
+    /// whole span inside the frame; endpoints may name one past the last.
     #[test]
-    fn register_tier_includes_implicit_offsets() {
-        use crate::compiler::RegisterTier;
-
+    fn implicit_offsets_and_endpoints_are_checked_against_the_frame() {
         let ret = Instr::ret(0, RetCount::Fixed(0));
-        for (narrow, wide) in [
-            (Instr::mov(255, 0), Instr::mov(256, 0)),
+        for (fits, overflows) in [
             (Instr::self_(254, 0, 0, None), Instr::self_(255, 0, 0, None)),
             (Instr::for_prep(252, 0), Instr::for_prep(253, 0)),
             (Instr::for_loop(252, 0), Instr::for_loop(253, 0)),
@@ -1122,54 +1121,20 @@ mod tree_tests {
                 Instr::tfor_call(252, 2, None),
             ),
         ] {
-            // A chunk may reserve more registers than its code addresses.
-            for (inst, expected) in [(narrow, RegisterTier::Narrow), (wide, RegisterTier::Wide)] {
-                let mut bc = chunk(vec![inst, ret], 300);
-                bc.string_literals.push(b"field".to_vec());
-                assert_eq!(validate_bytecode(&bc).unwrap(), expected);
-                assert_installs(bc, expected);
-            }
+            let mut ok = chunk(vec![fits, ret], 256);
+            ok.string_literals.push(b"field".to_vec());
+            assert!(validate_bytecode(&ok).is_ok(), "{fits:?}");
+            let mut bad = chunk(vec![overflows, ret], 256);
+            bad.string_literals.push(b"field".to_vec());
+            assert_rejects(&bad, ValidationReason::RegisterOutOfRange);
         }
-
-        // CLOSE and an empty RETURN name one past the last register; they
-        // keep the function narrow and their full-width A.
         let endpoints = chunk(
             vec![Instr::close(256), Instr::ret(256, RetCount::Fixed(0))],
             256,
         );
-        assert_eq!(validate_bytecode(&endpoints).unwrap(), RegisterTier::Narrow);
-        assert_installs(endpoints, RegisterTier::Narrow);
-        // A RETURN of a value at 256 grants no narrow getter, but its range
-        // still selects the wide tier.
-        let returned = chunk(vec![Instr::ret(256, RetCount::Fixed(1))], 257);
-        assert_eq!(validate_bytecode(&returned).unwrap(), RegisterTier::Wide);
-        assert_installs(returned, RegisterTier::Wide);
-    }
-
-    /// Installing the verdict gives that tier and keeps every word.
-    fn assert_installs(mut bc: Bytecode, tier: crate::compiler::RegisterTier) {
-        let words: Vec<Instr> = bc.code.to_vec();
-        let verdict = validate_bytecode(&bc).unwrap();
-        bc.code.install_tier(verdict);
-        assert_eq!(bc.code.tier(), tier);
-        assert_eq!(bc.code.to_vec(), words);
-        let view = bc.code.narrow_view();
-        assert_eq!(
-            view.is_some(),
-            tier == crate::compiler::RegisterTier::Narrow
-        );
-        if let Some(view) = view {
-            for (pc, inst) in words.iter().enumerate() {
-                assert_eq!(view.fetch(pc).canonical(), *inst);
-            }
-            // An edit, even through a clone, drops the narrow claim.
-            let mut edited = bc.code.clone();
-            assert!(edited.narrow_view().is_some());
-            edited.iter_mut().for_each(|_| {});
-            assert!(edited.narrow_view().is_none());
-            assert!(bc.code.narrow_view().is_some());
-        }
-        assert!(crate::instr::Code::default().narrow_view().is_none());
+        assert!(validate_bytecode(&endpoints).is_ok());
+        let valued = chunk(vec![Instr::ret(256, RetCount::Fixed(1))], 256);
+        assert_rejects(&valued, ValidationReason::RegisterOutOfRange);
     }
 
     #[test]
