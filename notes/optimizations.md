@@ -683,31 +683,14 @@ buffer"). Left open:
 
 ### gmatch iterator residue after the typed iterator
 
-The typed iterator (`GmatchIter`, `reference/performance.md` "Typed gmatch
-iterators") now holds its compiled program ("gmatch iterators hold their
-compiled program"). Left open:
-
-- A failed search does not record exhaustion, so calling an exhausted-by-miss
-  iterator again rescans the remaining suffix and recharges its steps, as
-  reference `gmatch_aux` does. Proposal for the user (a cost-model decision,
-  not landed): commit the already-admitted exhausted state, `pos = len + 1`
-  with `resumed = false`, only on a completed miss (a terminal rejected empty
-  match included); interrupts, budget refusals and malformed-pattern errors
-  keep leaving the cursor unchanged. No snapshot format change is needed,
-  since load already admits that state, but it changes the cost of a repeat
-  call after a miss (a `COST_MODEL_VERSION` bump, folded into the unreleased
-  version 9 if that is still open) and the saved values of iterators
-  exhausted by a miss, both replay-visible.
-- The iterator's dispatch arms grew the dev-build native frame of re-entry
-  through `begin_call` and `instr_tfor_call` by 96 to 256 bytes a level when
-  the typed iterator landed. Outlining `State::gmatch_step_of` and a second
-  `invoke_rust_fn` site were tried and made release worse. Untried: one
-  borrowed object classification in `begin_call` (and the `__call` chain
-  path) that yields either the Lua case or the gmatch step, instead of
-  probing the object twice. The dev growth itself is unexplained.
-- The pattern cache shares one program per interned key among its owners
-  (a weak index of programs evicted while still held), but a number pattern
-  coerced to a string has no interned key and still compiles on every call.
+The typed iterator's dispatch arms grew the dev-build native frame of
+re-entry through `begin_call` and `instr_tfor_call` by 96 to 256 bytes a
+level when it landed. Outlining `State::gmatch_step_of` and a second
+`invoke_rust_fn` site were tried and made release worse. One borrowed
+callee classification in `begin_call` and `resolve_callable`
+(`classify_callee`) replaced the two object probes and won back 16 to 32
+dev bytes a level, release unchanged; the rest of the dev growth is
+unexplained.
 
 ---
 

@@ -286,7 +286,9 @@ String library (the rule and its reasoning are under "String costs" above):
 - `gmatch`: 1 when the iterator is created, then the matcher steps of each
   call. A leading `^`, which `gmatch` matches as a literal byte, runs the same
   steps as `%^`. An empty pattern's iterator runs no matcher and charges
-  nothing.
+  nothing. A search that finds no match exhausts the iterator, so later
+  calls run no matcher and charge nothing; an interrupted or refused search
+  does not.
 - `format`: 1 per directive, at least 1 per call. Each directive's unit is
   atomic, charged after the directive parses and validates and before its
   argument is rendered, so a refused directive runs no `__tostring`; a

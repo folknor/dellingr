@@ -1331,6 +1331,13 @@ fn gsub_lua_pattern(
 /// coerced to `pattern` has no interned key and compiles fresh. Compilation
 /// is free in the cost model either way, and a cached program raises its lazy
 /// malformed-pattern errors at exactly the points a fresh one would.
+///
+/// Caching the rendered number was weighed and refused: interning it for a
+/// key hashes and allocates a heap string per call, no cheaper than
+/// compiling a pattern of a few bytes, and a side cache keyed by the rendered
+/// bytes would be a second cache for a rare case no workload shows.
+/// `gmatch` is not affected: it interns its arguments (they outlive the
+/// call), so its iterator takes a cached program.
 fn pattern_program(state: &mut State, pattern: &StringArg) -> Result<SharedPattern> {
     match pattern {
         StringArg::Slot(idx) => state.cached_pattern_program(*idx),
@@ -1479,8 +1486,23 @@ pub(super) fn gmatch_step(state: &mut State) -> Result<u8> {
         );
         Ok(num_returns)
     } else {
-        // No match left: no results, like the exhausted exit above.
+        // No match left: the completed miss leaves the iterator exhausted,
+        // so a later call takes the exhausted exit above instead of
+        // rescanning the suffix and recharging its steps (reference
+        // `gmatch_aux` rescans). Only a search that ran to its end gets
+        // here; an interrupt, a budget refusal or a malformed-pattern error
+        // returned above, leaving the cursor where it was.
         state.set_top(0)?;
+        let len = state.string_ptr_len(subject);
+        state.set_gmatch(
+            iterator,
+            GmatchIter::General {
+                subject,
+                pattern,
+                pos: len + 1,
+                resumed: false,
+            },
+        );
         Ok(0)
     }
 }

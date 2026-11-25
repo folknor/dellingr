@@ -22,6 +22,14 @@ use crate::limits::{MAX_ARGUMENTS, MAX_METAMETHOD_DEPTH, MAX_NATIVE_CALL_DEPTH};
 /// Lua reserves `EXTRA_STACK` for the same purpose.
 pub(super) const FRAME_HEADROOM: usize = 4;
 
+/// What a call of a value other than a Rust function runs, from one look at
+/// its object (`State::classify_callee`).
+enum CalleeKind {
+    Lua(Arc<Bytecode>),
+    Gmatch,
+    Other,
+}
+
 /// Entry observation is zero-sized for ordinary calls, including debug builds.
 /// Only direct function-valued `__index` and `__newindex` handlers carry a
 /// mutable commit flag.
@@ -521,27 +529,30 @@ impl State {
             // an argument move per call); such forms belong with the leaves.
             self.stack.remove(idx);
             f
-        } else if let Some(bytecode) = self.lua_function_bytecode(func_val) {
-            self.admit_lua_call(bytecode, num_args, old_stack_bottom, shape.tail())?;
-            entered.mark_entered();
-            return Ok(None);
-        } else if let Some(step) = self.gmatch_step_of(func_val) {
-            // A gmatch iterator runs its step with the iterator left in the
-            // callee slot as the callback's first argument (`GmatchIter`), so
-            // nothing is removed: the slot roots the iterator and its
-            // strings. Tested after the Lua case, which it would otherwise
-            // slow.
-            step
         } else {
-            // Observed calls are only made for direct Lua, Rust or gmatch
-            // iterator __index and __newindex functions (the resolvers hand
-            // back nothing else). Callable-object resolution has no
-            // host-access observer.
-            debug_assert!(!entered.tracks_entry());
-            return crate::native_call!(
-                "begin_call->begin_callable_call",
-                self.begin_callable_call(idx, num_args, old_stack_bottom, shape)
-            );
+            match self.classify_callee(func_val) {
+                CalleeKind::Lua(bytecode) => {
+                    self.admit_lua_call(bytecode, num_args, old_stack_bottom, shape.tail())?;
+                    entered.mark_entered();
+                    return Ok(None);
+                }
+                // A gmatch iterator runs its step with the iterator left in
+                // the callee slot as the callback's first argument
+                // (`GmatchIter`), so nothing is removed: the slot roots the
+                // iterator and its strings.
+                CalleeKind::Gmatch => crate::lua_std::GMATCH_STEP,
+                CalleeKind::Other => {
+                    // Observed calls are only made for direct Lua, Rust or
+                    // gmatch iterator __index and __newindex functions (the
+                    // resolvers hand back nothing else). Callable-object
+                    // resolution has no host-access observer.
+                    debug_assert!(!entered.tracks_entry());
+                    return crate::native_call!(
+                        "begin_call->begin_callable_call",
+                        self.begin_callable_call(idx, num_args, old_stack_bottom, shape)
+                    );
+                }
+            }
         };
         crate::native_call!(
             "begin_call->invoke_rust_fn",
@@ -615,7 +626,8 @@ impl State {
             // Rust handler is returned below without being placed here.
             let func_val = self.stack[idx];
             debug_assert!(!matches!(func_val, Val::RustFn(_)));
-            if let Some(bytecode) = self.lua_function_bytecode(func_val) {
+            let kind = self.classify_callee(func_val);
+            if let CalleeKind::Lua(bytecode) = kind {
                 // A Lua callee keeps its function slot: the value stays
                 // rooted there below the callee's frame, its frame is built
                 // from it (`State::admitted_frame`), and the results land in
@@ -638,8 +650,8 @@ impl State {
             // A gmatch iterator placed here as a `__call` handler runs its
             // step on the window as it stands: the iterator at `idx`, then
             // the receiver and the arguments, which the step ignores.
-            if let Some(step) = self.gmatch_step_of(func_val) {
-                return Ok(Some((step, charges)));
+            if let CalleeKind::Gmatch = kind {
+                return Ok(Some((crate::lua_std::GMATCH_STEP, charges)));
             }
             // Check for a __call metamethod: a table's own metatable, or the
             // metatable all strings share (reference Lua makes `("x")(...)`
@@ -1106,15 +1118,23 @@ impl State {
             .drain(caller_start as usize..callee_start as usize);
     }
 
-    /// The bytecode of `func` if it is a Lua function, without cloning the
-    /// rest of its closure.
-    fn lua_function_bytecode(&self, func: Val) -> Option<Arc<Bytecode>> {
+    /// Classify a non-Rust callee by one borrow of its object: a Lua
+    /// function (with its bytecode, the rest of the closure not cloned), a
+    /// gmatch iterator, or anything else for `__call` resolution. It replaced
+    /// a Lua-function probe followed by a gmatch probe of the same object,
+    /// which cost the dev native frame of every re-entry through
+    /// `begin_call` 16 to 32 bytes; release frames did not move.
+    #[inline(always)]
+    fn classify_callee(&self, func: Val) -> CalleeKind {
         match func {
-            Val::Obj(ptr) => self
-                .heap
-                .as_lua_function_ref(ptr)
-                .map(|closure| Arc::clone(closure.bytecode())),
-            _ => None,
+            Val::Obj(ptr) => match self.heap.get(ptr) {
+                super::object::RawObject::LuaFn(closure) => {
+                    CalleeKind::Lua(Arc::clone(closure.bytecode()))
+                }
+                super::object::RawObject::Gmatch(_) => CalleeKind::Gmatch,
+                super::object::RawObject::Table(_) => CalleeKind::Other,
+            },
+            _ => CalleeKind::Other,
         }
     }
 

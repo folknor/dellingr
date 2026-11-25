@@ -57,6 +57,13 @@ tick budgets and re-record replays.
   admitted before its argument is rendered, so a refused directive runs no
   `__tostring`. Charges named in a `CostModel` are unchanged; only their units
   and admission are.
+- **Replay-visible:** a `string.gmatch` search that finds no match leaves the
+  iterator exhausted (saved position one past the subject's end), so calling
+  it again runs no matcher steps instead of rescanning the rest of the
+  subject and charging those steps again. An interrupted, budget-refused or
+  malformed-pattern search still leaves the iterator where it was. A repeat
+  call no longer pushes the subject and pattern, so near the stack cap it
+  returns no values where the rescan could fail with a stack overflow.
 - **Replay-visible:** string results that are already a string value are
   returned as that value instead of being copied and interned again, which
   removes a collection point from each: `string.gsub` with no match, `upper`

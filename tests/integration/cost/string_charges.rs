@@ -245,6 +245,31 @@ fn gmatch_refusal_does_not_advance_the_iterator() {
     );
 }
 
+/// A search that runs to the end without a match leaves the iterator
+/// exhausted: calling it again runs no matcher steps, where a rescan of the
+/// suffix would charge the miss's steps again.
+#[test]
+fn gmatch_miss_exhausts_the_iterator() {
+    let mut state = State::new();
+    support::run(
+        &mut state,
+        "iter = string.gmatch('a long subject without digits', '%d')",
+    );
+    let mut call_costs = Vec::new();
+    for _ in 0..3 {
+        let before = state.cost_used();
+        support::eval(&mut state, "return select('#', iter())", 1);
+        assert_eq!(state.to_number(-1).expect("a count"), 0.0);
+        state.pop(1).expect("the count is on the stack");
+        call_costs.push(state.cost_used() - before);
+    }
+    assert!(
+        call_costs[0] > call_costs[1],
+        "the miss charges its steps once: {call_costs:?}"
+    );
+    assert_eq!(call_costs[1], call_costs[2], "{call_costs:?}");
+}
+
 /// The compile-once half of this check is a crate unit test, since the
 /// compilation counter is test-only instrumentation.
 #[test]
