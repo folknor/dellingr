@@ -970,16 +970,19 @@ impl GcHeap {
         ptr
     }
 
-    /// Allocate or intern a string.
+    /// Allocate or intern a string. A hit hands `bytes` back unused.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    fn alloc_string_raw<B: AsRef<[u8]> + Into<Box<[u8]>>>(&mut self, bytes: B) -> StringPtr {
+    fn alloc_string_raw<B: AsRef<[u8]> + Into<Box<[u8]>>>(
+        &mut self,
+        bytes: B,
+    ) -> (StringPtr, Option<B>) {
         let count = self.strings.len();
         let hash = crate::det_hash::hash_bytes(bytes.as_ref());
-        let ptr = self.strings.intern_storage(bytes, hash, &mut self.resident);
+        let interned = self.strings.intern_storage(bytes, hash, &mut self.resident);
         if self.strings.len() != count {
             self.refresh_gc_watermark();
         }
-        ptr
+        interned
     }
 
     /// Intern `range` of the pooled string `source`, reading the bytes in
@@ -1539,16 +1542,17 @@ impl StringPool {
     /// most `INLINE_STRING_BYTES` copies them inline (dropping a `Vec`); a
     /// longer one boxes a slice (a copy) or converts the `Vec`
     /// (`into_boxed_slice`, which shrinks when capacity exceeds length and
-    /// may still move the bytes then) instead of copying it. A hit drops
-    /// the `Vec`. The probe, identity and resident
-    /// length (never the capacity) are the same either way.
+    /// may still move the bytes then) instead of copying it. A hit hands
+    /// `bytes` back unused, so an owned caller can recycle the `Vec`. The
+    /// probe, identity and resident length (never the capacity) are the
+    /// same either way.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn intern_storage<B: AsRef<[u8]> + Into<Box<[u8]>>>(
         &mut self,
         bytes: B,
         hash: u64,
         resident: &mut ResidentBytes,
-    ) -> StringPtr {
+    ) -> (StringPtr, Option<B>) {
         let strings = &self.strings;
         let content = bytes.as_ref();
         let vacant = match self.index.entry(
@@ -1560,7 +1564,9 @@ impl StringPool {
             },
             |key| Self::entry_hash(strings, *key),
         ) {
-            hashbrown::hash_table::Entry::Occupied(found) => return StringPtr(*found.get()),
+            hashbrown::hash_table::Entry::Occupied(found) => {
+                return (StringPtr(*found.get()), Some(bytes));
+            }
             hashbrown::hash_table::Entry::Vacant(vacant) => vacant,
         };
         let bytes_len = content.len();
@@ -1570,7 +1576,7 @@ impl StringPool {
         });
         vacant.insert(key);
         resident.add(bytes_len as u64);
-        StringPtr(key)
+        (StringPtr(key), None)
     }
 
     /// Intern `range` of the pooled string `source`, reading the bytes in
@@ -1611,7 +1617,7 @@ impl StringPool {
     /// Test shorthand: `intern_storage` of a borrowed slice.
     #[cfg(test)]
     fn intern(&mut self, bytes: &[u8], hash: u64, resident: &mut ResidentBytes) -> StringPtr {
-        self.intern_storage(bytes, hash, resident)
+        self.intern_storage(bytes, hash, resident).0
     }
 
     /// Mark a string as reachable.
@@ -2003,13 +2009,20 @@ mod tests {
             let mut resident = ResidentBytes::default();
             let mut owned = Vec::with_capacity(64);
             owned.extend_from_slice(content);
-            let adopted = pool.intern_storage(owned, 7, &mut resident);
+            let (adopted, unused) = pool.intern_storage(owned, 7, &mut resident);
+            assert!(unused.is_none(), "a miss consumes the buffer");
             assert_eq!(pool.get(adopted), content);
             assert_eq!(resident.bytes, content.len() as u64);
             assert_eq!(pool.intern(content, 7, &mut resident), adopted);
             let mut again = Vec::with_capacity(content.len());
             again.extend_from_slice(content);
-            assert_eq!(pool.intern_storage(again, 7, &mut resident), adopted);
+            let (hit, unused) = pool.intern_storage(again, 7, &mut resident);
+            assert_eq!(hit, adopted);
+            assert_eq!(
+                unused.as_deref(),
+                Some(content),
+                "a hit hands the buffer back"
+            );
             assert_eq!(pool.len(), 1);
             assert_eq!(resident.bytes, content.len() as u64);
             assert_eq!(pool.resident_bytes(), content.len() as u64);

@@ -17,6 +17,44 @@ figures are in reference/native-calls.md ("Current native bytes per level");
 the history of the largest cycle across both profiles is under "Native stack
 frames and cycles" below.
 
+## Long result-buffer hits recycle their buffer, 2026-11-25
+
+A `gsub`, `string.format` or `table.concat` result longer than 22 bytes
+that hits an existing string after the allocation policy ran used to drop
+its buffer, so the next producer allocated a fresh one. The pool now hands
+the unused `Vec` back (`StringPool::intern_storage`) and
+`State::push_result_buffer` returns it to the spare under the existing rule
+(spare out, capacity at most 4096). The policy check, probe, identity,
+resident length and root set are unchanged, so it is not replay-visible.
+Other owned producers (`..`, `tostring`, `upper`/`lower`/`reverse`) still
+drop a hit's buffer: they size their own, and donating them would change
+the capacity a later producer starts from (`string.format` skips its
+reservation on any spare with capacity).
+
+Counts, bygg, `brokkr bench --hotpath alloc`: on the `patterns` hotpath
+file essentially every long result hits (4567 owned interns, 3 per kernel
+call, against 15 KB of pool allocation in 12303 interns, 32 collections);
+total allocation fell from 1.1 MB to 285 KB a run. `format_literals` misses
+more often (96 collections), 2.1 to 1.6 MB.
+
+Wall, f1e4a6d against the change, five matched `--commit` rounds on bygg,
+medians: `patterns` 755 to 737 ms (5 of 5 faster), `gsub_replace` 401 to
+405, `short_results` 776 to 776, `format_literals` 476 to 488 (0 of 5).
+The layout sweep (invocation 48dc8831, three rounds per recipe) settles
+both: `patterns` is faster 3 of 3 in every recipe (-15 to -38 ms), robust
+across the tested recipes; `format_literals` is slower in `none`, `f5` and
+`f6` and flat in `l64` and `f6l64` although it allocates less, so it is
+recipe-sensitive, cause unattributed, investigation closed. The same sweep
+of the reusable-result-buffer pair (2f78fa8 against 625e787, invocation
+4349bc4e) puts its `format_literals` loss in the same class: +16 ms in
+`none`, +9 in `f5`, +6 in `f6l64`, flat in `f6` and `l64`.
+
+`strings/patterns` against the 0.2.0-era README: the 30 ms recorded then
+and the 160 then 65 ms of 2026-07-25 are history; the README run at
+20b9088 (plantasjen, 2026-10-25, the same `bench.sh` hyperfine method on
+the unchanged kernel) records 29 ms, 1.54x lua5.2 against 1.62x then, so
+the residual once recorded as unaccounted for no longer exists.
+
 ## Code-alignment recipe sweeps, 2026-11-25
 
 `brokkr bench layout` is `wall` built under one of the `data.layouts`

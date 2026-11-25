@@ -199,10 +199,6 @@ them:
 - `optimizations.md` "Shared record layouts: the storage side": codegen
   hunter's constructor plans (the leading static run landed as an
   execution-side fusion; the storage-side layouts remain).
-- `optimizations.md` "Growing-producer residue after the reusable result
-  buffer": the heap hunter's checked builder residue (decide-once producers
-  and the reusable result buffer landed; a per-append builder was measured
-  and rejected).
 - `optimizations.md` "`string.format` cached plan": strings hunter's
   cached format plan, deferred after the scan and capacity changes and
   refused again once the output buffer became reusable.

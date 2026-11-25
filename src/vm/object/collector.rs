@@ -56,12 +56,13 @@ impl NoGcAllocator<'_> {
     }
 
     pub(in crate::vm) fn alloc_string(self, bytes: &[u8]) -> StringPtr {
-        self.heap.alloc_string_raw(bytes)
+        self.heap.alloc_string_raw(bytes).0
     }
 
     /// `alloc_string` for a producer's owned buffer: a miss converts it to
-    /// the string's storage instead of copying it from a slice.
-    pub(in crate::vm) fn alloc_string_owned(self, bytes: Vec<u8>) -> StringPtr {
+    /// the string's storage instead of copying it from a slice, a hit hands
+    /// it back unused.
+    pub(in crate::vm) fn alloc_string_owned(self, bytes: Vec<u8>) -> (StringPtr, Option<Vec<u8>>) {
         self.heap.alloc_string_raw(bytes)
     }
 

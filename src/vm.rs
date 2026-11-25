@@ -1951,12 +1951,14 @@ impl State {
 
     /// `alloc_string` for a result built in an owned buffer: the same size
     /// check, collection point and intern, but a miss converts the buffer
-    /// to the string's storage rather than copying it from a slice.
+    /// to the string's storage rather than copying it from a slice. A hit
+    /// (decided after the allocation policy ran) hands the buffer back
+    /// unused, for the caller to recycle or drop.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    pub(super) fn alloc_string_owned(&mut self, bytes: Vec<u8>) -> Result<Val> {
+    pub(super) fn alloc_string_owned(&mut self, bytes: Vec<u8>) -> Result<(Val, Option<Vec<u8>>)> {
         check_string_size(bytes.len())?;
-        let ptr = self.allocator().alloc_string_owned(bytes);
-        Ok(Val::str(ptr))
+        let (ptr, unused) = self.allocator().alloc_string_owned(bytes);
+        Ok((Val::str(ptr), unused))
     }
 
     /// Construct an [`Error`] of the given kind with no source position.

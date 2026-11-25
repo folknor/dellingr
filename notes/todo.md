@@ -147,6 +147,9 @@ classification in `decode_with`.
   (`get_onecapture`, `LuaCapture::Unfinished`), which describes a
   capture-reading helper, not the stack floor. Move it to the function it
   belongs to.
+- `examples/strings/patterns.lua` labels `string.gsub(log, "%d+", "<NUM>")`
+  "gsub with function replacement"; it is a string replacement. The file is
+  pinned, so fix the comment at its next re-pin.
 - A gmatch miss now leaves the iterator exhausted (`pos` one past the
   subject end, `resumed` false), and `gmatch_miss_exhausts_the_iterator`
   pins the repeat-call cost. No test pins the saved record of an iterator

@@ -97,29 +97,6 @@ A closed-cell fast path in the canonical arm was refused (reason at
 is refused (codegen.rs header: it drops scratch register overwrites that
 free dead values).
 
-### Residual ~2x in `strings/patterns` - decided not to chase (2026-07-25)
-
-What: the 0.2.0-era README recorded `examples/strings/patterns.lua` at 30ms; it
-measured 160ms on the same host before the gmatch memoization work and 65ms
-after, so roughly 2.4x was recovered and roughly 2x remains unaccounted for.
-The bench re-measured at 60ms on 2026-07-27, so the residual is stable, not
-drifting.
-
-Decision: not chasing it. The portion with an identified mechanism (per-iteration
-subject recopy and pattern recompilation in `gmatch`) is already fixed. What is
-left has no suspect attached, and bisecting it is open-ended work against a
-bench whose absolute number is now 60ms. Relative deltas remain valid against an
-inflated baseline, so this does not block measuring pattern-matcher
-optimizations - it would only matter if the residual were a live cost that is
-cheap to recover, which nothing currently suggests.
-
-Signal that would reopen it: `strings/patterns` moving again without a
-corresponding change to the pattern code, or a pattern-matcher optimization
-landing with a much smaller win than its mechanism predicts (which would hint
-that something else dominates the bench).
-
----
-
 ## Full coherent rewrites
 
 Large enough to reshape whole subsystems. Each subsumes several smaller
@@ -355,36 +332,6 @@ dominating request-path latency, or a real "one State per request"
 embedder asking. The `host --scenario state_new` bench (construction plus
 teardown, about 5 us per State on bygg, 2026-11-24, dirty tree at 8b98de6)
 is where a change here is measured.
-
----
-
-## Stdlib / patterns
-
-### Growing-producer residue after the reusable result buffer (2026-11-25)
-
-`string.format`, `gsub` and `table.concat` now build in the State's
-reusable result buffer and decide storage once at the push
-(`reference/performance.md`, "Growing producers reuse one result
-buffer"). Left open:
-
-- `format_literals` is slower across that change (median 506 to 530 ms,
-  0 of 5 faster), and was slower by the same amount across the stack-storage
-  change before it, although its executed path is unchanged: allocation and
-  per-function call counts on its hotpath file are identical in both arms.
-  Read as layout, unconfirmed (no five-launch same-binary control run).
-  `patterns` (+0.9%, 1 of 5 faster) and `mixed` (+0.5%, 0 of 5) are inside
-  the floor; `mixed`'s counts are identical too.
-- A long result that hits an existing string drops its buffer; the
-  post-policy probe could hand the unused `Vec` back for reuse (within the
-  same capacity cap). A pre-policy hit shortcut would move the collection
-  point and is not an option. Unmeasured. `patterns` is the probe: its
-  three long results (the two `gsub(log, ...)` calls and the last `gsub`
-  in `replace`) repeat their content every kernel call but are not
-  retained across calls, so whether they hit after the allocation policy
-  runs is the first count to take, by site, beside buffers actually reused
-  and alloc/realloc/free calls. The 2026-11-24 owned-interning pair on this
-  workload does not implicate the hit path (reference/performance.md,
-  "Code-alignment recipe sweeps").
 
 ---
 

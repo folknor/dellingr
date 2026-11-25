@@ -161,17 +161,29 @@ impl State {
     /// `push_bytes` for a result built in an owned buffer, with the same
     /// refusal order and collection point: a new string takes the buffer as
     /// its storage instead of a copy of it, an existing one drops it.
+    ///
+    /// The dropped buffer of a hit is not offered to the result-buffer spare:
+    /// these callers (`tostring`, `BytesCopy`) size their own buffers, and
+    /// seeding the spare with them would change the capacity a later
+    /// producer starts from (`string.format` skips its reservation on any
+    /// spare with capacity).
     pub(crate) fn push_owned_bytes(&mut self, bytes: Vec<u8>) -> Result<()> {
+        self.push_owned_bytes_returning(bytes).map(drop)
+    }
+
+    /// `push_owned_bytes`, handing back the buffer of a hit unused.
+    fn push_owned_bytes_returning(&mut self, bytes: Vec<u8>) -> Result<Option<Vec<u8>>> {
         self.check_usable()?;
         self.check_stack_slot()?;
-        let val = self.alloc_string_owned(bytes)?;
+        let (val, unused) = self.alloc_string_owned(bytes)?;
         self.push_unchecked(val);
-        Ok(())
+        Ok(unused)
     }
 
     /// The spare result buffer for a growing producer (`gsub`,
     /// `string.format`, `table.concat`), empty, or a new one when it is
-    /// out (a nested producer, or one whose last result was long). The
+    /// out (a nested producer, or one whose last result was a new long
+    /// string, which took the buffer as its storage). The
     /// producer appends to it as a plain `Vec`, with no storage test per
     /// append, and hands it to `push_result_buffer`. An error drops it.
     pub(crate) fn take_result_buffer(&mut self) -> Vec<u8> {
@@ -181,17 +193,19 @@ impl State {
     /// Push a producer's finished result, deciding its storage once. A
     /// short result is interned borrowed (an inline copy, no allocation)
     /// and the buffer is kept for the next producer; a long one is adopted
-    /// as `push_owned_bytes` does. Both pushes share the refusal order,
-    /// the collection point and the root set, so nothing replay-visible
-    /// depends on which one ran.
+    /// as `push_owned_bytes` does, unless it hits an existing string after
+    /// the allocation policy ran, when its buffer is kept the same way. Both
+    /// pushes share the refusal order, the collection point and the root
+    /// set, so nothing replay-visible depends on which one ran, and the
+    /// buffer is bytes outside the heap accounting either way.
     pub(crate) fn push_result_buffer(&mut self, buffer: Vec<u8>) -> Result<()> {
         if buffer.len() <= super::object::INLINE_STRING_BYTES {
             self.push_bytes(&buffer)?;
             self.return_result_buffer(buffer);
-            Ok(())
-        } else {
-            self.push_owned_bytes(buffer)
+        } else if let Some(unused) = self.push_owned_bytes_returning(buffer)? {
+            self.return_result_buffer(unused);
         }
+        Ok(())
     }
 
     /// Give back a result buffer that produced no string. Kept only when
@@ -648,5 +662,66 @@ impl State {
             }));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn long_result(state: &mut State, capacity: usize) -> Vec<u8> {
+        let mut buffer = state.take_result_buffer();
+        buffer.reserve(capacity);
+        buffer.extend_from_slice(&[b'r'; super::super::object::INLINE_STRING_BYTES + 1]);
+        buffer
+    }
+
+    /// A long result's buffer becomes the string on a miss and returns to
+    /// the spare on a hit, within the capacity cap; a nested producer's
+    /// buffer already in place wins.
+    #[test]
+    fn long_hit_returns_its_buffer_to_the_spare() {
+        let mut state = State::new();
+        let first = long_result(&mut state, 64);
+        state.push_result_buffer(first).expect("push");
+        assert_eq!(
+            state.result_buffer.capacity(),
+            0,
+            "a miss adopts the buffer"
+        );
+
+        let again = long_result(&mut state, 64);
+        let capacity = again.capacity();
+        state.push_result_buffer(again).expect("push");
+        assert_eq!(
+            state.result_buffer.capacity(),
+            capacity,
+            "a hit recycles it"
+        );
+        assert!(state.result_buffer.is_empty());
+
+        let outer = long_result(&mut state, 64);
+        let inner = long_result(&mut state, 128);
+        let inner_capacity = inner.capacity();
+        state.push_result_buffer(inner).expect("push");
+        state.push_result_buffer(outer).expect("push");
+        assert_eq!(
+            state.result_buffer.capacity(),
+            inner_capacity,
+            "the first return wins"
+        );
+
+        let mut taken = state.take_result_buffer();
+        taken.clear();
+        let mut large = long_result(&mut state, RESULT_BUFFER_CAPACITY + 1);
+        assert!(large.capacity() > RESULT_BUFFER_CAPACITY);
+        large.truncate(super::super::object::INLINE_STRING_BYTES + 1);
+        state.push_result_buffer(large).expect("push");
+        assert_eq!(
+            state.result_buffer.capacity(),
+            0,
+            "an oversized buffer is dropped"
+        );
+        drop(taken);
     }
 }

@@ -977,7 +977,7 @@ impl State {
         // operands still rooted where they are) reads nothing from the stack,
         // and a new long string takes the buffer rather than a second copy.
         match buffer {
-            Some(buffer) => self.alloc_string_owned(buffer),
+            Some(buffer) => self.alloc_string_owned(buffer).map(|(val, _unused)| val),
             None => self.alloc_string(&inline[..len]),
         }
     }
