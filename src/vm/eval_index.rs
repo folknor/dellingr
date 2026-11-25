@@ -70,19 +70,37 @@ impl State {
     }
 
     /// The own-field cache hit alone: same table, unchanged version, live
-    /// value. `None` is not a lookup result, only "not answered here"; the
-    /// caller must continue with the full lookup.
+    /// value; or, for any other table receiver, the entry's position read as
+    /// a key-checked hint (`Table::string_value_at`: that slot holds the
+    /// site's key with a live value). `None` is not a lookup result, only
+    /// "not answered here"; the caller must continue with the full lookup.
+    ///
+    /// The hint hit writes nothing back. Keys are unique in a table, so a
+    /// live slot holding the key is the one the keyed lookup finds, and an own
+    /// hit answers before any metatable is consulted. Records built in one
+    /// order share positions, so a sweep over many of them hits here with no
+    /// per-table shape identity: an interned shape id guarding a keyless load
+    /// was proposed and refused, since a slot keeps its key beside its value,
+    /// the guard would cost about what the key compare does, and it would
+    /// need a Table field, interning, transitions and snapshot handling the
+    /// hint does not. Measured on bygg against 1e5a451 in matched pairs:
+    /// `wide_sweep` 5.1 to 2.75 s and `record_tables` 2.2 to 1.6 s (3 of 3
+    /// each), `method_step` and `same_obj_read` flat. The earlier form that
+    /// renewed and refilled the entry on every cross-receiver hit, with the
+    /// generic `Val` comparison, made `wide_sweep` slower (5.1 to 5.9 s).
     #[inline(always)]
     pub(super) fn get_current_cached_field(
         &self,
         ptr: ObjectPtr,
+        key: Val,
         cache: &FieldLookupCacheSlot,
     ) -> Option<Val> {
         let entry = cache.get_field()?;
-        if entry.table != ptr {
-            return None;
+        let tbl = self.heap.as_table_ref(ptr)?;
+        if entry.table == ptr {
+            return tbl.read_slot(entry.slot);
         }
-        self.heap.as_table_ref(ptr)?.read_slot(entry.slot)
+        tbl.string_value_at(entry.slot, key)
     }
 
     #[inline(always)]
@@ -93,16 +111,12 @@ impl State {
         cache: &FieldLookupCacheSlot,
     ) -> Option<Val> {
         let entry = cache.get_field()?;
-        // A different receiver goes to the keyed lookup. Trying the cached
-        // position there first (`Table::renew_slot`, sound since it checks
-        // the key; versions alone are not, as unrelated tables share them)
-        // was built for this read, for `State::store_field` and inside the
-        // dispatch hit path, and measured at fea24a2 on bygg: no wall gain
-        // on method_step, object_fields or same_obj_read, and record_tables
-        // about 3 percent slower, although the instrumented resolver got
-        // faster. A Map probe costs about what the position check and the
-        // refill do. Typed loop regions keep the form (`record_slot`), where
-        // the probe is the whole access.
+        // A different receiver goes to the keyed lookup: the dispatch hit
+        // (`get_current_cached_field`) already tried the cached position as
+        // a key-checked hint. Repeating it here behind the resolver call,
+        // with a refill, was measured at fea24a2 on bygg: no wall gain, and
+        // record_tables about 3 percent slower; past the call a Map probe
+        // costs about what the position check and the refill do.
         if entry.table != ptr {
             return None;
         }

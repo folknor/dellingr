@@ -1048,6 +1048,29 @@ which no region takes; the site misses once per column and hits the other
 verdict file at `K = 2000`), 9.7 s to 8.7-8.8 s in 5 of 5 rounds, about
 10 percent faster. The fused lookup pays on its hit side as well.
 
+## Field sites read the cached position in any receiver, 2026-11-25
+
+A GET_FIELD or SELF site whose receiver is not the table its entry names
+reads the entry's position in the receiver as a key-checked hint
+(`Table::string_value_at`: the slot holds the site's key as the same
+interned string, with a live value) and writes nothing back; a failed check
+takes the outlined resolver as before. An interned per-table shape id was
+the alternative and was refused: a hash slot keeps its key beside its value,
+so the guard would cost about what the key compare does, and it needs a
+table field, interning, transitions and snapshot handling. Matched
+interleaved pairs on bygg, `brokkr bench --rounds 3 --iterations 3`,
+`--commit 1e5a451` against the change committed: `wide_sweep` 5.1 to 2.7-2.8
+s and `record_tables` 2.2 to 1.6 s (3 of 3 each), `method_step` (2.3 s) and
+`same_obj_read` (about 478 ms) flat. Before the change perf put about 56
+percent of `wide_sweep`'s cycles in the miss chain (`reg_get_field`,
+`resolve_index`, `get_with_index`), call overhead rather than memory stalls.
+A first form that renewed the slot token and refilled the entry on every
+cross-receiver hit, comparing keys through the generic `Val` equality
+(outlined in release), made `wide_sweep` slower, 5.1 to 5.9 s, and
+`record_tables` 2.2 to about 2.35 s, in a matched pair of the same shape.
+Release native levels are unchanged (`index_field` 640 bytes, `index_key`
+736).
+
 ## Records read by a register key in typed regions, 2026-11-24
 
 A `GET_TABLE d r k` whose receiver `r` is a record of the pass and whose

@@ -203,9 +203,10 @@ them:
 - `optimizations.md` "8-byte NaN-boxed `Val`": dispatch hunter's compact value
   and heap hunter's typed arenas, with the table hunter's
   `TableStorage` footprint point.
-- `optimizations.md` "Shape-based polymorphic field IC": lookup and table
-  hunters' shared layouts (the lookup hunter's key-checked position reuse
-  was measured there and refused for the field caches).
+- `optimizations.md` "Field-site position hints: residue": the lookup
+  hunter's shared layouts (landed as GET_FIELD's key-checked position hint;
+  the shape-id IC refused); the table hunter's shared layouts sit under
+  "Compile-time table-shape prediction".
 - `optimizations.md` "Compile-time table-shape prediction": codegen hunter's
   constructor plans.
 - `optimizations.md` "Growing-producer residue after the reusable result

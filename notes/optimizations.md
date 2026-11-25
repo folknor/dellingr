@@ -243,8 +243,8 @@ not the executed path. Conclusion: release code-layout perturbation of
 the dispatch loop, hitting the bench where dispatch overhead is the
 largest fraction of per-op work (arithmetic is the lightest-op kernel;
 its hot `if n < 2` recursion is call+dispatch bound). This is the same
-codegen fragility the 2026-05-06 revert under "Shape-based polymorphic
-field IC" records.
+codegen fragility a 2026-05-06 attempt at a cross-receiver field-cache
+branch met (recorded in e0bef7b's notes text).
 
 Five same-binary launches of `bench/arithmetic` at 71afe0e (plantasjen)
 all report 4000ms - launch-to-launch spread is below the 100ms reporting
@@ -524,80 +524,32 @@ what materialized-value cost remains.
 
 ## Architectural
 
-### Shape-based polymorphic field IC
+### Field-site position hints: residue
 
-What: a per-callsite cache for `OP_GET_FIELD` keyed on (table_shape_id,
-field_name) -> field_index. Catches the iteration pattern where many
-distinct tables with the same logical structure are accessed at one site
-(`for _, e in pairs(items) do sum = sum + e.id end`).
+GET_FIELD and SELF read the site's cached position in any table receiver as
+a key-checked hint (`State::get_current_cached_field`, `Table::string_value_at`;
+the measurements and the refused shape-id IC are recorded there). What is
+left:
 
-Sketch: each Table gets a `shape_id: u64` that updates when keys are
-inserted or removed in non-shape-preserving ways. Shape IDs are interned -
-two tables built by inserting the same keys in the same order share an ID.
-The IC validates by shape_id equality instead of pointer equality.
-
-Why deferred: shape interning is non-trivial. The dominant cost is on
-table creation (computing the shape after each insert/remove), and
-introducing it everywhere risks regressing table-fill paths for marginal
-wins on iteration paths. The current monomorphic IC already catches
-same-object access well.
-
-Signal that would promote it: a real workload where polymorphic field
-access dominates and `fields/polymorphic` measures 3-5x slower than
-`fields/same_obj_read`.
-
-Key-checked position reuse, measured and refused (fea24a2, bygg,
-2026-11-24): on a pointer mismatch, try the site's cached position in the
-new receiver (`Table::renew_slot`, which checks the key and a live value)
-before the keyed lookup. Built twice: in the outlined read and store paths
-(`get_cached_field`, `store_field`), and with the read in the dispatch
-hit path (`get_current_cached_field`). Best-of-N wall, HEAD against tree:
-outlined method_step 5707 vs 5702 ms, object_fields 3460 vs 3464,
-same_obj_read 481.6 both, method_polymorphic 2083 vs 2074, record_tables
-2155 and 2160 vs 2231 and 2234; dispatch variant record_tables 2223,
-method_step 5744, object_fields 3438. Instrumented, the resolver did get
-faster (method_step resolve_index 14 to 11 ns, store_field 21 to 16 ns), but
-no release win followed: with `HashSlots` and the forced-inline key hash a
-Map probe costs about what the position check plus the cache refill does.
-The reasoning stays at `State::get_cached_field`. Typed loop regions keep
-the form (`State::record_slot`), where the probe is the whole access.
-Untested shape that could still promote it: an own-field sweep over many
-prebuilt wide Map records (no construction or call in the kernel) where the
-per-table hash indices lose locality. That workload is now registered,
-`wide_sweep` (4096 eight-field records from one constructor, four static
-field reads per record in a `while` loop so no typed region takes it); a
-retry measures there first.
-
-The 2026-11-17 performance hunt raised this from two scopes. The lookup
-hunter's lead rewrite: own-field entries hold one `ObjectPtr` and one `SlotRef`
-and caches belong to the bytecode runtime, so every entity running the same
-method shares one entry, and `update(entities[i])` remembers only the previous
-entity; more cached objects only postpone the failure. Make the plan describe
-a layout and a slot: guard the receiver's shared layout identity, load or
-update the live slot, resolve generically only on a different layout or when
-the slot's nil status needs metamethod handling; a small polymorphic cache over
-layouts, with a shared lookup structure for megamorphic sites. Table `version`
-cannot serve: it starts equal on unrelated tables and ignores ordinary
-additions. Risks: layout proliferation, mutation overhead, nil handling (a
-reserved nil slot needs a live check unless presence changes the guarded
-identity), and cache metadata must stay weak. Its local fallback,
-key-checked position reuse, is the measured refusal above. The table hunter's lead rewrite is the storage side:
-materialize each constructor's layout once in State-local runtime data, an
-instance holding a shape identity and dense values, the shape owning ordered
-names and the lookup index; small records hold values inline without repeating
-keys; larger ones allocate a value block with no per-instance index;
-structural mutation converts to dictionary storage carrying its history; the
-table exposes a shape identity and a field-offset token valid across instances.
-That removes construction hashing and map population, per-instance key and
-index storage, repeated lookup across same-shape objects and repeated tracing
-of identical name lists (if shapes are marked once). Its main risk is history:
-large templates reserve nil-valued keys while small constructors do not
-reserve a key for a nil initializer, deletion and reinsertion change order, and
-snapshots distinguish storage kinds and save dead controls and vacant
-positions, so conversion must preserve the logical slot history, and shared
-names need GC ownership beyond the creating bytecode's literal roots. A general
-dynamic shape-transition system is a follow-up. The host hunter noted fresh
-option tables built by hosts get nothing from identity caches either.
+- One position per site. A site whose receivers alternate between layouts
+  that hold the key at different positions misses on every switch and
+  refills from the keyed lookup. N positions per site cover the same hits a
+  per-site set of N shape guards would, with no table field; each failed
+  guess reads another slot of the receiver, where a shape guard would
+  compare an already-loaded id. Promote on a workload with persistent
+  alternating-offset misses.
+- SET_FIELD keeps the same-table entry only. A cross-receiver store hint
+  must prove what `GcHeap::overwrite_live_slot` requires (a live, non-nil
+  overwrite of a key other than `__index` through a token valid for the
+  current receiver), so it is not the read hint reused. Coverage only: the
+  read hint holds a position, never a value, so it is sound without it.
+- `bench/polymorphic` and `examples/fields/polymorphic.lua` (2 fields, a
+  numeric `for`) now run entirely in a typed loop region, so their header's
+  "per-callsite IC never hits" no longer describes them; `wide_sweep` is the
+  workload that exercises the dispatch hint.
+- The host hunter noted fresh option tables built by hosts get nothing from
+  identity caches; the position hint now serves them when they share a
+  layout.
 
 ### Compiler-recognized field-update fusion
 
@@ -691,9 +643,28 @@ evaluation and initialization interleave at today's points. Replay risks: nil
 entries and tombstones, pending positional batches in mixed constructors whose
 flush timing matters when keys overlap, duplicate-key overwrites, and
 snapshots serializing physical slots. Medium confidence in broad payoff,
-which depends on the table representation (see the shared-layout account in
-"Shape-based polymorphic field IC"). Escape analysis and scalar replacement of
-temporary records are follow-ups.
+which depends on the table representation. Escape analysis and scalar
+replacement of temporary records are follow-ups.
+
+Shared layouts, the storage side (2026-11-17 table hunter's lead rewrite):
+materialize each constructor's layout once in State-local runtime data, an
+instance holding a shape identity and dense values, the shape owning ordered
+names and the lookup index; small records hold values inline without repeating
+keys; larger ones allocate a value block with no per-instance index;
+structural mutation converts to dictionary storage carrying its history.
+That removes construction hashing and map population, per-instance key and
+index storage and repeated tracing of identical name lists (if shapes are
+marked once). Field reads over many same-layout records no longer need it:
+GET_FIELD's dispatch hit reads the site's cached position in any receiver as
+a key-checked hint (`State::get_current_cached_field`). A shape identity
+proving a physical key-to-offset map must tell apart histories with equal
+live keys in equal order (a deleted and reinserted key leaves a vacant
+slot), which the hint ignores. Main risk is history: large templates reserve
+nil-valued keys while small constructors do not reserve a key for a nil
+initializer, deletion and reinsertion change order, and snapshots
+distinguish storage kinds and save dead controls and vacant positions, so
+conversion must preserve the logical slot history, and shared names need GC
+ownership beyond the creating bytecode's literal roots.
 
 **(b) Local-tracked shape inheritance (rewrite-the-analysis).**
 

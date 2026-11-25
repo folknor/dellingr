@@ -1146,6 +1146,24 @@ impl Table {
         }
     }
 
+    /// The live value in `slot`'s hash position if that slot holds the
+    /// string `key`, whatever the slot's version or the table that minted
+    /// it: a key-checked position, so it answers about this table only and
+    /// never needs the version. `None` for any other key, a tombstone, a
+    /// vacant or missing position. The key compare is the interned pointer,
+    /// not the generic `Val` equality, which the release build outlined.
+    /// Forced inline: it is the GET_FIELD dispatch hit over many receivers.
+    #[inline(always)]
+    pub(super) fn string_value_at(&self, slot: SlotRef, key: Val) -> Option<Val> {
+        let index = slot.index;
+        let (slot_key, value) = match &self.storage {
+            TableStorage::Inline { entries, len } => entries[..usize::from(*len)].get(index)?,
+            TableStorage::Map(map, _) => map.get(index)?,
+        };
+        let same = matches!((slot_key, key), (Val::Str(a), Val::Str(b)) if *a == b);
+        (same && !matches!(value, Val::Nil)).then_some(*value)
+    }
+
     /// The value half of [`Self::get_index`], for cached reads that never look
     /// at the key. `Option<Val>` comes back in two registers, whereas the
     /// key/value pair goes through a stack out-parameter that the caller

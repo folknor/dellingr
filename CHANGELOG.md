@@ -233,6 +233,12 @@ tick budgets and re-record replays.
 
 ### Performance
 
+- A field read (`r.x`, `obj:method()`) over many tables built in the same
+  key order no longer takes the full lookup for each new table: the site
+  checks the position its key held in the last table it resolved. A sweep
+  reading four fields of 4096 eight-field records went from about 5.1 to
+  2.75 s, `bench/record_tables` from about 2.2 to 1.6 s on bygg. Results,
+  charges and snapshots are unchanged. Not replay-visible.
 - Garbage-collection marking no longer calls the per-value mark out of line
   from table scans and the other marking loops: a collection over 1,000
   loaded chunks retires about 24% fewer instructions (about 1.95 to 1.45 s

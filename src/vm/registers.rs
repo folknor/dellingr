@@ -133,11 +133,11 @@ impl State {
         call_site: usize,
     ) -> Result<()> {
         let cache_slot = inst.cache_slot();
-        if let Some(val) = self.field_cache_hit(frame, receiver, cache_slot) {
+        let key = frame.literal(inst.c());
+        if let Some(val) = self.field_cache_hit(frame, receiver, key, cache_slot) {
             self.stack[dst] = val;
             return Ok(());
         }
-        let key = frame.literal(inst.c());
         let cache = frame.runtime.caches.field(cache_slot);
         match self.resolve_index(receiver, IndexStart::Receiver, key, cache, local_cost)? {
             IndexOutcome::Value(val) => self.stack[dst] = val,
@@ -166,9 +166,15 @@ impl State {
     }
 
     #[inline]
-    fn field_cache_hit(&self, frame: &Frame, receiver: Val, cache_slot: Option<u8>) -> Option<Val> {
+    fn field_cache_hit(
+        &self,
+        frame: &Frame,
+        receiver: Val,
+        key: Val,
+        cache_slot: Option<u8>,
+    ) -> Option<Val> {
         let cache = frame.runtime.caches.field(cache_slot)?;
-        self.get_current_cached_field(receiver.as_object_ptr()?, cache)
+        self.get_current_cached_field(receiver.as_object_ptr()?, key, cache)
     }
 
     /// `R[dst] = R[table][R[key]]`. A plain table, or a raw hit, answers
