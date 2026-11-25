@@ -476,6 +476,27 @@ fn gsub_leading_caret_matches_only_at_subject_start() {
     assert_eq!(state.to_number(-1).unwrap(), 2.0);
 }
 
+/// A bare `^` compiles to an empty program whose match is formed without
+/// running the matcher; the function and table replacements still receive
+/// the empty whole match as capture 0.
+#[test]
+fn gsub_bare_caret_passes_the_empty_match_to_function_and_table() {
+    let mut state = State::new();
+    support::eval(
+        &mut state,
+        r#"
+            local a, ac = string.gsub("abc", "^", function(m) return "[" .. m .. "]" end)
+            local b, bc = string.gsub("abc", "^", { [""] = "X" })
+            return a, ac, b, bc
+            "#,
+        4,
+    );
+    assert_eq!(state.to_bytes(-4).unwrap(), b"[]abc");
+    assert_eq!(state.to_number(-3).unwrap(), 1.0);
+    assert_eq!(state.to_bytes(-2).unwrap(), b"Xabc");
+    assert_eq!(state.to_number(-1).unwrap(), 1.0);
+}
+
 #[test]
 fn gsub_position_captures_and_replacement_escapes() {
     let mut state = State::new();

@@ -328,8 +328,11 @@ live pointer grew `match_at`, which recurses natively up to `MAXCCALLS`,
 from 168 to 200 bytes per level (and `min_expand` from 72 to 120), and it
 measured slower than the shipped shape, which keeps `match_at` at 168 and
 `min_expand` at 72. `str_match`'s own frame stays 888 bytes; it is one
-level, not part of the recursion, and returns before gsub calls a
-replacement.
+level, not part of the recursion. Its work is finished before gsub calls a
+replacement, but until 2026-11-25 it was inlined into `gsub_lua_pattern`,
+so its `MatchState` sat in the frame that recurs per native level, beside
+the matcher's own `CaptureSlots` ("2026-11-25: callback gsub holds no
+matcher state across its replacement").
 
 Plantasjen (as above), default release profile, `brokkr dellingr --bench`
 cells (best of 3 launches, the harness's elapsed ms), base and both shapes
@@ -1258,8 +1261,8 @@ compiler-dependent measurements, not limits.
 
 ### Largest recurring cycle over time
 
-The largest cycle (a `gsub_*_table` or `gsub_pattern_*` scenario, one native
-level) in bytes. Release before 0779c08 is under the old fat-LTO,
+The largest cycle (one native level; the scenario that sets it is named
+where it changed) in bytes. Release before 0779c08 is under the old fat-LTO,
 one-codegen-unit profile and does not compare with the default profile.
 Hosts: plantasjen from 4a722cf on, bygg where the row says so (a different
 host and compiler, so its row does not compare with the one above it); the
@@ -1289,6 +1292,7 @@ host and compiler, so its row does not compare with the one above it); the
 | bygg, same `rustc`: unsized `State`, on top of bea3fdd (bea3fdd itself measured 16576 / 3024 / 3072) | 16800 | 3104 | 3168 |
 | bygg, same `rustc`: `gsub` callback results appended in place, on top of 6a6c2b2 (6a6c2b2 itself measured 16880 / 3120 / 3184) | 16528 | 3104 | 3184 |
 | bygg, `rustc` of 2026-11-18: the capture slice selected once per activation, on top of a1b9172 (a1b9172 itself measured 16576 / 3216 / 3184) | 16544 | 3232 | 3200 |
+| bygg, same `rustc`: callback `gsub` holds no matcher state, on top of e1ed482 (e1ed482 itself measured 3216 / 3200 in release; dev not re-measured); the dev maximum is now `callable_rust` | 14160 | 1776 | 1712 |
 
 ### 2026-11-18: unsized `State`
 
@@ -1322,8 +1326,29 @@ of 6 rounds), 1.0% on `invoke_stack` (6 of 6), 0.8% on `rust_boundary`,
 0.2% on `host_records`, 2.7% on `sort`, 4.7% on `gsub_replace` and 0.1% on
 `pairs` (4 rounds each); the cause of those deltas (layout or codegen) was
 not isolated. No shape pays for its unsafe proof or API churn on these
-numbers. A redesign that changes what stays live across re-entry (such as
-the gsub matcher state) is a separate mechanism and makes its own case.
+numbers. Changing what stays live across re-entry is a separate mechanism;
+the gsub matcher state was taken off the recurring frame that way on
+2026-11-25.
+
+### 2026-11-25: callback gsub holds no matcher state across its replacement
+
+`gsub_lua_pattern` (function and table replacements) held a `LuaPattern`,
+the program plus 32 capture slots, across each replacement call, and
+`str_match` with its own 32-slot `MatchState` was inlined into it, so both
+arrays recurred once per native level. It now holds only the program
+(`SharedPattern`) and its reused capture `Vec`; each search runs in the
+out-of-line `SharedPattern::search_captures`, which converts the captures
+straight from the search's slots into the `Vec` through `str_match`'s
+publisher and returns before the replacement runs. String-replacement
+`gsub`, `find`, `match` and `gmatch` keep `LuaPattern`: none re-enters Lua
+while a matcher is live, so a `Vec` there would add heap work and save no
+recurring frame. bygg, `rustc 1.102.0-nightly (65ce8611f 2026-11-18)`, on
+top of e1ed482, release / release + snapshot: `gsub_pattern_function`
+(and `gsub_pattern_captures`) 3216 / 3200 to 1776 / 1712,
+`gsub_pattern_table` 3136 / 3120 to 1696 / 1632, no other release row
+moved. Dev, not re-measured at e1ed482: 13312 and 13440 against the
+16416 and 16544 of the previous table (625e787). The largest dev cycle is
+now `callable_rust`.
 
 ### 2026-11-17: typed host invocation
 

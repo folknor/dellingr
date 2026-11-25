@@ -50,9 +50,23 @@ enum CapLen {
 }
 
 #[derive(Copy, Clone)]
-struct Capture {
+pub(super) struct Capture {
     init: usize,
     len: CapLen,
+}
+
+impl Capture {
+    /// The capture as its consumers read it.
+    pub(super) fn to_lua(self) -> LuaCapture {
+        match self.len {
+            CapLen::Len(length) => LuaCapture::Bytes {
+                start: self.init,
+                end: self.init + length,
+            },
+            CapLen::Position => LuaCapture::Position(self.init),
+            CapLen::Unfinished => LuaCapture::Unfinished,
+        }
+    }
 }
 
 /// The captures a successful search publishes: its program's slots, copied
@@ -74,15 +88,12 @@ impl CaptureSlots {
     /// latest successful search left it. Meaningful only for an index below
     /// that search's program's capture count; the caller enforces it.
     pub(super) fn get(&self, index: usize) -> LuaCapture {
-        let capture = self.0[index];
-        match capture.len {
-            CapLen::Len(length) => LuaCapture::Bytes {
-                start: capture.init,
-                end: capture.init + length,
-            },
-            CapLen::Position => LuaCapture::Position(capture.init),
-            CapLen::Unfinished => LuaCapture::Unfinished,
-        }
+        self.0[index].to_lua()
+    }
+
+    /// Store a successful search's captures.
+    pub(super) fn publish(&mut self, captures: &[Capture]) {
+        self.0[..captures.len()].copy_from_slice(captures);
     }
 }
 
@@ -1053,23 +1064,26 @@ pub(super) fn compile(pattern: &[u8], mode: AnchorMode) -> CompiledPattern {
     Compiler::new(pattern).compile(mode)
 }
 
-/// Search `subject` from `init`, returning the whole match's range. On
-/// success the program's captures are copied into `captures`; on failure or
-/// error `captures` is left as it was.
+/// Search `subject` from `init`. Every success, the empty program's
+/// included, is formed by `publish`, which receives the whole match's range
+/// and the program's captures (one per capture item, in order, not counting
+/// the whole match) and returns what the search returns; on failure or
+/// error it is not called. Whatever a caller needs from a match therefore
+/// cannot be skipped by a success path.
 ///
 /// One `MatchState` serves every start position: its slots need no reset
 /// between positions (`MatchState::captures`), and building the state
 /// charges nothing, so the cost and safepoints are those of `match_at` and
 /// of the start skip, which charges exactly the steps of the attempts it
 /// skips (`StartSkip`).
-pub(super) fn str_match(
+pub(super) fn str_match<T>(
     subject: &[u8],
     pattern: &CompiledPattern,
     init: usize,
-    captures: &mut CaptureSlots,
+    publish: impl FnOnce(ops::Range<usize>, &[Capture]) -> T,
     meter: &mut CostMeter<'_>,
     interrupt: &AtomicBool,
-) -> MatchResult<Option<ops::Range<usize>>> {
+) -> MatchResult<Option<T>> {
     // `""`, and `"^"` under `AnchorMode::Honour`, compile to no items and
     // match the empty range at `init` without consulting the
     // matcher, so they charge no matcher step (`match_at` charges one on
@@ -1078,7 +1092,7 @@ pub(super) fn str_match(
     // `string.match` has no empty-pattern special case of its own because
     // this one is free; removing it is a cost change.
     if pattern.items.is_empty() {
-        return Ok(Some(init..init));
+        return Ok(Some(publish(init..init, &[])));
     }
     let mut state = MatchState {
         subject,
@@ -1098,9 +1112,7 @@ pub(super) fn str_match(
             }
         }
         if let Some(end) = state.match_at(pos, 0, 0)? {
-            let published = pattern.captures;
-            captures.0[..published].copy_from_slice(&state.captures[..published]);
-            return Ok(Some(pos..end));
+            return Ok(Some(publish(pos..end, &state.captures[..pattern.captures])));
         }
         if pattern.is_anchored() || pos == subject.len() {
             return Ok(None);

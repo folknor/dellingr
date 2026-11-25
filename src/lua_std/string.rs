@@ -7,7 +7,9 @@ use crate::cost_meter::CostMeter;
 use crate::cost_model::Charge;
 use crate::error::{Error, ErrorKind, LibraryError, PatternErrorDetail, StringPatternFunction};
 use crate::instr::{ArgCount, RetCount};
-use crate::patterns::{LuaCapture, LuaPattern, MatchError, PatternError};
+use crate::patterns::{
+    AnchorMode, LuaCapture, LuaPattern, MatchError, PatternError, SharedPattern,
+};
 use crate::saturate::saturating_cast;
 use crate::vm::{GmatchIter, StringArg};
 use crate::{LuaType, Result, State};
@@ -1247,7 +1249,11 @@ fn gsub_lua_pattern(
     repl_type: &LuaType,
     max_replacements: Option<usize>,
 ) -> Result<u8> {
-    let mut matcher = pattern_matcher(state, pattern)?;
+    // Only the program and the copied capture offsets stay in this frame
+    // while a replacement runs Lua: each search's state, capture slots
+    // included, lives and dies inside `search_captures`, so a recursion
+    // through the replacement carries no matcher state per native level.
+    let program = pattern_program(state, pattern)?;
     let s_len = string_arg_len(state, s)?;
     // Sized at the first match: a call with no match returns the subject.
     let mut result = state.take_result_buffer();
@@ -1257,7 +1263,7 @@ fn gsub_lua_pattern(
     // `pos` are pending, appended at the next match or at the end.
     let mut copied = 0usize;
     let mut count = 0usize;
-    let anchored = matcher.is_anchored();
+    let anchored = program.is_anchored();
     // Lua 5.4 empty-match semantics (`lastmatch`): a match is rejected
     // when it is empty and ends where the previous accepted match ended,
     // and the scan then copies one byte and moves on. So
@@ -1274,16 +1280,14 @@ fn gsub_lua_pattern(
             break;
         }
 
-        let matched = state
+        let found = state
             .with_string_arg(s, Charge::StringGsub, |subject, mut meter, interrupt| {
-                matcher.matches_bytes_from(subject, pos, &mut meter, interrupt)
+                program.search_captures(subject, pos, &mut meter, interrupt, &mut captures)
             })?
             .map_err(|err| match_error(state, StringPatternFunction::Gsub, err))?;
-        if !matched {
+        let Some(range) = found else {
             break;
-        }
-
-        let range = matcher.range();
+        };
         if range.start == range.end && lastmatch == Some(range.end) {
             if pos == s_len {
                 break;
@@ -1299,15 +1303,11 @@ fn gsub_lua_pattern(
             result.reserve(s_len);
         }
         append_subject_range(state, &mut result, s, copied..range.start)?;
-        // The capture buffer is reused across matches. Both replacement arms
-        // take the same slice, and a function replacement validates all its
-        // arguments before pushing the call window. Reading captures off the
-        // matcher instead was weighed and not taken: the copy is a few Copy
-        // values beside a capture push (an intern for a byte capture) and a
-        // table read or Lua call, and a second capture source would have to
-        // reach the frames live across the replacement's native re-entry.
-        captures.clear();
-        captures.extend((0..matcher.num_matches()).map(|i| matcher.capture(i)));
+        // The capture buffer is reused across matches and is the only copy
+        // of the captures: the search wrote it and kept no slots of its own.
+        // Both replacement arms take the same slice, and a function
+        // replacement validates all its arguments before pushing the call
+        // window.
         crate::native_call!(
             "gsub_lua_pattern->append_gsub_replacement",
             append_gsub_replacement(state, &mut result, repl_type, s, &captures)
@@ -1324,12 +1324,22 @@ fn gsub_lua_pattern(
     finish_gsub(state, s, result, copied, count)
 }
 
-/// The matcher for argument 2 of `find`, `match` or `gsub`.
+/// The compiled program for argument 2 of a `gsub` with a function or table
+/// replacement, which holds only the program across its replacement calls.
 ///
 /// A string pattern comes from the State's compiled-pattern cache; a number
 /// coerced to `pattern` has no interned key and compiles fresh. Compilation
 /// is free in the cost model either way, and a cached program raises its lazy
 /// malformed-pattern errors at exactly the points a fresh one would.
+fn pattern_program(state: &mut State, pattern: &StringArg) -> Result<SharedPattern> {
+    match pattern {
+        StringArg::Slot(idx) => state.cached_pattern_program(*idx),
+        StringArg::Rendered(bytes) => Ok(SharedPattern::compile(bytes, AnchorMode::Honour)),
+    }
+}
+
+/// The matcher for argument 2 of `find`, `match` or a string-replacement
+/// `gsub`, from the same sources as `pattern_program`.
 fn pattern_matcher(state: &mut State, pattern: &StringArg) -> Result<LuaPattern> {
     match pattern {
         StringArg::Slot(idx) => state.cached_pattern_matcher(*idx),

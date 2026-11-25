@@ -15,7 +15,7 @@ use self::errors::MalformedPattern;
 mod luapat;
 #[cfg(test)]
 use self::luapat::LUA_MAXMATCHES;
-use self::luapat::{CaptureSlots, CompiledPattern, compile, str_match};
+use self::luapat::{Capture, CaptureSlots, CompiledPattern, compile, str_match};
 
 pub(crate) use self::errors::{MatchError, PatternError};
 pub(crate) use self::luapat::AnchorMode;
@@ -65,9 +65,48 @@ impl SharedPattern {
     }
 
     /// Whether anything besides this handle owns the program (an iterator, a
-    /// matcher held across a callback).
+    /// `gsub` holding the program across its replacement calls).
     pub(crate) fn has_other_owner(&self) -> bool {
         Arc::strong_count(&self.0) > 1
+    }
+
+    /// Whether the program matches only at the initial position.
+    pub(crate) fn is_anchored(&self) -> bool {
+        self.0.is_anchored()
+    }
+
+    /// Search the complete subject from `init` and, on success, replace
+    /// `out` with captures 0 (the whole match) through the program's
+    /// capture count, returning the whole match's range. A failed search
+    /// leaves `out` as it was. Polls `interrupt` as
+    /// `LuaPattern::matches_bytes_from` does.
+    ///
+    /// The search state, capture slots included, lives in this call's own
+    /// frame and is gone when it returns. That is the point: `gsub` holds
+    /// only the program and the copied offsets while its replacement runs
+    /// Lua, so no matcher state recurs on the native stack per level
+    /// (`reference/native-calls.md`, "Current native bytes per level"). Out
+    /// of line so the caller's frame cannot absorb the search's.
+    #[inline(never)]
+    pub(crate) fn search_captures(
+        &self,
+        s: &[u8],
+        init: usize,
+        meter: &mut CostMeter<'_>,
+        interrupt: &AtomicBool,
+        out: &mut Vec<LuaCapture>,
+    ) -> Result<Option<ops::Range<usize>>, MatchError> {
+        let publish = |whole: ops::Range<usize>, captures: &[Capture]| {
+            out.clear();
+            out.reserve(1 + captures.len());
+            out.push(LuaCapture::Bytes {
+                start: whole.start,
+                end: whole.end,
+            });
+            out.extend(captures.iter().map(|capture| capture.to_lua()));
+            whole
+        };
+        str_match(s, &self.0, init, publish, meter, interrupt)
     }
 
     /// A handle that finds this program while some other owner keeps it.
@@ -163,8 +202,12 @@ impl LuaPattern {
         interrupt: &AtomicBool,
     ) -> Result<bool, MatchError> {
         self.n_match = 0;
-        let Some(whole) = str_match(s, &self.compiled, init, &mut self.slots, meter, interrupt)?
-        else {
+        let slots = &mut self.slots;
+        let publish = |whole: ops::Range<usize>, captures: &[Capture]| {
+            slots.publish(captures);
+            whole
+        };
+        let Some(whole) = str_match(s, &self.compiled, init, publish, meter, interrupt)? else {
             return Ok(false);
         };
         self.whole = whole;

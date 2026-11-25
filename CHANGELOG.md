@@ -233,6 +233,12 @@ tick budgets and re-record replays.
 
 ### Performance
 
+- `string.gsub` with a Lua pattern and a function or table replacement no
+  longer keeps its matcher state on the native stack while the replacement
+  runs: each nested level through such a replacement takes about 1.4 KB
+  less native stack in release and 3 KB less in dev (bygg).
+  `MAX_NATIVE_CALL_DEPTH`, costs and
+  results are unchanged. Not replay-visible.
 - A table constructor with more than four named fields whose values are
   locals, upvalues or literals (`{x = x, y = y, hp = 100, ...}`) now stores
   its fields in one step after the allocation instead of one instruction

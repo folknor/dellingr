@@ -662,25 +662,6 @@ its 4 MiB envelope, with less margin. Worth a look if the dev envelope gets
 tight: a shared helper for the fixed charge, or a layout that keeps the
 per-arm expansion out of the dev frame.
 
-### Lua-pattern gsub keeps the matcher live across the replacement call
-
-What: `gsub_lua_pattern` calls `append_gsub_replacement` (and through it a
-function replacement or a table replacement's `__index` handler) while its
-matcher state is still on the native stack, so every level of recursion
-through such a callback carries it. The
-[Current native bytes per level](../reference/native-calls.md#current-native-bytes-per-level)
-table compares the recurring stack usage of Lua-pattern and plain-pattern
-function and table replacements.
-
-Sketch: collect the match result (captures as offsets) and drop the
-matcher's frame state before invoking the replacement, so the callback
-runs from a frame no larger than the plain path's; or move the match loop
-into a helper that returns per match and is re-entered.
-
-Why deferred: it fits the envelope with room to spare and nothing is
-failing; this buys margin, not correctness. Signal: the envelope tests
-tightening, or a reason to raise `MAX_NATIVE_CALL_DEPTH`.
-
 ### Growing-producer residue after the reusable result buffer (2026-11-25)
 
 `string.format`, `gsub` and `table.concat` now build in the State's

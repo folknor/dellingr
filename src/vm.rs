@@ -325,7 +325,7 @@ pub struct State<Tail: ?Sized = [()]> {
     /// It is an implementation cache only: no charge depends on residency,
     /// and a snapshot rebuilds what it needs. Programs are reference-counted,
     /// so an owner outside the cache (a gmatch iterator, which holds its
-    /// program, or a gsub matcher held across a replacement callback) keeps
+    /// program, or a gsub holding its program across a replacement callback) keeps
     /// its program alive across GC pruning or eviction.
     patterns: IndexMap<(StringPtr, AnchorMode), PatternCacheEntry>,
     pattern_bytes: usize,
@@ -860,6 +860,15 @@ impl State {
     pub(crate) fn cached_pattern_matcher(&mut self, idx: isize) -> Result<LuaPattern> {
         let idx = self.expect_string_at(idx)?;
         Ok(self.cached_pattern_at(idx, AnchorMode::Honour).matcher())
+    }
+
+    /// The compiled program for the string pattern at 1-based stack index
+    /// `idx`, from cache, with a leading `^` anchoring the match. The handle
+    /// owns a reference to the program, so the caller may run Lua (and so
+    /// allocate, collect or evict) while holding it.
+    pub(crate) fn cached_pattern_program(&mut self, idx: isize) -> Result<SharedPattern> {
+        let idx = self.expect_string_at(idx)?;
+        Ok(self.cached_pattern_at(idx, AnchorMode::Honour))
     }
 
     /// The Rust step a call of `val` runs when `val` is a `string.gmatch`
