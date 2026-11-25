@@ -124,10 +124,14 @@ impl State {
     }
 
     /// Pushes the given UTF-8 string onto the stack.
-    pub fn push_string(&mut self, s: impl AsRef<str>) -> Result<()> {
+    ///
+    /// Takes a concrete borrow, not `impl AsRef`, so no caller code runs
+    /// between the environment check and the allocation: any conversion
+    /// happens at the call site, before the check.
+    pub fn push_string(&mut self, s: &str) -> Result<()> {
         self.check_usable()?;
         self.check_stack_slot()?;
-        let val = self.alloc_string(s.as_ref().as_bytes())?;
+        let val = self.alloc_string(s.as_bytes())?;
         self.push_unchecked(val);
         Ok(())
     }
@@ -140,11 +144,12 @@ impl State {
         Ok(())
     }
 
-    /// Pushes the given raw Lua string bytes onto the stack.
-    pub fn push_bytes(&mut self, bytes: impl AsRef<[u8]>) -> Result<()> {
+    /// Pushes the given raw Lua string bytes onto the stack. A concrete
+    /// borrow for the same reason as `push_string`.
+    pub fn push_bytes(&mut self, bytes: &[u8]) -> Result<()> {
         self.check_usable()?;
         self.check_stack_slot()?;
-        let val = self.alloc_string(bytes.as_ref())?;
+        let val = self.alloc_string(bytes)?;
         self.push_unchecked(val);
         Ok(())
     }

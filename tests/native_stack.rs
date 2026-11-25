@@ -1014,13 +1014,13 @@ fn host_newindex(state: &mut State) -> dellingr::Result<u8> {
 
 fn host_tostring(state: &mut State) -> dellingr::Result<u8> {
     let bytes = state.tostring_bytes(1)?;
-    state.push_bytes(bytes)?;
+    state.push_bytes(&bytes)?;
     Ok(1)
 }
 
 fn host_to_string(state: &mut State) -> dellingr::Result<u8> {
     let string = state.to_string_with_meta(1)?;
-    state.push_string(string)?;
+    state.push_string(&string)?;
     Ok(1)
 }
 

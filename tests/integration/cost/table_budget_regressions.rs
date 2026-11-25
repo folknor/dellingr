@@ -45,7 +45,7 @@ fn table_move_costs_empty_and_each_moved_element() {
     // Call the native function directly so bytecode dispatch cannot consume
     // the exhausted budget before table.move reaches its empty-range charge.
     state.get_global("table").unwrap();
-    state.push_bytes("move").expect("short test string fits");
+    state.push_bytes(b"move").expect("short test string fits");
     state.get_table(-2).expect("table.move lookup succeeds");
     state.remove(-2).expect("table table is removed");
     state.new_table().unwrap();

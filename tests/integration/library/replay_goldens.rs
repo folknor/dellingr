@@ -186,8 +186,8 @@ fn remainder_edge_cases_are_pinned_bit_exact() {
 fn read_nan_field(state: &mut dellingr::State) -> dellingr::Result<u8> {
     let plain: f64 = state.raw_field(1, "v")?;
     let optional: Option<f64> = state.raw_field(1, "v")?;
-    state.push_string(format!("{:#018x}", plain.to_bits()))?;
-    state.push_string(format!("{:#018x}", optional.unwrap_or(0.0).to_bits()))?;
+    state.push_string(&format!("{:#018x}", plain.to_bits()))?;
+    state.push_string(&format!("{:#018x}", optional.unwrap_or(0.0).to_bits()))?;
     Ok(2)
 }
 

@@ -15,7 +15,7 @@ macro_rules! reader {
     ($name:ident, $ty:ty) => {
         fn $name(state: &mut State) -> dellingr::Result<u8> {
             let value: $ty = state.raw_field(1, "v")?;
-            state.push_string(value.to_string())?;
+            state.push_string(&value.to_string())?;
             Ok(1)
         }
     };
@@ -35,7 +35,7 @@ reader!(read_string, String);
 
 fn read_bytes(state: &mut State) -> dellingr::Result<u8> {
     let value: Vec<u8> = state.raw_field(1, "v")?;
-    state.push_string(format!("{value:?}"))?;
+    state.push_string(&format!("{value:?}"))?;
     Ok(1)
 }
 
@@ -43,33 +43,33 @@ fn read_bytes(state: &mut State) -> dellingr::Result<u8> {
 fn read_str(state: &mut State) -> dellingr::Result<u8> {
     let value: &str = state.raw_field(1, "v")?;
     let rendered = value.to_owned();
-    state.push_string(rendered)?;
+    state.push_string(&rendered)?;
     Ok(1)
 }
 
 fn read_byte_slice(state: &mut State) -> dellingr::Result<u8> {
     let value: &[u8] = state.raw_field(1, "v")?;
     let rendered = format!("{value:?}");
-    state.push_string(rendered)?;
+    state.push_string(&rendered)?;
     Ok(1)
 }
 
 fn read_opt_str(state: &mut State) -> dellingr::Result<u8> {
     let value: Option<&str> = state.raw_field(1, "v")?;
     let rendered = format!("{value:?}");
-    state.push_string(rendered)?;
+    state.push_string(&rendered)?;
     Ok(1)
 }
 
 fn read_opt_u8(state: &mut State) -> dellingr::Result<u8> {
     let value: Option<u8> = state.raw_field(1, "v")?;
-    state.push_string(format!("{value:?}"))?;
+    state.push_string(&format!("{value:?}"))?;
     Ok(1)
 }
 
 fn read_opt_string(state: &mut State) -> dellingr::Result<u8> {
     let value: Option<String> = state.raw_field(1, "v")?;
-    state.push_string(format!("{value:?}"))?;
+    state.push_string(&format!("{value:?}"))?;
     Ok(1)
 }
 
@@ -79,7 +79,7 @@ fn spawn(state: &mut State) -> dellingr::Result<u8> {
     let player: u32 = state.raw_field(1, "player")?;
     let x: f64 = state.raw_field(1, "x")?;
     let flags: Option<String> = state.raw_field(1, "flags")?;
-    state.push_string(format!("{player} {x} {flags:?}"))?;
+    state.push_string(&format!("{player} {x} {flags:?}"))?;
     Ok(1)
 }
 
@@ -717,7 +717,7 @@ fn a_descriptor_fails_with_the_plain_name_error() {
 fn spawn_batch(state: &mut State) -> dellingr::Result<u8> {
     let (player, x, flags): (u32, f64, Option<String>) =
         state.raw_fields(1, (&BATCH_PLAYER, &BATCH_X, "flags"))?;
-    state.push_string(format!("{player} {x} {flags:?}"))?;
+    state.push_string(&format!("{player} {x} {flags:?}"))?;
     Ok(1)
 }
 

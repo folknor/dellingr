@@ -473,10 +473,10 @@ fn native_call_depth_exceeded_through_rust_callbacks() {
 fn host_string_limit_is_inclusive_and_leaves_stack_unchanged() {
     let mut state = State::new();
     state
-        .push_bytes(vec![b'x'; MAX_STRING_BYTES])
+        .push_bytes(&vec![b'x'; MAX_STRING_BYTES])
         .expect("the exact string limit must succeed");
     let err = state
-        .push_bytes(vec![b'x'; MAX_STRING_BYTES + 1])
+        .push_bytes(&vec![b'x'; MAX_STRING_BYTES + 1])
         .expect_err("a string above the limit must fail");
     match err.kind() {
         ErrorKind::StringSizeExceeded { size, limit } => {

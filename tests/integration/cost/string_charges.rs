@@ -108,7 +108,7 @@ fn format_output_across_the_size_cap_charges_only_its_directives() {
     fn after_format(format: &str) -> (dellingr::Result<()>, u64) {
         let mut state = State::new();
         state
-            .push_bytes(vec![b'a'; MAX_STRING_BYTES - 2])
+            .push_bytes(&vec![b'a'; MAX_STRING_BYTES - 2])
             .expect("a string under the cap fits");
         state.set_global("s").expect("global set");
         let before = state.cost_used();

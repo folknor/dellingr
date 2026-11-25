@@ -279,7 +279,7 @@ mod tests {
         let mut state = State::new();
         state.gc_disable_auto();
         for index in 0..PATTERN_CACHE_ENTRIES {
-            state.push_string(format!("pattern{index}")).unwrap();
+            state.push_string(&format!("pattern{index}")).unwrap();
             state.cached_pattern_at(index, AnchorMode::Honour);
         }
         let keys: Vec<_> = state.patterns.keys().copied().collect();
@@ -311,7 +311,7 @@ mod tests {
         let held = state.cached_pattern_at(0, AnchorMode::Honour);
         let key = *state.patterns.get_index(0).unwrap().0;
         for index in 1..=PATTERN_CACHE_ENTRIES {
-            state.push_string(format!("pattern{index}")).unwrap();
+            state.push_string(&format!("pattern{index}")).unwrap();
             state.cached_pattern_at(index, AnchorMode::Honour);
         }
         assert!(!state.patterns.contains_key(&key));

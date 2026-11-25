@@ -830,7 +830,7 @@ fn configured_budget_remains_enforced_after_load() {
     // Invoke the native function directly so the saved two units are consumed
     // by table.move itself rather than by bytecode dispatch before the call.
     loaded.get_global("table").unwrap();
-    loaded.push_bytes("move").expect("short test string fits");
+    loaded.push_bytes(b"move").expect("short test string fits");
     loaded.get_table(-2).expect("table.move lookup succeeds");
     loaded.remove(-2).expect("table table is removed");
     loaded.get_global("t").unwrap();
@@ -1772,7 +1772,7 @@ fn non_utf8_and_edge_values_round_trip() {
     let mut state = State::new();
 
     state
-        .push_bytes([0u8, 159, 146, 150, 255])
+        .push_bytes(&[0u8, 159, 146, 150, 255])
         .expect("short test string fits");
     state.set_global("binval").unwrap();
     state.push_number(-0.0).unwrap();
@@ -1783,7 +1783,7 @@ fn non_utf8_and_edge_values_round_trip() {
     // Table keyed by a non-UTF8 byte string.
     state.new_table().unwrap();
     state
-        .push_bytes([0xff, 0x00, 0xfe])
+        .push_bytes(&[0xff, 0x00, 0xfe])
         .expect("short test string fits");
     state.push_number(42.0).unwrap();
     state.set_table_raw(-3).unwrap();
@@ -1805,7 +1805,7 @@ fn non_utf8_and_edge_values_round_trip() {
 
     loaded.get_global("bt").unwrap();
     loaded
-        .push_bytes([0xff, 0x00, 0xfe])
+        .push_bytes(&[0xff, 0x00, 0xfe])
         .expect("short test string fits");
     loaded.get_table_raw(-2).unwrap();
     assert_eq!(loaded.to_number(-1).unwrap(), 42.0);

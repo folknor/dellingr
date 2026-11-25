@@ -257,7 +257,7 @@ fn lossy_host_conversion_is_size_checked() {
     assert_eq!(state.get_top(), 1);
     // Valid text at the same length still converts.
     state
-        .push_bytes(vec![b'a'; MAX_STRING_BYTES / 3 + 1])
+        .push_bytes(&vec![b'a'; MAX_STRING_BYTES / 3 + 1])
         .unwrap();
     assert_eq!(
         state.to_string_with_meta(-1).unwrap().len(),

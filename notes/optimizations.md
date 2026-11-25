@@ -211,6 +211,18 @@ measuring. Candidates are caching the upvalue slice pointer per activation
 into a register at compile time is refused (codegen.rs header: it drops
 scratch register overwrites that free dead values).
 
+### Closed-upvalue writes have no registered workload (2026-11-25)
+
+`State::set_upvalue_value` matches once on the borrowed pool slot (no
+clone, no second lookup on the closed arm). That landed as a
+simplification, unmeasured: `queue`, the one registered workload that runs
+`SET_UPVAL` per iteration, keeps its captures open, and `upvalue_bounce`
+only reads its captures. No workload writes a closed capture in a hot loop
+(a callback or closure bumping a counter after its defining frame
+returned), so the closed arm's saving, and any later closed-arm write
+work, is unmeasured. Register such a workload at both scales before
+measuring or changing that path.
+
 ### 16-byte `Val` copies that miss store forwarding
 
 What: a `Val` written as a tag byte plus two 8-byte words (payloads sit at

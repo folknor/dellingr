@@ -721,7 +721,7 @@ fn string_allocations_drive_automatic_gc_threshold() {
     let mut i = 0;
     while !state.gc_should_run() {
         state
-            .push_string(format!("live-{i}"))
+            .push_string(&format!("live-{i}"))
             .expect("short test string fits");
         i += 1;
     }
@@ -744,7 +744,7 @@ fn string_allocations_drive_automatic_gc_threshold() {
     state.set_top(0).unwrap();
     for i in 0..1_000 {
         state
-            .push_string(format!("temporary-{i}"))
+            .push_string(&format!("temporary-{i}"))
             .expect("short test string fits");
         state.pop(1).unwrap();
     }

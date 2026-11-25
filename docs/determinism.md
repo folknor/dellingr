@@ -105,8 +105,9 @@ refuses to compute in such an environment instead.
   the register value and decodes it. Reading changes nothing: dellingr never
   resets the environment, which would be undefined behaviour in Rust.
 - Checked: every public fallible `State` method made by host code that can
-  compute, except the value moves listed below, plus `Program::compile`, `save_state`, `load_state` on entry and again after
-  its setup closure, and every host Rust callback's return, where a callback
+  compute, except the value moves listed below, plus `Program::compile`,
+  `save_state`, `load_state` on entry and again after its setup closure, and
+  every host Rust callback's return, where a callback
   that returns `Ok` with the environment changed fails with this error
   instead, so Lua never resumes under it. A host function's own calls into
   the State are checked; a standard-library function's are not, since it
@@ -118,7 +119,11 @@ refuses to compute in such an environment instead.
   executes directly when Lua calls them (`math.floor`, `type`, `rawget`,
   ...) enter no callback and run no host code, so nothing is checked at
   their return. The process allocator is assumed to leave the environment
-  as it found it, as it is during any allocating operation. Creating a State is not
+  as it found it, as it is during any allocating operation. A check covers
+  only the work after it, so no caller code runs between a check and the
+  work it guards: `push_string` and `push_bytes` take `&str` and `&[u8]`, so
+  any conversion runs at the call site before the method is entered, and
+  `Program::compile` checks after its `source.as_ref()`. Creating a State is not
   checked: it computes nothing that depends on the environment, and a State
   may be created on one thread and run on another.
 - Refusing poison only, not the environment: the fallible methods whose

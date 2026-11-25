@@ -11,18 +11,18 @@ fn unregistered(_state: &mut State) -> dellingr::Result<u8> {
 fn nested_unregistered_function_path_is_rendered_from_its_root() {
     let mut state = State::new();
     state.new_table().expect("root table allocates");
-    state.push_bytes("child").expect("key string allocates");
+    state.push_bytes(b"child").expect("key string allocates");
     state.new_table().expect("child table allocates");
     state
         .set_table_raw(1)
         .expect("child table is stored in root");
 
-    state.push_bytes("child").expect("key string allocates");
+    state.push_bytes(b"child").expect("key string allocates");
     state
         .get_table_raw(1)
         .expect("child table is read from root");
     state
-        .push_bytes("callback")
+        .push_bytes(b"callback")
         .expect("callback key string allocates");
     state
         .push_new_rust_fn(unregistered)

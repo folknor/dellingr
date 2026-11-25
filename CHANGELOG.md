@@ -12,6 +12,13 @@ tick budgets and re-record replays.
 
 ### Changed (breaking)
 
+- `State::push_string` takes `&str` and `State::push_bytes` takes `&[u8]`
+  instead of `impl AsRef`, so no caller conversion runs between the
+  floating-point environment check and the allocation. Callers passing a
+  `String`, `Vec<u8>`, array or `&str` to `push_bytes` borrow it (`&s`,
+  `b"..."`). A conversion now runs before the method's checks, as any
+  argument does, so a panicking one panics even on a poisoned State. Refusal
+  order inside the method is unchanged. Not replay-visible.
 - The value-moving stack methods (`push_nil`, `push_boolean`,
   `push_number`, `push_value`, `push_anchor`, `push_rust_fn`, `pop`,
   `set_top`, `insert`, `remove`, `replace`, `copy_val`, `to_number`,

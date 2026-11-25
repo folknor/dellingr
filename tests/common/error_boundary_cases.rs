@@ -66,7 +66,7 @@ pub(crate) const CASES: &[(&str, &str)] = &[
 
 fn render(state: &mut State) -> dellingr::Result<u8> {
     let rendered = state.tostring_bytes(1)?;
-    state.push_bytes(rendered)?;
+    state.push_bytes(&rendered)?;
     Ok(1)
 }
 
@@ -87,7 +87,7 @@ impl Setup {
             Setup::Plain => {}
             Setup::LargeString => {
                 state
-                    .push_bytes(vec![b'x'; dellingr::limits::MAX_STRING_BYTES / 2 + 1])
+                    .push_bytes(&vec![b'x'; dellingr::limits::MAX_STRING_BYTES / 2 + 1])
                     .unwrap();
                 state.set_global("large").unwrap();
             }
@@ -160,7 +160,7 @@ pub(crate) fn overreport(_: &mut State) -> dellingr::Result<u8> {
     Ok(1)
 }
 pub(crate) fn oversized(state: &mut State) -> dellingr::Result<u8> {
-    state.push_bytes(vec![b'x'; dellingr::limits::MAX_STRING_BYTES + 1])?;
+    state.push_bytes(&vec![b'x'; dellingr::limits::MAX_STRING_BYTES + 1])?;
     Ok(1)
 }
 
