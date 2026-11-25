@@ -197,6 +197,43 @@ impl Frame {
         Ok(())
     }
 
+    /// Charge one opcode's fixed charge at the State's weight, skipping a
+    /// zero weight. The same batching rule as `run_frame`'s `add_cost!`.
+    /// A function rather than macro text in every dispatch arm: a dev build
+    /// gives each expansion's weight, sum and threshold temporaries their own
+    /// slots in the dispatch frame, live across every native re-entry, and
+    /// the per-arm copies were most of the dev `Frame::run` frame growth when
+    /// weights became configurable (2080 bytes a dev level when this moved
+    /// here). Forced inline only without debug assertions, so release keeps
+    /// the charge inlined at each arm; its native frames did not move.
+    #[cfg_attr(not(debug_assertions), inline(always))]
+    fn charge_fixed(
+        state: &mut State,
+        local_cost: &mut u64,
+        #[cfg(feature = "cost-check-interval")] ip: usize,
+        charge: Charge,
+    ) -> Result<()> {
+        let units = state.cost.weight(charge);
+        if units != 0 {
+            // A weight is at most `u32::MAX` and pending cost stays below the
+            // flush threshold, at most `COST_CHECK_INTERVAL`, so the
+            // production sum cannot overflow. The debug interval override
+            // accepts any positive interval, so that build saturates.
+            #[cfg(not(feature = "cost-check-interval"))]
+            let next = *local_cost + units;
+            #[cfg(feature = "cost-check-interval")]
+            let next = (*local_cost).saturating_add(units);
+            if next >= state.cost_flush_at() {
+                Self::settle_cost(state, local_cost, next)?;
+            } else {
+                *local_cost = next;
+            }
+            #[cfg(feature = "cost-check-interval")]
+            crate::cost_meter::interval_test::record(ip, units);
+        }
+        Ok(())
+    }
+
     /// Continue a template constructor from the instruction after its
     /// `NEW_TABLE_TEMPLATE`, which has just allocated the table into
     /// register `table`: execute the leading run of static value loads and
@@ -440,26 +477,10 @@ impl Frame {
         // a loop dispatching closed captures (bench/closed_mode), which was
         // judged worth it inside the native stack envelope (docs/limits.md).
         let upvalues = frame.upvalues.as_slice();
-        // A fixed charge is one weight, at most `u32::MAX`, and pending cost
-        // stays below the flush threshold, at most `COST_CHECK_INTERVAL`, so
-        // the production sum cannot overflow. The debug interval override
-        // accepts any positive interval, so that build saturates.
-        #[cfg(not(feature = "cost-check-interval"))]
-        macro_rules! add_weight {
-            ($pending:expr, $weight:expr) => {
-                $pending + $weight
-            };
-        }
-        #[cfg(feature = "cost-check-interval")]
-        macro_rules! add_weight {
-            ($pending:expr, $weight:expr) => {
-                ($pending).saturating_add($weight)
-            };
-        }
-
         /// Macro to accumulate cost and flush when threshold is reached.
-        /// `$cost` is a fixed weight; `@unbounded $cost` is a charge of any
-        /// size (a SET_LIST element count times its weight).
+        /// `@unbounded $cost` is a charge of any size (a SET_LIST element
+        /// count times its weight); fixed charges go through `charge_fixed`,
+        /// which applies the same rule.
         macro_rules! add_cost {
             (@next $next:expr, $cost:expr) => {{
                 let next = $next;
@@ -482,9 +503,6 @@ impl Frame {
             }};
             (@unbounded $cost:expr) => {
                 add_cost!(@next (*local_cost).saturating_add($cost), $cost)
-            };
-            ($cost:expr) => {
-                add_cost!(@next add_weight!(*local_cost, $cost), $cost)
             };
         }
 
@@ -513,10 +531,10 @@ impl Frame {
                     };
                 )?
                 if let Some(charge) = CHARGE {
-                    let units = state.cost.weight(charge);
-                    if units != 0 {
-                        add_cost!(units);
-                    }
+                    #[cfg(not(feature = "cost-check-interval"))]
+                    Self::charge_fixed(state, local_cost, charge)?;
+                    #[cfg(feature = "cost-check-interval")]
+                    Self::charge_fixed(state, local_cost, *ip, charge)?;
                 }
             }};
         }

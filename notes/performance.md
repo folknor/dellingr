@@ -214,10 +214,6 @@ them:
   buffer": the heap hunter's checked builder residue (decide-once producers
   and the reusable result buffer landed; a per-append builder was measured
   and rejected).
-- `optimizations.md` "gmatch iterator residue after the typed iterator":
-  the unexplained dev frame growth (the native iterator, its held program,
-  exhaustion on a miss and the single callee classification landed; caching
-  number patterns was refused).
 - `optimizations.md` "`string.format` cached plan": strings hunter's
   cached format plan, deferred after the scan and capacity changes and
   refused again once the output buffer became reusable.

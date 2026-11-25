@@ -140,6 +140,25 @@ classification in `decode_with`.
 - The `disable-inline-caches` paragraph at the top of `src/vm/caches.rs` has
   one over-long, mis-wrapped line.
 
+### String library and cost-history housekeeping (2026-11-25)
+
+- The doc comment on `subject_floor` in `src/lua_std/string.rs` opens with
+  a displaced paragraph about reference Lua raising "unfinished capture"
+  (`get_onecapture`, `LuaCapture::Unfinished`), which describes a
+  capture-reading helper, not the stack floor. Move it to the function it
+  belongs to.
+- A gmatch miss now leaves the iterator exhausted (`pos` one past the
+  subject end, `resumed` false), and `gmatch_miss_exhausts_the_iterator`
+  pins the repeat-call cost. No test pins the saved record of an iterator
+  exhausted by a miss, so a save/load round trip of that state, the other
+  replay-visible half, is unguarded.
+- `COST_MODEL_HISTORY` in `tests/integration/cost/cost_golden.rs` is
+  append-only by convention, and `docs/budget.md` says a changed fixture row
+  needs a new version. Neither says whether the fingerprint of a version that
+  is still unreleased may be replaced in place
+  when further changes fold into it, which is how unreleased cost changes
+  have been landing. The intent needs stating.
+
 ## Deferred forward-looking ideas
 
 ### Execution trace hook for a stepping debugger

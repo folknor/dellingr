@@ -878,7 +878,11 @@ impl State {
     ///
     /// Forced inline: outlined, it grew the release native frame of every
     /// re-entry through `begin_call` by a further 16 to 48 bytes
-    /// (`native_bytes_per_level`).
+    /// (`native_bytes_per_level`). A second `invoke_rust_fn` site in
+    /// `instr_tfor_call` cost release 160. The typed iterator's remaining dev
+    /// growth on these paths (under 256 bytes a level) is accepted rather
+    /// than traded for release bytes: it is a small fraction of the dev
+    /// envelope's headroom.
     #[inline(always)]
     pub(crate) fn gmatch_step_of(&self, val: Val) -> Option<RustFnId> {
         match val {

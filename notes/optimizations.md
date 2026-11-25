@@ -652,16 +652,6 @@ is where a change here is measured.
 
 ## Stdlib / patterns
 
-### Dev `Frame::run` frame after the weights (+2.4 KB per native level)
-
-022a10c grew the dev `Frame::run` frame from 5528 to 7976 bytes, every dev
-native level by the same (`reference/performance.md`, the cycle history).
-Release did not move. Presumably each dispatch arm's weight read and zero
-check expands into its own stack slots without optimization. Dev still fits
-its 4 MiB envelope, with less margin. Worth a look if the dev envelope gets
-tight: a shared helper for the fixed charge, or a layout that keeps the
-per-arm expansion out of the dev frame.
-
 ### Growing-producer residue after the reusable result buffer (2026-11-25)
 
 `string.format`, `gsub` and `table.concat` now build in the State's
@@ -680,17 +670,6 @@ buffer"). Left open:
   post-policy probe could hand the unused `Vec` back for reuse (within the
   same capacity cap). A pre-policy hit shortcut would move the collection
   point and is not an option. Unmeasured.
-
-### gmatch iterator residue after the typed iterator
-
-The typed iterator's dispatch arms grew the dev-build native frame of
-re-entry through `begin_call` and `instr_tfor_call` by 96 to 256 bytes a
-level when it landed. Outlining `State::gmatch_step_of` and a second
-`invoke_rust_fn` site were tried and made release worse. One borrowed
-callee classification in `begin_call` and `resolve_callable`
-(`classify_callee`) replaced the two object probes and won back 16 to 32
-dev bytes a level, release unchanged; the rest of the dev growth is
-unexplained.
 
 ---
 

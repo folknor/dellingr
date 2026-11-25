@@ -1293,6 +1293,28 @@ host and compiler, so its row does not compare with the one above it); the
 | bygg, same `rustc`: `gsub` callback results appended in place, on top of 6a6c2b2 (6a6c2b2 itself measured 16880 / 3120 / 3184) | 16528 | 3104 | 3184 |
 | bygg, `rustc` of 2026-11-18: the capture slice selected once per activation, on top of a1b9172 (a1b9172 itself measured 16576 / 3216 / 3184) | 16544 | 3232 | 3200 |
 | bygg, same `rustc`: callback `gsub` holds no matcher state, on top of e1ed482 (e1ed482 itself measured 3216 / 3200 in release; dev not re-measured); the dev maximum is now `callable_rust` | 14160 | 1776 | 1712 |
+| bygg, same `rustc`: fixed opcode charges through one helper outlined in dev, on top of 83a1132 (83a1132 itself measured 14128 / 1776 / 1712) | 12048 | 1776 | 1712 |
+
+### 2026-11-25: fixed charges out of the dev dispatch frame
+
+The configurable weights (022a10c) expanded each costed dispatch arm's
+weight read, zero test, batch sum and flush compare inline, and a dev build
+gives each expansion's temporaries their own slots in the `Frame::run`
+frame, which is live across every native re-entry: that frame grew 5528 to
+7976 bytes on plantasjen. `Frame::charge_fixed` now holds that sequence,
+forced inline only without debug assertions. Measured on bygg against
+83a1132: every dev and dev-snapshot row 2080 bytes smaller per level
+(`callable_rust` 14128 to 12048), native-call coverage rows 2592 smaller,
+every release and release-snapshot row unchanged. The growth was the
+per-arm expansion, as presumed when it was filed.
+
+The typed gmatch iterator's dev growth on re-entry through `begin_call`
+and `instr_tfor_call` (96 to 256 bytes a level when it landed, 16 to 32
+of it recovered by `classify_callee`) is left as it is: outlining
+`State::gmatch_step_of` or adding a second `invoke_rust_fn` site made
+release worse, and at `MAX_NATIVE_CALL_DEPTH` the remainder is at most
+about 38 KiB of dev recurring stack against about 1.7 MiB used under the
+4 MiB dev envelope.
 
 ### 2026-11-18: unsized `State`
 
