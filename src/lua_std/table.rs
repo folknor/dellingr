@@ -1,6 +1,6 @@
 //! Lua's Table Library
 
-use super::{arg_integer, check_optional_type_named, check_type_named, opt_integer};
+use super::{BytesCopy, arg_integer, check_optional_type_named, check_type_named, opt_integer};
 use crate::LuaType;
 use crate::Result;
 use crate::State;
@@ -222,14 +222,18 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
             sequence_len(state, 1, LibraryFunction::Concat)
         )?;
 
+        // An owned copy, so the separator's slot is dropped (and it can be
+        // collected) during `__index` as before; a short one, the usual
+        // case, is copied into a stack array without an allocation.
         let sep = if state.is_none_or_nil(2)? {
-            Vec::new()
-        } else if state.typ(2) == LuaType::Number {
-            state.bytes_with_default_string_coercion(2)?
+            BytesCopy::new(b"")
         } else {
-            check_type_named(state, 2, LuaType::String, "concat")?;
-            state.to_bytes(2)?.to_vec()
+            if state.typ(2) != LuaType::Number {
+                check_type_named(state, 2, LuaType::String, "concat")?;
+            }
+            BytesCopy::of_string_or_number(state, 2)?
         };
+        let sep = sep.as_slice();
 
         let i = opt_integer(state, 3, "concat")?.unwrap_or(1);
         let j = opt_integer(state, 4, "concat")?.unwrap_or(len);
@@ -260,7 +264,7 @@ pub(super) const TABLE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
             if idx > i {
                 let next = crate::limits::checked_string_growth(result.len(), sep.len())?;
                 result.reserve(next - result.len());
-                result.extend_from_slice(&sep);
+                result.extend_from_slice(sep);
             }
             // A raw hit, or a miss with no `__index`, appends straight from
             // the table; only a miss that needs the handler goes through the

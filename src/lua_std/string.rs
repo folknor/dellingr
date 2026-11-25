@@ -2,7 +2,7 @@
 
 use std::sync::atomic::AtomicBool;
 
-use super::{STRING_LIBRARY_CAPACITY, arg_integer, opt_integer};
+use super::{BytesCopy, STRING_LIBRARY_CAPACITY, arg_integer, opt_integer};
 use crate::cost_meter::CostMeter;
 use crate::cost_model::Charge;
 use crate::error::{Error, ErrorKind, LibraryError, PatternErrorDetail, StringPatternFunction};
@@ -189,31 +189,17 @@ fn map_ascii_case(
         state.set_top(1)?;
         return Ok(1);
     }
-    let mut s = string_or_number_bytes(state, 1, function_name)?;
+    let mut s = BytesCopy::of_string_or_number(state, 1)?;
     charge_call(state, charge)?;
-    map(&mut s);
+    map(s.as_mut_slice());
     state.set_top(0)?;
-    state.push_owned_bytes(s)?;
+    s.push(state)?;
     Ok(1)
 }
 
-/// Lua's string-library arguments accept strings and numbers, but no other
-/// values. Keep the type gate separate from
-/// `bytes_with_default_string_coercion`, whose general conversion rules are
-/// intentionally broader.
-///
-/// The returned `Vec` is an owned copy. Its callers are `upper`, `lower` and
-/// `reverse`, which rewrite the copy into their result, and the number
-/// branches of `sub` and `len`. The pattern functions do not copy: they take a
-/// `string_or_number_arg`, which reads a string in place in its stack slot
-/// (see `crate::vm::StringArg`).
-fn string_or_number_bytes(state: &mut State, idx: isize, function_name: &str) -> Result<Vec<u8>> {
-    check_string_or_number(state, idx, function_name)?;
-    state.bytes_with_default_string_coercion(idx)
-}
-
-/// A pattern function's subject or pattern: type-gated like
-/// `string_or_number_bytes`, then a string read in place in its slot and a
+/// A pattern function's subject or pattern: type-gated by
+/// `check_string_or_number` (strings and numbers only, narrower than
+/// `bytes_with_default_string_coercion` on purpose), then a string read in place in its slot and a
 /// number rendered once. Reading in place needs no shared ownership of heap
 /// string bytes: each read borrows the State only for its own span (the slot
 /// roots the string for the whole call, `gsub` replacement calls included),
@@ -342,6 +328,12 @@ fn append_subject_range(
 /// Append `bytes` to a library result after checking the string size cap for
 /// the whole append. Produced bytes are free (docs/budget.md, "String
 /// costs"), so nothing is charged.
+///
+/// The growing producers (`gsub`, `string.format`, `table.concat`) append
+/// into a plain `Vec` on purpose: a small-buffer builder that tests inline
+/// or heap storage on every append was measured 3 to 15 percent slower on
+/// long-result workloads to save one allocation on a short result. Short
+/// storage is decided once, where a producer knows its length up front.
 pub(super) fn append_bytes(out: &mut Vec<u8>, bytes: &[u8]) -> Result<()> {
     let next = crate::limits::checked_string_growth(out.len(), bytes.len())?;
     out.reserve(next - out.len());
@@ -840,15 +832,13 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
             state.push_bytes_from_stack_range(1, range)?;
             state.replace(1)?;
         } else {
-            // The rendering is owned: cut it down to the range in place and
-            // intern the buffer itself.
-            let mut subject = string_or_number_bytes(state, 1, "sub")?;
-            let range = lua_sub_range(subject.len(), i, j);
+            // A number's spelling is inline: intern the range straight from
+            // it, with no copy of its own.
+            let text = crate::number_text::number_to_text(state.to_number(1)?);
+            let range = lua_sub_range(text.as_bytes().len(), i, j);
             charge_call(state, Charge::StringSub)?;
-            subject.truncate(range.end);
-            subject.drain(..range.start);
             state.set_top(0)?;
-            state.push_owned_bytes(subject)?;
+            state.push_bytes(&text.as_bytes()[range])?;
         }
         Ok(1)
     }),
@@ -951,7 +941,12 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     ("string.len", |state| {
         let len = match state.typ(1) {
             LuaType::String => state.to_bytes(1)?.len(),
-            _ => string_or_number_bytes(state, 1, "len")?.len(),
+            _ => {
+                check_string_or_number(state, 1, "len")?;
+                crate::number_text::number_to_text(state.to_number(1)?)
+                    .as_bytes()
+                    .len()
+            }
         };
         state.set_top(0)?;
         state.push_number(len as f64)?;
@@ -983,11 +978,12 @@ pub(super) const STRING_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
     }),
     // string.reverse(s)
     ("string.reverse", |state| {
-        let mut s = string_or_number_bytes(state, 1, "reverse")?;
+        check_string_or_number(state, 1, "reverse")?;
+        let mut s = BytesCopy::of_string_or_number(state, 1)?;
         charge_call(state, Charge::StringReverse)?;
-        s.reverse();
+        s.as_mut_slice().reverse();
         state.set_top(0)?;
-        state.push_owned_bytes(s)?;
+        s.push(state)?;
         Ok(1)
     }),
     // string.match(s, pattern [, init])

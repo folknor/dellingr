@@ -801,22 +801,23 @@ Why deferred: it fits the envelope with room to spare and nothing is
 failing; this buys margin, not correctness. Signal: the envelope tests
 tightening, or a reason to raise `MAX_NATIVE_CALL_DEPTH`.
 
-### Short owned string results still allocate in their producer
+### Short results of growing producers still allocate (2026-11-25)
 
-Interned strings of at most `INLINE_STRING_BYTES` (22) bytes are stored
-inline in their arena slot (`StringData` in `vm/object.rs`), so the pool no
-longer allocates for them; a short owned result is copied inline and its
-`Vec` freed. The producers still build that `Vec` on the heap first
-(`concat_values`, `table.concat`, `gsub`, `upper`/`lower`, `reverse`,
-`string.format`), so a short miss still pays one allocate-and-free. Open: a
-common checked builder that renders short results into a stack buffer (and
-long ones into the destination buffer), keeping the allocation-policy check
-before the probe. Also left: `table.concat` copies its separator
-(`to_bytes(2)?.to_vec()`) every call. Neither is measured; the inline
-change itself measured 0.7 to 1.8 percent faster on `mixed`, `patterns`,
-`fill`, `format_literals` (two matched `--commit` rounds, bygg; see
-`reference/performance.md`), within the layout noise floor, and no
-allocator-call counts were taken.
+`..`, `upper`/`lower`/`reverse`, number `sub`, number `tostring` and the
+`table.concat` separator build short results in stack storage
+(`reference/performance.md`, "Short producer results built in stack
+storage"). `string.format`, `gsub` and the `table.concat` result still
+build in a `Vec`, so their short results pay one allocate-and-free. A
+per-append small-buffer builder for them was measured and rejected (a
+storage test on every append cost 3 to 15 percent on long-result
+workloads). Open, unmeasured: a decide-once shape for them (for format,
+the template length is a bound only when there are no directives), and
+the format float-body scratch `Vec`s (`number_text::general`/`scientific`,
+`format_fixed`, `special_float`). Also open: `format_literals` measured
+507 to 534 ms across the change though its hot path runs none of the
+changed producers; read as layout, unconfirmed (a five-launch
+same-binary control was not run). `table.concat`'s separator copy grew the
+release `concat_*` native frames by 48 bytes.
 
 ### gmatch iterator residue after the typed iterator
 

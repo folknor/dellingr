@@ -180,6 +180,33 @@ moved the same way, but each delta is inside the layout noise floor, so
 this records no attributed speedup; `state_new_us` in the records fell
 from about 42 to 28 us.
 
+## Short producer results built in stack storage, 2026-11-25
+
+Producers that know a result's length before building it now build a short
+one in a stack array and intern it by slice: `..` (an inline prefix pass
+that moves to a heap buffer at the first operand crossing 22 bytes),
+`upper`/`lower`/`reverse`, number `sub`, number `tostring` (a `NumberText`
+rendering arm), and `table.concat`'s separator. `string.format`, `gsub`
+and the `table.concat` result keep their `Vec`. Release wall, five matched
+`--commit` rounds of c1667e8 against the change on bygg, medians:
+`mixed` 2250 to 2246 ms (2 of 5 faster), `patterns` 781 to 772 (4 of 5),
+`fill` 1493 to 1478 (4 of 5), `gsub_replace` 386 to 387 (1 of 5),
+`format_literals` 507 to 534 (0 of 5). `format_literals` runs none of the
+changed producers on its hot path (its `%s` arguments are strings, its
+results all longer than 22 bytes), so its loss is read as layout, not
+mechanism; the others are inside the noise floor. The mechanism is
+confirmed by counts: on the `mixed` hotpath file, owned interns fell from
+65224 to 63757 per run, the difference being concat results built in
+place.
+
+Rejected on the way: a small-buffer `StrBuf` replacing the `Vec` in every
+producer, with a per-append inline-or-heap test, measured `mixed` +3 to
++7%, `format_literals` +12 to +15% and `gsub_replace` +4 to +10% in
+matched rounds; about half of the format loss went away with format alone
+back on a `Vec`. A per-append storage test taxes every append of a long
+result to save one allocation on a short one, so storage is decided once,
+where the length is known.
+
 ## gmatch iterators hold their compiled program, 2026-11-24
 
 A gmatch step used to resolve its program from the pattern cache on every

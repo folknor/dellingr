@@ -1374,8 +1374,10 @@ struct StringEntry {
 
 /// Longest string stored inline in its arena slot. Chosen so `StringData`
 /// is no larger than the `Box<[u8]>` arm plus its tag: 24 bytes, a 40-byte
-/// slot with the hash and version (pinned below).
-const INLINE_STRING_BYTES: usize = 22;
+/// slot with the hash and version (pinned below). Producers that know a
+/// result's length before building it build a short one in a stack array
+/// of this size and intern it by slice, so it never touches the allocator.
+pub(crate) const INLINE_STRING_BYTES: usize = 22;
 
 /// A string's bytes: inline beside the entry header when short, so a
 /// distinct short string costs no allocator allocation and no pointer

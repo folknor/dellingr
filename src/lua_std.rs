@@ -538,6 +538,69 @@ fn name_argument_error(error: Error, function_name: &str) -> Error {
     error.with_argument_function_name(function_name)
 }
 
+/// A library function's own copy of a string or number argument, for a
+/// result made by rewriting it in place (`upper`, `lower`, `reverse`) or
+/// for bytes kept across calls that can run Lua (`table.concat`'s
+/// separator). The storage is chosen once, from the length: up to the
+/// pool's inline cap the copy lives in a stack array and is interned by
+/// slice, so a short result never allocates; a longer one is a `Vec` the
+/// pool adopts. Nothing grows it, so no append pays a storage test.
+pub(super) enum BytesCopy {
+    Inline {
+        len: u8,
+        bytes: [u8; crate::vm::INLINE_STRING_BYTES],
+    },
+    Heap(Vec<u8>),
+}
+
+impl BytesCopy {
+    pub(super) fn new(source: &[u8]) -> Self {
+        let mut bytes = [0u8; crate::vm::INLINE_STRING_BYTES];
+        match bytes.get_mut(..source.len()) {
+            Some(dest) => {
+                dest.copy_from_slice(source);
+                let len = u8::try_from(source.len()).expect("the inline cap fits a u8");
+                Self::Inline { len, bytes }
+            }
+            None => Self::Heap(source.to_vec()),
+        }
+    }
+
+    /// The argument at `idx`, which the caller has type-gated as a string or
+    /// a number: a string's bytes, a number's default spelling.
+    pub(super) fn of_string_or_number(state: &State, idx: isize) -> Result<Self> {
+        if state.typ(idx) == LuaType::Number {
+            let text = crate::number_text::number_to_text(state.to_number(idx)?);
+            Ok(Self::new(text.as_bytes()))
+        } else {
+            Ok(Self::new(state.to_bytes(idx)?))
+        }
+    }
+
+    pub(super) fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Inline { len, bytes } => &bytes[..usize::from(*len)],
+            Self::Heap(vec) => vec,
+        }
+    }
+
+    pub(super) fn as_mut_slice(&mut self) -> &mut [u8] {
+        match self {
+            Self::Inline { len, bytes } => &mut bytes[..usize::from(*len)],
+            Self::Heap(vec) => vec,
+        }
+    }
+
+    /// Push the bytes as a string, with `push_bytes`' refusal order and
+    /// collection point either way.
+    pub(super) fn push(self, state: &mut State) -> Result<()> {
+        match self {
+            Self::Inline { len, bytes } => state.push_bytes(&bytes[..usize::from(len)]),
+            Self::Heap(vec) => state.push_owned_bytes(vec),
+        }
+    }
+}
+
 pub(super) fn check_any_named(
     state: &mut State,
     arg_number: isize,

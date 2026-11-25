@@ -221,8 +221,9 @@ them:
   was measured there and refused for the field caches).
 - `optimizations.md` "Compile-time table-shape prediction": codegen hunter's
   constructor plans.
-- `optimizations.md` "Short owned string results still allocate in
-  their producer": the heap hunter's checked builder residue.
+- `optimizations.md` "Short results of growing producers still allocate":
+  the heap hunter's checked builder residue (the decide-once producers
+  landed; a per-append builder was measured and rejected).
 - `optimizations.md` "gmatch iterator residue after the typed iterator":
   the failed-search exhaustion proposal (a cost-model decision), the
   unexplained dev frame growth, and uncached number patterns (the native

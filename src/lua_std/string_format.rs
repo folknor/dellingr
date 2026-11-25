@@ -421,6 +421,9 @@ fn format_argument(
                     state.pop(1)?;
                     formatted
                 }
+                TostringRendering::Number(text) => {
+                    format_string_rendering(state, out, text.as_bytes(), directive, argument)
+                }
                 TostringRendering::Bytes(bytes) => {
                     format_string_rendering(state, out, &bytes, directive, argument)
                 }

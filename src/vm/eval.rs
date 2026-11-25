@@ -913,8 +913,6 @@ impl State {
                 hint = hint.saturating_add(crate::number_text::MAX_NUMBER_TEXT);
             }
         }
-        let mut buffer = Vec::with_capacity(hint.min(crate::limits::MAX_STRING_BYTES));
-
         // One ordered pass decides the outcome: each operand is type-checked,
         // numbers are rendered (into inline storage), and the EXACT grown
         // length is checked against the cap before its bytes are copied. So
@@ -925,24 +923,50 @@ impl State {
         // result - which would also change what the script costs, since the
         // next costed operation never runs - while under-counting long
         // spellings could let the buffer grow past the cap unchecked.
+        //
+        // The pass starts in a stack array of the pool's inline size: a
+        // result that fits (`"k_" .. i`) is interned from it by slice and
+        // never allocates. The first operand that would cross it moves the
+        // prefix to a heap buffer sized by the hint, and the rest of the pass
+        // appends there with no further storage test.
+        let mut inline = [0u8; super::INLINE_STRING_BYTES];
+        let mut len = 0usize;
+        let mut buffer: Option<Vec<u8>> = None;
         for val in &self.stack[operands] {
-            if let Some(s) = val.as_string(&self.heap) {
-                crate::limits::checked_string_growth(buffer.len(), s.len())?;
-                buffer.extend_from_slice(s);
+            let text;
+            let bytes: &[u8] = if let Some(s) = val.as_string(&self.heap) {
+                s
             } else if let Some(num) = val.as_num() {
                 // The same spelling as tostring and default coercion.
-                let text = crate::number_text::number_to_text(num);
-                crate::limits::checked_string_growth(buffer.len(), text.as_bytes().len())?;
-                buffer.extend_from_slice(text.as_bytes());
+                text = crate::number_text::number_to_text(num);
+                text.as_bytes()
             } else {
                 return Err(self.type_error(TypeError::Concat(val.typ(&self.heap))));
+            };
+            if let Some(buffer) = buffer.as_mut() {
+                crate::limits::checked_string_growth(buffer.len(), bytes.len())?;
+                buffer.extend_from_slice(bytes);
+                continue;
+            }
+            let end = crate::limits::checked_string_growth(len, bytes.len())?;
+            if let Some(dest) = inline.get_mut(len..end) {
+                dest.copy_from_slice(bytes);
+                len = end;
+            } else {
+                let mut heap = Vec::with_capacity(hint.clamp(end, crate::limits::MAX_STRING_BYTES));
+                heap.extend_from_slice(&inline[..len]);
+                heap.extend_from_slice(bytes);
+                buffer = Some(heap);
             }
         }
 
         // The bytes are owned now, so interning (which may collect, with the
         // operands still rooted where they are) reads nothing from the stack,
-        // and a new string takes the buffer rather than a second copy.
-        self.alloc_string_owned(buffer)
+        // and a new long string takes the buffer rather than a second copy.
+        match buffer {
+            Some(buffer) => self.alloc_string_owned(buffer),
+            None => self.alloc_string(&inline[..len]),
+        }
     }
 
     /// Admit a Lua call: check the call depth, push the activation record,

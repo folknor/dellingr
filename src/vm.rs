@@ -42,6 +42,7 @@ pub use invoke::{InvokeArg, InvokeArgs, InvokeResult, InvokeResults};
 pub(crate) use leaf::Leaf;
 pub use lua_val::LuaType;
 pub use lua_val::RustFunc;
+pub(crate) use object::INLINE_STRING_BYTES;
 pub use raw_field::{FieldKey, FieldName, RawField, RawFields};
 pub use rust_fn::RustFnHandle;
 pub(crate) use rust_fn::RustFnId;

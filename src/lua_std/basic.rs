@@ -336,6 +336,13 @@ pub(super) const BASE_FUNCTIONS: &[(&str, crate::RustFunc)] = &[
             }
             // Byte-exact: a `__tostring` result may hold non-UTF-8 bytes,
             // which reference Lua returns unchanged.
+            // A number's spelling is interned from its inline rendering, so
+            // a short one never allocates; same refusal order and
+            // collection point as the owned push.
+            TostringRendering::Number(text) => {
+                state.set_top(0)?;
+                state.push_bytes(text.as_bytes())?;
+            }
             TostringRendering::Bytes(bytes) => {
                 state.set_top(0)?;
                 state.push_owned_bytes(bytes)?;

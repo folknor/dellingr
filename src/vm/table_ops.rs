@@ -20,7 +20,11 @@ pub(crate) enum TostringRendering {
     /// stack: it is its own rendering, read or returned without a copy or a
     /// re-intern. The caller consumes (pops or moves) that slot.
     OnTop,
-    /// The rendered bytes.
+    /// A number's spelling (the value itself, or a `__tostring` handler's
+    /// number result), held inline so a caller that interns it allocates
+    /// nothing first.
+    Number(crate::number_text::NumberText),
+    /// The rendered bytes of any other value.
     Bytes(Vec<u8>),
 }
 
@@ -1461,6 +1465,7 @@ impl State {
                 self.pop(1)?;
                 Ok(bytes)
             }
+            TostringRendering::Number(text) => Ok(text.as_bytes().to_vec()),
             TostringRendering::Bytes(bytes) => Ok(bytes),
         }
     }
@@ -1499,10 +1504,10 @@ impl State {
                 return Ok(TostringRendering::OnTop);
             }
             let result = self.pop_val();
-            if result.typ(&self.heap) == super::LuaType::Number
-                && let Some(bytes) = result.to_bytes_with_heap(&self.heap)
-            {
-                return Ok(TostringRendering::Bytes(bytes));
+            if let Some(number) = result.as_num() {
+                return Ok(TostringRendering::Number(
+                    crate::number_text::number_to_text(number),
+                ));
             }
             return Err(
                 self.report_escaping(self.library_error(LibraryError::TostringMustReturnString))
@@ -1510,6 +1515,11 @@ impl State {
         }
         if matches!(val, Val::Str(_)) {
             return Ok(TostringRendering::Itself);
+        }
+        if let Some(number) = val.as_num() {
+            return Ok(TostringRendering::Number(
+                crate::number_text::number_to_text(number),
+            ));
         }
         self.bytes_with_default_string_coercion(idx)
             .map(TostringRendering::Bytes)
