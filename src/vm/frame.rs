@@ -483,21 +483,29 @@ impl Frame {
     /// `Frame::ip` and every error simply propagates.
     ///
     /// One `match` is the dispatch on purpose. Threaded dispatch, where each
-    /// handler tail-calls the next, was considered and refused: Rust has no
-    /// guaranteed tail transfer on the supported toolchain (`become` is
-    /// unstable even on current nightly), and an ordinary call between
-    /// handlers is not guaranteed to be eliminated at any optimization level
-    /// (dev builds never do it), so one surviving non-tail edge on a handler
-    /// cycle grows the native stack per executed instruction and breaks the
+    /// handler transfers straight to the next (which can give each handler
+    /// its own indirect branch site, optionally through a predecoded stream
+    /// of handler targets), was considered and refused. Stable Rust has no
+    /// guaranteed tail transfer: `become` still needs the unstable
+    /// `explicit_tail_calls` gate on nightly, and an ordinary call between
+    /// handlers carries no elimination guarantee at any optimization level,
+    /// so one surviving non-tail edge on an executable handler cycle retains
+    /// a native frame every time the cycle repeats and breaks the
     /// flat-native-stack invariant. A table of handler pointers called from a
     /// loop keeps one shared indirect site, so it buys no per-predecessor
     /// prediction and adds a call and return per opcode. Reopen this only
-    /// with a guaranteed tail transfer on every supported toolchain (or
-    /// per-ISA assembly) and a current measurement attributing cost to this
-    /// branch. Predecessor-specific dispatch on stable Rust belongs here
-    /// instead: after a handler, test the actual next opcode and enter its
-    /// body directly, which is execution-side fusion keyed on the real next
-    /// instruction.
+    /// with a guaranteed tail transfer on the stable toolchain at
+    /// `rust-version` (or per-ISA assembly owning the transfers) and current
+    /// evidence that dispatch is worth investigating; adopt it only on a
+    /// measured net win over this loop on a representative workload. Two
+    /// obligations survive any such design: stack bounded on every dispatch
+    /// cycle within one activation does not discharge the native re-entry
+    /// envelope (docs/limits.md), which every executor frame live across a
+    /// Rust-to-Lua call still counts against; and handler addresses stay
+    /// derived runtime data, never in bytecode, snapshots or function
+    /// identity. Next-opcode fusion (after a handler, test the actual next
+    /// opcode and enter its body directly) is the stable-Rust subset of
+    /// this: a predecessor-specific path for one chosen successor.
     #[inline(always)]
     fn run_frame(
         frame: &Frame,

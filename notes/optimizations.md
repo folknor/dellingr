@@ -686,9 +686,8 @@ path is recorded yet; nothing here is a candidate until one is.
   is already dense (every opcode number up to the last is assigned), so a
   renumbering (or `#[repr(u8)]` enum with a validated dense range) has
   nothing left to close; LLVM
-  likely already emits one jump table with a few dead slots. `get_instr`
-  bounds-checks every
-  fetch; with one-time validation that all jump targets are in-bounds at
+  likely already emits one jump table with a few dead slots. The
+  dispatch head's `code[*ip]` bounds-checks every fetch; with one-time validation that all jump targets are in-bounds at
   load/finalize time, the fetch could use a pointer/len cursor - only if
   profiles show it; keep panics over UB.
 - **`string.format` cached plan (deferred, 2026-11-24):** `perf record` of

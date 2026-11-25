@@ -153,9 +153,10 @@ dispatch per instruction. object_fields' remaining time is its
 construction pass (`{}`, `new_unit` calls, `SET_TABLE`), which no region
 takes.
 One stable shape for a two-op fusion: after a handler, test the actual next
-opcode and enter its body directly inside the dispatch loop. That is the
-predecessor-specific dispatch threaded dispatch was after, without its
-native-stack hazard (threading itself is refused at `run_frame`). The
+opcode and enter its body directly inside the dispatch loop. That is a
+subset of what threaded dispatch was after (a predecessor-specific path for
+one chosen successor), without its native-stack hazard (threading itself is
+refused at `run_frame`). The
 dispatch hunter's encoding note also lands here: redesign the 64-bit word
 around fused handlers' operand needs rather than narrowing it first.
 
@@ -175,31 +176,6 @@ placed.
 **Classification:** rewrite, dispatch hunter's highest conviction. Subsumes
 `optimizations.md` "Compiler-recognized field-update fusion". Afterwards, if
 it works, broader instruction-description machinery is a follow-up.
-
-## PERF-003 - Threaded dispatch with guaranteed tail transfers
-
-Raised by the dispatch hunter.
-
-**Redesign.** Replace the central opcode match with handlers that tail-call
-the next handler. Distinct dispatch sites give the branch predictor a site
-for each predecessor handler. An internal execution stream of handler targets
-would also remove opcode-to-handler selection while keeping handler addresses
-out of Lua function identity and serialized bytecode.
-
-**Deferred** until Rust's `become` guarantees tail calls on every supported
-toolchain, including the MSRV set by `rust-version` in `Cargo.toml`, and
-works in dev builds without growing the native stack per instruction.
-Commit `2d322db` recorded that `become` was unstable and that ordinary
-handler calls survive in dev builds. A single surviving call on a handler
-cycle grows the native stack as instructions execute. A handler-pointer table
-called from a loop keeps one shared indirect jump site and adds a call and
-return per opcode.
-
-**Reopen conditions.** The `run_frame` comment records per-ISA assembly as
-another way to guarantee tail transfers. Either implementation requires a fresh
-measurement attributing branch misses to the dispatch branch before work
-begins. The stable-Rust route that tests the actual next opcode and enters
-its handler directly lives under PERF-002.
 
 ## Accounts added to existing entries
 
