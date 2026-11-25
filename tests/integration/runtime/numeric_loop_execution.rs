@@ -4,6 +4,7 @@
 use dellingr::{ArgCount, Charge, CostModel, Costing, RetCount, State};
 
 use crate::support;
+use crate::support::PushNewRustFn;
 use crate::support::eval_number;
 
 /// A loop whose body is straight-line arithmetic, a move and a literal load,
@@ -1182,6 +1183,182 @@ fn numeric_loop_region_with_keyed_records_matches_canonical_dispatch_at_every_bu
             assert_eq!(
                 region_outcome(model, &region, budget),
                 region_outcome(model, &canonical, budget),
+                "budget {budget} under {model:?}"
+            );
+        }
+    }
+}
+
+/// A loop truth-testing record fields, `if u.alive then` and
+/// `if not u.dead then`, the tested register reused for a number on the
+/// taken path. `alive` holds booleans, numbers (zero is true), a table that
+/// the register then roots, and on record 7 nothing, a raw miss answered by
+/// `__index`, which exits the region at its lookup; the inner loop is
+/// entered once per round, so it runs as a region again after each exit.
+/// Run with a collection at every checkpoint too.
+fn record_test_program(twin: &str) -> String {
+    format!(
+        r#"
+        local up = 0
+        local M = {{ __index = function(t, k) return k == "alive" end }}
+        function run()
+            local sum, k = 0.5, 0
+            local us
+            peek = function()
+                local c = 0
+                for i = 1, 12 do
+                    local u = us and us[i]
+                    if u then c = c + (rawget(u, "x") or 0) * i end
+                end
+                return sum, c, k
+            end
+            us = {{}}
+            for i = 1, 12 do
+                local alive = i % 3 ~= 0
+                if i == 4 then alive = 0 elseif i == 5 then alive = {{}} end
+                us[i] = setmetatable({{ x = i, speed = i % 4, alive = alive, dead = i == 2 }}, M)
+            end
+            us[7] = setmetatable({{ x = 7, speed = 1, dead = false }}, M)
+            for round = 1, 3 do
+                for i = 1, 12 do
+                    local u = us[i]
+                    if u.alive then
+                        u.x = u.x + u.speed
+                    end
+                    if not u.dead then
+                        sum = sum + u.x
+                    end
+                    k = i
+                    {twin}
+                end
+            end
+            return sum
+        end
+        "#
+    )
+}
+
+#[test]
+fn numeric_loop_region_with_record_tests_matches_canonical_dispatch_at_every_budget() {
+    let region = record_test_program("");
+    let canonical = record_test_program("local _u = up");
+    let models = [
+        CostModel::default(),
+        CostModel::default()
+            .with(Charge::TableWrite, 4)
+            .with(Charge::Add, 0),
+        CostModel::zero(),
+    ];
+    for model in &models {
+        for gc_threshold in [None, Some(1)] {
+            for budget in -1..=700 {
+                assert_eq!(
+                    region_outcome_at(model, &region, budget, gc_threshold),
+                    region_outcome_at(model, &canonical, budget, gc_threshold),
+                    "budget {budget} under {model:?}, threshold {gc_threshold:?}"
+                );
+            }
+        }
+    }
+}
+
+/// Truth tests whose value is a fresh table that a number store then
+/// replaces in its field, so the tested local `a` is its only root: after
+/// the first loop it still holds the last one, which `census` (a full
+/// collection, then the live object count) sees; in the second a number
+/// read into `a` drops it. The tables are refilled every round. `{twin}`
+/// must leave the register layout alone, since dead registers are roots
+/// too.
+fn record_test_root_program(twin: &str) -> String {
+    format!(
+        r#"
+        local up = {{}}
+        keep = up
+        local function refill(us)
+            for i = 1, 12 do us[i].alive = {{}} end
+        end
+        function run()
+            local us = {{}}
+            for i = 1, 12 do us[i] = {{ x = i }} end
+            local sum, k, seen = 0.5, 0, 0
+            local a
+            for round = 1, 3 do
+                refill(us)
+                for i = 1, 12 do
+                    local u = us[i]
+                    a = u.alive
+                    if a then u.alive = i end
+                    {twin}
+                    k = i
+                end
+                seen = seen + census()
+                refill(us)
+                for i = 1, 12 do
+                    local u = us[i]
+                    a = u.alive
+                    if a then u.alive = i end
+                    a = u.x
+                    sum = sum + a
+                    {twin}
+                    k = i
+                end
+                seen = seen + census()
+            end
+            return sum + seen
+        end
+        "#
+    )
+}
+
+/// `run()` of `source` under `budget` with a collection at every
+/// checkpoint: whether it completed, the meter, and the live object count
+/// right after it returned, which the roots at its last checkpoint decided.
+fn rooted_outcome(model: &CostModel, source: &str, budget: i64) -> (Option<f64>, u64, usize) {
+    let mut state = State::builder()
+        .costing(Costing::Metered(model.clone()))
+        .build();
+    state
+        .push_new_rust_fn(|state| {
+            state.gc_collect();
+            let live = state.object_count();
+            state.push_number(live as f64)?;
+            Ok(1)
+        })
+        .expect("census is pushed");
+    state.set_global("census").expect("census is installed");
+    support::run(&mut state, source);
+    state.gc_set_threshold(1);
+    state.set_cost_budget(budget).expect("the State is metered");
+    state.get_global("run").expect("run is defined");
+    let result = match state.call(ArgCount::Fixed(0), RetCount::Fixed(1)) {
+        Ok(_) => Some(state.to_number(-1).expect("run returns a number")),
+        Err(error) => {
+            assert!(
+                matches!(
+                    error.kind(),
+                    dellingr::error::ErrorKind::BudgetExceeded { .. }
+                ),
+                "budget {budget} returned {error:?}"
+            );
+            None
+        }
+    };
+    (result, state.cost_used(), state.object_count())
+}
+
+#[test]
+fn record_tests_root_what_canonical_dispatch_roots_at_every_budget() {
+    let region = record_test_root_program("");
+    // A free load of a table upvalue into `k`, overwritten next, refuses
+    // the region without moving any register, so every dead register holds
+    // what it would in the region.
+    let canonical = record_test_root_program("k = up");
+    let models = [CostModel::default(), CostModel::zero()];
+    for model in &models {
+        for budget in -1..=600 {
+            assert_eq!(
+                rooted_outcome(model, &region, budget),
+                rooted_outcome(model, &canonical, budget),
                 "budget {budget} under {model:?}"
             );
         }

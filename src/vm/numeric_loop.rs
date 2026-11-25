@@ -7,7 +7,8 @@
 //!   branch forward on number comparisons, read elements of loop-invariant
 //!   tables, read a record (a table element) per iteration whose number
 //!   fields it reads (by name, or by a string key held in a register the
-//!   body never writes, `us[i][key]`) and stores, call a method of that record, and hold
+//!   body never writes, `us[i][key]`) and stores, branch on the truthiness
+//!   of any of its fields (`if u.alive then`), call a method of that record, and hold
 //!   nested numeric loops (`State::run_control_region`). A generic `for`
 //!   over the `ipairs` iterator with one or two variables runs as such a
 //!   region too, its pass ending in the iterator's step instead of
@@ -38,7 +39,11 @@
 //!   give numbers out, and nothing else runs while the region does: no
 //!   other call, allocation or handler, and no store but a number into a
 //!   slot already live (a field leaf's, a record's, or a number upvalue's
-//!   cell; see the upvalue item below). The
+//!   cell; see the upvalue item below). A record field's truth test is
+//!   the one operation that leaves a register holding something other
+//!   than a number or a record: it writes the field's value to the stack
+//!   as canonical dispatch does, and that register leaves the mirror's
+//!   publication until a number write (`Layout::record_test`). The
 //!   only foreign code is the back-edge checkpoint
 //!   (`State::poll_gc_checkpoint`), which polls the interrupt and may
 //!   collect, and runs no Lua or host code. A guard at entry on every
@@ -265,6 +270,10 @@ struct Body {
     /// A loop's record field sites, read or stored per iteration on the
     /// table its record register holds. Empty for a leaf.
     record_sites: Box<[RecordSite]>,
+    /// A loop's record truth tests, by `RecordTest` operand `c`: the
+    /// register the test writes its value to, and that register's mirror
+    /// slot when the body also writes it as a number. Empty for a leaf.
+    tests: Box<[(u16, Option<u8>)]>,
     /// A loop's nested numeric loops, by `Prep` order. Empty for a leaf.
     inner: Box<[InnerLoop]>,
     /// A loop's written upvalues: each one's constant mirror slot and
@@ -609,6 +618,14 @@ enum OpKind {
     /// A loop's raw read of record site `b` into slot `a`, exiting to
     /// canonical dispatch unless it is a live number.
     RecordRead,
+    /// A loop's `GET_FIELD d r k; TEST_FALSE d` (`false`) or `TEST_TRUE d`
+    /// (`true`) on record site `b`: writes the live value, of any type, to
+    /// register `d` on the stack (`Body::tests[c]`), and when it has the
+    /// given truthiness continues at operation index `a`. A key not live in
+    /// the record exits to canonical dispatch at the `GET_FIELD`, which
+    /// answers the miss. Writes no mirror slot: `d`'s, if it has one, stops
+    /// being the value to publish (`Layout::record_test`).
+    RecordTest(bool),
     /// A loop's store of slot `c` into the live slot of record site `b`,
     /// exiting to canonical dispatch before its charge when the key is not
     /// live there. Writes no mirror slot.
@@ -732,6 +749,8 @@ struct Layout {
     /// Registers some record read of the body defines, by record id.
     records: Vec<u16>,
     record_sites: Vec<RecordSite>,
+    /// The destination register of each record truth test, by test index.
+    tests: Vec<u16>,
     /// The operation index each scanned instruction starts, by pc.
     op_at: Vec<(usize, usize)>,
     /// Branch and jump operations with their target pcs, resolved to
@@ -1129,6 +1148,50 @@ impl Layout {
             a: 0,
             b,
             c: 0,
+        })
+    }
+
+    /// `GET_FIELD d r k` at `pc` on a record `r`, fused with the
+    /// `TEST_FALSE d` or `TEST_TRUE d` after it, in a loop body ending at
+    /// `end`. The receiver is classified before `d` is clobbered (`d` may
+    /// be `r`, whose record then dies). `d` then holds a value of any type
+    /// on the stack, which the runner writes there as canonical dispatch
+    /// would, so the roots at every later checkpoint and exit are
+    /// canonical: its number facts are cleared, as a call clearing it
+    /// would, so a number read of it on a path from here refuses until a
+    /// number write, and its record facts die. No mirror slot is reserved
+    /// for it: an `ipairs` value bound as a record must stay out of the
+    /// mirror, and `finish` names `d`'s slot only if a number write gave it
+    /// one. The runner clears that slot's written and published bits, so
+    /// neither an exit nor a checkpoint publishes a stale number over the
+    /// value, while a later number write sets written again and the next
+    /// checkpoint republishes the slot. The edge is
+    /// decoded from the `TEST`, and an edge into the `TEST` half stays
+    /// pending, which refuses the plan.
+    fn record_test(
+        &mut self,
+        inst: Instr,
+        test: Instr,
+        pc: usize,
+        end: Option<usize>,
+    ) -> Option<LoopOp> {
+        let record = self.record_receiver(inst.b())?;
+        let register = inst.a();
+        if self.untouchable(register) || self.tests.len() >= MAX_RECORD_SITES {
+            return None;
+        }
+        let b = self.record_site(record, SiteKey::Literal(inst.c()), false)?;
+        let bit = 1u64 << self.fact(register)?;
+        self.cur.must &= !bit;
+        self.cur.safe &= !bit;
+        self.overwritten(register)?;
+        self.branch(pc + 1, test.sj(), end)?;
+        self.tests.push(register);
+        Some(LoopOp {
+            kind: OpKind::RecordTest(test.opcode() == Instr::OP_TEST_TRUE),
+            a: 0,
+            b,
+            c: (self.tests.len() - 1) as u8,
         })
     }
 
@@ -1592,6 +1655,29 @@ impl Layout {
                             self.index(receiver, pc, inst)?
                         }
                     }
+                    // A truth test of a record field, both instructions
+                    // inside the body and both free, so no charge falls
+                    // between them.
+                    Instr::OP_GET_FIELD
+                        if fields
+                            && self.record_id(inst.b()).is_some()
+                            && end.is_some_and(|end| pc + 1 < end)
+                            && code.get(pc + 1).is_some_and(|test| {
+                                matches!(test.opcode(), Instr::OP_TEST_FALSE | Instr::OP_TEST_TRUE)
+                                    && test.a() == inst.a()
+                            }) =>
+                    {
+                        const {
+                            assert!(Instr::fixed_charge(Instr::OP_GET_FIELD).is_none());
+                            assert!(Instr::fixed_charge(Instr::OP_TEST_FALSE).is_none());
+                            assert!(Instr::fixed_charge(Instr::OP_TEST_TRUE).is_none());
+                        }
+                        let op = self.record_test(inst, code[pc + 1], pc, end)?;
+                        self.ops.push(op);
+                        self.charges.push((pc + 2, 0));
+                        pc += 2;
+                        continue;
+                    }
                     // A field of a record, read per iteration; the receiver
                     // is classified before the destination is written.
                     Instr::OP_GET_FIELD if fields && self.record_id(inst.b()).is_some() => {
@@ -1931,6 +2017,14 @@ impl Layout {
                 (register, slot.map(mirror_slot))
             })
             .collect::<Vec<_>>();
+        let tests = self
+            .tests
+            .iter()
+            .map(|&register| {
+                let slot = self.registers.iter().position(|&r| r == register);
+                (register, slot.map(mirror_slot))
+            })
+            .collect::<Vec<_>>();
         // Operation indices fit a `u8`.
         if control && self.ops.len() > usize::from(u8::MAX) {
             return None;
@@ -2031,6 +2125,7 @@ impl Layout {
                 indexed: self.indexed.into_boxed_slice(),
                 records: records.into_boxed_slice(),
                 record_sites: self.record_sites.into_boxed_slice(),
+                tests: tests.into_boxed_slice(),
                 inner: self.inner.into_boxed_slice(),
                 captures: captures.into_boxed_slice(),
                 control,
@@ -3103,7 +3198,7 @@ impl State {
                             x[at(op.a)] = n;
                             written |= 1 << op.a;
                         }
-                        // Only a body with records holds these three.
+                        // Only a body with records holds the record arms.
                         OpKind::Record if RECORDS => {
                             let (_, exit) = body.indexed[usize::from(op.b)];
                             let table = tables[usize::from(op.b) % MAX_INDEXED]
@@ -3165,6 +3260,31 @@ impl State {
                             };
                             x[at(op.a)] = n;
                             written |= 1 << op.a;
+                        }
+                        OpKind::RecordTest(truthy) if RECORDS => {
+                            let site = usize::from(op.b) % MAX_RECORD_SITES;
+                            let table = records
+                                [usize::from(body.record_sites[site].record) % MAX_RECORDS]
+                                .expect("a record is defined on every path to its use");
+                            let Some((_, value)) =
+                                self.record_slot(table, keys[site], &mut found[site])
+                            else {
+                                // The fused pair's cursor is past its `TEST`;
+                                // the miss resumes at the `GET_FIELD`.
+                                *ip = cursor - 2;
+                                break 'pass Ok(());
+                            };
+                            let (register, slot) = body.tests[usize::from(op.c)];
+                            // The stack holds the value as canonical dispatch
+                            // leaves it, and no number publishes over it.
+                            self.stack[base + usize::from(register)] = value;
+                            if let Some(slot) = slot {
+                                written &= !(1 << slot);
+                                published &= !(1 << slot);
+                            }
+                            if value.truthy() == truthy {
+                                k = usize::from(op.a);
+                            }
                         }
                         OpKind::RecordStore if RECORDS => {
                             let (table, slot) = store.expect("the store resolved its slot");
@@ -4455,6 +4575,7 @@ fn eval(op: &LoopOp, x: &[f64; MIRROR_SLOTS]) -> f64 {
         | OpKind::Record
         | OpKind::Bind
         | OpKind::RecordRead
+        | OpKind::RecordTest(_)
         | OpKind::RecordStore
         | OpKind::Prep
         | OpKind::Step => lhs,
@@ -4737,9 +4858,17 @@ mod tests {
             // A record read by a key register the body never writes.
             "local function f(us, k) local s = 0 for i = 1, 9 do s = s + us[i][k] end return s end",
             "local function f(us, k) for i = 1, 9 do local u = us[i] u.x = u[k] + u.x end end",
+            // Truth tests of record fields, the tested register reused, or
+            // the tested field overwritten by a number.
+            "local function f(us) local k = 0 for i = 1, 9 do local u = us[i] if u.alive then u.alive = i end k = i end end",
+            "local function f(us) for i = 1, 9 do local u = us[i] if u.alive then u.x = u.x + 1 end end end",
+            "local function f(us) local s = 0 for i = 1, 9 do if not us[i].dead then s = s + i end end return s end",
         ] {
             assert_eq!(regions(source), 1, "{source}");
         }
+        // A tested value read as a number.
+        let source = "local function f(us) local s = 0 for i = 1, 9 do local u = us[i] local a = u.a if a then s = s + a end end return s end";
+        assert_eq!(regions(source), 0, "{source}");
         for source in [
             // A record on one path only; a record used as a number; a
             // record carried into the next pass; a store of a record.

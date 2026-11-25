@@ -302,6 +302,10 @@ xxhash = "381dd103bd1e217a665c95795df88e23"
 file = "bench/store_loop.lua"
 xxhash = "5b5ddf60401b616fbf11fa4cdb011366"
 
+[data.workloads.bench.alive_update]
+file = "bench/alive_update.lua"
+xxhash = "6967a73d7180ee563e8b54d3faa0aaf5"
+
 [data.workloads.bench.column_key]
 file = "bench/column_key.lua"
 xxhash = "e9eed60defdf4ce926c63fa12697c922"
@@ -582,6 +586,10 @@ xxhash = "7ffb0728234cd8b6c0060d172da4efbf"
 [data.workloads.hotpath.store_loop]
 file = "examples/tables/store_loop.lua"
 xxhash = "2534e8e5d077df22afa96eadba19de50"
+
+[data.workloads.hotpath.alive_update]
+file = "examples/tables/alive_update.lua"
+xxhash = "e10823264c4551a72d6c8c32764ae278"
 
 [data.workloads.hotpath.column_key]
 file = "examples/tables/column_key.lua"

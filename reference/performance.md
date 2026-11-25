@@ -1179,6 +1179,27 @@ kernel written over `ipairs`. Matched interleaved pairs on bygg,
 is unchanged in dev and release: the bind sits in the control runner, which
 is not live across a native re-entry.
 
+## Truth tests of record fields in typed regions, 2026-11-25
+
+A region body may branch on the truthiness of a record field
+(`if u.alive then`): `GET_FIELD d r k; TEST d` runs as one operation that
+writes the live value to `d` on the stack, so the roots at every checkpoint
+are canonical. `alive_update` is `store_loop`'s kernel behind that test,
+every other unit alive; before this change the loop ran canonically.
+Matched interleaved pairs on bygg, `brokkr bench --rounds 3` with
+`--commit` arms, 0288cac5 against the landing build's local variant
+(best of one per cell), invocation 4472e2b5:
+
+| Workload | 0288cac5 | variant | pairs |
+|---|---:|---:|---|
+| `alive_update` | 1482 ms median | 1379 ms median | faster 3 of 3 |
+| `store_loop` | 1461 ms median | 1484 ms median | slower 3 of 3 |
+
+`store_loop` runs the same operations in both builds; its delta is read as
+layout of the shared control runner. The gain is small because canonical
+dispatch of this kernel is already close to the region: about 29 us against
+27 us per kernel call in the warm phase.
+
 ## The session's `object_fields` deltas, re-measured, 2026-11-24
 
 Both `object_fields` slowdowns above (the forward-branch leaves and the

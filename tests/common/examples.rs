@@ -107,6 +107,7 @@ examples! {
     table_multivalue_nested: "examples/table_multivalue_nested.lua",
     table_multivalue_preceding_table: "examples/table_multivalue_preceding_table.lua",
     tables: "examples/tables.lua",
+    tables_alive_update: "examples/tables/alive_update.lua",
     tables_column_key: "examples/tables/column_key.lua",
     tables_deep_stack: "examples/tables/deep_stack.lua",
     tables_fill: "examples/tables/fill.lua",

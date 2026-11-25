@@ -76,7 +76,7 @@ and at `State::try_numeric_leaf`; numbers in `reference/performance.md`):
   on a register the body never writes), each field read once at entry as a
   raw present number.
 - Numeric leaves: a function whose code up to its first `RETURN` is that
-  arithmetic over its parameters, returning one value, runs inside
+  arithmetic over its parameters, returning one value or none, runs inside
   `call_from_lua` without an activation when its arguments are numbers.
   Every admission check is made first and declines rather than fails. This
   was the argument-guarded specialization the call-site hunt asked for; the
@@ -115,6 +115,14 @@ and at `State::try_numeric_leaf`; numbers in `reference/performance.md`):
   upvalue reads in regions (`State::run_control_region`): bench/method_polymorphic
   2.1 s to 1.4 s, object_fields 3.4 s to 3.0 s, store_loop 1.7 s to 1.5 s;
   cull flat with its outer loop now a region (reference/performance.md).
+- Truth tests of record fields (`if u.alive then`, `if not u.dead then`):
+  `GET_FIELD d r k; TEST d` on a record runs as one region operation that
+  writes the live value of any type to `d` on the stack and drops `d`'s
+  mirror slot from publication until a number write (`Layout::record_test`);
+  a key not live in the record exits at the `GET_FIELD`. bench/alive_update
+  1482 to 1379 ms (3 of 3 matched pairs, bygg, 0288cac5 against the
+  landing build); store_loop 1461 to 1484 ms in the same pairs with an
+  unchanged executed path, read as layout.
 
 What the landed work taught: canonical-pc metadata with the canonical
 instructions as the fallback needs no position map or execution stream;
@@ -122,11 +130,16 @@ deferred register writes are exact once the first checkpoint has published
 every written slot; free constituents let a fused read sit inside the
 per-operation charge path with no refusal between its halves. The exact `i64`
 countdown was not built: the f64 add and compare are not where the loop's time
-went.
+went. After the NaN-boxed `Val`, a record region is only a few percent faster
+than canonical dispatch of the same kernel (alive_update 7%): record-shape
+residue is worth taking for loops that already run as regions, less as a
+headline win on its own.
 
 **Residue:** loop bodies storing anything but a number into a live field
 of a record (a store to an invariant receiver, a dynamic-key
-`SET_TABLE`), a non-number branch (truth test, string or nil compare), a
+`SET_TABLE`), a non-number branch (a truth test of anything but a record
+field present raw in its record, so a field the record lacks or inherits
+exits; a string or nil compare), a
 call to anything but a numeric leaf (nested `f(g(x))`, open arguments or
 results, a method that calls or returns early), a
 method the record holds itself or finds through a function `__index`, or

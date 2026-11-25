@@ -279,6 +279,12 @@ tick budgets and re-record replays.
   (`for _, u in ipairs(units) do u.x = u.x + u.vx end`, method calls on `u`
   included) runs as a region too; a value that is not a table hands the
   rest of the loop back at the start of its pass. Not replay-visible.
+- A loop over records that branches on a field's truthiness
+  (`if u.alive then u.x = u.x + u.speed end`) now runs as a typed loop
+  region instead of declining it: `bench/alive_update` went from about 1.48
+  to 1.38 s on bygg. A field the record lacks or inherits hands the rest of
+  the loop back at its lookup. Results, charges, error locations, poll points,
+  collection points and rooted values are unchanged. Not replay-visible.
 - Added `memchr` as a direct dependency for byte searches in string
   formatting, plain pattern searches, replacement strings, and numeral
   diagnostics. String results and charges are unchanged.
