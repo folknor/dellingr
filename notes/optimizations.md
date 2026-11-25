@@ -70,8 +70,8 @@ recording call sites only on paths that can call (4794237) shipped; the
 bounds-check entry below was measured and is not pursued. What remains is
 in the single-digit-percent band that code-layout noise alone moves on these
 benches, so the program is parked: pick an entry up only with a workload
-where it shows clearly, and treat the NaN-boxed `Val` (under "Full coherent
-rewrites") as the larger lever for the same costs.
+where it shows clearly. The 8-byte NaN-boxed `Val` has landed, so re-measure
+these costs before trusting the figures above.
 
 Each suspect is independent. Work one at a time: perf before and after
 (`scripts/perf_hot_lines.py` filters the annotate output), interleaved
@@ -192,14 +192,6 @@ A closed-cell fast path in the canonical arm was refused (reason at
 `State::upvalue_value`). Hoisting the read into a register at compile time
 is refused (codegen.rs header: it drops scratch register overwrites that
 free dead values).
-
-### 16-byte `Val` copies that miss store forwarding
-
-Folded into the NaN-boxed `Val` chain (`notes/NANBOX-design.md`), which
-removes the tag/payload split. The original evidence (about 6% of samples on
-same_obj_read in `ADD_RR` after `GET_FIELD`; `#[repr(C, u8)]` within noise)
-has no retrievable run record and predates the typed numeric regions that
-now carry same_obj_read's loops, so it is not a basis for a separate fix.
 
 ### bench/arithmetic +11% wall after compare-and-branch fusion landed (2026-09-03)
 
@@ -389,14 +381,11 @@ that legitimately nests calls made from Rust past 150.
 
 ### 8-byte NaN-boxed `Val` (C-O7)
 
-Running as a chain under `notes/NANBOX-design.md` (rulings and link plan).
-Link 1 landed: 16-bit arena generations, `CACHE_PRUNE_INTERVAL` `1 << 14`,
-fixed-literal resident charges. Remaining: link 2 (the `Val(u64)` rewrite
-and `u64` resident accounting) and link 3 (green gate). Typed arenas with
-distinct table/closure tags, the 2026-11-17 hunt's other half, are not in
-the chain and stay open here: `Val::Obj` names neither a table nor a
-closure, so access resolves the handle and examines `RawObject`, and
-`Val::typ` dereferences the heap; two tags are left spare for it.
+Residue: typed arenas with distinct table and closure tags (the 2026-11-17
+hunt's other half). `Val` is now an 8-byte NaN-boxed word, but its `Obj`
+tag names neither a table nor a closure, so access resolves the handle and
+examines `RawObject`, and `Val::typ` dereferences the heap. Two tags are
+spare for it.
 
 ---
 

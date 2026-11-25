@@ -53,6 +53,30 @@ const OBJ_TAG: u64 = 0xfffd_0000_0000_0000;
 /// A runtime value. The five tags occupy the negative quiet NaN space above
 /// 0xfff8_0000_0000_0000. Publishing any NaN through `num` clears that space
 /// for tags and leaves the original bits of every non-NaN number intact.
+///
+/// Rules a change here must keep:
+/// - Every number is published through `num`, which maps any NaN to the
+///   canonical NaN with an integer bit test, never an f64 compare (publishing
+///   must not run FP instructions on its argument). Arithmetic does not yield
+///   only the two standard quiet NaNs: negating a payload NaN lands in tag
+///   space. No constructor from raw bits exists outside this file; typed
+///   temporaries and literal pools may stay f64 but publish through `num`.
+/// - Numeric equality is f64 equality (NaN unequal to itself, `+0 == -0`), so
+///   a whole-word shortcut in equality is wrong both ways. Word equality
+///   (`same_bits`) is for non-number encodings and bit-identity witnesses
+///   such as the builtin mirror and handle-identity caches.
+/// - Arena handles must fit the 48-bit payload: slot index in the low 32
+///   bits, nonzero 16-bit generation above it. Narrower generations are why
+///   the identity-cache prune interval is bounded. Inline-cache hits compare
+///   whole handles, so the generation has to travel with the value.
+/// - There is no niche: tables store `(Val, Val)` with vacant `(Nil, Nil)`
+///   rather than `Option<Val>`, which stays 16 bytes as a register-pair
+///   return.
+/// - Tags `0xfffe` and `0xffff` are spare (room for distinct table and
+///   closure tags; `Obj` today names neither, so `typ` examines the heap).
+/// - Resident-byte accounting charges fixed per-slot literals, not
+///   `size_of::<Val>()`, so GC pacing does not follow the representation;
+///   the sums are `u64` because the charge exceeds the allocation.
 #[derive(Clone, Copy)]
 pub(crate) struct Val(u64);
 
