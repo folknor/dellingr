@@ -11,6 +11,13 @@ use crate::support::error_boundary_cases::{
 
 #[test]
 fn error_boundary_budget_sweep() {
+    // Compiling per outcome keeps the shared runner simple. On bygg at
+    // 2d2428d, this entire test took 16 ms of 8.527 s in default and 28 ms of
+    // 13.673 s in snapshot. Even counting the whole transcript test, the
+    // combined shares were 0.62% and 0.61%. The interval differential's
+    // boundary prefixes took 39.6-40.7 ms in five runs of about 1.2 s each.
+    // Those times include State setup and execution, so compile-once could
+    // recover only a fraction of them.
     for (name, source) in CASES {
         let baseline = run(name, source, None, None);
         assert!(baseline.error.is_none(), "{name}: {:?}", baseline.error);

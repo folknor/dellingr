@@ -163,18 +163,6 @@ its next re-pin, not on its own.
   standalone run takes a few seconds in a release build". The whole run now
   takes well under a second on bygg, so the sizing claim no longer holds.
 
-### Error-boundary budget sweep compiles per outcome (2026-11-25)
-
-`error_boundary_budget_sweep` (`tests/integration/failures/error_boundary.rs`)
-and the boundary section of the cost-check-interval differential call
-`tests/common/error_boundary_cases.rs`'s `run_with` once per budget, and
-`run_with` compiles the case source and builds a callback State every call.
-These run in the serial `default` and `snapshot` sweeps. The numeric-loop
-sweeps had the same shape and lost about a third of their time when they
-compiled once and loaded the Program into a fresh State per outcome
-(9b778db). Unmeasured here; check this sweep's share of the serial sweeps
-before changing it, and keep a fresh State per outcome.
-
 ## Deferred forward-looking ideas
 
 ### Execution trace hook for a stepping debugger
