@@ -28,6 +28,10 @@ Subagent prompt rules:
 
 Never tell a codex agent to read CLAUDE.md (it is Claude-specific and contradicts their job), and never tell them to read AGENTS.md (codex loads it automatically). Put any rule they need directly in the prompt.
 
+### Versions and goldens between releases
+
+Internal versions (`COST_MODEL_VERSION` and its `COST_MODEL_HISTORY` fingerprint, `FORMAT_VERSION`, and the like) and every golden fixture can be bumped, replaced or rewritten in place as many times as needed between releases. Nothing outside the repo holds an unreleased value, so there is nothing to protect: bump again or replace in place, whichever is simpler, and do not ask or treat it as an open question. Only a released value is frozen (the archived `save_released_v*.bin` goldens are the released ones).
+
 ### Memory rules
 
 Do not use your Memory functionality. Durable context belongs in CLAUDE.md or the relevant docs.

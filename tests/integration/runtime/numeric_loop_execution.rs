@@ -900,6 +900,72 @@ fn branching_field_leaves_match_canonical_dispatch_at_every_budget() {
     }
 }
 
+/// A straight-line loop body calling leaves with branches: a global leaf
+/// on numbers and a field leaf of a loop-invariant receiver. The body has
+/// no branch of its own, so the straight-line runner sees the call first
+/// and hands the loop to the control runner. `{twin}` keeps the loop
+/// canonical, `{leaf_twin}` every leaf.
+fn straight_branching_leaf_program(twin: &str, leaf_twin: &str) -> String {
+    format!(
+        r#"
+        local up = 0
+        local Body = {{}}
+        Body.__index = Body
+        function clamp(x, hi)
+            {leaf_twin}
+            if x > hi then x = x - hi * 0.75 else x = x + 1.5 end
+            return x
+        end
+        function Body:pull(d)
+            {leaf_twin}
+            if self.alive then self.x = self.x + d end
+            if self.x > 20 then self.x = self.x / 3 end
+            return self.x
+        end
+        local b = setmetatable({{ alive = true, x = 1 }}, Body)
+        function run()
+            local sum, last, k = 0.5, 0, 0
+            peek = function() return sum, last, k + b.x end
+            for i = 1, 40 do
+                sum = clamp(sum + i, 30)
+                last = b:pull(i % 5)
+                k = k + last * 0.5
+                {twin}
+            end
+            return sum
+        end
+        "#
+    )
+}
+
+#[test]
+fn straight_line_loops_calling_branching_leaves_match_canonical_dispatch_at_every_budget() {
+    let fast = straight_branching_leaf_program("", "");
+    let canonical = straight_branching_leaf_program("local _u = up", "local _u = false");
+    let models = [
+        CostModel::default(),
+        CostModel::default()
+            .with(Charge::TableWrite, 4)
+            .with(Charge::Mul, 0)
+            .with(Charge::Sub, 5),
+        CostModel::zero(),
+    ];
+    for model in &models {
+        for budget in -1..=900 {
+            assert_eq!(
+                region_outcome(model, &fast, budget),
+                region_outcome(model, &canonical, budget),
+                "budget {budget} under {model:?}"
+            );
+            assert_eq!(
+                region_outcome_at(model, &fast, budget, Some(1)),
+                region_outcome_at(model, &canonical, budget, Some(1)),
+                "budget {budget} under {model:?}, collecting at every checkpoint"
+            );
+        }
+    }
+}
+
 /// Nested loops inside one region: an outer pass reading two upvalue
 /// tables, a number upvalue as the inner limit, an inner loop that may not
 /// enter, a forward branch out of the inner loop, and a third loop nested

@@ -2282,6 +2282,11 @@ impl NumericLoop {
         let code = &bytecode.code;
         let call_inst = code[call];
         let vars = call_inst.b();
+        // A third name and beyond are nil at every step: only a loop header
+        // shared with iterators of other arities writes them, so they are
+        // not taken. Taking them means nilling those slots on every step
+        // before the poll, killing their facts and publication bits, and
+        // nilling the whole window at exhaustion.
         if !(1..=2).contains(&vars) {
             return None;
         }
@@ -2679,16 +2684,27 @@ impl State {
             return Ok(());
         }
         // The straight-line runner charges each leaf's whole weight; a
-        // leaf with branches charges its path, which only the control
-        // runner and `try_numeric_leaf` follow. Declining runs the loop
-        // canonically, each call still taking the leaf.
+        // leaf with branches charges its path, which the control runner
+        // follows. Which leaf a site calls is known only here, so such a
+        // loop is handed to the control runner, which makes its own
+        // admission from the same state: nothing ran between the two and
+        // only caches were refilled. A body that is not `control` has no
+        // jumps, indexed reads, nested loops, dynamic callees or `ipairs`
+        // head, so no records either, which names the instantiation.
+        // Teaching this runner paths instead cost `method` and `global`
+        // about 18% in a first build (reference/performance.md, "Field
+        // leaves with forward branches"). The first resolution is dropped
+        // before the second, so its boxes are not live twice.
         if CALLS
             && callees
                 .iter()
                 .flatten()
                 .any(|resolved| resolved.leaf().body.control)
         {
-            return Ok(());
+            drop(callees);
+            debug_assert!(matches!(region.head, Head::Numeric) && body.records.is_empty());
+            return self
+                .run_control_region::<false, true, false, false>(region, frame, ip, local_cost);
         }
         if CALLS
             && callees
@@ -4184,7 +4200,12 @@ impl State {
     ///
     /// Every field site is resolved on every path, so a call whose skipped
     /// path names a field the receiver lacks declines although canonical
-    /// execution would not read it. A truth test reads the site's live
+    /// execution would not read it. Resolving per path in general would need
+    /// a leaf that already stored to abort, which it cannot: it runs whole
+    /// or not at all. A failed site that every path reaches before its first
+    /// store could instead be marked unavailable and fail the leaf, with
+    /// its result, path and charges discarded, when a run reaches it; no
+    /// workload has such a leaf. A truth test reads the site's live
     /// value, so a store before it, through any receiver, is seen; its
     /// register holds no number afterwards and nothing reads it as one
     /// (`Layout::truth_test`).

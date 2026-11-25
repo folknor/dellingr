@@ -257,15 +257,14 @@ Signal that would promote it: a workload whose hot non-leaf function
 (one that calls) does such updates, with the dispatches showing in
 profiling.
 
-### Branching leaves: open costs and declines (2026-11-24)
+### Branching leaves: field sites resolved on every path (2026-11-25)
 
-- The straight-line region runner (`State::run_passes`) declines a loop
-  calling a leaf with branches, since it charges whole leaf weights; each
-  call still runs as a leaf. Following paths there cost `global` and
-  `method` 15-25% in a first build, so it would need its own
-  instantiation.
-- Every field site is resolved on every path, so a leaf whose skipped path
-  reads a field the receiver lacks declines the call.
+Every field site of a leaf is resolved before it runs, so a leaf whose
+skipped path reads a field the receiver lacks declines the call. A leaf
+runs whole or not at all, so only sites that every path reaches before
+its first store can be resolved lazily: mark a failed one unavailable and
+fail the leaf at the `CALL` when a run reaches it, its result, path and
+charges discarded. No workload has such a leaf.
 
 ### Shared record layouts: the storage side
 
@@ -422,17 +421,21 @@ finishes. It moves work into the closure tracer and leaves the literal-root
 visit and the map `retain`, so it pays only on states whose retained
 runtimes mostly have nested prototypes; no workload has that shape.
 
-### `ipairs` regions: eager record bind, three or more variables (2026-11-24)
+### `ipairs` regions: eager record bind (2026-11-25)
 
 A typed `ipairs` region whose body uses the value as a record binds it at
 the pass's first operation (`OpKind::Bind`), so a value that is no table
 hands the rest of the loop back even on a pass whose path never touches
-it (`if i ~= 2 then s = s + u.x end` over `{ {x=1}, false, {x=3} }`), and
-the key-1 entry rule means no retry. A guard at the first consuming
-operation on each path would take such mixed arrays; it needs a per-path
-"bound" fact the solver lacks. No workload holds such an array. Loops with
-three or more variables are still declined (the extra ones are nil every
-step).
+it (`if active[i] ~= 0 then s = s + u.x end` over records mixed with
+`false`), and the key-1 entry rule means no retry. The per-path fact a
+lazy bind needs exists: `Facts.rmust`. A bind at each consumer reached
+without it also needs the yielded register's stack value to be the
+step's (refuse intervening writes or call clears), must exit at the
+consumer's first instruction before its charge (not at the body start,
+which would replay the prefix), and must sit at branch targets that land
+on a consumer. The self-guarded tombstone idiom (`if e then ... e.x end`)
+additionally needs a region op for a bare `TEST` of a register, which no
+region admits today. No workload holds such an array.
 
 ---
 

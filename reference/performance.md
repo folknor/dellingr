@@ -1044,8 +1044,9 @@ with the `TEST_FALSE d` or `TEST_TRUE d` after it into a test of the field
 site's live truthiness. A leaf with branches is admitted against the sum
 of every operation's charge and charges the path it ran; the runners report
 that path as one bit per operation (at most 64). The straight-line region
-runner still charges whole leaf weights, so it declines a loop calling a
-leaf with branches; the control runner and `try_numeric_leaf` follow
+runner still charges whole leaf weights, so it declined a loop calling a
+leaf with branches (it now hands such a loop to the control runner,
+unmeasured: no registered workload has that shape); the control runner and `try_numeric_leaf` follow
 paths. `method_step`'s `Body:step` (updates behind `if self.alive`) is
 such a leaf, and its caller's loop over records now runs as a region
 calling it. Measured on bygg with `brokkr bench wall`, interleaved
