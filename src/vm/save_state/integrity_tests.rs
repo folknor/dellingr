@@ -186,7 +186,7 @@ fn reset_clears_in_flight_and_host_held_state() {
     state.push_nil().expect("one value fits the test stack");
     state.in_flight.stack_bottom = 1;
     state.in_flight.pending_bytecode_caches.push(1);
-    state.in_flight.rooted_values.push(Val::Nil);
+    state.in_flight.rooted_values.push(Val::NIL);
     state
         .suspended_envs
         .push(super::super::global_env::SuspendedEnv::detached());
@@ -237,11 +237,13 @@ fn environment_fifo_snapshot_is_compact_and_byte_stable() {
     let mut table = original.heap.edit_table(ptr).expect("math is a table");
     for key in 1..=10_000 {
         table
-            .insert(Val::Num(f64::from(key)), Val::Bool(true))
+            .insert(Val::num(f64::from(key)), Val::boolean(true))
             .unwrap();
-        table.insert(Val::Num(f64::from(key)), Val::Nil).unwrap();
+        table.insert(Val::num(f64::from(key)), Val::NIL).unwrap();
     }
-    table.insert(Val::Num(10_001.0), Val::Bool(true)).unwrap();
+    table
+        .insert(Val::num(10_001.0), Val::boolean(true))
+        .unwrap();
     let before = original.save_state().expect("FIFO saves").bytes;
     assert!(
         before.len() < 10_000,
@@ -263,7 +265,7 @@ fn environment_fifo_snapshot_is_compact_and_byte_stable() {
     let (len, slots, entries) = table.snapshot_entries();
     assert_eq!(len, 10_001);
     assert_eq!(slots, 1);
-    assert!(matches!(entries[0], (Val::Num(10_001.0), Val::Bool(true))));
+    assert_eq!(entries[0], (Val::num(10_001.0), Val::boolean(true)));
 }
 
 #[test]
@@ -273,9 +275,9 @@ fn environment_empty_array_span_retains_logical_length() {
     let mut table = original.heap.edit_table(ptr).expect("math is a table");
     for key in 1..=10_000 {
         table
-            .insert(Val::Num(f64::from(key)), Val::Bool(true))
+            .insert(Val::num(f64::from(key)), Val::boolean(true))
             .unwrap();
-        table.insert(Val::Num(f64::from(key)), Val::Nil).unwrap();
+        table.insert(Val::num(f64::from(key)), Val::NIL).unwrap();
     }
     let before = original.save_state().expect("empty FIFO saves").bytes;
     assert!(

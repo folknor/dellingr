@@ -670,7 +670,7 @@ impl CacheEntry for GlobalLookupCacheEntry {
 impl CacheEntry for FieldLookupCacheEntry {
     fn for_each_handle(&self, f: &mut dyn FnMut(Val)) {
         let Self { table, slot: _ } = self;
-        f(Val::Obj(*table));
+        f(Val::obj(*table));
     }
 }
 
@@ -682,8 +682,8 @@ impl CacheEntry for MethodLookupCacheEntry {
             method_table,
             method_slot: _,
         } = self;
-        f(Val::Obj(*receiver_metatable));
-        f(Val::Obj(*method_table));
+        f(Val::obj(*receiver_metatable));
+        f(Val::obj(*method_table));
     }
 }
 
@@ -698,8 +698,8 @@ impl CacheEntry for RouteLookupCacheEntry {
             terminal_slot: _,
             units: _,
         } = self;
-        f(Val::Obj(*receiver_metatable));
-        f(Val::Obj(*terminal));
+        f(Val::obj(*receiver_metatable));
+        f(Val::obj(*terminal));
     }
 }
 
@@ -709,7 +709,7 @@ impl CacheEntry for StringMethodCacheEntry {
             string_lib,
             slot: _,
         } = self;
-        f(Val::Obj(*string_lib));
+        f(Val::obj(*string_lib));
     }
 }
 
@@ -719,7 +719,7 @@ impl CacheEntry for TforCursorEntry {
         // a stale one cannot give a wrong result; it is cleared anyway so the
         // invariant holds for every family without a per-family argument.
         let Self { table, index: _ } = self;
-        f(Val::Obj(*table));
+        f(Val::obj(*table));
     }
 }
 

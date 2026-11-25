@@ -238,7 +238,7 @@ impl WeakTable<'_> {
                 // the oldest surviving entry remains the next eviction victim.
                 let mut pattern_bytes = 0;
                 entries.retain(|(ptr, _), entry| {
-                    let live = heap.val_is_live(&Val::Str(*ptr));
+                    let live = heap.val_is_live(&Val::str(*ptr));
                     if live {
                         pattern_bytes += entry.byte_len;
                     }
@@ -248,7 +248,7 @@ impl WeakTable<'_> {
                 // A held program dies with its last owner; its key string
                 // may outlive it, so liveness of either ends the entry.
                 held.retain(|(ptr, _), program| {
-                    !program.is_dead() && heap.val_is_live(&Val::Str(*ptr))
+                    !program.is_dead() && heap.val_is_live(&Val::str(*ptr))
                 });
             }
             WeakTable::FormatPointerIds(entries) => {
@@ -470,7 +470,7 @@ mod tests {
         state
             .load(&crate::Program::compile(source, None).expect("test chunk compiles"))
             .expect("load");
-        let Val::Obj(ptr) = state.stack[state.stack.len() - 1] else {
+        let Some(ptr) = state.stack[state.stack.len() - 1].as_object_ptr() else {
             unreachable!("load pushes a closure");
         };
         state
@@ -503,10 +503,10 @@ mod tests {
                     vararg_start: 0,
                     chain: crate::vm::ChainUnits::NONE,
                 }],
-                vararg_stack: vec![Val::Nil],
+                vararg_stack: vec![Val::NIL],
                 open_upvalues: vec![(0, UpvalueRef::new(0))],
                 pending_bytecode_caches: vec![1],
-                rooted_values: vec![Val::Nil],
+                rooted_values: vec![Val::NIL],
                 metamethod_depth: 1,
                 call_depth: 1,
                 native_call_depth: 1,

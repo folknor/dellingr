@@ -31,9 +31,8 @@ pub type RustFunc = fn(&mut State) -> Result<u8>;
 
 const RUST_FN_DISPLAY: &str = "<function>";
 
-#[derive(Clone, Copy, Default)]
-pub(crate) enum Val {
-    #[default]
+#[derive(Clone, Copy)]
+pub(crate) enum ValKind {
     Nil,
     Bool(bool),
     Num(f64),
@@ -42,57 +41,121 @@ pub(crate) enum Val {
     RustFn(RustFnId),
     Obj(ObjectPtr),
 }
-use Val::*;
+use ValKind::*;
+
+const TAG_MASK: u64 = 0xffff_0000_0000_0000;
+const NIL_TAG: u64 = 0xfff9_0000_0000_0000;
+const BOOL_TAG: u64 = 0xfffa_0000_0000_0000;
+const STR_TAG: u64 = 0xfffb_0000_0000_0000;
+const RUST_FN_TAG: u64 = 0xfffc_0000_0000_0000;
+const OBJ_TAG: u64 = 0xfffd_0000_0000_0000;
+
+/// A runtime value. The five tags occupy the negative quiet NaN space above
+/// 0xfff8_0000_0000_0000. Publishing any NaN through `num` clears that space
+/// for tags and leaves the original bits of every non-NaN number intact.
+#[derive(Clone, Copy)]
+pub(crate) struct Val(u64);
+
+const _: () = assert!(size_of::<Val>() == 8);
+
+impl Default for Val {
+    fn default() -> Self {
+        Self::NIL
+    }
+}
 
 impl Val {
+    pub(crate) const NIL: Self = Self(NIL_TAG);
+
+    pub(crate) fn num(value: f64) -> Self {
+        Self(crate::numeral::canonical_nan(value).to_bits())
+    }
+
+    pub(crate) const fn boolean(value: bool) -> Self {
+        Self(BOOL_TAG | value as u64)
+    }
+
+    pub(crate) fn str(ptr: StringPtr) -> Self {
+        Self(STR_TAG | ptr.payload())
+    }
+
+    pub(crate) fn rust_fn(id: RustFnId) -> Self {
+        Self(RUST_FN_TAG | u64::from(id.raw_index()))
+    }
+
+    pub(crate) fn obj(ptr: ObjectPtr) -> Self {
+        Self(OBJ_TAG | ptr.payload())
+    }
+
+    fn payload(self) -> u64 {
+        self.0 & !TAG_MASK
+    }
+
+    pub(crate) fn kind(self) -> ValKind {
+        match self.0 & TAG_MASK {
+            NIL_TAG => Nil,
+            BOOL_TAG => Bool(self.payload() != 0),
+            STR_TAG => Str(StringPtr::from_payload(self.payload())),
+            RUST_FN_TAG => RustFn(RustFnId::from_index(self.payload() as u32)),
+            OBJ_TAG => Obj(ObjectPtr::from_payload(self.payload())),
+            _ => Num(f64::from_bits(self.0)),
+        }
+    }
+
+    pub(crate) fn is_nil(self) -> bool {
+        self.0 == NIL_TAG
+    }
+
+    pub(super) fn is_string(self) -> bool {
+        (self.0 & TAG_MASK) == STR_TAG
+    }
+
+    pub(super) fn same_bits(self, other: Self) -> bool {
+        self.0 == other.0
+    }
+
     /// Get this value as a Lua function (closure), if it is one.
     /// Requires heap access since the function data is stored in the GC heap.
     /// Test-only: runtime paths borrow through `GcHeap::as_lua_function_ref`.
     #[cfg(test)]
     pub(super) fn as_lua_function(&self, heap: &GcHeap) -> Option<Closure> {
-        if let Obj(o) = self {
-            heap.as_lua_function(*o)
+        if let Some(o) = self.as_object_ptr() {
+            heap.as_lua_function(o)
         } else {
             None
         }
     }
 
     pub(super) fn as_num(&self) -> Option<f64> {
-        match self {
-            Num(f) => Some(*f),
-            _ => None,
-        }
+        (self.0 < NIL_TAG).then(|| f64::from_bits(self.0))
     }
 
     /// Get this value as Lua string bytes, if it is a string.
     /// Requires heap access since strings are stored in the GC heap.
     pub(super) fn as_string<'a>(&self, heap: &'a GcHeap) -> Option<&'a [u8]> {
-        if let Str(s) = self {
-            Some(heap.get_string(*s))
-        } else {
-            None
-        }
+        self.as_string_ptr().map(|ptr| heap.get_string(ptr))
     }
 
     /// Get the StringPtr if this is a string value.
     pub(super) fn as_string_ptr(&self) -> Option<StringPtr> {
-        if let Str(s) = self { Some(*s) } else { None }
+        self.is_string()
+            .then(|| StringPtr::from_payload(self.payload()))
     }
 
     /// Get the ObjectPtr if this is an object, without checking what kind.
     /// Use heap.as_table_ref() or heap.as_lua_function_ref() to inspect its type.
     pub(super) fn as_object_ptr(&self) -> Option<ObjectPtr> {
-        if let Obj(o) = self { Some(*o) } else { None }
+        ((self.0 & TAG_MASK) == OBJ_TAG).then(|| ObjectPtr::from_payload(self.payload()))
     }
 
     pub(super) fn truthy(&self) -> bool {
-        !matches!(self, Nil | Bool(false))
+        !self.is_nil() && self.0 != BOOL_TAG
     }
 
     /// Returns the value's type.
     /// Requires heap access to determine if an Object is a Table or Function.
     pub(super) fn typ(&self, heap: &GcHeap) -> LuaType {
-        match self {
+        match self.kind() {
             Nil => LuaType::Nil,
             Bool(_) => LuaType::Boolean,
             Num(_) => LuaType::Number,
@@ -105,7 +168,7 @@ impl Val {
     /// Render a primitive value. Pointer-like values have no heap-only
     /// representation because their deterministic identity needs State.
     pub(super) fn to_bytes_with_heap(self, heap: &GcHeap) -> Option<Vec<u8>> {
-        match self {
+        match self.kind() {
             Nil => Some(b"nil".to_vec()),
             Bool(false) => Some(b"false".to_vec()),
             Bool(true) => Some(b"true".to_vec()),
@@ -118,7 +181,7 @@ impl Val {
 
 impl fmt::Debug for Val {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
+        match self.kind() {
             Nil => write!(f, "nil"),
             Bool(b) => b.fmt(f),
             Num(n) => n.fmt(f),
@@ -145,15 +208,10 @@ impl fmt::Debug for Val {
 // the `%p` identity index uses `PointerIdKey`.
 impl PartialEq for Val {
     fn eq(&self, other: &Val) -> bool {
-        match (self, other) {
-            (Nil, Nil) => true,
-            (Bool(a), Bool(b)) => a == b,
-            (Num(a), Num(b)) => a == b,
-            (RustFn(a), RustFn(b)) => a == b,
-            (Obj(a), Obj(b)) => a == b,
-            // String pointer equality works because strings are interned
-            (Str(a), Str(b)) => a == b,
-            _ => false,
+        if self.0 < NIL_TAG && other.0 < NIL_TAG {
+            f64::from_bits(self.0) == f64::from_bits(other.0)
+        } else {
+            self.same_bits(*other)
         }
     }
 }
@@ -174,20 +232,20 @@ pub(crate) enum PointerIdKey {
 impl PointerIdKey {
     /// Convert a pointer-like value to an index key.
     pub(crate) fn from_val(value: Val) -> Option<Self> {
-        match value {
-            Val::Str(ptr) => Some(Self::String(ptr)),
-            Val::Obj(ptr) => Some(Self::Object(ptr)),
-            Val::RustFn(func) => Some(Self::RustFn(func)),
-            Val::Nil | Val::Bool(_) | Val::Num(_) => None,
+        match value.kind() {
+            ValKind::Str(ptr) => Some(Self::String(ptr)),
+            ValKind::Obj(ptr) => Some(Self::Object(ptr)),
+            ValKind::RustFn(func) => Some(Self::RustFn(func)),
+            ValKind::Nil | ValKind::Bool(_) | ValKind::Num(_) => None,
         }
     }
 
     /// Recreate the runtime value represented by this identity key.
     pub(crate) fn as_val(self) -> Val {
         match self {
-            Self::String(ptr) => Val::Str(ptr),
-            Self::Object(ptr) => Val::Obj(ptr),
-            Self::RustFn(func) => Val::RustFn(func),
+            Self::String(ptr) => Val::str(ptr),
+            Self::Object(ptr) => Val::obj(ptr),
+            Self::RustFn(func) => Val::rust_fn(func),
         }
     }
 }
@@ -274,13 +332,38 @@ mod tests {
         }
     }
 
+    #[test]
+    fn nan_payloads_never_decode_as_tags() {
+        for bits in [
+            0x7ff0_0000_0000_0001,
+            0xfff0_0000_0000_0001,
+            NIL_TAG,
+            BOOL_TAG | 1,
+            STR_TAG | 1,
+            RUST_FN_TAG,
+            OBJ_TAG | 1,
+            u64::MAX,
+        ] {
+            let value = Val::num(f64::from_bits(bits));
+            let ValKind::Num(number) = value.kind() else {
+                panic!("a numeric payload decoded as a tag");
+            };
+            assert_eq!(number.to_bits(), crate::numeral::CANONICAL_NAN_BITS);
+            assert_ne!(value, value);
+        }
+        let positive = Val::num(0.0);
+        let negative = Val::num(-0.0);
+        assert_eq!(positive, negative);
+        assert!(!positive.same_bits(negative));
+    }
+
     fn first_callback(_state: &mut State) -> Result<u8> {
         Ok(0)
     }
 
     #[test]
     fn rust_function_copies_compare_equal_and_hash_equal() {
-        let first = Val::RustFn(RustFnId::catalog(0));
+        let first = Val::rust_fn(RustFnId::catalog(0));
         let second = first;
         assert_eq!(first, second);
 
@@ -311,7 +394,7 @@ mod tests {
 
     #[test]
     fn rust_function_debug_rendering_is_opaque() {
-        let value = Val::RustFn(RustFnId::catalog(0));
+        let value = Val::rust_fn(RustFnId::catalog(0));
         assert_eq!(format!("{value:?}"), RUST_FN_DISPLAY);
     }
 

@@ -278,7 +278,7 @@ impl State {
         // is untouched on error - matches `anchor_at` and the rest of
         // the host API.
         let val = self.at_index(-1)?;
-        if matches!(val, Val::Nil) {
+        if val.is_nil() {
             return Err(self.error(ErrorKind::AnchorNil));
         }
         let anchor = self.registry.insert(val);
@@ -291,7 +291,7 @@ impl State {
     pub fn anchor_at(&mut self, idx: isize) -> Result<Anchor> {
         self.check_usable()?;
         let val = self.at_index(idx)?;
-        if matches!(val, Val::Nil) {
+        if val.is_nil() {
             return Err(self.error(ErrorKind::AnchorNil));
         }
         Ok(self.registry.insert(val))
@@ -442,7 +442,7 @@ mod tests {
     fn insert_recycles_dropped_slots() {
         let mut registry = Registry::new(next_state_id());
         for i in 0..100 {
-            drop(registry.insert(Val::Num(f64::from(i))));
+            drop(registry.insert(Val::num(f64::from(i))));
             // The previous handle's slot was reclaimed by this insert, so at
             // most the handle just dropped is still occupying one.
             assert_eq!(registry.slots.len(), 1);
@@ -455,7 +455,7 @@ mod tests {
     #[test]
     fn release_disarms_the_handle() {
         let mut registry = Registry::new(next_state_id());
-        let a = registry.insert(Val::Num(1.0));
+        let a = registry.insert(Val::num(1.0));
         assert!(registry.remove(a));
         assert!(registry.released.lock().is_empty());
     }

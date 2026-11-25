@@ -71,7 +71,7 @@ impl State {
         let Some((index, _)) = tbl.get_with_index(&key) else {
             return Ok(false);
         };
-        if matches!(val, Val::Nil) {
+        if val.is_nil() {
             Ok(tbl.remove_at_index(index))
         } else {
             // A live existing entry can be updated by its slot, so the
@@ -92,7 +92,7 @@ impl State {
     #[inline(never)]
     pub(super) fn resolve_length(&mut self, val: Val, local_cost: &mut u64) -> Result<Option<Val>> {
         if let Some(s) = val.as_string(&self.heap) {
-            return Ok(Some(Val::Num(s.len() as f64)));
+            return Ok(Some(Val::num(s.len() as f64)));
         }
         let Some(tbl) = val
             .as_object_ptr()
@@ -102,8 +102,8 @@ impl State {
         };
         // The border is computed only when no handler replaces it.
         let handler = self.metatable_field(tbl.get_metatable(), super::MetaName::Len);
-        if matches!(handler, Val::Nil) {
-            return Ok(Some(Val::Num(tbl.array_len() as f64)));
+        if handler.is_nil() {
+            return Ok(Some(Val::num(tbl.array_len() as f64)));
         }
         Frame::flush_local_cost(self, local_cost)?;
         self.push_len_window(handler, val)?;

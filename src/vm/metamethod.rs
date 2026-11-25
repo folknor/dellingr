@@ -27,6 +27,7 @@ use super::lua_val::Val;
 use super::object::ObjectPtr;
 use super::table::SlotRef;
 use crate::error::{ErrorKind, TypeError};
+use crate::vm::lua_val::ValKind;
 
 use crate::limits::MAX_METAMETHOD_DEPTH;
 
@@ -186,11 +187,11 @@ impl State {
                 let handler = self
                     .heap
                     .as_table_ref(metatable)
-                    .map_or(Val::Nil, |mt| mt.get(&index_key));
+                    .map_or(Val::NIL, |mt| mt.get(&index_key));
                 (receiver, handler)
             }
-            IndexStart::Receiver => match receiver {
-                Val::Obj(ptr) => {
+            IndexStart::Receiver => match receiver.kind() {
+                ValKind::Obj(ptr) => {
                     let Some((direct, metatable)) = self.get_table_field_direct(ptr, key, cache)
                     else {
                         return Err(self.index_handler_error(receiver));
@@ -201,7 +202,7 @@ impl State {
                     // A miss on a plain table is nil, exactly as `rawget`
                     // sees it.
                     let Some(metatable) = metatable else {
-                        return Ok(Some(Val::Nil));
+                        return Ok(Some(Val::NIL));
                     };
                     if let Some(cache) = cache
                         && let Some(method) =
@@ -224,7 +225,7 @@ impl State {
                         .as_table_ref(metatable)
                         .and_then(|mt| mt.find_keyed(&index_key));
                     let Some((index_field, handler)) = found else {
-                        return Ok(Some(Val::Nil));
+                        return Ok(Some(Val::NIL));
                     };
                     if cache.is_some() {
                         method_fill = Some((metatable, index_field));
@@ -232,15 +233,15 @@ impl State {
                     }
                     (receiver, handler)
                 }
-                Val::Str(_) => match self.string_index_step(key, cache)? {
+                ValKind::Str(_) => match self.string_index_step(key, cache)? {
                     StringStep::Done(val) => return Ok(Some(val)),
                     StringStep::Next(handler) => (receiver, handler),
                 },
                 _ => return Err(self.index_handler_error(receiver)),
             },
         };
-        if matches!(handler, Val::Nil) {
-            return Ok(Some(Val::Nil));
+        if handler.is_nil() {
+            return Ok(Some(Val::NIL));
         }
         // With `C.__index = C` the first pass resolves the metatable handle
         // again as the handler. Reusing that borrow would mean holding it
@@ -266,7 +267,7 @@ impl State {
                             }
                             return Ok(Some(method));
                         }
-                        None => Val::Nil,
+                        None => Val::NIL,
                     },
                     None => match (route_fill, cache) {
                         // A raw hit past a continuing step: a route. The
@@ -291,20 +292,20 @@ impl State {
                                 }
                                 return Ok(Some(val));
                             }
-                            None => Val::Nil,
+                            None => Val::NIL,
                         },
                         _ => table.get(&key),
                     },
                 };
-                if !matches!(val, Val::Nil) {
+                if !val.is_nil() {
                     return Ok(Some(val));
                 }
                 let next_mt = table
                     .get_metatable()
                     .and_then(|mt_ptr| self.heap.as_table_ref(mt_ptr));
-                let next = next_mt.map_or(Val::Nil, |mt| mt.get(&index_key));
-                if matches!(next, Val::Nil) {
-                    return Ok(Some(Val::Nil));
+                let next = next_mt.map_or(Val::NIL, |mt| mt.get(&index_key));
+                if next.is_nil() {
+                    return Ok(Some(Val::NIL));
                 }
                 // A step that continues is part of any route this walk
                 // fills: mark what it read (this table's miss and metatable
@@ -330,11 +331,11 @@ impl State {
                 handler = next;
                 continue;
             }
-            let calls = match handler {
+            let calls = match handler.kind() {
                 // A Lua closure or a gmatch iterator.
-                Val::Obj(ptr) => self.heap.get(ptr).typ() == LuaType::Function,
-                Val::RustFn(_) => true,
-                Val::Str(_) => {
+                ValKind::Obj(ptr) => self.heap.get(ptr).typ() == LuaType::Function,
+                ValKind::RustFn(_) => true,
+                ValKind::Str(_) => {
                     // Routes run through tables only.
                     route_fill = None;
                     self.take_metamethod_unit()?;
@@ -392,11 +393,11 @@ impl State {
         let (handler, shape) = match self.heap.as_table_ref(mt_ptr) {
             Some(mt) => match mt.find_slot(&index_key) {
                 Some((slot, handler)) => (handler, Some(slot)),
-                None => (Val::Nil, None),
+                None => (Val::NIL, None),
             },
-            None => (Val::Nil, None),
+            None => (Val::NIL, None),
         };
-        if matches!(handler, Val::Nil) {
+        if handler.is_nil() {
             return Err(self.type_error(TypeError::TableIndex(LuaType::String)));
         }
         if let Some(cache) = cache
@@ -424,17 +425,17 @@ impl State {
             .and_then(super::table::Table::get_metatable)
             .and_then(|mt| self.heap.as_table_ref(mt))
         else {
-            return Val::Nil;
+            return Val::NIL;
         };
         if mt.known_no_newindex() {
             debug_assert!(
-                matches!(mt.get(&self.meta_names.get(MetaName::NewIndex)), Val::Nil),
+                mt.get(&self.meta_names.get(MetaName::NewIndex)).is_nil(),
                 "a metatable proven to lack __newindex holds one"
             );
-            return Val::Nil;
+            return Val::NIL;
         }
         let handler = mt.get(&self.meta_names.get(MetaName::NewIndex));
-        if matches!(handler, Val::Nil) {
+        if handler.is_nil() {
             mt.learn_no_newindex();
         }
         handler
@@ -488,10 +489,10 @@ impl State {
         let cache = cache.filter(|_| key != self.meta_names.get(MetaName::Index));
         // A string key with a value is a raw store whose insert reports the
         // slot it wrote, so the cache is filled without a second lookup.
-        let raw_string = match (key, val) {
-            (_, Val::Nil) => None,
-            (Val::Str(name), _) => Some(name),
-            _ => None,
+        let raw_string = if val.is_nil() {
+            None
+        } else {
+            key.as_string_ptr()
         };
         let mut tbl = self
             .heap
@@ -507,7 +508,7 @@ impl State {
             return Ok(None);
         }
         if let Some((slot, _)) = tbl.find_slot(&key) {
-            if matches!(val, Val::Nil) {
+            if val.is_nil() {
                 tbl.remove_slot(slot);
             } else {
                 tbl.store_slot(slot, val);
@@ -521,8 +522,8 @@ impl State {
         // through a handler leaves the cache alone, since the handler may
         // have dropped every other root of the receiver.
         let handler = self.newindex_handler(ptr);
-        if !matches!(handler, Val::Nil) {
-            return self.resolve_newindex(Val::Obj(ptr), handler, key, val, local_cost);
+        if !handler.is_nil() {
+            return self.resolve_newindex(Val::obj(ptr), handler, key, val, local_cost);
         }
         let mut tbl = self.heap.edit_table(ptr).expect("the receiver is a table");
         if let Some(name) = raw_string {
@@ -553,14 +554,14 @@ impl State {
         local_cost: &mut u64,
     ) -> Result<Option<u32>> {
         let handler = self.newindex_handler(ptr);
-        if matches!(handler, Val::Nil) {
+        if handler.is_nil() {
             self.heap
                 .edit_table(ptr)
                 .expect("the receiver is a table")
                 .insert(key, val)?;
             return Ok(None);
         }
-        self.resolve_newindex(Val::Obj(ptr), handler, key, val, local_cost)
+        self.resolve_newindex(Val::obj(ptr), handler, key, val, local_cost)
     }
 
     /// Resolve a store into `target`, whose raw lookup missed and whose
@@ -615,8 +616,8 @@ impl State {
         units: &mut u32,
     ) -> Result<bool> {
         loop {
-            let calls = match handler {
-                Val::Obj(ptr) => {
+            let calls = match handler.kind() {
+                ValKind::Obj(ptr) => {
                     if let Some(table) = self.heap.as_table_ref(ptr) {
                         if self.newindex_absent(table.get_metatable()) {
                             // A terminal table step either way, and a raw
@@ -639,7 +640,7 @@ impl State {
                                 .heap
                                 .edit_table(ptr)
                                 .expect("checked to be a table just above");
-                            if matches!(val, Val::Nil) {
+                            if val.is_nil() {
                                 table.remove_slot(slot);
                             } else {
                                 table.store_slot(slot, val);
@@ -647,7 +648,7 @@ impl State {
                             return Ok(true);
                         }
                         let next = self.newindex_handler(ptr);
-                        if !matches!(next, Val::Nil) {
+                        if !next.is_nil() {
                             // A table step that continues holds a unit
                             // until the store ends.
                             self.take_metamethod_unit()?;
@@ -668,7 +669,7 @@ impl State {
                     // A Lua closure or a gmatch iterator.
                     self.heap.get(ptr).typ() == LuaType::Function
                 }
-                Val::RustFn(_) => true,
+                ValKind::RustFn(_) => true,
                 _ => false,
             };
             if !calls {

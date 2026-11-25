@@ -151,6 +151,7 @@
 //!
 //! Why a numeric leaf is exact: see `State::try_numeric_leaf`.
 
+use crate::vm::lua_val::ValKind;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -2479,7 +2480,7 @@ impl State {
             return Ok(());
         };
         let iterator = self.stack[frame.stack_bottom + usize::from(first)];
-        if !matches!(iterator, Val::RustFn(f) if f == crate::lua_std::IPAIRS_ITER) {
+        if !matches!(iterator.kind(), ValKind::RustFn(f) if f == crate::lua_std::IPAIRS_ITER) {
             return Ok(());
         }
         self.run_numeric_loop(region, frame, ip, local_cost)
@@ -2751,7 +2752,7 @@ impl State {
                             x[at(op.a)] = result;
                             written = (written | 1 << op.a) & !site.above;
                             let cleared = base + usize::from(site.cleared());
-                            self.stack[cleared..frame.top].fill(Val::Nil);
+                            self.stack[cleared..frame.top].fill(Val::NIL);
                             self.record_call_site(site.pc + 1);
                             loaded = None;
                         }
@@ -2958,8 +2959,8 @@ impl State {
         // `IPAIRS` is the head's own test (`run_control_shape`).
         let ipairs_table = match region.head {
             Head::Ipairs { base: first, .. } if IPAIRS => {
-                match self.stack[base + usize::from(first) + 1] {
-                    Val::Obj(ptr) if self.heap.as_table_ref(ptr).is_some() => Some(ptr),
+                match self.stack[base + usize::from(first) + 1].kind() {
+                    ValKind::Obj(ptr) if self.heap.as_table_ref(ptr).is_some() => Some(ptr),
                     _ => return Ok(()),
                 }
             }
@@ -2973,7 +2974,7 @@ impl State {
                 Receiver::Upvalue(index) => self.upvalue_value(frame.upvalues.as_slice(), index),
                 Receiver::Register(register) => self.stack[base + usize::from(register)],
             };
-            let Val::Obj(ptr) = value else {
+            let ValKind::Obj(ptr) = value.kind() else {
                 return Ok(());
             };
             if self.heap.as_table_ref(ptr).is_none() {
@@ -2981,7 +2982,7 @@ impl State {
             }
             *table = Some(ptr);
         }
-        let mut keys = [Val::Nil; MAX_RECORD_SITES];
+        let mut keys = [Val::NIL; MAX_RECORD_SITES];
         if RECORDS && !self.resolve_record_keys(body, frame, &mut keys) {
             return Ok(());
         }
@@ -2999,8 +3000,8 @@ impl State {
         let mut methods: [Vec<RegionMethod>; MAX_CALLS] = Default::default();
         // Per call site: the method and receiver a method lookup on a record
         // found this pass, and the cache entry.
-        let mut current = [(Val::Nil, None::<ObjectPtr>, 0usize); MAX_CALLS];
-        let mut method_keys = [Val::Nil; MAX_CALLS];
+        let mut current = [(Val::NIL, None::<ObjectPtr>, 0usize); MAX_CALLS];
+        let mut method_keys = [Val::NIL; MAX_CALLS];
         // A method's field sites this pass, resolved before its leaf runs.
         let mut method_slots: FieldSlots = [None; MAX_FIELD_SITES];
         let mut relied = Vec::new();
@@ -3095,7 +3096,7 @@ impl State {
                                 .heap
                                 .as_table_ref(table)
                                 .map(|tbl| tbl.get_number(x[at(op.c)]));
-                            let Some(Val::Num(n)) = value else {
+                            let Some(n) = value.and_then(|value| value.as_num()) else {
                                 *ip = exit;
                                 break 'pass Ok(());
                             };
@@ -3111,7 +3112,7 @@ impl State {
                                 .heap
                                 .as_table_ref(table)
                                 .map(|tbl| tbl.get_number(x[at(op.c)]));
-                            let Some(Val::Obj(record)) = value else {
+                            let Some(record) = value.and_then(|value| value.as_object_ptr()) else {
                                 *ip = exit;
                                 break 'pass Ok(());
                             };
@@ -3126,7 +3127,7 @@ impl State {
                             // leaves it: no exit publishes an older number over
                             // it, and the next checkpoint republishes a number
                             // written after it.
-                            self.stack[base + usize::from(register)] = Val::Obj(record);
+                            self.stack[base + usize::from(register)] = Val::obj(record);
                             if let Some(slot) = slot {
                                 written &= !(1 << slot);
                                 published &= !(1 << slot);
@@ -3140,7 +3141,7 @@ impl State {
                             let id = usize::from(op.a) % MAX_RECORDS;
                             let (register, _) = body.records[id];
                             let value = self.stack[base + usize::from(register)];
-                            let Val::Obj(record) = value else {
+                            let ValKind::Obj(record) = value.kind() else {
                                 *ip = region.body_pc;
                                 break 'pass Ok(());
                             };
@@ -3155,8 +3156,9 @@ impl State {
                             let table = records
                                 [usize::from(body.record_sites[site].record) % MAX_RECORDS]
                                 .expect("a record is defined on every path to its use");
-                            let Some((_, Val::Num(n))) =
-                                self.record_slot(table, keys[site], &mut found[site])
+                            let Some(n) = self
+                                .record_slot(table, keys[site], &mut found[site])
+                                .and_then(|(_, value)| value.as_num())
                             else {
                                 *ip = cursor - 1;
                                 break 'pass Ok(());
@@ -3170,7 +3172,7 @@ impl State {
                             // at entry, so inherited routes stay standing.
                             let stored =
                                 self.heap
-                                    .overwrite_live_slot(table, slot, Val::Num(x[at(op.c)]));
+                                    .overwrite_live_slot(table, slot, Val::num(x[at(op.c)]));
                             debug_assert!(stored, "a slot resolved just before stays live");
                         }
                         OpKind::Prep if NESTED => {
@@ -3321,7 +3323,7 @@ impl State {
                             written = (written | 1 << op.a) & !site.above;
                             published &= !site.above;
                             let cleared = base + usize::from(site.cleared());
-                            self.stack[cleared..frame.top].fill(Val::Nil);
+                            self.stack[cleared..frame.top].fill(Val::NIL);
                             self.record_call_site(site.pc + 1);
                             loaded = None;
                         }
@@ -3374,7 +3376,7 @@ impl State {
                     }
                 };
                 if let Some(slot) = value_slot {
-                    let Val::Num(n) = value else {
+                    let ValKind::Num(n) = value.kind() else {
                         *ip = region.prep;
                         break Ok(());
                     };
@@ -3391,8 +3393,8 @@ impl State {
                 }
                 // The stack as canonical dispatch has it at the poll: the
                 // step's results written, the control as the body left it.
-                self.stack[results - 1] = Val::Num(x[0]);
-                self.stack[results] = Val::Num(key);
+                self.stack[results - 1] = Val::num(x[0]);
+                self.stack[results] = Val::num(key);
                 if vars == 2 {
                     self.stack[results + 1] = value;
                 }
@@ -3432,7 +3434,7 @@ impl State {
         // An exhausted `ipairs` step leaves nil in its results, over the
         // published key, as canonical TFOR_CALL does.
         if IPAIRS && let Some((results, vars)) = exhausted {
-            self.stack[results..results + usize::from(vars)].fill(Val::Nil);
+            self.stack[results..results + usize::from(vars)].fill(Val::NIL);
         }
         // Last, so no published number overwrites it.
         if CALLS && let Some(index) = loaded {
@@ -3441,7 +3443,7 @@ impl State {
                 Some(resolved) => (resolved.callee, resolved.receiver),
                 None => {
                     let (method, receiver, _) = current[index];
-                    (method, receiver.map_or(Val::Nil, Val::Obj))
+                    (method, receiver.map_or(Val::NIL, Val::obj))
                 }
             };
             self.stack[function] = callee;
@@ -3480,7 +3482,7 @@ impl State {
                 // other key is left to canonical dispatch.
                 SiteKey::Register(register) => {
                     *key = self.stack[frame.stack_bottom + usize::from(register)];
-                    if !matches!(*key, Val::Str(_)) {
+                    if !key.is_string() {
                         return false;
                     }
                 }
@@ -3580,10 +3582,10 @@ impl State {
                 return false;
             }
             let (value, receiver) = match site.callee {
-                Callee::Global { name, cache } => (self.read_global(frame, name, cache), Val::Nil),
+                Callee::Global { name, cache } => (self.read_global(frame, name, cache), Val::NIL),
                 Callee::Upvalue(index) => (
                     self.upvalue_value(frame.upvalues.as_slice(), index),
-                    Val::Nil,
+                    Val::NIL,
                 ),
                 Callee::Method { receiver, key } => {
                     let receiver = match receiver {
@@ -3602,7 +3604,7 @@ impl State {
                 // region runs captures a register or changes the depth.
                 Callee::Dynamic { .. } => continue,
             };
-            let Val::Obj(ptr) = value else {
+            let ValKind::Obj(ptr) = value.kind() else {
                 return false;
             };
             let Some(closure) = self.heap.as_lua_function_ref(ptr) else {
@@ -3741,7 +3743,7 @@ impl State {
         relied: &[Val],
     ) -> Option<usize> {
         let tbl = self.heap.as_table_ref(table)?;
-        if !matches!(tbl.get(&key), Val::Nil) {
+        if !tbl.get(&key).is_nil() {
             return None;
         }
         let meta = tbl.get_metatable()?;
@@ -3751,7 +3753,7 @@ impl State {
         if entries.len() >= MAX_METHOD_CLASSES {
             return None;
         }
-        let method = self.region_method(Val::Obj(table), key)?;
+        let method = self.region_method(Val::obj(table), key)?;
         entries.push(self.admit_method(meta, method, site, base, relied)?);
         Some(entries.len() - 1)
     }
@@ -3772,7 +3774,7 @@ impl State {
         base: usize,
         relied: &[Val],
     ) -> Option<RegionMethod> {
-        let Val::Obj(ptr) = method else {
+        let ValKind::Obj(ptr) = method.kind() else {
             return None;
         };
         let closure = self.heap.as_lua_function_ref(ptr)?;
@@ -3799,7 +3801,7 @@ impl State {
         }
         let index_key = self.meta_names.get(MetaName::Index);
         let mut fields: FieldSlots = [None; MAX_FIELD_SITES];
-        let mut keys = [Val::Nil; MAX_FIELD_SITES];
+        let mut keys = [Val::NIL; MAX_FIELD_SITES];
         // bounded: at most MAX_FIELD_SITES field sites
         for ((field, slot_key), site) in fields.iter_mut().zip(&mut keys).zip(leaf.sites.iter()) {
             let key = runtime.literals[usize::from(site.key)];
@@ -3817,11 +3819,11 @@ impl State {
                         Upvalue::Open(_) => return None,
                         Upvalue::Closed(value) => *value,
                     };
-                    let Val::Obj(table) = value else {
+                    let ValKind::Obj(table) = value.kind() else {
                         return None;
                     };
                     let (slot, value) = self.heap.as_table_ref(table)?.find_slot(&key)?;
-                    if site.number && !matches!(value, Val::Num(_)) {
+                    if site.number && value.as_num().is_none() {
                         return None;
                     }
                     *field = Some((table, slot));
@@ -3870,7 +3872,7 @@ impl State {
                     else {
                         return false;
                     };
-                    if site.number && !matches!(value, Val::Num(_)) {
+                    if site.number && value.as_num().is_none() {
                         return false;
                     }
                     Some((receiver, slot))
@@ -3890,7 +3892,7 @@ impl State {
     /// any other handler, a nil answer, or too deep a walk.
     fn region_method(&self, receiver: Val, key: Val) -> Option<Val> {
         let index_key = self.meta_names.get(MetaName::Index);
-        let Val::Obj(mut table) = receiver else {
+        let ValKind::Obj(mut table) = receiver.kind() else {
             return None;
         };
         let mut depth = self.in_flight.metamethod_depth;
@@ -3900,11 +3902,11 @@ impl State {
         loop {
             let tbl = self.heap.as_table_ref(table)?;
             let value = tbl.get(&key);
-            if !matches!(value, Val::Nil) {
+            if !value.is_nil() {
                 return Some(value);
             }
             let metatable = self.heap.as_table_ref(tbl.get_metatable()?)?;
-            let Val::Obj(next) = metatable.get(&index_key) else {
+            let ValKind::Obj(next) = metatable.get(&index_key).kind() else {
                 return None;
             };
             if !first {
@@ -3930,8 +3932,8 @@ impl State {
         // bounded: at most MIRROR_SLOTS registers
         for (slot, &register) in body.registers.iter().enumerate() {
             if body.guards & (1 << slot) != 0 {
-                match self.stack[base + usize::from(register)] {
-                    Val::Num(n) => x[slot] = n,
+                match self.stack[base + usize::from(register)].kind() {
+                    ValKind::Num(n) => x[slot] = n,
                     _ => return false,
                 }
             }
@@ -3941,8 +3943,8 @@ impl State {
             x[at(slot)] = match constant {
                 Constant::Number(value) => value,
                 Constant::Upvalue(index) => {
-                    match self.upvalue_value(frame.upvalues.as_slice(), index) {
-                        Val::Num(n) => n,
+                    match self.upvalue_value(frame.upvalues.as_slice(), index).kind() {
+                        ValKind::Num(n) => n,
                         _ => return false,
                     }
                 }
@@ -3957,14 +3959,18 @@ impl State {
                         }
                         Receiver::Register(register) => self.stack[base + usize::from(register)],
                     };
-                    let Val::Obj(ptr) = receiver else {
+                    let ValKind::Obj(ptr) = receiver.kind() else {
                         return false;
                     };
                     let cache = frame.runtime.caches.field(cache);
-                    match self.get_table_field_direct(ptr, frame.literal(key), cache) {
-                        Some((Some(Val::Num(n)), _)) => n,
-                        _ => return false,
-                    }
+                    let Some(n) = self
+                        .get_table_field_direct(ptr, frame.literal(key), cache)
+                        .and_then(|(value, _)| value)
+                        .and_then(|value| value.as_num())
+                    else {
+                        return false;
+                    };
+                    n
                 }
             };
         }
@@ -3998,7 +4004,7 @@ impl State {
         // bounded: at most MIRROR_SLOTS written upvalues
         for &(slot, index) in &body.captures {
             if written & (1 << slot) != 0 {
-                self.set_upvalue_value(upvalues, index, Val::Num(x[at(slot)]));
+                self.set_upvalue_value(upvalues, index, Val::num(x[at(slot)]));
             }
         }
     }
@@ -4027,7 +4033,7 @@ impl State {
         // bounded: at most MIRROR_SLOTS registers
         for (slot, &register) in body.registers.iter().enumerate() {
             if written & (1 << slot) != 0 {
-                self.stack[base + usize::from(register)] = Val::Num(x[slot]);
+                self.stack[base + usize::from(register)] = Val::num(x[slot]);
             }
         }
     }
@@ -4091,7 +4097,7 @@ impl State {
         if cfg!(feature = "fault-injection") {
             return false;
         }
-        let Val::Obj(ptr) = self.stack[idx] else {
+        let ValKind::Obj(ptr) = self.stack[idx].kind() else {
             return false;
         };
         let Some(closure) = self.heap.as_lua_function_ref(ptr) else {
@@ -4115,8 +4121,8 @@ impl State {
                 if register >= u16::from(num_args) {
                     return false;
                 }
-                match self.stack[idx + 1 + usize::from(register)] {
-                    Val::Num(n) => x[slot] = n,
+                match self.stack[idx + 1 + usize::from(register)].kind() {
+                    ValKind::Num(n) => x[slot] = n,
                     _ => return false,
                 }
             }
@@ -4173,7 +4179,7 @@ impl State {
         *local_cost += weight;
         match result {
             Some(result) if expected != RetCount::Fixed(0) => {
-                self.stack[idx] = Val::Num(result);
+                self.stack[idx] = Val::num(result);
                 self.stack.truncate(idx + 1);
             }
             _ => self.stack.truncate(idx),
@@ -4235,7 +4241,7 @@ impl State {
                     }
                 }
             };
-            let Val::Obj(table) = receiver else {
+            let ValKind::Obj(table) = receiver.kind() else {
                 return false;
             };
             let Some(tbl) = self.heap.as_table_ref(table) else {
@@ -4276,7 +4282,7 @@ impl State {
                     (slot, value)
                 }
             };
-            if site.number && !matches!(value, Val::Num(_)) {
+            if site.number && value.as_num().is_none() {
                 return false;
             }
             *field = Some((table, slot));
@@ -4378,7 +4384,7 @@ impl State {
                         .heap
                         .as_table_ref(table)
                         .and_then(|tbl| tbl.read_slot(slot));
-                    let Some(Val::Num(n)) = value else {
+                    let Some(n) = value.and_then(|value| value.as_num()) else {
                         panic!(
                             "a read site resolved to a number stays one: stores write numbers into live slots"
                         );
@@ -4392,7 +4398,7 @@ impl State {
                     // inherited routes stay standing (`GcHeap::overwrite_live_slot`).
                     let stored = self
                         .heap
-                        .overwrite_live_slot(table, slot, Val::Num(x[at(op.c)]));
+                        .overwrite_live_slot(table, slot, Val::num(x[at(op.c)]));
                     debug_assert!(stored, "a resolved site stays live");
                 }
                 _ => x[at(op.a)] = eval(op, x),

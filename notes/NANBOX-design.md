@@ -53,23 +53,36 @@ consensus on every ruling below.
    be canonical inside too). Sorting uses numeric `<`; `%a` handles
    nonfinite values before the bit formatter.
 
+### Link 2 implementation decisions
+
+- In tag order, the encodings are nil, boolean, string, Rust function and
+  object. Nil carries zero and booleans carry zero or one. Arena payloads
+  put the slot index in the low 32 bits and the nonzero generation in the
+  next 16, matching the existing arena-key hash input. String and object
+  codecs reconstruct typed handles; the packed word stays private.
+- Numeric dispatch and array indexing use the direct numeric accessor.
+  The cached string slot check compares words after checking the string
+  tag, preserving handle identity and avoiding redundant unpacking on the
+  cache hit. The builtin mirror uses the same word identity check so it
+  distinguishes the two zero signs and accepts identical canonical NaNs.
+- Host numeric reads use the invariant established on publication. Literal
+  pools and the snapshot wire codec retain their own handling because
+  they also carry numbers outside the runtime value representation.
+- The resident score divides before applying the existing saturating
+  integer conversion. Watermarks use saturating multiplication in u64;
+  the threshold mode and score remain independent of the watermark sentinel.
+
 ## Link plan
 
 - **Link 1 (landed with this document):** arena generation narrowed to 16
   bits, prune interval `1 << 14`, fixed-literal resident charges, tests and
   contract text updated (`docs/limits.md`).
-- **Link 2 (one implementer, large):** `Val(u64)` in `lua_val.rs` with a
-  `kind()` decode to a Copy view enum carrying today's variants, constructors
-  (`Val::num`, `Val::str`, ...), and direct accessors (`as_num`, `is_nil`,
-  `truthy`) for hot handlers; migrate every construct and match site (about
-  1100 across `src/vm`, heaviest `table.rs`, `save_state.rs` and its
-  verifier, `global_env.rs`, `numeric_loop.rs`, `metamethod.rs`,
-  `table_ops.rs`; `lua_std/basic.rs`). Ruling 6's `u64` widening. A
-  `const _: () = assert!(size_of::<Val>() == 8)`. docs/determinism.md NaN
-  text. Re-measure `brokkr test native_bytes_per_level` dev and release and
-  update `reference/native-calls.md` if it moves; save goldens must be
-  byte-identical (`tests/integration/snapshot/save_golden.rs` is the
-  oracle). Interleaved matched `--commit` A/B on same_obj_read, arithmetic,
-  fill, list_literals and gc_churn, recorded with hash and host.
+- **Link 2 (implementation complete):** packed `Val(u64)`, migrated VM and
+  library uses, widened resident bytes, and updated the NaN contract.
+  The tag-collision regression test covers signaling NaNs, negative payloads
+  in tag space, IEEE equality, and bit identity for signed zero. The native
+  stack reference records the dev and release probes on bygg against base
+  63d34b0. Compare 63d34b0 and the link 2 commit with matched interleaved wall
+  benches for same_obj_read, arithmetic, fill, list_literals and gc_churn.
 - **Link 3 (green agent):** full unscoped `brokkr check`, the golden and
   corpus-cost diffs, and the CHANGELOG entry.

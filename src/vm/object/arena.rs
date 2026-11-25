@@ -51,6 +51,18 @@ impl SlotKey {
         version: NonZeroU16::MIN,
     };
 
+    pub(super) fn payload(self) -> u64 {
+        (u64::from(self.version.get()) << 32) | u64::from(self.idx)
+    }
+
+    pub(super) fn from_payload(payload: u64) -> Self {
+        Self {
+            idx: payload as u32,
+            version: NonZeroU16::new((payload >> 32) as u16)
+                .expect("packed arena handles have a nonzero generation"),
+        }
+    }
+
     /// Slot index and version, for tests that pin the stepping.
     #[cfg(test)]
     pub(crate) fn parts(self) -> (u32, u16) {
@@ -60,7 +72,7 @@ impl SlotKey {
 
 impl Hash for SlotKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        state.write_u64((u64::from(self.version.get()) << 32) | u64::from(self.idx));
+        state.write_u64(self.payload());
     }
 }
 

@@ -1,6 +1,7 @@
 //! This module provides the `State` struct, which handles the primary
 //! components of the VM.
 
+use crate::vm::lua_val::ValKind;
 mod anchor;
 #[cfg(all(test, feature = "disable-inline-caches"))]
 mod cache_differential;
@@ -546,7 +547,11 @@ impl State {
             tables.push((ptr, role));
         };
         for (builtin, role) in global_env::LIBRARY_BUILTINS {
-            if let Val::Obj(ptr) = self.global_env.read_builtin(&self.heap, builtin.to_u8()) {
+            if let ValKind::Obj(ptr) = self
+                .global_env
+                .read_builtin(&self.heap, builtin.to_u8())
+                .kind()
+            {
                 add(ptr, role);
             }
         }
@@ -885,8 +890,8 @@ impl State {
     /// envelope's headroom.
     #[inline(always)]
     pub(crate) fn gmatch_step_of(&self, val: Val) -> Option<RustFnId> {
-        match val {
-            Val::Obj(ptr) if self.heap.as_gmatch(ptr).is_some() => {
+        match val.kind() {
+            ValKind::Obj(ptr) if self.heap.as_gmatch(ptr).is_some() => {
                 Some(crate::lua_std::GMATCH_STEP)
             }
             _ => None,
@@ -897,9 +902,10 @@ impl State {
     /// if the value there is one.
     pub(crate) fn gmatch_at(&self, idx: isize) -> Option<(ObjectPtr, GmatchIter)> {
         // An absent slot holds no iterator, so the caller reports that.
-        let Ok(Val::Obj(ptr)) = self.at_index(idx) else {
+        let Ok(value) = self.at_index(idx) else {
             return None;
         };
+        let ptr = value.as_object_ptr()?;
         Some((ptr, self.heap.as_gmatch(ptr)?))
     }
 
@@ -917,7 +923,7 @@ impl State {
         self.check_stack_space(1)?;
         let program = self.gmatch_program(&iter);
         let ptr = self.allocator().alloc_gmatch(iter, program);
-        self.push_unchecked(Val::Obj(ptr));
+        self.push_unchecked(Val::obj(ptr));
         Ok(())
     }
 
@@ -959,7 +965,7 @@ impl State {
     /// The pushable string value of a gmatch record's string.
     pub(crate) fn push_string_ptr(&mut self, ptr: StringPtr) -> Result<()> {
         self.check_stack_slot()?;
-        self.push_unchecked(Val::Str(ptr));
+        self.push_unchecked(Val::str(ptr));
         Ok(())
     }
 
@@ -1320,7 +1326,7 @@ impl State {
         let literals = bytecode
             .string_literals
             .iter()
-            .map(|literal| Val::Str(self.heap.no_gc_allocator().alloc_string(literal)))
+            .map(|literal| Val::str(self.heap.no_gc_allocator().alloc_string(literal)))
             .collect::<Vec<_>>()
             .into_boxed_slice();
         let runtime = Arc::new(BytecodeRuntime {
@@ -1390,7 +1396,7 @@ impl State {
 
     /// Pushes the global table, which `open_libs` binds to `_G`.
     pub(crate) fn push_global_table(&mut self) -> Result<()> {
-        self.push_val(Val::Obj(self.global_env.table()))
+        self.push_val(Val::obj(self.global_env.table()))
     }
 
     /// Pops a value from the stack and sets it as the new value of global
@@ -1428,7 +1434,7 @@ impl State {
     /// Interning may collect, so `val` must already be rooted unless it is a
     /// value the collector never frees.
     fn global_name_key(&mut self, name: &str, val: Val) -> Result<Option<StringPtr>> {
-        if matches!(val, Val::Nil) {
+        if val.is_nil() {
             return Ok(self.heap.find_string(name.as_bytes()));
         }
         check_string_size(name.len())?;
@@ -1482,7 +1488,7 @@ impl State {
 
     /// Install the catalog or host function `function` as global `name`.
     pub(crate) fn set_global_rust_fn(&mut self, name: &str, function: RustFnId) -> Result<()> {
-        self.set_global_value(name, Val::RustFn(function))
+        self.set_global_value(name, Val::rust_fn(function))
     }
 
     /// Creates a new Rust function entry and returns its handle; push it with
@@ -1556,7 +1562,7 @@ impl State {
         // interning collects.
         let key = self.allocator().alloc_string(name.as_bytes());
         self.global_env
-            .write_key(&mut self.heap, key, Val::RustFn(function));
+            .write_key(&mut self.heap, key, Val::rust_fn(function));
         Ok(handle)
     }
 
@@ -1917,7 +1923,7 @@ impl State {
     pub(super) fn alloc_string(&mut self, bytes: impl AsRef<[u8]>) -> Result<Val> {
         check_string_size(bytes.as_ref().len())?;
         let ptr = self.allocator().alloc_string(bytes.as_ref());
-        Ok(Val::Str(ptr))
+        Ok(Val::str(ptr))
     }
 
     /// `alloc_string` for a result built in an owned buffer: the same size
@@ -1927,7 +1933,7 @@ impl State {
     pub(super) fn alloc_string_owned(&mut self, bytes: Vec<u8>) -> Result<Val> {
         check_string_size(bytes.len())?;
         let ptr = self.allocator().alloc_string_owned(bytes);
-        Ok(Val::Str(ptr))
+        Ok(Val::str(ptr))
     }
 
     /// Construct an [`Error`] of the given kind with no source position.
@@ -2013,7 +2019,7 @@ mod runtime_tests {
         let state = State::new();
         assert!(
             (0..Builtin::COUNT)
-                .all(|slot| state.global_env.read_builtin(&state.heap, slot as u8) != Val::Nil)
+                .all(|slot| state.global_env.read_builtin(&state.heap, slot as u8) != Val::NIL)
         );
     }
 
@@ -2125,10 +2131,10 @@ mod runtime_tests {
         /// the collector's own enumeration.
         fn handles(self) -> Vec<Val> {
             match self {
-                Self::Field(e) | Self::SetField(e) => vec![Val::Obj(e.table)],
-                Self::Method(e) => vec![Val::Obj(e.receiver_metatable), Val::Obj(e.method_table)],
-                Self::StringMethod(e) => vec![Val::Obj(e.string_lib)],
-                Self::Tfor(e) => vec![Val::Obj(e.table)],
+                Self::Field(e) | Self::SetField(e) => vec![Val::obj(e.table)],
+                Self::Method(e) => vec![Val::obj(e.receiver_metatable), Val::obj(e.method_table)],
+                Self::StringMethod(e) => vec![Val::obj(e.string_lib)],
+                Self::Tfor(e) => vec![Val::obj(e.table)],
             }
         }
     }
@@ -2391,14 +2397,14 @@ mod runtime_tests {
             before
                 .iter()
                 .any(|(_, cell)| matches!(cell, CachedEntry::Method(e)
-                if live(&Val::Obj(e.receiver_metatable)) && !live(&Val::Obj(e.method_table)))),
+                if live(&Val::obj(e.receiver_metatable)) && !live(&Val::obj(e.method_table)))),
             "no method entry had its method table freed under a surviving metatable"
         );
         assert!(
             before
                 .iter()
                 .any(|(_, cell)| matches!(cell, CachedEntry::Method(e)
-                if !live(&Val::Obj(e.receiver_metatable)) && live(&Val::Obj(e.method_table)))),
+                if !live(&Val::obj(e.receiver_metatable)) && live(&Val::obj(e.method_table)))),
             "no method entry had a freed metatable with a surviving method table"
         );
         let method_entries = before
@@ -2661,9 +2667,10 @@ mod snapshot_env_alias_tests {
             .set_global("string")
             .expect("string builtin can be rebound");
 
-        let Val::Obj(shared_table) = state
+        let Some(shared_table) = state
             .global_env
             .read_builtin(&state.heap, Builtin::Math as u8)
+            .as_object_ptr()
         else {
             panic!("math builtin is a table");
         };
@@ -2671,7 +2678,7 @@ mod snapshot_env_alias_tests {
             state
                 .global_env
                 .read_builtin(&state.heap, Builtin::String as u8),
-            Val::Obj(shared_table)
+            Val::obj(shared_table)
         );
 
         state.capture_env_tables();

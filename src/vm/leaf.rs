@@ -59,6 +59,7 @@ use super::{Result, State, Val};
 use crate::cost_model::Charge;
 use crate::lua_std::math;
 use crate::numeral::{exact_i64, parse_lua_numeral};
+use crate::vm::lua_val::ValKind;
 
 /// A standard-library function the dispatch loop executes directly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,7 +109,7 @@ impl State {
     /// function first, so a Lua callee pays no call here.
     #[inline(never)]
     pub(super) fn call_leaf(&mut self, idx: usize, num_args: u8) -> Result<Option<u8>> {
-        let Val::RustFn(function) = self.stack[idx] else {
+        let ValKind::RustFn(function) = self.stack[idx].kind() else {
             return Ok(None);
         };
         let Some(leaf) = crate::lua_std::leaf_of(function) else {
@@ -125,15 +126,12 @@ impl State {
         let n = usize::from(num_args);
         debug_assert_eq!(self.stack.len(), idx + 1 + n);
         let arg = |state: &Self, i: usize| (i < n).then(|| state.stack[idx + 1 + i]);
-        let num = |state: &Self, i: usize| match arg(state, i) {
-            Some(Val::Num(x)) => Some(x),
-            _ => None,
-        };
+        let num = |state: &Self, i: usize| arg(state, i).and_then(|value| value.as_num());
         // An optional numeric argument: absent or nil is `Some(None)`, a
         // number `Some(Some(x))`, anything else `None` (the callback errors).
-        let opt_num = |state: &Self, i: usize| match arg(state, i) {
-            None | Some(Val::Nil) => Some(None),
-            Some(Val::Num(x)) => Some(Some(x)),
+        let opt_num = |state: &Self, i: usize| match arg(state, i).map(Val::kind) {
+            None | Some(ValKind::Nil) => Some(None),
+            Some(ValKind::Num(x)) => Some(Some(x)),
             Some(_) => None,
         };
         let unary =
@@ -184,7 +182,7 @@ impl State {
                     return Ok(None);
                 }
                 let equal = self.stack[idx + 1] == self.stack[idx + 2];
-                return self.leaf_free_result(idx, Val::Bool(equal));
+                return self.leaf_free_result(idx, Val::boolean(equal));
             }
             Leaf::RawLen => {
                 let Some(value) = arg(self, 0) else {
@@ -205,20 +203,20 @@ impl State {
                     reason = "rawlen reports a length as a Lua number, as its callback does."
                 )]
                 let len = len as f64;
-                return self.leaf_free_result(idx, Val::Num(len));
+                return self.leaf_free_result(idx, Val::num(len));
             }
             Leaf::ToNumber => {
                 let Some(value) = arg(self, 0) else {
                     return Ok(None);
                 };
-                if !matches!(arg(self, 1), None | Some(Val::Nil)) {
+                if arg(self, 1).is_some_and(|value| !value.is_nil()) {
                     return Ok(None);
                 }
-                let result = match value {
-                    Val::Num(_) => value,
+                let result = match value.kind() {
+                    ValKind::Num(_) => value,
                     _ => match value.as_string(&self.heap) {
-                        Some(bytes) => parse_lua_numeral(bytes).map_or(Val::Nil, Val::Num),
-                        None => Val::Nil,
+                        Some(bytes) => parse_lua_numeral(bytes).map_or(Val::NIL, Val::num),
+                        None => Val::NIL,
                     },
                 };
                 return self.leaf_free_result(idx, result);
@@ -251,7 +249,7 @@ impl State {
             return Ok(None);
         };
         self.enter_leaf(Some(charge))?;
-        self.leaf_result(idx, Val::Num(result))?;
+        self.leaf_result(idx, Val::num(result))?;
         Ok(Some(1))
     }
 
@@ -289,9 +287,9 @@ impl State {
         };
         self.enter_leaf(Some(Charge::MathModf))?;
         let (integral, fractional) = math::modf_of(x);
-        self.leaf_result(idx, Val::Num(integral))?;
+        self.leaf_result(idx, Val::num(integral))?;
         self.check_stack_slot_at(idx + 1)?;
-        self.push_unchecked(Val::Num(fractional));
+        self.push_unchecked(Val::num(fractional));
         Ok(Some(2))
     }
 
@@ -299,8 +297,8 @@ impl State {
     /// draw is made before the result's slot check, as the callback does, so
     /// a refused push leaves the stream advanced exactly as there.
     fn leaf_random(&mut self, idx: usize, n: usize) -> Result<Option<u8>> {
-        let integer = |state: &Self, i: usize| match state.stack[idx + 1 + i] {
-            Val::Num(x) => exact_i64(x),
+        let integer = |state: &Self, i: usize| match state.stack[idx + 1 + i].kind() {
+            ValKind::Num(x) => exact_i64(x),
             _ => None,
         };
         let range = match n {
@@ -320,7 +318,7 @@ impl State {
             None => self.rng.random_f64(),
             Some((low, high)) => math::draw_range(self, low, high)?,
         };
-        self.leaf_result(idx, Val::Num(result))?;
+        self.leaf_result(idx, Val::num(result))?;
         Ok(Some(1))
     }
 
@@ -388,12 +386,12 @@ impl State {
                 clippy::cast_precision_loss,
                 reason = "select reports a count as a Lua number, as its callback does."
             )]
-            let count = Val::Num(varargs as f64);
+            let count = Val::num(varargs as f64);
             self.leaf_result(idx, count)?;
             return Ok(Some(1));
         }
-        let Some(raw) = (match selector {
-            Val::Num(x) => exact_i64(x),
+        let Some(raw) = (match selector.kind() {
+            ValKind::Num(x) => exact_i64(x),
             _ => None,
         }) else {
             return Ok(None);
@@ -428,7 +426,7 @@ impl State {
     /// A position argument as the callbacks' `arg_integer` reads it on
     /// success: a number holding an exact non-negative integer.
     fn exact_position(value: Val) -> Option<usize> {
-        let Val::Num(x) = value else {
+        let ValKind::Num(x) = value.kind() else {
             return None;
         };
         // A negative integer is not a position: the caller declines.
@@ -487,7 +485,8 @@ impl State {
             return Ok(None);
         };
         let pos = match (n > 1).then(|| self.stack[idx + 2]) {
-            None | Some(Val::Nil) => len,
+            None => len,
+            Some(value) if value.is_nil() => len,
             Some(value) => match Self::exact_position(value) {
                 Some(pos)
                     if (len == 0 && pos <= 1) || (len > 0 && (1..=len + 1).contains(&pos)) =>

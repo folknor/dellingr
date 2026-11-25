@@ -8,6 +8,7 @@
 //! ObjectPtr contains a generation that is validated on access, preventing
 //! use-after-free bugs.
 
+use crate::vm::lua_val::ValKind;
 mod arena;
 mod collector;
 
@@ -203,14 +204,14 @@ impl UpvaluePool {
         self.bits.sweep(|idx| {
             // Drop the held value so a swept closed upvalue cannot pin heap
             // objects; the slot is dead until reallocated.
-            slots[idx] = Upvalue::Closed(Val::Nil);
+            slots[idx] = Upvalue::Closed(Val::NIL);
             free.push(idx);
         });
     }
 
     #[cfg(feature = "snapshot")]
     pub(super) fn alloc_closed_nil(&mut self) -> UpvalueRef {
-        self.alloc(Upvalue::Closed(Val::Nil))
+        self.alloc(Upvalue::Closed(Val::NIL))
     }
 
     #[cfg(feature = "snapshot")]
@@ -330,13 +331,6 @@ pub(super) struct GmatchObject {
 /// pay for this enum's largest variant. Boxing tables would add an allocation
 /// and indirection to every table, including small records; keep them inline
 /// unless measurements justify that tradeoff.
-#[cfg_attr(
-    debug_assertions,
-    expect(
-        clippy::large_enum_variant,
-        reason = "Table is stored inline so table access takes no extra indirection; its debug-only state pushes the gap to the inline closure past the lint threshold, which release builds stay under"
-    )
-)]
 pub(super) enum RawObject {
     LuaFn(Closure),
     Table(Table),
@@ -393,6 +387,16 @@ impl ArenaKey for StringKey {
 /// [`CACHE_PRUNE_INTERVAL`]).
 #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct ObjectPtr(pub(crate) ObjectKey);
+
+impl ObjectPtr {
+    pub(super) fn payload(self) -> u64 {
+        self.0.0.payload()
+    }
+
+    pub(super) fn from_payload(payload: u64) -> Self {
+        Self(ObjectKey(SlotKey::from_payload(payload)))
+    }
+}
 
 /// How many collections may pass between two runs of the runtime-cache
 /// prune (`State::drop_dead_cache_entries`).
@@ -506,11 +510,11 @@ impl GcThreshold {
 /// Bytes in table backing and interned string payloads owned by the heap,
 /// including table backing temporarily held by suspended environments.
 pub(super) struct ResidentBytes {
-    bytes: usize,
+    bytes: u64,
     // The first byte count that makes the automatic score reach its threshold.
     // MAX also serves as the sentinel for disabled or unreachable watermarks
     // and while a pending poll already covers further growth.
-    watermark: usize,
+    watermark: u64,
     interrupt: super::Interrupt,
     poll_source: super::Interrupt,
 }
@@ -530,34 +534,34 @@ static GC_PENDING: std::sync::LazyLock<super::Interrupt> = std::sync::LazyLock::
 });
 
 impl ResidentBytes {
-    pub(super) fn new(bytes: usize) -> Self {
+    pub(super) fn new(bytes: u64) -> Self {
         let interrupt = super::Interrupt::new();
         Self {
             bytes,
-            watermark: usize::MAX,
+            watermark: u64::MAX,
             poll_source: interrupt.clone(),
             interrupt,
         }
     }
 
-    pub(super) fn add(&mut self, bytes: usize) {
+    pub(super) fn add(&mut self, bytes: u64) {
         self.bytes += bytes;
         if self.bytes >= self.watermark {
             self.arm_gc_poll();
         }
     }
 
-    pub(super) fn remove(&mut self, bytes: usize) {
+    pub(super) fn remove(&mut self, bytes: u64) {
         self.bytes -= bytes;
     }
 
     #[cold]
     fn arm_gc_poll(&mut self) {
         self.poll_source = GC_PENDING.clone();
-        self.watermark = usize::MAX;
+        self.watermark = u64::MAX;
     }
 
-    fn refresh_watermark(&mut self, watermark: usize) {
+    fn refresh_watermark(&mut self, watermark: u64) {
         if self.bytes >= watermark {
             if self.poll_source.same_as(&self.interrupt) {
                 self.arm_gc_poll();
@@ -571,7 +575,7 @@ impl ResidentBytes {
     }
 
     #[cfg(any(feature = "snapshot", test))]
-    pub(super) fn replace(&mut self, old: usize, new: usize) {
+    pub(super) fn replace(&mut self, old: u64, new: u64) {
         self.remove(old);
         self.add(new);
     }
@@ -883,8 +887,8 @@ impl GcHeap {
     }
 
     #[cfg(debug_assertions)]
-    fn check_resident_bytes(&self, suspended: usize) {
-        let tables: usize = self
+    fn check_resident_bytes(&self, suspended: u64) {
+        let tables: u64 = self
             .objects
             .values()
             .map(|object| match object {
@@ -1016,10 +1020,10 @@ impl GcHeap {
     #[inline]
     pub(super) fn refresh_gc_watermark(&mut self) {
         let watermark = match self.threshold {
-            GcThreshold::Automatic(threshold) => threshold
-                .saturating_sub(self.allocation_count())
+            GcThreshold::Automatic(threshold) => (threshold.saturating_sub(self.allocation_count())
+                as u64)
                 .saturating_mul(tuning::GC_RESIDENT_BYTES_PER_UNIT),
-            GcThreshold::Manual(_) | GcThreshold::Disabled => usize::MAX,
+            GcThreshold::Manual(_) | GcThreshold::Disabled => u64::MAX,
         };
         self.resident.refresh_watermark(watermark);
     }
@@ -1043,8 +1047,9 @@ impl GcHeap {
     /// Manual thresholds keep counting allocations only.
     #[inline]
     pub(super) fn pacing_score(&self) -> usize {
+        let units = self.resident.bytes / tuning::GC_RESIDENT_BYTES_PER_UNIT;
         self.allocation_count()
-            .saturating_add(self.resident.bytes / tuning::GC_RESIDENT_BYTES_PER_UNIT)
+            .saturating_add(crate::saturate::saturating_cast(units))
     }
 
     /// Mark an object as reachable. Call this for all root objects.
@@ -1231,9 +1236,9 @@ impl GcHeap {
     /// later than right after a sweep it is still exact for a freed handle
     /// whose slot has not been reused 2^15 times since.
     pub(super) fn val_is_live(&self, val: &Val) -> bool {
-        match val {
-            Val::Obj(ptr) => self.objects.contains(ptr.0),
-            Val::Str(ptr) => self.strings.contains(*ptr),
+        match val.kind() {
+            ValKind::Obj(ptr) => self.objects.contains(ptr.0),
+            ValKind::Str(ptr) => self.strings.contains(ptr),
             _ => true,
         }
     }
@@ -1336,9 +1341,9 @@ impl Markable for Val {
     // retired instructions (bench/host/many_chunks).
     #[inline(always)]
     fn mark_reachable(&self, heap: &GcHeap, worklist: &mut Vec<ObjectPtr>) {
-        match self {
-            Val::Obj(ptr) => heap.mark(*ptr, worklist),
-            Val::Str(ptr) => heap.mark_string(*ptr),
+        match self.kind() {
+            ValKind::Obj(ptr) => heap.mark(ptr, worklist),
+            ValKind::Str(ptr) => heap.mark_string(ptr),
             _ => (),
         }
     }
@@ -1436,6 +1441,16 @@ impl StringData {
 /// - Accessing with an old key panics instead of causing memory corruption
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct StringPtr(StringKey);
+
+impl StringPtr {
+    pub(super) fn payload(self) -> u64 {
+        self.0.0.payload()
+    }
+
+    pub(super) fn from_payload(payload: u64) -> Self {
+        Self(StringKey(SlotKey::from_payload(payload)))
+    }
+}
 
 /// String pool over a generational arena.
 /// Provides string interning with use-after-free detection.
@@ -1554,7 +1569,7 @@ impl StringPool {
             hash,
         });
         vacant.insert(key);
-        resident.add(bytes_len);
+        resident.add(bytes_len as u64);
         StringPtr(key)
     }
 
@@ -1589,7 +1604,7 @@ impl StringPool {
         let data = StringData::new(bytes);
         let key = self.strings.insert(StringEntry { data, hash });
         vacant.insert(key);
-        resident.add(bytes_len);
+        resident.add(bytes_len as u64);
         Some(StringPtr(key))
     }
 
@@ -1615,10 +1630,10 @@ impl StringPool {
     }
 
     #[cfg(any(debug_assertions, test))]
-    fn resident_bytes(&self) -> usize {
+    fn resident_bytes(&self) -> u64 {
         self.strings
             .values()
-            .map(|entry| entry.data.as_bytes().len())
+            .map(|entry| entry.data.as_bytes().len() as u64)
             .sum()
     }
 
@@ -1640,7 +1655,7 @@ impl StringPool {
     fn collect(&mut self, resident: &mut ResidentBytes) {
         let index = &mut self.index;
         self.strings.sweep(|key, entry| {
-            resident.remove(entry.data.as_bytes().len());
+            resident.remove(entry.data.as_bytes().len() as u64);
             match index.find_entry(entry.hash, |k| *k == key) {
                 Ok(found) => {
                     found.remove();
@@ -1781,7 +1796,7 @@ mod tests {
     #[should_panic(expected = "marking it could let sweep add the same free slot twice")]
     fn marking_a_swept_upvalue_slot_is_rejected() {
         let mut pool = UpvaluePool::new();
-        let uv_ref = pool.alloc(Upvalue::Closed(Val::Nil));
+        let uv_ref = pool.alloc(Upvalue::Closed(Val::NIL));
         pool.sweep();
 
         pool.mark(uv_ref, &GcHeap::with_threshold(100), &mut Vec::new());
@@ -1792,7 +1807,7 @@ mod tests {
         let mut heap = GcHeap::with_threshold(100);
         let captured = heap.no_gc_allocator().alloc_table();
         let mut pool = UpvaluePool::new();
-        let uv_ref = pool.alloc(Upvalue::Closed(Val::Obj(captured)));
+        let uv_ref = pool.alloc(Upvalue::Closed(Val::obj(captured)));
         let mut worklist = Vec::new();
         pool.mark(uv_ref, &heap, &mut worklist);
         assert_eq!(worklist, vec![captured]);
@@ -1833,7 +1848,7 @@ mod tests {
                 let next = heap.no_gc_allocator().alloc_table();
                 heap.edit_table(next)
                     .expect("newly allocated object is a table")
-                    .insert(Val::Num(1.0), Val::Obj(root))
+                    .insert(Val::num(1.0), Val::obj(root))
                     .expect("table key is valid");
                 root = next;
             }
@@ -1920,8 +1935,8 @@ mod tests {
             resident.bytes,
             survivors
                 .iter()
-                .map(|(_, bytes, _)| bytes.len())
-                .sum::<usize>()
+                .map(|(_, bytes, _)| bytes.len() as u64)
+                .sum::<u64>()
         );
     }
 
@@ -1965,7 +1980,7 @@ mod tests {
         pool.mark(collided);
         pool.collect(&mut resident);
         assert_eq!(pool.len(), 1);
-        assert_eq!(resident.bytes, b"keep collision".len());
+        assert_eq!(resident.bytes, b"keep collision".len() as u64);
         assert_eq!(pool.find_by_hash(b"keep", 2), None);
         assert_eq!(pool.find_by_hash(b"replacement", 1), None);
         assert_eq!(pool.find_by_hash(b"keep collision", 3), Some(collided));
@@ -1990,14 +2005,14 @@ mod tests {
             owned.extend_from_slice(content);
             let adopted = pool.intern_storage(owned, 7, &mut resident);
             assert_eq!(pool.get(adopted), content);
-            assert_eq!(resident.bytes, content.len());
+            assert_eq!(resident.bytes, content.len() as u64);
             assert_eq!(pool.intern(content, 7, &mut resident), adopted);
             let mut again = Vec::with_capacity(content.len());
             again.extend_from_slice(content);
             assert_eq!(pool.intern_storage(again, 7, &mut resident), adopted);
             assert_eq!(pool.len(), 1);
-            assert_eq!(resident.bytes, content.len());
-            assert_eq!(pool.resident_bytes(), content.len());
+            assert_eq!(resident.bytes, content.len() as u64);
+            assert_eq!(pool.resident_bytes(), content.len() as u64);
         }
     }
 

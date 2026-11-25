@@ -22,6 +22,7 @@ use super::{Error, Result, State, Val};
 use crate::compiler::UpvalueDesc;
 use crate::instr::{ArgCount, CompareOp, Instr, RetCount};
 use crate::limits::MAX_TABLE_BATCH_SIZE;
+use crate::vm::lua_val::ValKind;
 
 impl State {
     /// The value of upvalue `index` of the running closure, whose capture
@@ -102,7 +103,7 @@ impl State {
     pub(super) fn reg_new_table_template(&mut self, frame: &Frame, dst: usize, template: u16) {
         let prototype = frame.runtime.template(usize::from(template));
         let obj = self.allocator().alloc_table_with_template(prototype);
-        self.stack[dst] = Val::Obj(obj);
+        self.stack[dst] = Val::obj(obj);
     }
 
     /// `R[dst] = receiver.name`. Only a current own-field cache hit runs in
@@ -120,7 +121,7 @@ impl State {
     /// is answered by the string-method cache inside the resolver. Answering
     /// it here instead was built at 0661bcb in two placements, the hit-only
     /// read (`get_cached_string_method` without its renew) inlined behind a
-    /// `Val::Str` test, and the same read as an outlined leaf called before
+    /// string tag test, and the same read as an outlined leaf called before
     /// the resolver. Both grew `Frame::run` on every native level in
     /// release: `index_field` and `string_library_index` 640 to 688 bytes
     /// inlined, 640 to 672 outlined, most other shapes 16 more. No workload
@@ -228,18 +229,17 @@ impl State {
             .and_then(|ptr| self.heap.as_table_ref(ptr))
         {
             Some(tbl) => {
-                let hint: Option<&TableKeySlot> = match key_val {
-                    Val::Str(_) => frame.runtime.caches.table_key(inst.cache_slot()),
-                    _ => None,
+                let hint: Option<&TableKeySlot> = if key_val.is_string() {
+                    frame.runtime.caches.table_key(inst.cache_slot())
+                } else {
+                    None
                 };
                 let val = match hint {
                     Some(hint) => tbl.string_get_hinted(hint, key_val),
                     None => tbl.get(&key_val),
                 };
                 match tbl.get_metatable() {
-                    Some(metatable) if matches!(val, Val::Nil) => {
-                        IndexStart::AfterRawMiss(metatable)
-                    }
+                    Some(metatable) if val.is_nil() => IndexStart::AfterRawMiss(metatable),
                     _ => {
                         self.stack[dst] = val;
                         return Ok(());
@@ -276,7 +276,7 @@ impl State {
         let val = self.stack[src];
         let key = frame.literal(name);
         let cache = frame.runtime.caches.set_field(cache_slot);
-        if !matches!(val, Val::Nil)
+        if !val.is_nil()
             && let Some(ptr) = receiver.as_object_ptr()
             && let Some(cache) = cache
             && self.try_set_field_cached(ptr, key, val, cache)
@@ -458,7 +458,7 @@ impl State {
     ) -> Result<()> {
         let val = self.stack[src];
         if let Some(s) = val.as_string(&self.heap) {
-            self.stack[dst] = Val::Num(s.len() as f64);
+            self.stack[dst] = Val::num(s.len() as f64);
             return Ok(());
         }
         if let Some(tbl) = val
@@ -466,7 +466,7 @@ impl State {
             .and_then(|ptr| self.heap.as_table_ref(ptr))
             && tbl.get_metatable().is_none()
         {
-            self.stack[dst] = Val::Num(tbl.array_len() as f64);
+            self.stack[dst] = Val::num(tbl.array_len() as f64);
             return Ok(());
         }
         match self.resolve_length(val, local_cost)? {
@@ -505,9 +505,9 @@ impl State {
         let Some((target, negate)) = op.ordering() else {
             return Ok((lhs == rhs) == (op == CompareOp::Eq));
         };
-        let result = match (lhs, rhs) {
-            (Val::Num(n1), Val::Num(n2)) => n1.partial_cmp(&n2).map(|cmp| cmp == target),
-            (Val::Str(s1), Val::Str(s2)) => {
+        let result = match (lhs.kind(), rhs.kind()) {
+            (ValKind::Num(n1), ValKind::Num(n2)) => n1.partial_cmp(&n2).map(|cmp| cmp == target),
+            (ValKind::Str(s1), ValKind::Str(s2)) => {
                 let cmp = self.heap.get_string(s1).cmp(self.heap.get_string(s2));
                 Some(cmp == target)
             }
@@ -559,7 +559,7 @@ impl State {
             UpvalueDesc::Upvalue(idx) => frame.upvalues.as_slice()[*idx as usize],
         }));
         let obj = self.alloc_closure(runtime, upvalues);
-        self.stack[dst] = Val::Obj(obj);
+        self.stack[dst] = Val::obj(obj);
         Ok(())
     }
 
@@ -582,7 +582,7 @@ impl State {
                     let varargs = &self.in_flight.vararg_stack[start..];
                     self.stack[dst..dst + copied].copy_from_slice(&varargs[..copied]);
                 }
-                self.stack[dst + copied..dst + n].fill(Val::Nil);
+                self.stack[dst + copied..dst + n].fill(Val::NIL);
             }
             RetCount::All => {
                 self.check_window(dst)?;
@@ -615,17 +615,17 @@ mod tests {
     fn refused_open_vararg_growth_preserves_the_live_register_window() {
         let mut state = State::new();
         let original = vec![
-            Val::Num(10.0),
-            Val::Num(20.0),
-            Val::Num(30.0),
-            Val::Num(40.0),
+            Val::num(10.0),
+            Val::num(20.0),
+            Val::num(30.0),
+            Val::num(40.0),
         ];
         state.stack.clone_from(&original);
         state.in_flight.vararg_stack.extend_from_slice(&[
-            Val::Num(50.0),
-            Val::Num(60.0),
-            Val::Num(70.0),
-            Val::Num(80.0),
+            Val::num(50.0),
+            Val::num(60.0),
+            Val::num(70.0),
+            Val::num(80.0),
         ]);
         state.in_flight.call_stack.push(CallInfo {
             bytecode: Arc::new(Bytecode::default()),

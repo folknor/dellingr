@@ -169,10 +169,9 @@ refuses to compute in such an environment instead.
 - The host receives every NaN as that same canonical quiet NaN
   (`0x7ff8_0000_0000_0000`): `State::to_number`, `State::raw_field` and
   `State::raw_fields` read as `f64` or `Option<f64>`, a `State::invoke` result read the same way, and the
-  `ErrorValue::Number` of `error(x)`. Inside
-  the VM a NaN keeps whatever sign and payload the hardware or a host push
-  gave it, but no exit lets those bits out. Every other number, `-0.0`
-  included, reaches the host with its exact bits.
+  `ErrorValue::Number` of `error(x)`. The VM canonicalizes NaNs when it
+  publishes them as Lua values. Every other number, `-0.0` included,
+  reaches the host with its exact bits.
 
 ## `pairs` order
 

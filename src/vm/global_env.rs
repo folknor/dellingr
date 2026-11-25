@@ -27,6 +27,7 @@
 //! load setup reinstalls them too, so they keep the same slot policy, seal
 //! with this table, and save and restore by the same rule.
 
+use crate::vm::lua_val::ValKind;
 use std::cell::Cell;
 
 use crate::instr::Builtin;
@@ -171,7 +172,7 @@ pub(super) struct SuspendedEnv {
 
 impl SuspendedEnv {
     #[cfg(debug_assertions)]
-    pub(super) fn resident_bytes(&self) -> usize {
+    pub(super) fn resident_bytes(&self) -> u64 {
         self.contents.resident_bytes()
     }
 
@@ -222,7 +223,7 @@ impl GlobalEnv {
             table,
             builtin_names,
             builtin_caches: std::array::from_fn(|_| GlobalLookupCacheSlot::default()),
-            builtin_mirror: std::array::from_fn(|_| Cell::new((stale, Val::Nil))),
+            builtin_mirror: std::array::from_fn(|_| Cell::new((stale, Val::NIL))),
             phase: Phase::Initializing,
             #[cfg(feature = "snapshot")]
             pins: Vec::new(),
@@ -344,12 +345,12 @@ impl GlobalEnv {
     /// The interned key for builtin `slot`.
     #[inline(always)]
     pub(super) fn builtin_key(&self, slot: u8) -> Val {
-        Val::Str(self.builtin_names[usize::from(slot)])
+        Val::str(self.builtin_names[usize::from(slot)])
     }
 
     /// Whether `key` is a builtin name. For cache fills, off the hot path.
     fn is_builtin_key(&self, key: Val) -> bool {
-        matches!(key, Val::Str(ptr) if self.builtin_names.contains(&ptr))
+        matches!(key.kind(), ValKind::Str(ptr) if self.builtin_names.contains(&ptr))
     }
 
     // Global bindings as authoritative cells (bytecode linked to State-local
@@ -463,7 +464,7 @@ impl GlobalEnv {
             if let Some(cache) = cache {
                 cache.set(GlobalLookupCacheEntry { probe, builtin });
             }
-        } else if !matches!(val, Val::Nil) {
+        } else if !val.is_nil() {
             table
                 .insert(key, val)
                 .expect("a string key lives in the hash part, whose insertion cannot fail");
@@ -518,7 +519,7 @@ impl GlobalEnv {
             return self.read_builtin(heap, builtin.to_u8());
         }
         heap.find_string(name.as_bytes())
-            .map_or(Val::Nil, |key| self.read(heap, Val::Str(key), None))
+            .map_or(Val::NIL, |key| self.read(heap, Val::str(key), None))
     }
 
     /// Store a global under an interned `key`, through the builtin cache when
@@ -526,7 +527,7 @@ impl GlobalEnv {
     pub(super) fn write_key(&self, heap: &mut GcHeap, key: StringPtr, val: Val) {
         match self.builtin_names.iter().position(|name| *name == key) {
             Some(slot) => self.write_builtin(heap, slot as u8, &val),
-            None => self.write(heap, Val::Str(key), val, None),
+            None => self.write(heap, Val::str(key), val, None),
         }
     }
 
@@ -539,8 +540,8 @@ impl GlobalEnv {
     ) -> impl Iterator<Item = (StringPtr, Val)> + 'h {
         self.contents(heap)
             .live_hash_entries()
-            .filter_map(|(_, key, value)| match key {
-                Val::Str(ptr) => Some((ptr, value)),
+            .filter_map(|(_, key, value)| match key.kind() {
+                ValKind::Str(ptr) => Some((ptr, value)),
                 _ => None,
             })
     }
@@ -559,9 +560,9 @@ impl GlobalEnv {
             let Some(key) = heap.find_string(name.as_bytes()) else {
                 continue;
             };
-            let key = Val::Str(key);
+            let key = Val::str(key);
             let value = outer.get(&key);
-            if !matches!(value, Val::Nil) {
+            if !value.is_nil() {
                 editor
                     .insert(key, value)
                     .expect("a string key lives in the hash part, whose insertion cannot fail");
@@ -618,7 +619,7 @@ impl GlobalEnv {
     /// Raw slot lookup, tombstones included, for tests that inspect the table.
     #[cfg(test)]
     pub(super) fn get(&self, heap: &GcHeap, name: &str) -> Option<Val> {
-        let key = Val::Str(heap.find_string(name.as_bytes())?);
+        let key = Val::str(heap.find_string(name.as_bytes())?);
         let (probe, value) = self.contents(heap).probe_hash(&key);
         probe.has_slot().then_some(value)
     }
@@ -650,8 +651,8 @@ fn string_slot_keys(table: &Table) -> impl Iterator<Item = StringPtr> + '_ {
     table
         .snapshot_hash_slots()
         .into_iter()
-        .filter_map(|(key, _)| match key {
-            Val::Str(ptr) => Some(ptr),
+        .filter_map(|(key, _)| match key.kind() {
+            ValKind::Str(ptr) => Some(ptr),
             _ => None,
         })
 }
@@ -754,15 +755,16 @@ fn restore_environment_table(
     let mut mentioned: IndexSet<TableKey> =
         IndexSet::with_capacity_and_hasher(entries.len() + saved_pins.len(), FixedState::default());
     for (key, _) in &entries {
-        if !matches!(key, Val::Nil) {
+        if !key.is_nil() {
             mentioned.insert(TableKey::from_prevalidated(*key));
         }
     }
     for pin in &saved_pins {
-        mentioned.insert(TableKey::from_prevalidated(Val::Str(*pin)));
+        mentioned.insert(TableKey::from_prevalidated(Val::str(*pin)));
     }
     entries.extend(setup_slots.into_iter().filter(|(key, _)| {
-        matches!(key, Val::Str(_)) && !mentioned.contains(&TableKey::from_prevalidated(*key))
+        matches!(key.kind(), ValKind::Str(_))
+            && !mentioned.contains(&TableKey::from_prevalidated(*key))
     }));
     table.rebuild_from_snapshot(array_len, array_slots, entries)?;
     table.set_metatable(metatable);
@@ -795,10 +797,7 @@ impl Markable for GlobalEnv {
                     .probe_hash(&self.builtin_key(slot as u8));
                 // Lua equality rejects NaN and equates signed zeros; the
                 // mirror must hold identical numeric bits instead.
-                debug_assert!(match (mirrored, actual) {
-                    (Val::Num(left), Val::Num(right)) => left.to_bits() == right.to_bits(),
-                    (left, right) => left == right,
-                });
+                debug_assert!(mirrored.same_bits(actual));
             }
         }
         heap.mark(self.table, worklist);
@@ -883,23 +882,23 @@ mod tests {
         let entry = cache.get().expect("writer call fills its cache slot");
         assert_eq!(
             state.global_env.read_cached(&state.heap, cache),
-            Some(Val::Num(2.0))
+            Some(Val::num(2.0))
         );
 
         call_writer(&mut state, "a", 3.0);
         assert_eq!(cache.get(), Some(entry));
         assert_eq!(
             state.global_env.read_cached(&state.heap, cache),
-            Some(Val::Num(3.0))
+            Some(Val::num(3.0))
         );
         assert!(
             state
                 .global_env
-                .write_cached(&mut state.heap, cache, &Val::Num(4.0))
+                .write_cached(&mut state.heap, cache, &Val::num(4.0))
         );
         assert_eq!(
             state.global_env.get(&state.heap, "cache_target"),
-            Some(Val::Num(4.0))
+            Some(Val::num(4.0))
         );
     }
 
@@ -918,12 +917,12 @@ mod tests {
         assert!(
             !state
                 .global_env
-                .write_cached(&mut state.heap, &cache, &Val::Num(1.0))
+                .write_cached(&mut state.heap, &cache, &Val::num(1.0))
         );
         assert!(
             !state
                 .global_env
-                .write_cached(&mut state.heap, &cache, &Val::Nil)
+                .write_cached(&mut state.heap, &cache, &Val::NIL)
         );
     }
 
@@ -933,17 +932,17 @@ mod tests {
         let mut state = State::raw();
         let slot = Builtin::Print as u8;
         let env = &state.global_env;
-        env.write_builtin(&mut state.heap, slot, &Val::Num(1.0));
-        assert_eq!(env.read_builtin(&state.heap, slot), Val::Num(1.0));
+        env.write_builtin(&mut state.heap, slot, &Val::num(1.0));
+        assert_eq!(env.read_builtin(&state.heap, slot), Val::num(1.0));
         let epoch = state.heap.watched_epoch();
         state
             .heap
             .edit_table(env.table())
             .expect("global table")
-            .insert(env.builtin_key(slot), Val::Num(2.0))
+            .insert(env.builtin_key(slot), Val::num(2.0))
             .expect("string key fits the hash part");
         assert_ne!(state.heap.watched_epoch(), epoch);
-        assert_eq!(env.read_builtin(&state.heap, slot), Val::Num(2.0));
+        assert_eq!(env.read_builtin(&state.heap, slot), Val::num(2.0));
     }
 
     #[test]
@@ -957,16 +956,16 @@ mod tests {
             .map(|i| key(&mut state, &format!("churn{i}")))
             .collect();
         let env = &state.global_env;
-        env.write_builtin(&mut state.heap, live, &Val::Num(1.0));
-        env.write_builtin(&mut state.heap, cleared, &Val::Num(2.0));
-        env.write_builtin(&mut state.heap, cleared, &Val::Nil);
-        assert_eq!(env.read_builtin(&state.heap, live), Val::Num(1.0));
-        assert_eq!(env.read_builtin(&state.heap, cleared), Val::Nil);
+        env.write_builtin(&mut state.heap, live, &Val::num(1.0));
+        env.write_builtin(&mut state.heap, cleared, &Val::num(2.0));
+        env.write_builtin(&mut state.heap, cleared, &Val::NIL);
+        assert_eq!(env.read_builtin(&state.heap, live), Val::num(1.0));
+        assert_eq!(env.read_builtin(&state.heap, cleared), Val::NIL);
         let epoch = state.heap.watched_epoch();
         let version = env.contents(&state.heap).version_stamp();
         for &name in &names {
-            env.write(&mut state.heap, name, Val::Num(3.0), None);
-            env.write(&mut state.heap, name, Val::Nil, None);
+            env.write(&mut state.heap, name, Val::num(3.0), None);
+            env.write(&mut state.heap, name, Val::NIL, None);
         }
         assert_ne!(
             env.contents(&state.heap).version_stamp(),
@@ -974,12 +973,12 @@ mod tests {
             "the churn compacted the global table"
         );
         assert_eq!(state.heap.watched_epoch(), epoch);
-        assert_eq!(env.read_builtin(&state.heap, live), Val::Num(1.0));
-        assert_eq!(env.read_builtin(&state.heap, cleared), Val::Nil);
+        assert_eq!(env.read_builtin(&state.heap, live), Val::num(1.0));
+        assert_eq!(env.read_builtin(&state.heap, cleared), Val::NIL);
         // A keyed store to a builtin name still moves the epoch.
-        env.write(&mut state.heap, env.builtin_key(live), Val::Num(4.0), None);
+        env.write(&mut state.heap, env.builtin_key(live), Val::num(4.0), None);
         assert_ne!(state.heap.watched_epoch(), epoch);
-        assert_eq!(env.read_builtin(&state.heap, live), Val::Num(4.0));
+        assert_eq!(env.read_builtin(&state.heap, live), Val::num(4.0));
     }
 
     #[test]
@@ -988,14 +987,14 @@ mod tests {
         let mut state = State::raw();
         let target = key(&mut state, "target");
         let env = &state.global_env;
-        env.write(&mut state.heap, target, Val::Num(7.0), None);
-        env.write_builtin(&mut state.heap, Builtin::Print as u8, &Val::Num(0.0));
+        env.write(&mut state.heap, target, Val::num(7.0), None);
+        env.write_builtin(&mut state.heap, Builtin::Print as u8, &Val::num(0.0));
         let cache = GlobalLookupCacheSlot::default();
         env.read(&state.heap, target, Some(&cache));
-        env.write_builtin(&mut state.heap, Builtin::Print as u8, &Val::Num(1.0));
-        assert_eq!(env.read_cached(&state.heap, &cache), Some(Val::Num(7.0)));
-        env.write_builtin(&mut state.heap, Builtin::Print as u8, &Val::Nil);
-        assert_eq!(env.read_cached(&state.heap, &cache), Some(Val::Num(7.0)));
+        env.write_builtin(&mut state.heap, Builtin::Print as u8, &Val::num(1.0));
+        assert_eq!(env.read_cached(&state.heap, &cache), Some(Val::num(7.0)));
+        env.write_builtin(&mut state.heap, Builtin::Print as u8, &Val::NIL);
+        assert_eq!(env.read_cached(&state.heap, &cache), Some(Val::num(7.0)));
     }
 
     #[test]
@@ -1005,18 +1004,18 @@ mod tests {
         let existing = key(&mut state, "existing");
         let optional = key(&mut state, "optional");
         let env = &state.global_env;
-        env.write(&mut state.heap, existing, Val::Num(1.0), None);
+        env.write(&mut state.heap, existing, Val::num(1.0), None);
         let cache = GlobalLookupCacheSlot::default();
-        assert_eq!(env.read(&state.heap, optional, Some(&cache)), Val::Nil);
-        assert_eq!(env.read_cached(&state.heap, &cache), Some(Val::Nil));
-        env.write(&mut state.heap, optional, Val::Nil, None);
-        env.write(&mut state.heap, existing, Val::Num(2.0), None);
-        assert_eq!(env.read_cached(&state.heap, &cache), Some(Val::Nil));
-        assert!(!env.write_cached(&mut state.heap, &cache, &Val::Num(3.0)));
-        env.write(&mut state.heap, optional, Val::Num(3.0), Some(&cache));
+        assert_eq!(env.read(&state.heap, optional, Some(&cache)), Val::NIL);
+        assert_eq!(env.read_cached(&state.heap, &cache), Some(Val::NIL));
+        env.write(&mut state.heap, optional, Val::NIL, None);
+        env.write(&mut state.heap, existing, Val::num(2.0), None);
+        assert_eq!(env.read_cached(&state.heap, &cache), Some(Val::NIL));
+        assert!(!env.write_cached(&mut state.heap, &cache, &Val::num(3.0)));
+        env.write(&mut state.heap, optional, Val::num(3.0), Some(&cache));
         assert_eq!(env.read_cached(&state.heap, &cache), None);
-        assert_eq!(env.read(&state.heap, optional, Some(&cache)), Val::Num(3.0));
-        assert_eq!(env.read_cached(&state.heap, &cache), Some(Val::Num(3.0)));
+        assert_eq!(env.read(&state.heap, optional, Some(&cache)), Val::num(3.0));
+        assert_eq!(env.read_cached(&state.heap, &cache), Some(Val::num(3.0)));
     }
 
     #[test]
@@ -1029,18 +1028,18 @@ mod tests {
             }
             let removed = key(&mut state, "removed");
             let env = &state.global_env;
-            env.write(&mut state.heap, removed, Val::Num(1.0), None);
-            env.write(&mut state.heap, removed, Val::Nil, None);
+            env.write(&mut state.heap, removed, Val::num(1.0), None);
+            env.write(&mut state.heap, removed, Val::NIL, None);
             let slots = env.len(&state.heap);
             let cache = GlobalLookupCacheSlot::default();
-            assert_eq!(env.read(&state.heap, removed, Some(&cache)), Val::Nil);
-            assert_eq!(env.read_cached(&state.heap, &cache), Some(Val::Nil));
+            assert_eq!(env.read(&state.heap, removed, Some(&cache)), Val::NIL);
+            assert_eq!(env.read_cached(&state.heap, &cache), Some(Val::NIL));
             // Revived through another path, in place: the cached slot sees it.
-            env.write(&mut state.heap, removed, Val::Num(5.0), None);
-            assert_eq!(env.read_cached(&state.heap, &cache), Some(Val::Num(5.0)));
-            assert!(env.write_cached(&mut state.heap, &cache, &Val::Nil));
-            assert!(env.write_cached(&mut state.heap, &cache, &Val::Num(6.0)));
-            assert_eq!(env.read_cached(&state.heap, &cache), Some(Val::Num(6.0)));
+            env.write(&mut state.heap, removed, Val::num(5.0), None);
+            assert_eq!(env.read_cached(&state.heap, &cache), Some(Val::num(5.0)));
+            assert!(env.write_cached(&mut state.heap, &cache, &Val::NIL));
+            assert!(env.write_cached(&mut state.heap, &cache, &Val::num(6.0)));
+            assert_eq!(env.read_cached(&state.heap, &cache), Some(Val::num(6.0)));
             assert_eq!(env.len(&state.heap), slots);
         }
     }
@@ -1053,10 +1052,10 @@ mod tests {
         let b = key(&mut state, "b");
         state
             .global_env
-            .write(&mut state.heap, a, Val::Num(1.0), None);
+            .write(&mut state.heap, a, Val::num(1.0), None);
         state
             .global_env
-            .write(&mut state.heap, b, Val::Num(2.0), None);
+            .write(&mut state.heap, b, Val::num(2.0), None);
         let base = GlobalLookupCacheSlot::default();
         state.global_env.read(&state.heap, a, Some(&base));
         let hit = |state: &State, cache: &GlobalLookupCacheSlot| {
@@ -1069,10 +1068,10 @@ mod tests {
         let first = GlobalLookupCacheSlot::default();
         assert_eq!(
             state.global_env.read(&state.heap, b, Some(&first)),
-            Val::Num(2.0)
+            Val::num(2.0)
         );
         state.global_env.resume(&mut state.heap, saved);
-        assert_eq!(hit(&state, &base), Some(Val::Num(1.0)));
+        assert_eq!(hit(&state, &base), Some(Val::num(1.0)));
         assert_eq!(hit(&state, &first), None);
 
         // A later restriction holds another key in the same slot: the earlier
@@ -1081,7 +1080,7 @@ mod tests {
         assert_eq!(hit(&state, &first), None);
         assert_eq!(hit(&state, &base), None);
         state.global_env.resume(&mut state.heap, saved);
-        assert_eq!(hit(&state, &base), Some(Val::Num(1.0)));
+        assert_eq!(hit(&state, &base), Some(Val::num(1.0)));
 
         // Nested: the resumed middle level is restamped, so its own token
         // misses (the cross-level cases are in the next test).
@@ -1092,7 +1091,7 @@ mod tests {
         state.global_env.resume(&mut state.heap, inner);
         assert_eq!(hit(&state, &middle), None);
         state.global_env.resume(&mut state.heap, outer);
-        assert_eq!(hit(&state, &base), Some(Val::Num(1.0)));
+        assert_eq!(hit(&state, &base), Some(Val::num(1.0)));
     }
 
     /// Shape changes inside restricted levels: a level that compacts before
@@ -1106,7 +1105,7 @@ mod tests {
         for (name, value) in [(a, 1.0), (b, 2.0)] {
             state
                 .global_env
-                .write(&mut state.heap, name, Val::Num(value), None);
+                .write(&mut state.heap, name, Val::num(value), None);
         }
         let hit = |state: &State, cache: &GlobalLookupCacheSlot| {
             state.global_env.read_cached(&state.heap, cache)
@@ -1120,13 +1119,13 @@ mod tests {
         // in slot 0. A probe minted after that names slot 0 at the new version.
         let outer = state.global_env.restrict(&mut state.heap, &["a", "b"]);
         let before = version(&state);
-        write(&mut state, a, Val::Nil);
-        write(&mut state, d, Val::Num(4.0));
+        write(&mut state, a, Val::NIL);
+        write(&mut state, d, Val::num(4.0));
         assert_ne!(version(&state), before, "the parent must have compacted");
         let parent = GlobalLookupCacheSlot::default();
         assert_eq!(
             state.global_env.read(&state.heap, b, Some(&parent)),
-            Val::Num(2.0)
+            Val::num(2.0)
         );
 
         // The child holds `d` then `b`; the parent's probe must not read its
@@ -1135,18 +1134,18 @@ mod tests {
         let inner = state.global_env.restrict(&mut state.heap, &["d", "b"]);
         assert_eq!(hit(&state, &parent), None);
         let before = version(&state);
-        write(&mut state, d, Val::Nil);
-        write(&mut state, c, Val::Num(5.0));
+        write(&mut state, d, Val::NIL);
+        write(&mut state, c, Val::num(5.0));
         assert_ne!(version(&state), before, "the child must have compacted");
-        write(&mut state, b, Val::Num(9.0));
+        write(&mut state, b, Val::num(9.0));
         let child = GlobalLookupCacheSlot::default();
         assert_eq!(
             state.global_env.read(&state.heap, b, Some(&child)),
-            Val::Num(9.0)
+            Val::num(9.0)
         );
         state.global_env.resume(&mut state.heap, inner);
         assert_eq!(hit(&state, &child), None);
-        assert_eq!(state.global_env.read(&state.heap, b, None), Val::Num(2.0));
+        assert_eq!(state.global_env.read(&state.heap, b, None), Val::num(2.0));
         state.global_env.resume(&mut state.heap, outer);
         assert_eq!(hit(&state, &child), None);
         assert_eq!(hit(&state, &parent), None);

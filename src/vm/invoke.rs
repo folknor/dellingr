@@ -88,28 +88,28 @@ pub trait InvokeResults: sealed::DecodeResults {}
 
 impl sealed::EncodeArg for f64 {
     fn push(self, state: &mut State) {
-        state.push_unchecked(Val::Num(self));
+        state.push_unchecked(Val::num(self));
     }
 }
 impl InvokeArg for f64 {}
 
 impl sealed::EncodeArg for bool {
     fn push(self, state: &mut State) {
-        state.push_unchecked(Val::Bool(self));
+        state.push_unchecked(Val::boolean(self));
     }
 }
 impl InvokeArg for bool {}
 
 impl sealed::EncodeArg for i32 {
     fn push(self, state: &mut State) {
-        state.push_unchecked(Val::Num(f64::from(self)));
+        state.push_unchecked(Val::num(f64::from(self)));
     }
 }
 impl InvokeArg for i32 {}
 
 impl sealed::EncodeArg for u32 {
     fn push(self, state: &mut State) {
-        state.push_unchecked(Val::Num(f64::from(self)));
+        state.push_unchecked(Val::num(f64::from(self)));
     }
 }
 impl InvokeArg for u32 {}

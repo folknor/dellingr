@@ -3,6 +3,7 @@
 //! This module contains methods for calling functions, evaluating closures,
 //! and managing the call stack.
 
+use crate::vm::lua_val::ValKind;
 use std::sync::Arc;
 
 use super::RustFnId;
@@ -299,13 +300,13 @@ impl State {
         self.publish_cost_unless_lua_callee(idx, local_cost)?;
         // A Lua function with a numeric leaf plan runs here without an
         // activation when its entry checks pass (`vm/numeric_loop.rs`).
-        if matches!(self.stack[idx], Val::Obj(_))
+        if matches!(self.stack[idx].kind(), ValKind::Obj(_))
             && self.try_numeric_leaf(idx, num_args, num_ret_expected, local_cost)
         {
             return Ok(false);
         }
         // A library leaf runs here without a callback (`vm/leaf.rs`).
-        if matches!(self.stack[idx], Val::RustFn(_))
+        if matches!(self.stack[idx].kind(), ValKind::RustFn(_))
             && let Some(n) = self.call_leaf(idx, num_args)?
         {
             self.drop_surplus_results(num_ret_expected, n);
@@ -338,8 +339,8 @@ impl State {
     /// resolves to a Lua function: resolution is not inspected here.
     #[inline(always)]
     fn publish_cost_unless_lua_callee(&mut self, idx: usize, local_cost: &mut u64) -> Result<()> {
-        let lua = match self.stack[idx] {
-            Val::Obj(ptr) => self.heap.as_lua_function_ref(ptr).is_some(),
+        let lua = match self.stack[idx].kind() {
+            ValKind::Obj(ptr) => self.heap.as_lua_function_ref(ptr).is_some(),
             _ => false,
         };
         if lua {
@@ -408,7 +409,7 @@ impl State {
         self.in_flight.stack_bottom = destination;
         // A library leaf runs here, once the caller is retired, with its
         // results at the destination like a Rust callee's (`vm/leaf.rs`).
-        if matches!(self.stack[destination], Val::RustFn(_))
+        if matches!(self.stack[destination].kind(), ValKind::RustFn(_))
             && let Some(n) = self.call_leaf(destination, num_args)?
         {
             return Ok(Some(n));
@@ -499,7 +500,7 @@ impl State {
         // The two function cases inline into the call sites; only a
         // callable object pays for the resolution loop's setup.
         let func_val = self.stack[idx];
-        let rust_fn = if let Val::RustFn(f) = func_val {
+        let rust_fn = if let ValKind::RustFn(f) = func_val.kind() {
             // The entry observer is marked inside `invoke_rust_fn`, after its
             // interrupt poll: marking here would report a callback refused
             // before it ran as entered, and a host get_table or set_table
@@ -625,7 +626,7 @@ impl State {
             // Never a Rust function: `begin_call` calls one directly, and a
             // Rust handler is returned below without being placed here.
             let func_val = self.stack[idx];
-            debug_assert!(!matches!(func_val, Val::RustFn(_)));
+            debug_assert!(!matches!(func_val.kind(), ValKind::RustFn(_)));
             let kind = self.classify_callee(func_val);
             if let CalleeKind::Lua(bytecode) = kind {
                 // A Lua callee keeps its function slot: the value stays
@@ -657,21 +658,21 @@ impl State {
             // metatable all strings share (reference Lua makes `("x")(...)`
             // callable once `getmetatable("").__call` is set). This branch is
             // already off the function fast paths above.
-            let metatable_ptr = match func_val {
-                Val::Obj(ptr) => self
+            let metatable_ptr = match func_val.kind() {
+                ValKind::Obj(ptr) => self
                     .heap
                     .as_table_ref(ptr)
                     .and_then(super::table::Table::get_metatable),
-                Val::Str(_) => self.string_metatable,
+                ValKind::Str(_) => self.string_metatable,
                 _ => None,
             };
-            let call_handler = metatable_ptr.map_or(Val::Nil, |mt_ptr| {
+            let call_handler = metatable_ptr.map_or(Val::NIL, |mt_ptr| {
                 let call_key = self.meta_names.get(super::MetaName::Call);
                 self.heap
                     .as_table_ref(mt_ptr)
-                    .map_or(Val::Nil, |mt| mt.get(&call_key))
+                    .map_or(Val::NIL, |mt| mt.get(&call_key))
             });
-            if matches!(call_handler, Val::Nil) {
+            if call_handler.is_nil() {
                 // Resolving a callable is execution, even when it has no
                 // handler, so this reaches the reporting boundary too.
                 break self.type_error(TypeError::FunctionCall(func_val.typ(&self.heap)));
@@ -696,7 +697,7 @@ impl State {
             // unmoved; the cap check above still runs, since the logical call
             // grew by the receiver. A function handler takes no metamethod
             // unit, so nothing below is skipped.
-            if let Val::RustFn(f) = call_handler {
+            if let ValKind::RustFn(f) = call_handler.kind() {
                 return Ok(Some((f, charges)));
             }
             // Stack is currently: [callable, arg1, ..., argN]
@@ -1076,7 +1077,7 @@ impl State {
         if let Err(e) = self.check_stack_space(grow) {
             return Err(self.reject_admission(e, frame_bottom, old_stack_bottom, vararg_start));
         }
-        self.stack.resize(frame_top, Val::Nil);
+        self.stack.resize(frame_top, Val::NIL);
 
         if tail {
             self.replace_tail_record(bytecode, vararg_start);
@@ -1126,8 +1127,8 @@ impl State {
     /// `begin_call` 16 to 32 bytes; release frames did not move.
     #[inline(always)]
     fn classify_callee(&self, func: Val) -> CalleeKind {
-        match func {
-            Val::Obj(ptr) => match self.heap.get(ptr) {
+        match func.kind() {
+            ValKind::Obj(ptr) => match self.heap.get(ptr) {
                 super::object::RawObject::LuaFn(closure) => {
                     CalleeKind::Lua(Arc::clone(closure.bytecode()))
                 }
@@ -1298,7 +1299,7 @@ impl State {
         // a shape that removes the dispatch without a peek on misses.
         if let RetCount::Fixed(_) = expected {
             let top = caller.top;
-            self.stack.resize(top, Val::Nil);
+            self.stack.resize(top, Val::NIL);
         }
         Ok(())
     }
@@ -1475,7 +1476,7 @@ impl State {
         self.check_stack_space(1)?;
         let runtime = self.resolve_bytecode_runtime(bytecode)?;
         let obj = self.alloc_closure(runtime, Captures::EMPTY);
-        self.push_unchecked(Val::Obj(obj));
+        self.push_unchecked(Val::obj(obj));
         Ok(())
     }
 

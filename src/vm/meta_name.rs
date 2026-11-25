@@ -67,13 +67,13 @@ impl MetaNames {
     /// The interned key for `name`, as a value ready for a table lookup.
     #[inline(always)]
     pub(super) fn get(&self, name: MetaName) -> Val {
-        Val::Str(self.0[name as usize])
+        Val::str(self.0[name as usize])
     }
 
     /// Every interned name, in [`MetaName::ALL`] order.
     #[cfg(feature = "snapshot")]
     pub(super) fn iter(&self) -> impl Iterator<Item = Val> + '_ {
-        self.0.iter().map(|ptr| Val::Str(*ptr))
+        self.0.iter().map(|ptr| Val::str(*ptr))
     }
 
     /// Strings have no children, so marking needs no worklist.

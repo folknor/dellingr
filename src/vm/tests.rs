@@ -93,7 +93,7 @@ fn compiled_assignment_stores_numeric_global() {
     let input = compile_unnamed("a = 1").unwrap();
     state.eval_chunk(input, 0).unwrap();
     assert_eq!(
-        Val::Num(1.0),
+        Val::num(1.0),
         state.global_env.get(&state.heap, "a").unwrap()
     );
 }
@@ -227,9 +227,9 @@ fn compaction_keeps_live_order_and_cached_writes() {
     assert_eq!(names, expected);
     assert_eq!(
         state.global_env.get(&state.heap, "kept"),
-        Some(Val::Num(2.0))
+        Some(Val::num(2.0))
     );
-    assert_eq!(state.global_env.get(&state.heap, "u5"), Some(Val::Num(5.0)));
+    assert_eq!(state.global_env.get(&state.heap, "u5"), Some(Val::num(5.0)));
 }
 
 #[test]
@@ -288,7 +288,7 @@ fn bytecode_equality_stores_true_for_equal_numbers() {
     };
     state.eval_chunk(input, 0).unwrap();
     assert_eq!(
-        Val::Bool(true),
+        Val::boolean(true),
         state.global_env.get(&state.heap, "a").unwrap()
     );
 }
@@ -311,7 +311,7 @@ fn bytecode_test_false_evaluates_boolean_rhs() {
     };
     state.eval_chunk(input, 0).unwrap();
     assert_eq!(
-        Val::Bool(false),
+        Val::boolean(false),
         state.global_env.get(&state.heap, "key").unwrap()
     );
 }
@@ -335,7 +335,7 @@ fn bytecode_test_false_continues_for_truthy_value() {
     };
     state.eval_chunk(chunk, 0).unwrap();
     assert_eq!(
-        Val::Num(5.0),
+        Val::num(5.0),
         state.global_env.get(&state.heap, "a").unwrap()
     );
 }
@@ -366,7 +366,7 @@ fn bytecode_less_than_branch_distinguishes_equal_and_ordered_numbers() {
     state.eval_chunk(positive_control, 0).unwrap();
     assert_eq!(
         state.global_env.get(&state.heap, "a").unwrap(),
-        Val::Bool(true)
+        Val::boolean(true)
     );
 }
 
@@ -395,7 +395,7 @@ fn bytecode_global_while_loop_reaches_limit() {
     let mut state = State::new();
     state.eval_chunk(chunk, 0).unwrap();
     assert_eq!(
-        Val::Num(10.0),
+        Val::num(10.0),
         state.global_env.get(&state.heap, "a").unwrap()
     );
 }
@@ -427,7 +427,7 @@ fn bytecode_local_while_loop_reaches_limit() {
     let mut state = State::new();
     state.eval_chunk(chunk, 0).unwrap();
     assert_eq!(
-        Val::Num(10.0),
+        Val::num(10.0),
         state.global_env.get(&state.heap, "x").unwrap()
     );
 }
@@ -464,7 +464,7 @@ fn bytecode_for_prep_skips_empty_positive_range() {
     state.eval_chunk(positive_control, 0).unwrap();
     assert_eq!(
         state.global_env.get(&state.heap, "a").unwrap(),
-        Val::Num(6.0)
+        Val::num(6.0)
     );
 }
 
@@ -1075,7 +1075,7 @@ fn open_libs_succeeds_with_exactly_four_slots_of_headroom() {
     state.get_metatable_of(-1).unwrap();
     state.push_string("__metatable").unwrap();
     state.get_table_raw(-2).unwrap();
-    assert_eq!(state.stack.last(), Some(&Val::Bool(false)));
+    assert_eq!(state.stack.last(), Some(&Val::boolean(false)));
 }
 
 #[test]
@@ -1378,7 +1378,7 @@ fn library_length_lookup_needs_no_stack_room_and_preflights_the_window() {
     state.set_top(5).unwrap();
     assert_eq!(state.length_or_push_len_call(5).unwrap(), None);
     assert_eq!(state.get_top(), 8);
-    assert!(matches!(state.at_index(6).unwrap(), Val::Bool(false)));
+    assert_eq!(state.at_index(6).unwrap(), Val::boolean(false));
 }
 
 /// Default rendering that runs out of pointer identities is an execution

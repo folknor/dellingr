@@ -10,6 +10,7 @@ use super::{Result, State, TypeError};
 use crate::cost_model::Charge;
 use crate::error::{Error, ErrorKind, ErrorValue, InternalFault, LibraryError, LibraryFunction};
 use crate::instr::{ArgCount, RetCount};
+use crate::vm::lua_val::ValKind;
 
 /// How a value renders under `tostring`; see `State::tostring_rendering`.
 pub(crate) enum TostringRendering {
@@ -301,7 +302,7 @@ impl State {
         name: &str,
         function: RustFnId,
     ) -> Result<()> {
-        self.set_table_str_key_value(table_idx, name, Val::RustFn(function))
+        self.set_table_str_key_value(table_idx, name, Val::rust_fn(function))
     }
 
     pub(crate) fn set_table_str_key_number(
@@ -310,7 +311,7 @@ impl State {
         name: &str,
         num: f64,
     ) -> Result<()> {
-        self.set_table_str_key_value(table_idx, name, Val::Num(num))
+        self.set_table_str_key_value(table_idx, name, Val::num(num))
     }
 
     /// Pushes onto the stack the value `t[k]`, where `t` is the value at the given
@@ -607,7 +608,7 @@ impl State {
             return Ok(None);
         }
         if let Some((slot, _)) = tbl.find_slot(&key) {
-            if matches!(val, Val::Nil) {
+            if val.is_nil() {
                 tbl.remove_slot(slot);
             } else {
                 tbl.store_slot(slot, val);
@@ -643,7 +644,7 @@ impl State {
                 Ok(true)
             }
             TableNext::End => {
-                self.stack[top] = Val::Nil;
+                self.stack[top] = Val::NIL;
                 Ok(false)
             }
             TableNext::InvalidKey => Err(self.library_error(LibraryError::InvalidNextKey)),
@@ -658,13 +659,14 @@ impl State {
     pub fn raw_len(&self, idx: isize) -> Result<usize> {
         self.check_usable()?;
         let i = self.convert_idx(idx)?;
-        match self.stack[i] {
-            Val::Str(s) => Ok(self.heap.get_string(s).len()),
-            v => v
+        let value = self.stack[i];
+        match value.as_string(&self.heap) {
+            Some(bytes) => Ok(bytes.len()),
+            None => value
                 .as_object_ptr()
                 .and_then(|ptr| self.heap.as_table_ref(ptr))
                 .map(super::table::Table::array_len)
-                .ok_or_else(|| self.type_error(TypeError::Length(v.typ(&self.heap)))),
+                .ok_or_else(|| self.type_error(TypeError::Length(value.typ(&self.heap)))),
         }
     }
 
@@ -705,7 +707,7 @@ impl State {
     pub(crate) fn length_or_push_len_call(&mut self, idx: isize) -> Result<Option<usize>> {
         let (val, mt) = self.sequence_operand(idx)?;
         let handler = self.metatable_field(mt, super::MetaName::Len);
-        if matches!(handler, Val::Nil) {
+        if handler.is_nil() {
             return Ok(Some(self.table_len_of(val)));
         }
         self.push_len_window(handler, val)?;
@@ -731,7 +733,7 @@ impl State {
         }
         [Len, Index, NewIndex]
             .into_iter()
-            .any(|name| !matches!(self.metatable_field(mt, name), Val::Nil))
+            .any(|name| !self.metatable_field(mt, name).is_nil())
     }
 
     /// The raw value of `t[key]` for the table at `idx`, or `None` when that
@@ -749,10 +751,8 @@ impl State {
             .and_then(|ptr| self.heap.as_table_ref(ptr))
             .expect("sequence_operand validated the table");
         // The key is the f64 the stack-borne path would push.
-        let value = table.get(&Val::Num(key as f64));
-        if matches!(value, Val::Nil)
-            && !matches!(self.metatable_field(mt, super::MetaName::Index), Val::Nil)
-        {
+        let value = table.get(&Val::num(key as f64));
+        if value.is_nil() && !self.metatable_field(mt, super::MetaName::Index).is_nil() {
             return Ok(None);
         }
         Ok(Some(value))
@@ -815,7 +815,7 @@ impl State {
                 self.heap
                     .edit_table(ptr)
                     .expect("new_table pushed a table")
-                    .insert(Val::Num(f64::from(key)), value)?;
+                    .insert(Val::num(f64::from(key)), value)?;
             }
         }
         self.check_stack_slot_at(len)?;
@@ -824,7 +824,7 @@ impl State {
         self.heap
             .edit_table(ptr)
             .expect("new_table pushed a table")
-            .insert(key, Val::Num(count as f64))?;
+            .insert(key, Val::num(count as f64))?;
         Ok(())
     }
 
@@ -901,13 +901,13 @@ impl State {
         out: &mut Vec<u8>,
     ) -> Result<std::result::Result<(), super::LuaType>> {
         let text;
-        let bytes: &[u8] = match val {
-            Val::Str(s) => self.heap.get_string(s),
-            Val::Num(n) => {
+        let bytes: &[u8] = match val.kind() {
+            ValKind::Str(s) => self.heap.get_string(s),
+            ValKind::Num(n) => {
                 text = crate::number_text::number_to_text(n);
                 text.as_bytes()
             }
-            other => return Ok(Err(other.typ(&self.heap))),
+            _ => return Ok(Err(val.typ(&self.heap))),
         };
         let next = crate::limits::checked_string_growth(out.len(), bytes.len())?;
         out.reserve(next - out.len());
@@ -963,7 +963,7 @@ impl State {
         };
 
         match metatable {
-            Some(mt) => self.push_val(Val::Obj(mt))?,
+            Some(mt) => self.push_val(Val::obj(mt))?,
             None => self.push_nil()?,
         }
         Ok(())
@@ -984,9 +984,9 @@ impl State {
     /// setup.
     pub(crate) fn pop_metatable_onto(&mut self, table_idx: isize) -> Result<()> {
         let idx = self.table_operand_below_top(table_idx, 1)?;
-        let mt = match self.stack[self.stack.len() - 1] {
-            Val::Nil => None,
-            Val::Obj(ptr) if self.heap.as_table_ref(ptr).is_some() => Some(ptr),
+        let mt = match self.stack[self.stack.len() - 1].kind() {
+            ValKind::Nil => None,
+            ValKind::Obj(ptr) if self.heap.as_table_ref(ptr).is_some() => Some(ptr),
             _ => return Err(self.type_error(TypeError::InvalidMetatable)),
         };
         self.stack[idx]
@@ -1295,12 +1295,12 @@ impl State {
     /// the linear copy, which is not where the time goes.
     fn table_sort_default(&mut self, values: &mut [Val]) -> Result<()> {
         let n = values.len();
-        if n >= 2 && values.iter().all(|v| matches!(v, Val::Num(_))) {
+        if n >= 2 && values.iter().all(|v| matches!(v.kind(), ValKind::Num(_))) {
             let mut keys = Vec::new();
             keys.try_reserve_exact(n)
                 .map_err(|_| Error::without_location(ErrorKind::TableGrowthFailed))?;
-            keys.extend(values.iter().map(|v| match v {
-                Val::Num(x) => *x,
+            keys.extend(values.iter().map(|v| match v.kind() {
+                ValKind::Num(x) => x,
                 _ => unreachable!("the range was checked to hold only numbers"),
             }));
             crate::native_call!(
@@ -1315,16 +1315,16 @@ impl State {
             )?;
             // bounded: one copy per element of a range below `TABLE_SORT_MAX_LEN`.
             for (slot, key) in values.iter_mut().zip(keys) {
-                *slot = Val::Num(key);
+                *slot = Val::num(key);
             }
             return Ok(());
         }
-        if n >= 2 && values.iter().all(|v| matches!(v, Val::Str(_))) {
+        if n >= 2 && values.iter().all(|v| matches!(v.kind(), ValKind::Str(_))) {
             let mut keys = Vec::new();
             keys.try_reserve_exact(n)
                 .map_err(|_| Error::without_location(ErrorKind::TableGrowthFailed))?;
-            keys.extend(values.iter().map(|v| match v {
-                Val::Str(s) => (self.heap.get_string(*s), *v),
+            keys.extend(values.iter().map(|v| match v.kind() {
+                ValKind::Str(s) => (self.heap.get_string(s), *v),
                 _ => unreachable!("the range was checked to hold only strings"),
             }));
             crate::native_call!(
@@ -1378,10 +1378,12 @@ impl State {
             return Ok(self.pop_val().truthy());
         }
 
-        match (a, b) {
-            (Val::Num(a), Val::Num(b)) => Ok(a < b),
-            (Val::Str(a), Val::Str(b)) => Ok(self.heap.get_string(a) < self.heap.get_string(b)),
-            (a, b) => Err(self.table_sort_comparison_error(a, b)),
+        match (a.kind(), b.kind()) {
+            (ValKind::Num(a), ValKind::Num(b)) => Ok(a < b),
+            (ValKind::Str(a), ValKind::Str(b)) => {
+                Ok(self.heap.get_string(a) < self.heap.get_string(b))
+            }
+            _ => Err(self.table_sort_comparison_error(a, b)),
         }
     }
 
@@ -1488,7 +1490,7 @@ impl State {
         let i = self.convert_idx(idx)?;
         let val = self.stack[i];
         let tostring_handler = self.tostring_handler(val);
-        if !matches!(tostring_handler, Val::Nil) {
+        if !tostring_handler.is_nil() {
             // Handler plus receiver: net-positive by two slots until the
             // call consumes them.
             self.check_stack_space(2)
@@ -1513,7 +1515,7 @@ impl State {
                 self.report_escaping(self.library_error(LibraryError::TostringMustReturnString))
             );
         }
-        if matches!(val, Val::Str(_)) {
+        if val.is_string() {
             return Ok(TostringRendering::Itself);
         }
         if let Some(number) = val.as_num() {
@@ -1537,13 +1539,13 @@ impl State {
     /// assign a State-local identity.
     pub(crate) fn error_value(&mut self, idx: isize) -> Result<ErrorValue> {
         let val = self.at_index(idx)?;
-        Ok(match val {
-            Val::Nil => ErrorValue::Nil,
-            Val::Bool(value) => ErrorValue::Boolean(value),
+        Ok(match val.kind() {
+            ValKind::Nil => ErrorValue::Nil,
+            ValKind::Bool(value) => ErrorValue::Boolean(value),
             // A NaN leaves as the canonical NaN, as from `State::to_number`.
-            Val::Num(number) => ErrorValue::Number(crate::numeral::canonical_nan(number)),
-            Val::Str(string) => ErrorValue::String(self.heap.get_string(string).to_vec()),
-            Val::RustFn(_) | Val::Obj(_) => {
+            ValKind::Num(number) => ErrorValue::Number(number),
+            ValKind::Str(string) => ErrorValue::String(self.heap.get_string(string).to_vec()),
+            ValKind::RustFn(_) | ValKind::Obj(_) => {
                 // Read the type before any handler runs.
                 let value_type = val.typ(&self.heap);
                 let rendering = crate::native_call!(
@@ -1569,15 +1571,15 @@ impl State {
     ) -> Val {
         let key = self.meta_names.get(name);
         mt.and_then(|ptr| self.heap.as_table_ref(ptr))
-            .map_or(Val::Nil, |mt| mt.get(&key))
+            .map_or(Val::NIL, |mt| mt.get(&key))
     }
 
     /// The `__tostring` field of a table's own or a string's shared metatable.
     /// Reads the State's interned key, so it neither allocates nor collects.
     fn tostring_handler(&self, val: Val) -> Val {
-        let metatable_ptr = match val {
-            Val::Str(_) => self.string_metatable,
-            Val::Obj(ptr) => self
+        let metatable_ptr = match val.kind() {
+            ValKind::Str(_) => self.string_metatable,
+            ValKind::Obj(ptr) => self
                 .heap
                 .as_table_ref(ptr)
                 .and_then(super::table::Table::get_metatable),
@@ -1642,7 +1644,7 @@ impl State {
     #[inline(never)]
     pub(super) fn alloc_table(&mut self) -> Val {
         let obj = self.allocator().alloc_table();
-        Val::Obj(obj)
+        Val::obj(obj)
     }
 
     /// Allocates a new table with room for `capacity` hash entries; see
@@ -1650,7 +1652,7 @@ impl State {
     #[inline(never)]
     pub(super) fn alloc_table_with_capacity(&mut self, capacity: usize) -> Val {
         let obj = self.allocator().alloc_table_with_capacity(capacity);
-        Val::Obj(obj)
+        Val::obj(obj)
     }
 }
 
@@ -1676,10 +1678,7 @@ mod sort_root_tests {
     fn bits(values: &[Val]) -> Vec<u64> {
         values
             .iter()
-            .map(|v| match v {
-                Val::Num(x) => x.to_bits(),
-                _ => panic!("expected a number"),
-            })
+            .map(|v| v.as_num().expect("test values are numbers").to_bits())
             .collect()
     }
 
@@ -1699,7 +1698,7 @@ mod sort_root_tests {
         for n in 0..70 {
             let numbers: Vec<Val> = (0..n)
                 .map(|_| {
-                    Val::Num(match next() % 6 {
+                    Val::num(match next() % 6 {
                         0 => f64::NAN,
                         1 => 0.0,
                         2 => -0.0,
@@ -1729,9 +1728,11 @@ mod sort_root_tests {
             let expected = generic_order(&mut state, &strings);
             let mut keys: Vec<(&[u8], Val)> = strings
                 .iter()
-                .map(|v| match v {
-                    Val::Str(s) => (state.heap.get_string(*s), *v),
-                    _ => panic!("expected a string"),
+                .map(|v| {
+                    (
+                        v.as_string(&state.heap).expect("test values are strings"),
+                        *v,
+                    )
                 })
                 .collect();
             table_sort_heap(

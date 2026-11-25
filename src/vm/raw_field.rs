@@ -5,9 +5,9 @@
 //! returns an argument error that names the field. It is meant for plain
 //! option tables such as `game.spawn{player = 1, x = 2}`.
 
-use super::lua_val::Val;
 use super::{LuaType, Result, State};
 use crate::error::{ArgDetail, ArgError, ErrorKind};
+use crate::vm::lua_val::ValKind;
 use sealed::{FieldFailure, FieldValue};
 use std::sync::atomic::AtomicUsize;
 
@@ -85,8 +85,7 @@ fn integral(value: &FieldValue<'_>) -> std::result::Result<f64, FieldFailure> {
 
 impl sealed::Convert<'_> for f64 {
     fn convert(value: FieldValue<'_>) -> std::result::Result<Self, FieldFailure> {
-        // A NaN leaves as the canonical NaN, as from `State::to_number`.
-        number(&value).map(crate::numeral::canonical_nan)
+        number(&value)
     }
 }
 impl RawField<'_> for f64 {}
@@ -152,8 +151,8 @@ impl RawField<'_> for u64 {}
 
 impl sealed::Convert<'_> for bool {
     fn convert(value: FieldValue<'_>) -> std::result::Result<Self, FieldFailure> {
-        match value.val {
-            Val::Bool(b) => Ok(b),
+        match value.val.kind() {
+            ValKind::Bool(b) => Ok(b),
             _ => Err(FieldFailure::Type(LuaType::Boolean)),
         }
     }
@@ -200,7 +199,7 @@ impl RawField<'_> for String {}
 
 impl<'s, T: RawField<'s>> sealed::Convert<'s> for Option<T> {
     fn convert(value: FieldValue<'s>) -> std::result::Result<Self, FieldFailure> {
-        if matches!(value.val, Val::Nil) {
+        if value.val.is_nil() {
             Ok(None)
         } else {
             T::convert(value).map(Some)
@@ -309,7 +308,7 @@ mod sealed_key {
             // keys keep their interned strings alive.
             let val = heap
                 .find_string(self.as_bytes())
-                .map_or(Val::Nil, |key| table.get(&Val::Str(key)));
+                .map_or(Val::NIL, |key| table.get(&Val::str(key)));
             FieldValue { val, heap }
         }
     }
@@ -332,13 +331,13 @@ mod sealed_key {
             }
             let val = match heap
                 .find_string(name)
-                .and_then(|key| table.get_with_index(&Val::Str(key)))
+                .and_then(|key| table.get_with_index(&Val::str(key)))
             {
                 Some((index, value)) => {
                     self.hint.store(index, Ordering::Relaxed);
                     value
                 }
-                None => Val::Nil,
+                None => Val::NIL,
             };
             FieldValue { val, heap }
         }

@@ -6,6 +6,7 @@ use super::Val;
 use super::caches::{RuntimeCaches, TforCursorEntry, TforCursorSlot};
 use super::frame::Frame;
 use crate::instr::{ArgCount, RetCount};
+use crate::vm::lua_val::ValKind;
 
 impl State {
     /// Numeric-for setup over the registers from `slot`: start, limit and
@@ -37,7 +38,7 @@ impl State {
         })?;
         if check_numeric_for_condition(start, end, step) {
             for (local_slot, n) in (slot..).zip([start, end, step, start]) {
-                self.stack[local_slot] = Val::Num(n);
+                self.stack[local_slot] = Val::num(n);
             }
             if let Some(region) = frame.runtime.numeric_loops.get(*ip - 1) {
                 self.run_numeric_loop(region, frame, ip, local_cost)?;
@@ -81,8 +82,8 @@ impl State {
             // Jump first: the jump back is an interrupt safepoint, and an
             // interrupted iteration writes no counter.
             Frame::branch(self, ip, offset)?;
-            self.stack[slot] = Val::Num(var);
-            self.stack[slot + 3] = Val::Num(var);
+            self.stack[slot] = Val::num(var);
+            self.stack[slot + 3] = Val::num(var);
         }
         Ok(())
     }
@@ -108,7 +109,7 @@ impl State {
         cursor_slot: Option<u8>,
         caches: &RuntimeCaches,
     ) -> bool {
-        let Val::RustFn(f) = self.stack[base] else {
+        let ValKind::RustFn(f) = self.stack[base].kind() else {
             return false;
         };
         let state = self.stack[base + 1];
@@ -135,8 +136,8 @@ impl State {
         // A Rust iterator is called on (state, control); a gmatch iterator
         // runs its step with itself as the first argument (`GmatchIter`),
         // the state riding along unread. Neither enters `call_unguarded`.
-        let rust_call = match iterator {
-            Val::RustFn(f) => Some((f, state, control)),
+        let rust_call = match iterator.kind() {
+            ValKind::RustFn(f) => Some((f, state, control)),
             _ => self
                 .gmatch_step_of(iterator)
                 .map(|step| (step, iterator, state)),
@@ -179,7 +180,7 @@ impl State {
             self.stack[base + 3 + i] = if i < returned {
                 self.stack[call_base + i]
             } else {
-                Val::Nil
+                Val::NIL
             };
         }
         self.stack.truncate(call_base);
@@ -196,8 +197,8 @@ impl State {
         for i in 0..num_vars as usize {
             self.stack[base + 3 + i] = match i {
                 0 => first,
-                1 => second.unwrap_or(Val::Nil),
-                _ => Val::Nil,
+                1 => second.unwrap_or(Val::NIL),
+                _ => Val::NIL,
             };
         }
     }
@@ -235,7 +236,7 @@ impl State {
                 self.write_tfor_results(base, num_vars, key, Some(value));
             }
             super::table::TableNextWithIndex::End => {
-                self.write_tfor_results(base, num_vars, Val::Nil, None);
+                self.write_tfor_results(base, num_vars, Val::NIL, None);
             }
             super::table::TableNextWithIndex::InvalidKey => return false,
         }
@@ -254,9 +255,9 @@ impl State {
         };
         match self.ipairs_step(table, old_index) {
             IpairsStep::Yield(key, value) => {
-                self.write_tfor_results(base, num_vars, Val::Num(key), Some(value));
+                self.write_tfor_results(base, num_vars, Val::num(key), Some(value));
             }
-            IpairsStep::Exhausted => self.write_tfor_results(base, num_vars, Val::Nil, None),
+            IpairsStep::Exhausted => self.write_tfor_results(base, num_vars, Val::NIL, None),
             IpairsStep::Fallback => return false,
         }
         true
@@ -276,10 +277,13 @@ impl State {
         let Some(key) = crate::lua_std::ipairs_next_index(control) else {
             return IpairsStep::Fallback;
         };
-        match tbl.get_number(key) {
-            Val::Nil if tbl.get_metatable().is_some() => IpairsStep::Fallback,
-            Val::Nil => IpairsStep::Exhausted,
-            value => IpairsStep::Yield(key, value),
+        let value = tbl.get_number(key);
+        if !value.is_nil() {
+            IpairsStep::Yield(key, value)
+        } else if tbl.get_metatable().is_some() {
+            IpairsStep::Fallback
+        } else {
+            IpairsStep::Exhausted
         }
     }
 

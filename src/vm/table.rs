@@ -1,3 +1,4 @@
+use crate::vm::lua_val::ValKind;
 use std::cell::Cell;
 use std::hash::{Hash, Hasher};
 
@@ -176,13 +177,13 @@ impl Val {
         InvalidTableKey,
     > {
         let value = self;
-        let input = match value {
-            Val::Nil => TableKeyInput::Nil,
-            Val::Bool(value) => TableKeyInput::Bool(value),
-            Val::Num(value) => TableKeyInput::Number(value),
-            Val::Str(value) => TableKeyInput::String(value),
-            Val::Obj(value) => TableKeyInput::Object(value),
-            Val::RustFn(value) => TableKeyInput::RustFn(value),
+        let input = match value.kind() {
+            ValKind::Nil => TableKeyInput::Nil,
+            ValKind::Bool(value) => TableKeyInput::Bool(value),
+            ValKind::Num(value) => TableKeyInput::Number(value),
+            ValKind::Str(value) => TableKeyInput::String(value),
+            ValKind::Obj(value) => TableKeyInput::Object(value),
+            ValKind::RustFn(value) => TableKeyInput::RustFn(value),
         };
         normalize_table_key(input)
     }
@@ -238,10 +239,10 @@ impl TableKey {
 /// re-enters, so it adds nothing to frames live across native re-entry.
 #[inline(always)]
 fn hash_table_key_value<H: Hasher>(value: Val, hasher: &mut H) {
-    match value {
-        Val::Nil => (),
-        Val::Bool(value) => value.hash(hasher),
-        Val::Num(number) => {
+    match value.kind() {
+        ValKind::Nil => (),
+        ValKind::Bool(value) => value.hash(hasher),
+        ValKind::Num(number) => {
             let bits = match normalize_table_key::<(), (), ()>(TableKeyInput::Number(number)) {
                 Ok(NormalizedTableKey::Number(bits)) => bits,
                 Err(InvalidTableKey::Nan) => {
@@ -254,9 +255,9 @@ fn hash_table_key_value<H: Hasher>(value: Val, hasher: &mut H) {
             };
             bits.hash(hasher);
         }
-        Val::Str(ptr) => ptr.hash(hasher),
-        Val::Obj(ptr) => ptr.hash(hasher),
-        Val::RustFn(function) => function.hash(hasher),
+        ValKind::Str(ptr) => ptr.hash(hasher),
+        ValKind::Obj(ptr) => ptr.hash(hasher),
+        ValKind::RustFn(function) => function.hash(hasher),
     }
 }
 
@@ -276,7 +277,7 @@ impl Hash for TableLookupKey {
 /// Valid keys are hashed and compared using the shared table-key semantics.
 #[inline]
 fn is_valid_table_key(value: &Val) -> bool {
-    !matches!(value, Val::Nil) && !matches!(value, Val::Num(number) if number.is_nan())
+    !value.is_nil() && !matches!(value.kind(), ValKind::Num(number) if number.is_nan())
 }
 
 impl Hash for TableKey {
@@ -351,7 +352,7 @@ impl Iterator for LiveHashEntries<'_> {
                     let current = *index;
                     *index += 1;
                     let (key, value) = entries[current];
-                    if !matches!(value, Val::Nil) {
+                    if !value.is_nil() {
                         return Some((current, key, value));
                     }
                 }
@@ -362,7 +363,7 @@ impl Iterator for LiveHashEntries<'_> {
                     let current = *index;
                     *index += 1;
                     // A vacant slot's value is nil too.
-                    if !matches!(value, Val::Nil) {
+                    if !value.is_nil() {
                         return Some((current, *key, *value));
                     }
                 }
@@ -722,7 +723,7 @@ impl TemplatePrototype {
         // bounded: one pass over the template's key ids
         for key_id in key_ids {
             let key = TableKey::from_prevalidated(literals[usize::from(*key_id)]);
-            slots.push_if_absent(key.value(), Val::Nil);
+            slots.push_if_absent(key.value(), Val::NIL);
         }
         Self {
             slots,
@@ -756,16 +757,16 @@ impl Default for Table {
 /// `append_growth` refuse the append that would reach `MAX_ARRAY_LEN`.
 #[inline]
 fn may_migrate(key: &Val) -> bool {
-    matches!(*key, Val::Num(n) if n >= 1.0 && integer_index(n, MAX_ARRAY_LEN + 1).is_some())
+    matches!((*key).kind(), ValKind::Num(n) if n >= 1.0 && integer_index(n, MAX_ARRAY_LEN + 1).is_some())
 }
 
 impl Table {
-    pub(super) fn resident_bytes(&self) -> usize {
+    pub(super) fn resident_bytes(&self) -> u64 {
         let hash = match &self.storage {
             TableStorage::Inline { .. } => 0,
             TableStorage::Map(map, _) => map.resident_bytes(),
         };
-        self.array.capacity() * RESIDENT_BYTES_PER_ARRAY_SLOT + hash
+        self.array.capacity() as u64 * RESIDENT_BYTES_PER_ARRAY_SLOT + hash
     }
 
     pub(super) fn edit<'a>(
@@ -826,29 +827,21 @@ impl Table {
     /// `base + 1..=base + array.len()`.
     #[inline]
     fn array_slot(&self, key: &Val) -> Option<usize> {
-        match *key {
-            Val::Num(n) => match integer_index(n, self.base + self.array.len()) {
-                Some(key) if key > self.base => Some(key - self.base - 1),
-                _ => None,
-            },
-            _ => None,
-        }
+        let key = integer_index(key.as_num()?, self.base + self.array.len())?;
+        key.checked_sub(self.base + 1)
     }
 
     /// The integer value of `key` if it is an array key, `1..=vlen`, whether
     /// or not the window stores it.
     #[inline]
     fn array_key(&self, key: &Val) -> Option<usize> {
-        match *key {
-            Val::Num(n) => array_index(n, self.vlen).map(|slot| slot + 1),
-            _ => None,
-        }
+        array_index(key.as_num()?, self.vlen).map(|slot| slot + 1)
     }
 
     /// Whether `key` is `vlen + 1`, the key that extends the array.
     #[inline]
     fn is_array_append_key(&self, key: &Val) -> bool {
-        matches!(key, Val::Num(n) if is_append_key(*n, self.vlen))
+        key.as_num().is_some_and(|n| is_append_key(n, self.vlen))
     }
 
     /// The window position of absolute array slot `slot` (key `slot + 1`).
@@ -863,7 +856,7 @@ impl Table {
     fn array_value(&self, key: usize) -> Val {
         key.checked_sub(1)
             .and_then(|slot| self.window_position(slot))
-            .map_or(Val::Nil, |position| self.array[position])
+            .map_or(Val::NIL, |position| self.array[position])
     }
 
     /// The shape version. Private: outside this file a version is only ever
@@ -900,7 +893,7 @@ impl Table {
             self.lead <= self.array.len()
                 && self.array[self.lead.saturating_sub(64)..self.lead]
                     .iter()
-                    .all(|value| matches!(value, Val::Nil)),
+                    .all(|value| value.is_nil()),
             "the sampled tail of the dead-prefix hint must contain only nil slots"
         );
         debug_assert!(self.array_live <= self.array.len() - self.lead);
@@ -910,10 +903,10 @@ impl Table {
                 self.base == 0
                     && self.array[live.saturating_sub(64)..live]
                         .iter()
-                        .all(|value| !matches!(value, Val::Nil))
+                        .all(|value| !value.is_nil())
                     && self.array[live..(live + 64).min(self.array.len())]
                         .iter()
-                        .all(|value| matches!(value, Val::Nil)),
+                        .all(|value| value.is_nil()),
                 "a set dense bit must mean the live array keys are 1..=array_live"
             );
         }
@@ -940,7 +933,7 @@ impl Table {
                             .all(|(earlier, _)| earlier != key),
                         "an inline hash key occupies one slot"
                     );
-                    if matches!(value, Val::Nil) {
+                    if value.is_nil() {
                         dead_count += 1;
                     } else {
                         count_live(key);
@@ -967,7 +960,7 @@ impl Table {
                 );
                 let mut dead_count = 0;
                 for (key, value) in map.slots() {
-                    if matches!(value, Val::Nil) {
+                    if value.is_nil() {
                         dead_count += 1;
                     } else {
                         count_live(key);
@@ -1022,7 +1015,7 @@ impl Table {
         use std::hash::BuildHasher;
         fn live<H: Hasher>(value: Val, hasher: &mut H) {
             0_u8.hash(hasher);
-            std::mem::discriminant(&value).hash(hasher);
+            std::mem::discriminant(&value.kind()).hash(hasher);
             hash_table_key_value(value, hasher);
         }
         let mut hasher = crate::det_hash::FixedState::default().build_hasher();
@@ -1037,7 +1030,7 @@ impl Table {
             }
             TableStorage::Map(map, _) => {
                 for (key, _) in map.slots().iter().take(count) {
-                    if matches!(key, Val::Nil) {
+                    if key.is_nil() {
                         1_u8.hash(&mut hasher);
                     } else {
                         live(*key, &mut hasher);
@@ -1067,14 +1060,14 @@ impl Table {
             Some(slot) => self.array_value(slot + 1),
             // Through `get`, not `hash_get`: another inlined probe site moved
             // the hash-part probe out of line from the field reads.
-            None => self.get(&Val::Num(key)),
+            None => self.get(&Val::num(key)),
         }
     }
 
     #[inline]
     fn hash_get(&self, key: &Val) -> Val {
         if !is_valid_table_key(key) {
-            return Val::Nil;
+            return Val::NIL;
         }
         match &self.storage {
             TableStorage::Inline { entries, len } => {
@@ -1083,12 +1076,12 @@ impl Table {
                         return *entry_value;
                     }
                 }
-                Val::Nil
+                Val::NIL
             }
             TableStorage::Map(map, _) => map
                 .find(*key)
                 .and_then(|position| map.get(position))
-                .map_or(Val::Nil, |(_, value)| *value),
+                .map_or(Val::NIL, |(_, value)| *value),
         }
     }
 
@@ -1100,7 +1093,7 @@ impl Table {
             let slot = key - 1;
             let position = self.window_position(slot)?;
             let value = self.array[position];
-            return (!matches!(value, Val::Nil)).then_some((ARRAY_SLOT_TAG | slot, value));
+            return (!value.is_nil()).then_some((ARRAY_SLOT_TAG | slot, value));
         }
         if !is_valid_table_key(key) {
             return None;
@@ -1111,7 +1104,7 @@ impl Table {
                     entries.iter().take(*len as usize).enumerate()
                 {
                     if entry_key == key {
-                        return (!matches!(entry_value, Val::Nil)).then_some((idx, *entry_value));
+                        return (!entry_value.is_nil()).then_some((idx, *entry_value));
                     }
                 }
                 None
@@ -1119,7 +1112,7 @@ impl Table {
             TableStorage::Map(map, _) => {
                 let idx = map.find(*key)?;
                 let (_, value) = map.get(idx)?;
-                (!matches!(value, Val::Nil)).then_some((idx, *value))
+                (!value.is_nil()).then_some((idx, *value))
             }
         }
     }
@@ -1130,20 +1123,20 @@ impl Table {
             let slot = index & !ARRAY_SLOT_TAG;
             return self.window_position(slot).and_then(|position| {
                 let value = self.array[position];
-                (!matches!(value, Val::Nil)).then_some((Val::Num((slot + 1) as f64), value))
+                (!value.is_nil()).then_some((Val::num((slot + 1) as f64), value))
             });
         }
         match &self.storage {
             TableStorage::Inline { entries, len } => {
                 if index < *len as usize {
-                    (!matches!(entries[index].1, Val::Nil)).then_some(entries[index])
+                    (!entries[index].1.is_nil()).then_some(entries[index])
                 } else {
                     None
                 }
             }
             TableStorage::Map(map, _) => map
                 .get(index)
-                .and_then(|&(key, value)| (!matches!(value, Val::Nil)).then_some((key, value))),
+                .and_then(|&(key, value)| (!value.is_nil()).then_some((key, value))),
         }
     }
 
@@ -1161,8 +1154,8 @@ impl Table {
             TableStorage::Inline { entries, len } => entries[..usize::from(*len)].get(index)?,
             TableStorage::Map(map, _) => map.get(index)?,
         };
-        let same = matches!((slot_key, key), (Val::Str(a), Val::Str(b)) if *a == b);
-        (same && !matches!(value, Val::Nil)).then_some(*value)
+        let same = key.is_string() && key.same_bits(*slot_key);
+        (same && !value.is_nil()).then_some(*value)
     }
 
     /// The value half of [`Self::get_index`], for cached reads that never look
@@ -1185,7 +1178,7 @@ impl Table {
                 TableStorage::Map(map, _) => map.get(index)?.1,
             }
         };
-        (!matches!(value, Val::Nil)).then_some(value)
+        (!value.is_nil()).then_some(value)
     }
 
     /// The value in hash slot `index`, nil for a tombstone or vacant slot;
@@ -1245,13 +1238,13 @@ impl Table {
                 (*key, value)
             }
             TableStorage::Map(map, _) => match map.get_mut(index) {
-                Some((Val::Nil, _)) | None => return false,
-                Some((key, slot)) => (key, slot),
+                Some((key, slot)) if !key.is_nil() => (key, slot),
+                _ => return false,
             },
             TableStorage::Inline { .. } => return false,
         };
-        let was_dead = matches!(*slot, Val::Nil);
-        let now_dead = matches!(value, Val::Nil);
+        let was_dead = slot.is_nil();
+        let now_dead = value.is_nil();
         *slot = value;
         self.tally.add_dead(usize::from(now_dead));
         self.tally.sub_dead(usize::from(was_dead));
@@ -1363,7 +1356,7 @@ impl Table {
     pub(super) fn probe_hash(&self, key: &Val) -> (HashProbe, Val) {
         let (at, present, value) = match self.hash_slot_of(key) {
             Some((index, value)) => (index, true, value),
-            None => (self.hash_slot_count(), false, Val::Nil),
+            None => (self.hash_slot_count(), false, Val::NIL),
         };
         (
             HashProbe {
@@ -1385,7 +1378,7 @@ impl Table {
         if probe.present {
             self.hash_slot_value(probe.at)
         } else {
-            (probe.at == self.hash_slot_count()).then_some(Val::Nil)
+            (probe.at == self.hash_slot_count()).then_some(Val::NIL)
         }
     }
 
@@ -1403,7 +1396,7 @@ impl Table {
         if probe.version != self.version() || !probe.present {
             return false;
         }
-        if matches!(value, Val::Nil) || !self.set_at_index(probe.at, *value) {
+        if value.is_nil() || !self.set_at_index(probe.at, *value) {
             return self.write_slot(probe.at, value);
         }
         true
@@ -1435,43 +1428,43 @@ impl Table {
     /// untagged hash position.
     #[inline]
     pub(super) fn string_get_hinted(&self, hint: &TableKeySlot, key: Val) -> Val {
-        debug_assert!(matches!(key, Val::Str(_)));
+        debug_assert!(key.is_string());
         let guess = hint.get();
         match &self.storage {
             TableStorage::Inline { entries, len } => {
                 let live = &entries[..usize::from(*len)];
                 if let Some((slot_key, value)) = guess.and_then(|at| live.get(at.0))
                     && *slot_key == key
-                    && !matches!(value, Val::Nil)
+                    && !value.is_nil()
                 {
                     return *value;
                 }
                 // bounded: an inline part holds a fixed handful of entries.
                 for (at, (entry_key, entry_value)) in live.iter().enumerate() {
                     if *entry_key == key {
-                        if !matches!(entry_value, Val::Nil) {
+                        if !entry_value.is_nil() {
                             hint.set(KeyedIndex(at));
                         }
                         return *entry_value;
                     }
                 }
-                Val::Nil
+                Val::NIL
             }
             TableStorage::Map(map, _) => {
                 if let Some((slot_key, value)) = guess.and_then(|at| map.get(at.0))
                     && *slot_key == key
-                    && !matches!(value, Val::Nil)
+                    && !value.is_nil()
                 {
                     return *value;
                 }
                 match map.find_slot(key) {
                     Some((at, value)) => {
-                        if !matches!(value, Val::Nil) {
+                        if !value.is_nil() {
                             hint.set(KeyedIndex(at));
                         }
                         value
                     }
-                    None => Val::Nil,
+                    None => Val::NIL,
                 }
             }
         }
@@ -1564,7 +1557,7 @@ impl Table {
     /// it.
     #[cfg(feature = "snapshot")]
     pub(super) fn snapshot_entries(&self) -> (usize, usize, Vec<(Val, Val)>) {
-        let live = |value: &Val| !matches!(value, Val::Nil);
+        let live = |value: &Val| !value.is_nil();
         let (first, last) = match (
             self.array.iter().position(live),
             self.array.iter().rposition(live),
@@ -1575,7 +1568,7 @@ impl Table {
         let mut out: Vec<(Val, Val)> = self.array[first..last]
             .iter()
             .enumerate()
-            .map(|(offset, value)| (Val::Num((self.base + first + offset + 1) as f64), *value))
+            .map(|(offset, value)| (Val::num((self.base + first + offset + 1) as f64), *value))
             .collect();
         let array_slots = out.len();
         out.extend(self.snapshot_hash_slots());
@@ -1590,7 +1583,7 @@ impl Table {
             TableStorage::Inline { entries, len } => entries[..*len as usize].to_vec(),
             // A leading (nil, true) is a storage-kind marker, not a slot.
             // Templates can be maps even with fewer than INLINE_CAPACITY keys.
-            TableStorage::Map(map, _) => std::iter::once((Val::Nil, Val::Bool(true)))
+            TableStorage::Map(map, _) => std::iter::once((Val::NIL, Val::boolean(true)))
                 .chain(map.slots().iter().copied())
                 .collect(),
         }
@@ -1621,8 +1614,8 @@ impl Table {
                 SnapshotTableFault::ArrayLengthExceedsLimit,
             ));
         }
-        let base = match entries.first() {
-            Some((Val::Num(n), _)) if array_slots > 0 => match array_index(*n, vlen) {
+        let base = match entries.first().and_then(|(key, _)| key.as_num()) {
+            Some(n) if array_slots > 0 => match array_index(n, vlen) {
                 Some(slot) if slot + array_slots <= vlen => slot,
                 _ => {
                     return Err(TableError::InvalidSnapshot(
@@ -1652,7 +1645,7 @@ impl Table {
         // wrong slot. A per-table bump suffices: caches key on table identity,
         // which the rebuild preserves.
         let next_version = self.version().wrapping_add(1);
-        let is_map = matches!(entries.get(array_slots), Some((Val::Nil, Val::Bool(true))));
+        let is_map = entries.get(array_slots) == Some(&(Val::NIL, Val::boolean(true)));
         let capacity = entries.len() - array_slots - usize::from(is_map);
         let mut rebuilt = Table::with_capacity(if is_map {
             capacity.max(INLINE_CAPACITY + 1)
@@ -1662,23 +1655,21 @@ impl Table {
         let mut entries = entries.into_iter();
         let mut array = Vec::with_capacity(array_slots);
         for (position, (key, value)) in entries.by_ref().take(array_slots).enumerate() {
-            if !matches!(key, Val::Num(n) if array_index(n, vlen) == Some(base + position)) {
+            if !matches!(key.kind(), ValKind::Num(n) if array_index(n, vlen) == Some(base + position))
+            {
                 return Err(TableError::InvalidSnapshot(
                     SnapshotTableFault::ArraySlotHasWrongKey,
                 ));
             }
             array.push(value);
         }
-        rebuilt.array_live = array
-            .iter()
-            .filter(|value| !matches!(value, Val::Nil))
-            .count();
+        rebuilt.array_live = array.iter().filter(|value| !value.is_nil()).count();
         rebuilt.tally.set_dense(
             rebuilt.array_live == 0
                 || base == 0
                     && array[..rebuilt.array_live]
                         .iter()
-                        .all(|value| !matches!(value, Val::Nil)),
+                        .all(|value| !value.is_nil()),
         );
         rebuilt.array = array;
         rebuilt.base = base;
@@ -1687,7 +1678,7 @@ impl Table {
             let _ = entries.next();
         }
         for (key, value) in entries {
-            let dead = matches!(value, Val::Nil);
+            let dead = value.is_nil();
             if !dead && (rebuilt.array_key(&key).is_some() || rebuilt.is_array_append_key(&key)) {
                 return Err(TableError::InvalidSnapshot(
                     SnapshotTableFault::HashEntryBelongsInArray,
@@ -1702,7 +1693,7 @@ impl Table {
                     *len += 1;
                 }
                 TableStorage::Map(map, _) => {
-                    if matches!(key, Val::Nil) && dead {
+                    if key.is_nil() && dead {
                         map.push_vacant();
                     } else {
                         let key = TableKey::new(key).map_err(TableError::InvalidKey)?;
@@ -1733,10 +1724,7 @@ impl Table {
     /// not bump version (value-only change preserves (key, index) bindings).
     #[inline]
     pub(super) fn set_at_index(&mut self, index: usize, value: Val) -> bool {
-        debug_assert!(
-            !matches!(value, Val::Nil),
-            "set_at_index requires a non-nil value"
-        );
+        debug_assert!(!value.is_nil(), "set_at_index requires a non-nil value");
         let updated = if index & ARRAY_SLOT_TAG != 0 {
             // A live slot is never inside the dead-prefix hint, so a
             // live-to-live update leaves the hint alone.
@@ -1744,7 +1732,7 @@ impl Table {
                 .window_position(index & !ARRAY_SLOT_TAG)
                 .map(|position| &mut self.array[position])
             {
-                Some(slot) if !matches!(*slot, Val::Nil) => {
+                Some(slot) if !slot.is_nil() => {
                     *slot = value;
                     true
                 }
@@ -1753,7 +1741,7 @@ impl Table {
         } else {
             match &mut self.storage {
                 TableStorage::Inline { entries, len } => {
-                    if index < *len as usize && !matches!(entries[index].1, Val::Nil) {
+                    if index < *len as usize && !entries[index].1.is_nil() {
                         entries[index].1 = value;
                         true
                     } else {
@@ -1764,7 +1752,7 @@ impl Table {
                     let Some((_, v)) = map.get_mut(index) else {
                         return false;
                     };
-                    if matches!(*v, Val::Nil) {
+                    if v.is_nil() {
                         false
                     } else {
                         *v = value;
@@ -1787,10 +1775,10 @@ impl Table {
             let Some(position) = self.window_position(index & !ARRAY_SLOT_TAG) else {
                 return false;
             };
-            if matches!(self.array[position], Val::Nil) {
+            if self.array[position].is_nil() {
                 return false;
             }
-            self.write_window(position, Val::Nil);
+            self.write_window(position, Val::NIL);
         } else {
             let (key, slot) = match &mut self.storage {
                 TableStorage::Inline { entries, len } => {
@@ -1808,10 +1796,10 @@ impl Table {
                 }
             };
             // A vacant slot's value is nil, so it is refused here too.
-            if matches!(*slot, Val::Nil) {
+            if slot.is_nil() {
                 return false;
             }
-            *slot = Val::Nil;
+            *slot = Val::NIL;
             self.tally.add_dead(1);
             self.hash_migratable -= usize::from(may_migrate(&key));
         }
@@ -1837,21 +1825,21 @@ impl Table {
                 if *existing_key != key {
                     return false;
                 }
-                let was_live = !matches!(*existing_value, Val::Nil);
+                let was_live = !existing_value.is_nil();
                 *existing_value = value;
-                (was_live, !matches!(value, Val::Nil))
+                (was_live, !value.is_nil())
             }
             TableStorage::Map(map, _) => {
                 let Some((existing_key, existing_value)) = map.get_mut(index) else {
                     return false;
                 };
                 // A vacant slot's nil key never names a template key.
-                if existing_key != key || matches!(key, Val::Nil) {
+                if existing_key != key || key.is_nil() {
                     return false;
                 }
-                let was_live = !matches!(*existing_value, Val::Nil);
+                let was_live = !existing_value.is_nil();
                 *existing_value = value;
-                (was_live, !matches!(value, Val::Nil))
+                (was_live, !value.is_nil())
             }
             TableStorage::Inline { .. } => return false,
         };
@@ -1886,7 +1874,7 @@ impl Table {
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub(super) fn array_len(&self) -> usize {
         if self.base + self.array.len() == self.vlen
-            && matches!(self.array.last(), Some(last) if !matches!(last, Val::Nil))
+            && matches!(self.array.last(), Some(last) if !last.is_nil())
         {
             return self.vlen;
         }
@@ -1912,7 +1900,7 @@ impl Table {
         let mut hi = self.vlen;
         while hi - lo > 1 {
             let mid = lo + (hi - lo) / 2;
-            if matches!(self.array_value(mid), Val::Nil) {
+            if self.array_value(mid).is_nil() {
                 hi = mid;
             } else {
                 lo = mid;
@@ -1944,7 +1932,7 @@ impl Table {
         // In Lua, assigning nil deletes the key rather than storing a nil value.
         // An array key outside the window is already absent, and the hash
         // part holds no live entry for it.
-        if matches!(value, Val::Nil) {
+        if value.is_nil() {
             self.hash_remove(&key);
             return Ok(());
         }
@@ -1974,7 +1962,7 @@ impl Table {
         key: StringPtr,
         value: Val,
     ) -> SlotRef {
-        let index = self.insert_hash(resident, TableKey::from_prevalidated(Val::Str(key)), value);
+        let index = self.insert_hash(resident, TableKey::from_prevalidated(Val::str(key)), value);
         SlotRef {
             version: self.version(),
             index,
@@ -1990,7 +1978,7 @@ impl Table {
         table_key: TableKey,
         value: Val,
     ) -> usize {
-        debug_assert!(!matches!(value, Val::Nil), "a hash insert stores a value");
+        debug_assert!(!value.is_nil(), "a hash insert stores a value");
         // Any branch but a live update makes `key` live; forgetting on
         // every call keeps the rule in one place.
         self.tally.forget_no_newindex();
@@ -2004,7 +1992,7 @@ impl Table {
                 let found = entries
                     .iter()
                     .take(*len as usize)
-                    .position(|entry| entry.0 == key && !matches!(entry.1, Val::Nil));
+                    .position(|entry| entry.0 == key && !entry.1.is_nil());
                 if let Some(index) = found {
                     entries[index].1 = value;
                 }
@@ -2062,8 +2050,8 @@ impl Table {
     /// dead-prefix hint a lower bound.
     #[inline]
     fn write_window(&mut self, position: usize, value: Val) {
-        let was_live = !matches!(self.array[position], Val::Nil);
-        let is_live = !matches!(value, Val::Nil);
+        let was_live = !self.array[position].is_nil();
+        let is_live = !value.is_nil();
         if was_live != is_live {
             self.note_live(self.base + position + 1, is_live);
         }
@@ -2095,7 +2083,7 @@ impl Table {
     /// Adjust the dead-prefix hint after a write at or below it: a live
     /// value below it lowers it, a nil at it extends it.
     fn note_prefix_write(&mut self, position: usize, value: Val) {
-        if !matches!(value, Val::Nil) {
+        if !value.is_nil() {
             self.lead = self.lead.min(position);
         } else if position == self.lead {
             self.lead += 1;
@@ -2106,7 +2094,7 @@ impl Table {
     /// Step the dead-prefix hint over at most `LEAD_CATCH_UP` nil slots.
     fn advance_lead(&mut self) {
         let end = (self.lead + LEAD_CATCH_UP).min(self.array.len());
-        while self.lead < end && matches!(self.array[self.lead], Val::Nil) {
+        while self.lead < end && self.array[self.lead].is_nil() {
             self.lead += 1;
         }
     }
@@ -2135,7 +2123,7 @@ impl Table {
             self.array
                 .try_reserve(len - self.array.len())
                 .map_err(|_| TableError::GrowthFailed)?;
-            resident.add((self.array.capacity() - old) * RESIDENT_BYTES_PER_ARRAY_SLOT);
+            resident.add((self.array.capacity() - old) as u64 * RESIDENT_BYTES_PER_ARRAY_SLOT);
         }
         Ok(())
     }
@@ -2163,7 +2151,7 @@ impl Table {
             return Ok(1);
         }
         let mut end = self.vlen + 1;
-        while !matches!(self.get(&Val::Num((end + 1) as f64)), Val::Nil) {
+        while !self.get(&Val::num((end + 1) as f64)).is_nil() {
             if end == MAX_ARRAY_LEN {
                 return Err(TableError::GrowthFailed);
             }
@@ -2193,7 +2181,7 @@ impl Table {
     /// included.
     #[inline]
     fn appends_are_plain(&self) -> bool {
-        matches!(self.array.first(), Some(first) if !matches!(first, Val::Nil))
+        matches!(self.array.first(), Some(first) if !first.is_nil())
             && self.base + self.array.len() == self.vlen
             && self.hash_migratable == 0
     }
@@ -2219,7 +2207,7 @@ impl Table {
         {
             return self.append_slow(resident, value);
         }
-        let is_live = !matches!(value, Val::Nil);
+        let is_live = !value.is_nil();
         if is_live {
             self.note_live(self.vlen + 1, true);
         }
@@ -2244,7 +2232,7 @@ impl Table {
         self.prepare_append_after_lead(resident)?;
         self.reserve_append(resident)?;
         // After the window preparation, whose reset would set the proof.
-        let is_live = !matches!(value, Val::Nil);
+        let is_live = !value.is_nil();
         if is_live {
             self.note_live(self.vlen + 1, true);
         }
@@ -2295,7 +2283,7 @@ impl Table {
             // appends. The gap is therefore legitimate and unbounded by the
             // saved span. Resetting this window would discard its live values.
             self.reserve_array_tracked(resident, self.vlen - self.base)?;
-            self.array.resize(self.vlen - self.base, Val::Nil);
+            self.array.resize(self.vlen - self.base, Val::NIL);
         }
         Ok(())
     }
@@ -2315,7 +2303,7 @@ impl Table {
     fn shrink_array(&mut self, minimum: usize, resident: &mut ResidentBytes) {
         let old = self.array.capacity();
         self.array.shrink_to(minimum);
-        resident.remove((old - self.array.capacity()) * RESIDENT_BYTES_PER_ARRAY_SLOT);
+        resident.remove((old - self.array.capacity()) as u64 * RESIDENT_BYTES_PER_ARRAY_SLOT);
     }
 
     /// Empty the window and restart it just above key `base`.
@@ -2366,7 +2354,7 @@ impl Table {
         value: Val,
     ) -> std::result::Result<(), TableError> {
         self.reserve_outside_window(resident, key, 0, 0)?;
-        debug_assert!(!matches!(value, Val::Nil));
+        debug_assert!(!value.is_nil());
         if self.array_live == 0 {
             self.reset_window(resident, key - 1);
             self.array.push(value);
@@ -2374,12 +2362,12 @@ impl Table {
             let pad = (key - 1).min(self.array_live.div_ceil(2));
             let new_base = key - 1 - pad;
             let grow = self.base - new_base;
-            self.array.splice(0..0, std::iter::repeat_n(Val::Nil, grow));
+            self.array.splice(0..0, std::iter::repeat_n(Val::NIL, grow));
             self.base = new_base;
             self.lead = pad;
             self.array[pad] = value;
         } else {
-            self.array.resize(key - self.base, Val::Nil);
+            self.array.resize(key - self.base, Val::NIL);
             self.array[key - self.base - 1] = value;
         }
         // After any reset above, which would otherwise overwrite it.
@@ -2407,7 +2395,7 @@ impl Table {
         // `hash_remove` decrements the counter for each migrated key, so the
         // run ends without a probe once the last migratable key has moved.
         while self.hash_migratable != 0 {
-            let next = Val::Num((self.vlen + 1) as f64);
+            let next = Val::num((self.vlen + 1) as f64);
             match self.hash_remove(&next) {
                 Some(value) => {
                     self.note_live(self.vlen + 1, true);
@@ -2458,7 +2446,7 @@ impl Table {
         let found = map.find_mut(key);
         if let Some(mut slot) = found {
             let index = slot.position();
-            let live = !matches!(*slot.value_mut(), Val::Nil);
+            let live = !slot.value_mut().is_nil();
             if live || policy.revive_in_place {
                 *slot.value_mut() = value;
                 if !live {
@@ -2625,10 +2613,10 @@ impl Table {
     fn remove(&mut self, key: &Val) -> Option<Val> {
         if let Some(slot) = self.array_slot(key) {
             let removed = self.array[slot];
-            self.write_window(slot, Val::Nil);
+            self.write_window(slot, Val::NIL);
             #[cfg(debug_assertions)]
             self.debug_assert_invariants();
-            return (!matches!(removed, Val::Nil)).then_some(removed);
+            return (!removed.is_nil()).then_some(removed);
         }
         self.hash_remove(key)
     }
@@ -2640,8 +2628,8 @@ impl Table {
                 let mut removed = None;
                 for (entry_key, entry_value) in entries.iter_mut().take(*len as usize) {
                     if entry_key == key {
-                        let value = std::mem::replace(entry_value, Val::Nil);
-                        if !matches!(value, Val::Nil) {
+                        let value = std::mem::replace(entry_value, Val::NIL);
+                        if !value.is_nil() {
                             self.tally.add_dead(1);
                             removed = Some(value);
                         }
@@ -2652,8 +2640,8 @@ impl Table {
             }
             TableStorage::Map(map, _) => {
                 let (_, value) = map.get_mut(map.find(*key)?)?;
-                let removed = std::mem::replace(value, Val::Nil);
-                if matches!(removed, Val::Nil) {
+                let removed = std::mem::replace(value, Val::NIL);
+                if removed.is_nil() {
                     None
                 } else {
                     self.tally.add_dead(1);
@@ -2688,7 +2676,7 @@ impl Table {
                 let mut packed_slots = packed.iter_mut();
                 for entry in entries.iter_mut().take(*len as usize) {
                     let entry = std::mem::take(entry);
-                    if !matches!(entry.1, Val::Nil) {
+                    if !entry.1.is_nil() {
                         *packed_slots
                             .next()
                             .expect("packed table must have room for every live entry") = entry;
@@ -2752,11 +2740,9 @@ impl Table {
         for (at, &value) in values.iter().enumerate() {
             let key = first + at;
             if key == self.vlen + 1
-                && (matches!(self.array.first(), Some(first) if !matches!(first, Val::Nil))
+                && (matches!(self.array.first(), Some(first) if !first.is_nil())
                     && self.base + self.array.len() == self.vlen
-                    || self.array.is_empty()
-                        && self.base == self.vlen
-                        && !matches!(value, Val::Nil))
+                    || self.array.is_empty() && self.base == self.vlen && !value.is_nil())
                 && self.hash_migratable == 0
             {
                 // Every remaining key is an append whose window
@@ -2766,7 +2752,7 @@ impl Table {
                 let rest = &values[at..];
                 self.check_vlen_growth(rest.len())?;
                 self.reserve_array_tracked(resident, self.array.len().saturating_add(rest.len()))?;
-                let live = rest.iter().filter(|v| !matches!(v, Val::Nil)).count();
+                let live = rest.iter().filter(|v| !v.is_nil()).count();
                 // An all-live run keeps the proof exactly when its first key
                 // would (`note_live`); a nil-only run moves no live key. A
                 // mixed run gives it up rather than locate its nils.
@@ -2795,7 +2781,7 @@ impl Table {
             if key == self.vlen + 1 {
                 self.append_tracked(resident, value)?;
             } else {
-                self.insert_tracked(resident, Val::Num(key as f64), value)?;
+                self.insert_tracked(resident, Val::num(key as f64), value)?;
             }
         }
         #[cfg(debug_assertions)]
@@ -2830,7 +2816,7 @@ impl Table {
         );
         if pos == len + 1 {
             // Nothing shifts. Nil is a no-op, as `t[#t + 1] = nil` is.
-            self.insert_tracked(resident, Val::Num(pos as f64), value)?;
+            self.insert_tracked(resident, Val::num(pos as f64), value)?;
             #[cfg(debug_assertions)]
             self.debug_assert_invariants();
             return Ok(());
@@ -2843,7 +2829,7 @@ impl Table {
         } else {
             usize::from(len == self.base + self.array.len())
         };
-        if pos <= self.base && !matches!(value, Val::Nil) {
+        if pos <= self.base && !value.is_nil() {
             // The rotation preserves the live count, but migration runs before
             // the downward write and increases its padding requirement. Reserve
             // for that final count before changing slots or removing hash keys.
@@ -2855,13 +2841,13 @@ impl Table {
         // The rotation opens a hole the write below fills, so the proof is
         // held aside for the shift: a live value shifted into a dense prefix,
         // migrated keys included, leaves it dense; a nil one leaves a hole.
-        let was_dense = self.tally.dense() && !matches!(value, Val::Nil);
+        let was_dense = self.tally.dense() && !value.is_nil();
         self.tally.set_dense(false);
         if structural {
             self.vlen += 1;
-            self.array.push(Val::Nil);
+            self.array.push(Val::NIL);
         } else if len == self.base + self.array.len() {
-            self.array.push(Val::Nil);
+            self.array.push(Val::NIL);
         }
         let low = pos.max(self.base + 1) - self.base - 1;
         let high = len - self.base;
@@ -2875,7 +2861,7 @@ impl Table {
         }
         if pos > self.base {
             self.write_window(pos - self.base - 1, value);
-        } else if !matches!(value, Val::Nil) {
+        } else if !value.is_nil() {
             self.write_outside_window(resident, pos, value)?;
         }
         self.tally.set_dense(self.tally.dense() || was_dense);
@@ -2899,7 +2885,7 @@ impl Table {
         debug_assert_eq!(len, self.array_len(), "stale border passed to array_remove");
         if (1..=len).contains(&pos) {
             // Key `len` is live, so it lies inside the window.
-            if pos <= self.base && !matches!(self.array[0], Val::Nil) {
+            if pos <= self.base && !self.array[0].is_nil() {
                 // The shift resets lead to zero before extending downward.
                 let pad = (self.base - 1).min(self.array.len().div_ceil(2));
                 self.reserve_array_tracked(resident, self.array.len() + 1 + pad)?;
@@ -2915,18 +2901,18 @@ impl Table {
             if pos > self.base {
                 let position = pos - self.base - 1;
                 self.array.copy_within(position + 1..end, position);
-                self.array[end - 1] = Val::Nil;
-                self.array_live -= usize::from(!matches!(removed, Val::Nil));
+                self.array[end - 1] = Val::NIL;
+                self.array_live -= usize::from(!removed.is_nil());
                 self.lead = self.lead.min(position);
             } else {
                 // Keys `pos..base` are nil and stay nil; key `base` receives
                 // the window's first value.
                 let first = self.array[0];
                 self.array.copy_within(1..end, 0);
-                self.array[end - 1] = Val::Nil;
-                self.array_live -= usize::from(!matches!(first, Val::Nil));
+                self.array[end - 1] = Val::NIL;
+                self.array_live -= usize::from(!first.is_nil());
                 self.lead = 0;
-                if !matches!(first, Val::Nil) {
+                if !first.is_nil() {
                     self.write_outside_window(resident, self.base, first)?;
                 }
             }
@@ -2936,7 +2922,7 @@ impl Table {
             self.debug_assert_invariants();
             return Ok(removed);
         }
-        let key = Val::Num(pos as f64);
+        let key = Val::num(pos as f64);
         let removed = self.get(&key);
         self.remove(&key);
         #[cfg(debug_assertions)]
@@ -2979,7 +2965,7 @@ impl Table {
         let below = self.base.min(len);
         out.try_reserve_exact(len)
             .map_err(|_| TableError::GrowthFailed)?;
-        out.resize(out.len() + below, Val::Nil);
+        out.resize(out.len() + below, Val::NIL);
         out.extend_from_slice(&self.array[..len - below]);
         Ok(())
     }
@@ -2994,7 +2980,7 @@ impl Table {
         values: &[Val],
     ) -> std::result::Result<(), TableError> {
         for (i, &v) in values.iter().enumerate() {
-            self.insert_tracked(resident, Val::Num((i + 1) as f64), v)?;
+            self.insert_tracked(resident, Val::num((i + 1) as f64), v)?;
         }
         #[cfg(debug_assertions)]
         self.debug_assert_invariants();
@@ -3010,8 +2996,8 @@ impl Table {
     pub(super) fn overwrite_live_prefix(&mut self, values: &[Val]) {
         debug_assert!(self.base == 0 || values.is_empty());
         let slots = &mut self.array[..values.len()];
-        debug_assert!(slots.iter().all(|v| !matches!(v, Val::Nil)));
-        debug_assert!(values.iter().all(|v| !matches!(v, Val::Nil)));
+        debug_assert!(slots.iter().all(|v| !v.is_nil()));
+        debug_assert!(values.iter().all(|v| !v.is_nil()));
         slots.copy_from_slice(values);
         #[cfg(debug_assertions)]
         self.debug_assert_invariants();
@@ -3078,12 +3064,12 @@ impl Table {
                     .iter()
                     .enumerate()
                     .skip(first)
-                    .find(|(_, value)| !matches!(value, Val::Nil))
+                    .find(|(_, value)| !value.is_nil())
                 {
                     let slot = self.base + position;
                     return TableNextWithIndex::Pair {
                         index: ARRAY_SLOT_TAG | slot,
-                        key: Val::Num((slot + 1) as f64),
+                        key: Val::num((slot + 1) as f64),
                         value: *value,
                     };
                 }
@@ -3097,7 +3083,7 @@ impl Table {
                 .take(*len as usize)
                 .enumerate()
                 .skip(hash_start)
-                .find(|(_, (_, value))| !matches!(value, Val::Nil))
+                .find(|(_, (_, value))| !value.is_nil())
                 .map_or(TableNextWithIndex::End, |(index, (key, value))| {
                     TableNextWithIndex::Pair {
                         index,
@@ -3110,7 +3096,7 @@ impl Table {
                 .iter()
                 .enumerate()
                 .skip(hash_start)
-                .find(|(_, (_, value))| !matches!(value, Val::Nil))
+                .find(|(_, (_, value))| !value.is_nil())
                 .map_or(TableNextWithIndex::End, |(index, (key, value))| {
                     TableNextWithIndex::Pair {
                         index,
@@ -3133,7 +3119,7 @@ impl Table {
     /// slot would otherwise resume in the hash part. A hint that does not hold
     /// `control` falls back to the lookup, so the answer never depends on it.
     pub(super) fn next_with_index(&self, control: &Val, hint: Option<usize>) -> TableNextWithIndex {
-        if matches!(control, Val::Nil) {
+        if control.is_nil() {
             return self.next_live_from(Position::Array(0));
         }
         if !is_valid_table_key(control) {
@@ -3253,7 +3239,7 @@ impl RouteState {
     /// `__index` value is a route's link.
     #[inline]
     pub(super) fn is_link_key(&self, key: &Val) -> bool {
-        self.link_key.is_none_or(|link| *key == Val::Str(link))
+        self.link_key.is_none_or(|link| *key == Val::str(link))
     }
 }
 
@@ -3298,7 +3284,7 @@ impl TableEditor<'_> {
     /// `key` would overwrite without changing a route, if it is one.
     #[inline]
     fn neutral_overwrite_index(&self, key: &Val, value: &Val) -> Option<usize> {
-        if matches!(value, Val::Nil) || self.routes.is_link_key(key) {
+        if value.is_nil() || self.routes.is_link_key(key) {
             return None;
         }
         self.table.get_with_index(key).map(|(index, _)| index)
@@ -3368,7 +3354,7 @@ impl TableEditor<'_> {
 
     #[inline(always)]
     fn store_string_key_classified(&mut self, key: StringPtr, value: Val) -> SlotRef {
-        if let Some(index) = self.neutral_overwrite_index(&Val::Str(key), &value) {
+        if let Some(index) = self.neutral_overwrite_index(&Val::str(key), &value) {
             let stored = self.table.set_at_index(index, value);
             debug_assert!(stored, "the entry was just found live");
             return SlotRef {
@@ -3436,7 +3422,7 @@ impl TableEditor<'_> {
         value: &Val,
     ) {
         let neutral = slot.is_none_or(|slot| table.slot_is_current(slot))
-            && !matches!(value, Val::Nil)
+            && !value.is_nil()
             && table
                 .get_index(index)
                 .is_some_and(|(key, _)| !routes.is_link_key(&key));
@@ -3563,7 +3549,7 @@ mod tests {
     use super::*;
 
     fn n(x: usize) -> Val {
-        Val::Num(x as f64)
+        Val::num(x as f64)
     }
 
     /// A table whose logical array length is `vlen` and whose array window
@@ -3573,7 +3559,7 @@ mod tests {
     fn window_table(vlen: usize, live_key: Option<usize>) -> Table {
         let mut table = Table::default();
         if let Some(key) = live_key {
-            table.array = vec![Val::Bool(true)];
+            table.array = vec![Val::boolean(true)];
             table.base = key - 1;
             table.array_live = 1;
             table.tally.set_dense(key == 1);
@@ -3596,18 +3582,18 @@ mod tests {
 
     /// A number key that can never live in the array part.
     fn h(x: usize) -> Val {
-        Val::Num(x as f64 + 0.5)
+        Val::num(x as f64 + 0.5)
     }
 
     fn fill(t: &mut Table, range: std::ops::RangeInclusive<usize>) {
         for i in range {
-            t.insert(n(i), Val::Bool(true)).unwrap();
+            t.insert(n(i), Val::boolean(true)).unwrap();
         }
     }
 
     fn fill_hash(t: &mut Table, range: std::ops::RangeInclusive<usize>) {
         for i in range {
-            t.insert(h(i), Val::Bool(true)).unwrap();
+            t.insert(h(i), Val::boolean(true)).unwrap();
         }
     }
 
@@ -3616,20 +3602,20 @@ mod tests {
         let mut table = Table::default();
         fill_hash(&mut table, 1..=6);
 
-        for key in [Val::Nil, Val::Num(f64::NAN)] {
+        for key in [Val::NIL, Val::num(f64::NAN)] {
             assert!(!is_valid_table_key(&key));
             assert!(key.table_key().is_err());
-            assert_eq!(table.get(&key), Val::Nil);
+            assert_eq!(table.get(&key), Val::NIL);
             assert_eq!(table.get_with_index(&key), None);
         }
 
         assert!(matches!(
-            table.next_with_index(&Val::Num(f64::NAN), None),
+            table.next_with_index(&Val::num(f64::NAN), None),
             TableNextWithIndex::InvalidKey
         ));
         let (index, _) = table.get_with_index(&h(1)).expect("hash key exists");
         assert!(matches!(
-            table.next_with_index(&Val::Num(f64::NAN), Some(index)),
+            table.next_with_index(&Val::num(f64::NAN), Some(index)),
             TableNextWithIndex::InvalidKey
         ));
     }
@@ -3651,8 +3637,8 @@ mod tests {
         }
 
         fn array_key(&self, key: Val) -> Option<usize> {
-            match key {
-                Val::Num(x) => array_index(x, self.array.len()),
+            match key.kind() {
+                ValKind::Num(x) => array_index(x, self.array.len()),
                 _ => None,
             }
         }
@@ -3660,7 +3646,7 @@ mod tests {
         fn take_hash(&mut self, key: Val) -> Val {
             match self.hash_slot(key) {
                 Some(i) => std::mem::take(&mut self.hash[i].1),
-                None => Val::Nil,
+                None => Val::NIL,
             }
         }
 
@@ -3669,7 +3655,7 @@ mod tests {
             loop {
                 let next = n(self.array.len() + 1);
                 let value = self.take_hash(next);
-                if matches!(value, Val::Nil) {
+                if value.is_nil() {
                     break;
                 }
                 self.array.push(value);
@@ -3679,13 +3665,13 @@ mod tests {
         fn insert(&mut self, key: Val, value: Val) {
             if let Some(slot) = self.array_key(key) {
                 self.array[slot] = value;
-            } else if matches!(value, Val::Nil) {
+            } else if value.is_nil() {
                 self.take_hash(key);
             } else if key == n(self.array.len() + 1) {
                 self.push(value);
             } else {
                 match self.hash_slot(key) {
-                    Some(i) if !matches!(self.hash[i].1, Val::Nil) => self.hash[i].1 = value,
+                    Some(i) if !self.hash[i].1.is_nil() => self.hash[i].1 = value,
                     Some(i) => {
                         self.hash.remove(i);
                         self.hash.push((key, value));
@@ -3698,19 +3684,19 @@ mod tests {
         fn get(&self, key: Val) -> Val {
             match self.array_key(key) {
                 Some(slot) => self.array[slot],
-                None => self.hash_slot(key).map_or(Val::Nil, |i| self.hash[i].1),
+                None => self.hash_slot(key).map_or(Val::NIL, |i| self.hash[i].1),
             }
         }
 
         fn border(&self) -> usize {
             match self.array.last() {
                 None => 0,
-                Some(last) if !matches!(last, Val::Nil) => self.array.len(),
+                Some(last) if !last.is_nil() => self.array.len(),
                 Some(_) => {
                     let (mut lo, mut hi) = (0, self.array.len());
                     while hi - lo > 1 {
                         let mid = lo + (hi - lo) / 2;
-                        if matches!(self.array[mid - 1], Val::Nil) {
+                        if self.array[mid - 1].is_nil() {
                             hi = mid;
                         } else {
                             lo = mid;
@@ -3740,11 +3726,11 @@ mod tests {
             if (1..=len).contains(&pos) {
                 let removed = self.array[pos - 1];
                 self.array.copy_within(pos..len, pos - 1);
-                self.array[len - 1] = Val::Nil;
+                self.array[len - 1] = Val::NIL;
                 return removed;
             }
             let removed = self.get(n(pos));
-            self.insert(n(pos), Val::Nil);
+            self.insert(n(pos), Val::NIL);
             removed
         }
 
@@ -3754,13 +3740,13 @@ mod tests {
                 .enumerate()
                 .map(|(slot, value)| (n(slot + 1), *value))
                 .chain(self.hash.iter().copied())
-                .filter(|(_, value)| !matches!(value, Val::Nil))
+                .filter(|(_, value)| !value.is_nil())
                 .collect()
         }
     }
 
     fn pairs(t: &Table) -> Vec<(Val, Val)> {
-        let mut control = Val::Nil;
+        let mut control = Val::NIL;
         let mut out = Vec::new();
         while let TableNext::Pair(key, value) = t.next(&control) {
             out.push((key, value));
@@ -3774,8 +3760,8 @@ mod tests {
     fn assert_dense_proof(t: &Table, logical: &[Val]) {
         if t.tally.dense() {
             let live = t.array_live;
-            assert!(logical[..live].iter().all(|v| !matches!(v, Val::Nil)));
-            assert!(logical[live..].iter().all(|v| matches!(v, Val::Nil)));
+            assert!(logical[..live].iter().all(|v| !v.is_nil()));
+            assert!(logical[live..].iter().all(|v| v.is_nil()));
         }
     }
 
@@ -3833,20 +3819,20 @@ mod tests {
         let mut t = Table::default();
         for i in 1..=1000 {
             let len = t.array_len();
-            t.insert(n(len + 1), Val::Num(i as f64)).unwrap();
+            t.insert(n(len + 1), Val::num(i as f64)).unwrap();
         }
         for _ in 0..600 {
             let len = t.array_len();
-            t.insert(n(len), Val::Nil).unwrap();
+            t.insert(n(len), Val::NIL).unwrap();
         }
         assert!(t.tally.dense());
         assert_eq!((t.array_len(), t.vlen), (400, 1000));
         for round in 0..300 {
             let len = t.array_len();
             if round % 3 == 2 {
-                t.insert(n(len), Val::Nil).unwrap();
+                t.insert(n(len), Val::NIL).unwrap();
             } else {
-                t.insert(n(len + 1), Val::Bool(true)).unwrap();
+                t.insert(n(len + 1), Val::boolean(true)).unwrap();
             }
             assert!(t.tally.dense(), "round {round}");
             assert_dense_proof(&t, &logical_array(&t));
@@ -3857,32 +3843,32 @@ mod tests {
         // A raw table.remove from the top and table.insert at the top keep
         // it; one in the middle shifts a dense prefix and keeps it too.
         t.array_remove(len).unwrap();
-        t.array_insert(len, Val::Bool(true)).unwrap();
+        t.array_insert(len, Val::boolean(true)).unwrap();
         t.array_remove(10).unwrap();
-        t.array_insert(10, Val::Bool(true)).unwrap();
+        t.array_insert(10, Val::boolean(true)).unwrap();
         assert!(t.tally.dense());
         assert_eq!(t.array_len(), 500);
 
         // A nil inserted in the middle punches a hole: the search answers.
-        t.array_insert(3, Val::Nil).unwrap();
+        t.array_insert(3, Val::NIL).unwrap();
         assert!(!t.tally.dense());
         assert_eq!(t.array_len(), 501);
         assert_dense_proof(&t, &logical_array(&t));
 
         // Clearing every key re-establishes the proof.
         for key in 1..=t.vlen {
-            t.insert(n(key), Val::Nil).unwrap();
+            t.insert(n(key), Val::NIL).unwrap();
         }
         assert!(t.tally.dense());
         assert_eq!(t.array_len(), 0);
-        t.insert(n(1), Val::Bool(true)).unwrap();
+        t.insert(n(1), Val::boolean(true)).unwrap();
         assert!(t.tally.dense());
         assert_eq!(t.array_len(), 1);
 
         // A live write past an all-nil window must not borrow the proof.
         let mut u = Table::default();
-        u.set_list(1, &[Val::Nil, Val::Nil, Val::Nil]).unwrap();
-        u.insert(n(2), Val::Bool(true)).unwrap();
+        u.set_list(1, &[Val::NIL, Val::NIL, Val::NIL]).unwrap();
+        u.insert(n(2), Val::boolean(true)).unwrap();
         assert!(!u.tally.dense());
         assert_eq!(u.array_len(), 0);
     }
@@ -3905,7 +3891,7 @@ mod tests {
             let mut head = 1;
             let mut tail = 0;
             for step in 0..600 {
-                let value = Val::Num((round * 1000 + step) as f64);
+                let value = Val::num((round * 1000 + step) as f64);
                 match next(10) {
                     // Queue push and pop.
                     0 | 1 => {
@@ -3915,8 +3901,8 @@ mod tests {
                     }
                     2 | 3 => {
                         if head <= tail {
-                            t.insert(n(head), Val::Nil).unwrap();
-                            m.insert(n(head), Val::Nil);
+                            t.insert(n(head), Val::NIL).unwrap();
+                            m.insert(n(head), Val::NIL);
                             head += 1;
                         }
                     }
@@ -3934,14 +3920,14 @@ mod tests {
                     // A write or clear anywhere near the logical array.
                     5 | 6 => {
                         let key = n(1 + next(m.array.len() + 3));
-                        let value = if next(3) == 0 { Val::Nil } else { value };
+                        let value = if next(3) == 0 { Val::NIL } else { value };
                         t.insert(key, value).unwrap();
                         m.insert(key, value);
                     }
                     // A hash key, sometimes cleared.
                     7 => {
                         let key = h(next(6));
-                        let value = if next(2) == 0 { Val::Nil } else { value };
+                        let value = if next(2) == 0 { Val::NIL } else { value };
                         t.insert(key, value).unwrap();
                         m.insert(key, value);
                     }
@@ -3949,7 +3935,7 @@ mod tests {
                     8 => {
                         let len = m.border();
                         let pos = 1 + next(len + 1);
-                        let value = if next(4) == 0 { Val::Nil } else { value };
+                        let value = if next(4) == 0 { Val::NIL } else { value };
                         t.array_insert(pos, value).unwrap();
                         m.array_insert(pos, value);
                     }
@@ -3963,10 +3949,7 @@ mod tests {
                 assert_dense_proof(&t, &m.array);
                 assert_eq!(
                     t.array_live,
-                    t.array
-                        .iter()
-                        .filter(|value| !matches!(value, Val::Nil))
-                        .count()
+                    t.array.iter().filter(|value| !value.is_nil()).count()
                 );
                 assert_eq!(t.vlen, m.array.len(), "round {round} step {step}");
                 assert_eq!(pairs(&t), m.pairs(), "round {round} step {step}");
@@ -3985,13 +3968,13 @@ mod tests {
     fn queue_window_stays_bounded() {
         let mut t = Table::default();
         fill(&mut t, 1..=3);
-        t.insert(n(2), Val::Nil).unwrap();
-        t.insert(n(1), Val::Nil).unwrap();
+        t.insert(n(2), Val::NIL).unwrap();
+        t.insert(n(1), Val::NIL).unwrap();
         let (mut head, mut tail) = (3, 3);
         while tail < 100_000 {
             tail += 1;
-            t.insert(n(tail), Val::Bool(true)).unwrap();
-            t.insert(n(head), Val::Nil).unwrap();
+            t.insert(n(tail), Val::boolean(true)).unwrap();
+            t.insert(n(head), Val::NIL).unwrap();
             head += 1;
         }
         assert!(
@@ -4002,9 +3985,9 @@ mod tests {
         assert!(t.array.capacity() <= 4 * EMPTIED_WINDOW_CAPACITY);
         assert_eq!(t.array_len(), 100_000);
         // Drain, then restart from key 1 the way a reset queue does.
-        t.insert(n(head), Val::Nil).unwrap();
+        t.insert(n(head), Val::NIL).unwrap();
         for i in 1..=5 {
-            t.insert(n(i), Val::Bool(true)).unwrap();
+            t.insert(n(i), Val::boolean(true)).unwrap();
         }
         assert!(t.array.len() <= 5);
         assert_eq!(t.vlen, 100_000);
@@ -4012,7 +3995,7 @@ mod tests {
     }
 
     fn keys(t: &Table) -> Vec<Val> {
-        let mut control = Val::Nil;
+        let mut control = Val::NIL;
         let mut keys = Vec::new();
         while let TableNext::Pair(key, _) = t.next(&control) {
             keys.push(key);
@@ -4022,8 +4005,8 @@ mod tests {
     }
 
     fn is_border(t: &Table, len: usize) -> bool {
-        let after = matches!(t.get(&n(len + 1)), Val::Nil);
-        let here = len == 0 || !matches!(t.get(&n(len)), Val::Nil);
+        let after = t.get(&n(len + 1)).is_nil();
+        let here = len == 0 || !t.get(&n(len)).is_nil();
         here && after
     }
 
@@ -4052,7 +4035,7 @@ mod tests {
         let mut t = Table::default();
         fill(&mut t, 1..=10);
         assert_eq!(t.array_len(), 10);
-        t.insert(n(20), Val::Bool(true)).unwrap();
+        t.insert(n(20), Val::boolean(true)).unwrap();
         let len = t.array_len();
         assert!(is_border(&t, len), "len={len} is not a border");
     }
@@ -4063,7 +4046,7 @@ mod tests {
         // Reference Lua 5.2/5.4 both return 1000 here.
         let mut t = Table::default();
         fill(&mut t, 1..=1000);
-        t.insert(n(500), Val::Nil).unwrap();
+        t.insert(n(500), Val::NIL).unwrap();
         assert_eq!(t.array_len(), 1000);
     }
 
@@ -4072,10 +4055,10 @@ mod tests {
         let mut t = Table::default();
         fill(&mut t, 1..=100);
         for key in 40..=100 {
-            t.insert(n(key), Val::Nil).unwrap();
+            t.insert(n(key), Val::NIL).unwrap();
         }
         assert_eq!(t.array_len(), 39);
-        t.insert(n(1), Val::Nil).unwrap();
+        t.insert(n(1), Val::NIL).unwrap();
         let len = t.array_len();
         assert!(is_border(&t, len), "len={len} is not a border");
     }
@@ -4093,23 +4076,23 @@ mod tests {
     #[test]
     fn nil_at_one_returns_zero() {
         let mut t = Table::default();
-        t.insert(n(2), Val::Bool(true)).unwrap();
-        t.insert(n(3), Val::Bool(true)).unwrap();
+        t.insert(n(2), Val::boolean(true)).unwrap();
+        t.insert(n(3), Val::boolean(true)).unwrap();
         assert_eq!(t.array_len(), 0);
     }
 
     #[test]
     fn appending_the_gap_migrates_later_hash_keys() {
         let mut t = Table::default();
-        t.insert(Val::Bool(true), Val::Bool(true)).unwrap();
-        t.insert(n(3), Val::Num(3.0)).unwrap();
-        t.insert(n(2), Val::Num(2.0)).unwrap();
-        t.insert(n(5), Val::Num(5.0)).unwrap();
+        t.insert(Val::boolean(true), Val::boolean(true)).unwrap();
+        t.insert(n(3), Val::num(3.0)).unwrap();
+        t.insert(n(2), Val::num(2.0)).unwrap();
+        t.insert(n(5), Val::num(5.0)).unwrap();
         assert_eq!(t.array_len(), 0);
-        t.insert(n(1), Val::Num(1.0)).unwrap();
+        t.insert(n(1), Val::num(1.0)).unwrap();
         assert_eq!(t.array_len(), 3);
-        assert_eq!(t.array, vec![Val::Num(1.0), Val::Num(2.0), Val::Num(3.0)]);
-        assert_eq!(keys(&t), vec![n(1), n(2), n(3), Val::Bool(true), n(5)]);
+        assert_eq!(t.array, vec![Val::num(1.0), Val::num(2.0), Val::num(3.0)]);
+        assert_eq!(keys(&t), vec![n(1), n(2), n(3), Val::boolean(true), n(5)]);
         // The migrated keys left tombstones; once they outnumbered the live
         // hash entries the part was compacted, which moves hash indices.
         assert_eq!(t.tally.dead(), 0);
@@ -4121,24 +4104,24 @@ mod tests {
     fn only_live_integral_hash_keys_hold_appends_off_the_fast_path() {
         let mut t = Table::default();
         for key in [
-            Val::Bool(true),
-            Val::Num(0.0),
-            Val::Num(-3.0),
-            Val::Num(2.5),
+            Val::boolean(true),
+            Val::num(0.0),
+            Val::num(-3.0),
+            Val::num(2.5),
         ] {
-            t.insert(key, Val::Bool(true)).unwrap();
+            t.insert(key, Val::boolean(true)).unwrap();
         }
         // Keys that can never join the array do not count.
         assert_eq!(t.hash_migratable, 0);
-        t.insert(n(4), Val::Bool(true)).unwrap();
+        t.insert(n(4), Val::boolean(true)).unwrap();
         assert_eq!(t.hash_migratable, 1);
-        t.insert(n(4), Val::Nil).unwrap();
+        t.insert(n(4), Val::NIL).unwrap();
         assert_eq!(t.hash_migratable, 0);
-        t.insert(n(4), Val::Bool(true)).unwrap();
+        t.insert(n(4), Val::boolean(true)).unwrap();
         // Too large to ever join the array.
-        t.insert(Val::Num(1e300), Val::Bool(true)).unwrap();
+        t.insert(Val::num(1e300), Val::boolean(true)).unwrap();
         for key in 0..INLINE_CAPACITY {
-            t.insert(Val::Num(key as f64 + 0.5), Val::Bool(true))
+            t.insert(Val::num(key as f64 + 0.5), Val::boolean(true))
                 .unwrap();
         }
         // Promotion to map storage moves the count with the entries.
@@ -4147,7 +4130,7 @@ mod tests {
         fill(&mut t, 1..=3);
         // Appending 3 migrated key 4 through `hash_remove`.
         assert_eq!((t.vlen, t.hash_migratable), (4, 0));
-        t.set_list(5, &[Val::Num(5.0), Val::Num(6.0)]).unwrap();
+        t.set_list(5, &[Val::num(5.0), Val::num(6.0)]).unwrap();
         assert_eq!(t.array_len(), 6);
     }
 
@@ -4156,13 +4139,13 @@ mod tests {
         let mut t = Table::default();
         fill(&mut t, 1..=40);
         for key in 1..=30 {
-            t.insert(n(key), Val::Nil).unwrap();
+            t.insert(n(key), Val::NIL).unwrap();
         }
-        t.insert(n(41), Val::Num(41.0)).unwrap();
+        t.insert(n(41), Val::num(41.0)).unwrap();
         assert!(t.base > 0);
-        assert!(matches!(t.get(&n(1)), Val::Nil));
+        assert!(t.get(&n(1)).is_nil());
         assert!(t.get_with_index(&n(1)).is_none());
-        assert!(matches!(t.get(&n(41)), Val::Num(_)));
+        assert!(t.get(&n(41)).as_num().is_some());
         assert_eq!(
             t.get_with_index(&n(31)).map(|(index, _)| index),
             Some(ARRAY_SLOT_TAG | 30)
@@ -4172,7 +4155,7 @@ mod tests {
     #[test]
     fn single_element_returns_one() {
         let mut t = Table::default();
-        t.insert(n(1), Val::Bool(true)).unwrap();
+        t.insert(n(1), Val::boolean(true)).unwrap();
         assert_eq!(t.array_len(), 1);
     }
 
@@ -4186,12 +4169,12 @@ mod tests {
     #[test]
     fn set_list_keeps_nil_positional_slots_in_the_array() {
         let mut t = Table::default();
-        t.set_list(1, &[Val::Num(1.0), Val::Nil, Val::Num(3.0)])
+        t.set_list(1, &[Val::num(1.0), Val::NIL, Val::num(3.0)])
             .unwrap();
         assert_eq!(t.array.len(), 3);
         assert_eq!(t.array_len(), 3);
-        t.set_list(1, &[Val::Num(1.0), Val::Nil]).unwrap();
-        t.insert(n(3), Val::Nil).unwrap();
+        t.set_list(1, &[Val::num(1.0), Val::NIL]).unwrap();
+        t.insert(n(3), Val::NIL).unwrap();
         assert_eq!(t.array_len(), 1);
     }
 
@@ -4208,41 +4191,41 @@ mod tests {
                 }
             }
         }
-        let live = Val::Bool(true);
+        let live = Val::boolean(true);
         let batches: [&[Val]; 6] = [
-            &[live, Val::Nil, live, live],
-            &[Val::Nil, live, live, Val::Nil],
+            &[live, Val::NIL, live, live],
+            &[Val::NIL, live, live, Val::NIL],
             &[live; 9],
-            &[Val::Nil, Val::Nil, live],
-            &[Val::Nil; 9],
+            &[Val::NIL, Val::NIL, live],
+            &[Val::NIL; 9],
             &[live; 64],
         ];
         let setups: [fn(&mut Table); 8] = [
             |_| {},
-            |t| t.insert(Val::Bool(false), Val::Bool(true)).unwrap(),
+            |t| t.insert(Val::boolean(false), Val::boolean(true)).unwrap(),
             |t| {
                 *t = Table::with_capacity(INLINE_CAPACITY + 1);
-                t.insert(Val::Bool(false), Val::Bool(true)).unwrap();
+                t.insert(Val::boolean(false), Val::boolean(true)).unwrap();
             },
             |t| {
                 // A map whose live keys are nonnumeric but which also holds
                 // a Vacant slot (re-added key) and a dead numeric tombstone.
                 *t = Table::with_capacity(INLINE_CAPACITY + 1);
-                t.insert(Val::Bool(false), Val::Bool(true)).unwrap();
-                t.insert(Val::Bool(true), Val::Bool(true)).unwrap();
-                t.insert(h(1), Val::Bool(true)).unwrap();
-                t.insert(Val::Bool(true), Val::Nil).unwrap();
-                t.insert(Val::Bool(true), Val::Bool(true)).unwrap();
-                t.insert(h(1), Val::Nil).unwrap();
+                t.insert(Val::boolean(false), Val::boolean(true)).unwrap();
+                t.insert(Val::boolean(true), Val::boolean(true)).unwrap();
+                t.insert(h(1), Val::boolean(true)).unwrap();
+                t.insert(Val::boolean(true), Val::NIL).unwrap();
+                t.insert(Val::boolean(true), Val::boolean(true)).unwrap();
+                t.insert(h(1), Val::NIL).unwrap();
                 assert_eq!((map_slots(t), t.hash_live_len()), (4, 2));
             },
             |t| fill(t, 1..=3),
-            |t| t.insert(n(3), Val::Bool(false)).unwrap(),
+            |t| t.insert(n(3), Val::boolean(false)).unwrap(),
             |t| fill_hash(t, 1..=2),
             |t| {
                 fill(t, 1..=20);
                 for i in 1..=15 {
-                    t.insert(n(i), Val::Nil).unwrap();
+                    t.insert(n(i), Val::NIL).unwrap();
                 }
             },
         ];
@@ -4263,10 +4246,13 @@ mod tests {
                 );
                 assert_eq!(bulk.hash_live_len(), reference.hash_live_len());
                 assert_eq!(
-                    bulk.get(&Val::Bool(false)),
-                    reference.get(&Val::Bool(false))
+                    bulk.get(&Val::boolean(false)),
+                    reference.get(&Val::boolean(false))
                 );
-                assert_eq!(bulk.get(&Val::Bool(true)), reference.get(&Val::Bool(true)));
+                assert_eq!(
+                    bulk.get(&Val::boolean(true)),
+                    reference.get(&Val::boolean(true))
+                );
                 assert_eq!(keys(&bulk), keys(&reference));
                 for key in 1..=40 {
                     assert_eq!(bulk.get(&n(key)), reference.get(&n(key)));
@@ -4279,35 +4265,35 @@ mod tests {
     #[test]
     fn array_remove_shifts_in_place_without_reordering() {
         let mut t = Table::default();
-        t.insert(Val::Bool(false), Val::Bool(true)).unwrap();
+        t.insert(Val::boolean(false), Val::boolean(true)).unwrap();
         fill(&mut t, 1..=1000);
         for i in 1..=1000 {
-            t.insert(n(i), Val::Num(i as f64)).unwrap();
+            t.insert(n(i), Val::num(i as f64)).unwrap();
         }
         let version = t.version();
-        assert_eq!(t.array_remove(1).unwrap(), Val::Num(1.0));
+        assert_eq!(t.array_remove(1).unwrap(), Val::num(1.0));
         assert_eq!(t.array_len(), 999);
-        assert_eq!(t.get(&n(1)), Val::Num(2.0));
-        assert_eq!(t.get(&n(999)), Val::Num(1000.0));
-        assert_eq!(t.get(&n(1000)), Val::Nil);
+        assert_eq!(t.get(&n(1)), Val::num(2.0));
+        assert_eq!(t.get(&n(999)), Val::num(1000.0));
+        assert_eq!(t.get(&n(1000)), Val::NIL);
         assert_eq!(t.version(), version);
         let order = keys(&t);
         assert_eq!(order.first(), Some(&n(1)));
-        assert_eq!(order.last(), Some(&Val::Bool(false)));
+        assert_eq!(order.last(), Some(&Val::boolean(false)));
         // Queue idiom: push at the border, pop the front.
-        t.array_insert(1000, Val::Num(-1.0)).unwrap();
+        t.array_insert(1000, Val::num(-1.0)).unwrap();
         assert_eq!(t.array.len(), 1000);
         assert_eq!(t.array_len(), 1000);
-        assert_eq!(t.array_remove(1000).unwrap(), Val::Num(-1.0));
+        assert_eq!(t.array_remove(1000).unwrap(), Val::num(-1.0));
     }
 
     #[test]
     fn array_remove_outside_the_sequence_reads_and_clears_the_key() {
         let mut t = Table::default();
-        t.insert(n(0), Val::Bool(true)).unwrap();
-        assert_eq!(t.array_remove(0).unwrap(), Val::Bool(true));
-        assert_eq!(t.get(&n(0)), Val::Nil);
-        assert_eq!(t.array_remove(0).unwrap(), Val::Nil);
+        t.insert(n(0), Val::boolean(true)).unwrap();
+        assert_eq!(t.array_remove(0).unwrap(), Val::boolean(true));
+        assert_eq!(t.get(&n(0)), Val::NIL);
+        assert_eq!(t.array_remove(0).unwrap(), Val::NIL);
     }
 
     #[test]
@@ -4315,9 +4301,9 @@ mod tests {
         let mut t = Table::default();
         fill(&mut t, 1..=100);
         for key in 1..=60 {
-            t.insert(n(key), Val::Nil).unwrap();
+            t.insert(n(key), Val::NIL).unwrap();
         }
-        t.insert(n(101), Val::Bool(true)).unwrap();
+        t.insert(n(101), Val::boolean(true)).unwrap();
         fill(&mut t, 103..=104);
         assert_eq!((t.base, t.array.len(), t.array_live), (60, 41, 41));
         let extra = t.append_growth().unwrap();
@@ -4338,16 +4324,16 @@ mod tests {
         assert!(t.array.capacity() >= 77);
         let capacity = t.array.capacity();
 
-        t.array_insert(50, Val::Bool(false)).unwrap();
+        t.array_insert(50, Val::boolean(false)).unwrap();
         assert_eq!(t.array.capacity(), capacity);
         assert_eq!((t.base, t.array.len(), t.array_live), (27, 77, 44));
         assert_eq!(t.vlen, 104);
-        assert_eq!(t.get(&n(50)), Val::Bool(false));
-        assert_eq!(t.get(&n(61)), Val::Nil);
-        assert_eq!(t.get(&n(62)), Val::Bool(true));
-        assert_eq!(t.get(&n(102)), Val::Bool(true));
-        assert_eq!(t.get(&n(103)), Val::Bool(true));
-        assert_eq!(t.get(&n(104)), Val::Bool(true));
+        assert_eq!(t.get(&n(50)), Val::boolean(false));
+        assert_eq!(t.get(&n(61)), Val::NIL);
+        assert_eq!(t.get(&n(62)), Val::boolean(true));
+        assert_eq!(t.get(&n(102)), Val::boolean(true));
+        assert_eq!(t.get(&n(103)), Val::boolean(true));
+        assert_eq!(t.get(&n(104)), Val::boolean(true));
         assert_eq!(t.hash_live_len(), 0);
     }
 
@@ -4355,14 +4341,14 @@ mod tests {
     fn array_insert_shifts_up_and_migrates() {
         let mut t = Table::default();
         fill(&mut t, 1..=3);
-        t.insert(n(5), Val::Num(5.0)).unwrap();
-        t.array_insert(1, Val::Num(0.0)).unwrap();
+        t.insert(n(5), Val::num(5.0)).unwrap();
+        t.array_insert(1, Val::num(0.0)).unwrap();
         assert_eq!(t.array_len(), 5);
-        assert_eq!(t.get(&n(1)), Val::Num(0.0));
-        assert_eq!(t.get(&n(5)), Val::Num(5.0));
+        assert_eq!(t.get(&n(1)), Val::num(0.0));
+        assert_eq!(t.get(&n(5)), Val::num(5.0));
         assert_eq!(keys(&t), (1..=5).map(n).collect::<Vec<_>>());
         // Appending nil is a no-op.
-        t.array_insert(6, Val::Nil).unwrap();
+        t.array_insert(6, Val::NIL).unwrap();
         assert_eq!(t.array.len(), 5);
     }
 
@@ -4371,7 +4357,7 @@ mod tests {
         let mut table = Table::default();
         fill(&mut table, 1..=4096);
         for key in (1..=4096).rev() {
-            table.insert(n(key), Val::Nil).unwrap();
+            table.insert(n(key), Val::NIL).unwrap();
         }
         assert_eq!(table.array_live, 0);
         let mut resident = ResidentBytes::new(table.resident_bytes());
@@ -4379,9 +4365,11 @@ mod tests {
         assert_eq!(table.base, 4096);
         assert!(table.array.is_empty());
         assert!(table.array.capacity() < 4096);
-        table.set_list(4097, &[Val::Nil, Val::Bool(true)]).unwrap();
+        table
+            .set_list(4097, &[Val::NIL, Val::boolean(true)])
+            .unwrap();
         assert_eq!(table.vlen, 4098);
-        assert_eq!(table.get(&n(4097)), Val::Nil);
+        assert_eq!(table.get(&n(4097)), Val::NIL);
         assert_eq!(keys(&table), vec![n(4098)]);
     }
 
@@ -4391,15 +4379,15 @@ mod tests {
             let mut table = Table::default();
             fill(&mut table, 1..=2000);
             for key in 1..=1000 {
-                table.insert(n(key), Val::Nil).unwrap();
+                table.insert(n(key), Val::NIL).unwrap();
             }
-            table.insert(n(2001), Val::Bool(true)).unwrap();
+            table.insert(n(2001), Val::boolean(true)).unwrap();
             for key in (1001..=2001).rev() {
-                table.insert(n(key), Val::Nil).unwrap();
+                table.insert(n(key), Val::NIL).unwrap();
             }
             assert!(table.lead < table.array.len());
             assert_eq!(table.array_live, 0);
-            table.insert(n(key), Val::Bool(true)).unwrap();
+            table.insert(n(key), Val::boolean(true)).unwrap();
             assert_eq!(table.base, key - 1);
             assert_eq!(table.array.len(), 1);
             assert_eq!(table.array_live, 1);
@@ -4415,7 +4403,7 @@ mod tests {
             #[cfg(feature = "snapshot")]
             assert_eq!(
                 table.snapshot_entries(),
-                (2001.max(key), 1, vec![(n(key), Val::Bool(true))])
+                (2001.max(key), 1, vec![(n(key), Val::boolean(true))])
             );
         }
     }
@@ -4435,12 +4423,16 @@ mod tests {
     fn snapshot_load_reaches_the_growth_limit() {
         let mut table = Table::default();
         table
-            .rebuild_from_snapshot(MAX_ARRAY_LEN, 1, vec![(n(MAX_ARRAY_LEN), Val::Bool(true))])
+            .rebuild_from_snapshot(
+                MAX_ARRAY_LEN,
+                1,
+                vec![(n(MAX_ARRAY_LEN), Val::boolean(true))],
+            )
             .unwrap();
         let before = table.snapshot_entries();
         assert!(matches!(table.get_array(), Err(TableError::GrowthFailed)));
         assert!(matches!(
-            table.array_insert(1, Val::Bool(false)),
+            table.array_insert(1, Val::boolean(false)),
             Err(TableError::GrowthFailed)
         ));
         assert_eq!(table.snapshot_entries(), before);
@@ -4449,18 +4441,18 @@ mod tests {
     #[test]
     fn set_array_writes_back_in_place() {
         let mut t = Table::default();
-        t.insert(Val::Bool(true), Val::Bool(true)).unwrap();
+        t.insert(Val::boolean(true), Val::boolean(true)).unwrap();
         for i in 1..=5 {
-            t.insert(n(i), Val::Num((6 - i) as f64)).unwrap();
+            t.insert(n(i), Val::num((6 - i) as f64)).unwrap();
         }
         let mut values = t.get_array().unwrap();
         values.reverse();
         t.set_array(&values).unwrap();
-        assert_eq!(t.get(&n(1)), Val::Num(1.0));
-        assert_eq!(t.get(&n(5)), Val::Num(5.0));
+        assert_eq!(t.get(&n(1)), Val::num(1.0));
+        assert_eq!(t.get(&n(5)), Val::num(5.0));
         assert_eq!(t.tally.dead(), 0);
         assert_eq!(t.version(), 0);
-        assert_eq!(keys(&t).last(), Some(&Val::Bool(true)));
+        assert_eq!(keys(&t).last(), Some(&Val::boolean(true)));
     }
 
     #[test]
@@ -4469,16 +4461,16 @@ mod tests {
         fill(&mut t, 1..=3);
 
         assert!(matches!(
-            t.next(&Val::Nil),
-            TableNext::Pair(Val::Num(1.0), Val::Bool(true))
+            t.next(&Val::NIL),
+            TableNext::Pair(key, value) if key == Val::num(1.0) && value == Val::boolean(true)
         ));
         assert!(matches!(
             t.next(&n(2)),
-            TableNext::Pair(Val::Num(3.0), Val::Bool(true))
+            TableNext::Pair(key, value) if key == Val::num(3.0) && value == Val::boolean(true)
         ));
         assert!(matches!(t.next(&n(3)), TableNext::End));
         assert!(matches!(t.next(&n(4)), TableNext::InvalidKey));
-        assert!(matches!(t.next(&Val::Num(f64::NAN)), TableNext::InvalidKey));
+        assert!(matches!(t.next(&Val::num(f64::NAN)), TableNext::InvalidKey));
     }
 
     #[test]
@@ -4487,13 +4479,13 @@ mod tests {
         fill_hash(&mut t, 1..=5);
 
         assert!(matches!(
-            t.next(&Val::Nil),
-            TableNext::Pair(Val::Num(1.5), _)
+            t.next(&Val::NIL),
+            TableNext::Pair(key, _) if key == Val::num(1.5)
         ));
-        assert!(matches!(t.next(&h(3)), TableNext::Pair(Val::Num(4.5), _)));
+        assert!(matches!(t.next(&h(3)), TableNext::Pair(key, _) if key == Val::num(4.5)));
         assert!(matches!(t.next(&h(5)), TableNext::End));
         assert!(matches!(t.next(&h(6)), TableNext::InvalidKey));
-        assert!(matches!(t.next(&Val::Num(f64::NAN)), TableNext::InvalidKey));
+        assert!(matches!(t.next(&Val::num(f64::NAN)), TableNext::InvalidKey));
     }
 
     #[test]
@@ -4508,7 +4500,7 @@ mod tests {
             table.remove(&h(1));
             table.remove(&h(3));
 
-            let mut control = Val::Nil;
+            let mut control = Val::NIL;
             let mut expected = Vec::new();
             let mut indexed = Vec::new();
             loop {
@@ -4530,7 +4522,7 @@ mod tests {
                 expected.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
                 live_keys
             );
-            control = Val::Nil;
+            control = Val::NIL;
             loop {
                 match table.next_with_index(&control, None) {
                     TableNextWithIndex::Pair { index, key, value } => {
@@ -4577,7 +4569,7 @@ mod tests {
                 TableNextWithIndex::InvalidKey
             ));
             assert!(matches!(
-                table.next_with_index(&Val::Num(f64::NAN), None),
+                table.next_with_index(&Val::num(f64::NAN), None),
                 TableNextWithIndex::InvalidKey
             ));
         }
@@ -4589,33 +4581,33 @@ mod tests {
         // slot stays. Both routes leave the overlap: migration, and removal
         // followed by a direct append. Extra string keys keep the tombstone
         // from compacting; `extra` 4 takes Map storage.
-        let s = |i: usize| Val::Bool(i % 2 == 0);
+        let s = |i: usize| Val::boolean(i % 2 == 0);
         for extra in [0, 4] {
             for migrate in [true, false] {
                 let mut t = Table::default();
-                t.insert(n(2), Val::Num(2.0)).unwrap();
-                t.insert(s(0), Val::Num(10.0)).unwrap();
-                t.insert(s(1), Val::Num(11.0)).unwrap();
+                t.insert(n(2), Val::num(2.0)).unwrap();
+                t.insert(s(0), Val::num(10.0)).unwrap();
+                t.insert(s(1), Val::num(11.0)).unwrap();
                 fill_hash(&mut t, 1..=extra);
                 let (slot, _) = t.get_with_index(&n(2)).unwrap();
                 if !migrate {
-                    t.insert(n(2), Val::Nil).unwrap();
+                    t.insert(n(2), Val::NIL).unwrap();
                 }
-                t.insert(n(1), Val::Num(1.0)).unwrap();
+                t.insert(n(1), Val::num(1.0)).unwrap();
                 if !migrate {
-                    t.insert(n(2), Val::Num(2.0)).unwrap();
+                    t.insert(n(2), Val::num(2.0)).unwrap();
                 }
-                t.insert(n(3), Val::Num(3.0)).unwrap();
+                t.insert(n(3), Val::num(3.0)).unwrap();
                 assert_eq!(t.array_len(), 3);
                 assert!(t.hash_slot_holds(slot, &n(2)), "the dead slot must survive");
                 assert!(matches!(
                     t.next_with_index(&n(2), Some(slot)),
                     TableNextWithIndex::Pair {
-                        key: Val::Num(3.0),
+                        key,
                         ..
-                    }
+                    } if key == Val::num(3.0)
                 ));
-                assert!(matches!(t.next(&n(2)), TableNext::Pair(Val::Num(3.0), _)));
+                assert!(matches!(t.next(&n(2)), TableNext::Pair(key, _) if key == Val::num(3.0)));
             }
         }
     }
@@ -4628,11 +4620,7 @@ mod tests {
             fill_hash(&mut table, 1..=count);
             table.remove(&h(2));
             let control_index = match table.next_with_index(&h(1), None) {
-                TableNextWithIndex::Pair {
-                    index,
-                    key: Val::Num(3.5),
-                    ..
-                } => index,
+                TableNextWithIndex::Pair { index, key, .. } if key == Val::num(3.5) => index,
                 _ => panic!("expected the live successor"),
             };
             // A tombstoned control (key 2.5, dead at index 1) must validate
@@ -4642,15 +4630,14 @@ mod tests {
             assert!(matches!(
                 table.next_with_index(&h(2), Some(1)),
                 TableNextWithIndex::Pair {
-                    key: Val::Num(3.5),
+                    key,
                     ..
-                }
+                } if key == Val::num(3.5)
             ));
             match table.next_with_index(&h(3), Some(control_index)) {
-                TableNextWithIndex::Pair {
-                    key: Val::Num(next),
-                    ..
-                } if count == 5 => assert_eq!(next, 4.5),
+                TableNextWithIndex::Pair { key, .. } if count == 5 => {
+                    assert_eq!(key, Val::num(4.5));
+                }
                 TableNextWithIndex::End if count == 3 => {}
                 other => panic!("unexpected successor of key 3.5 (count {count}): {other:?}"),
             }
@@ -4671,7 +4658,7 @@ mod tests {
             let mut t = Table::default();
             fill(&mut t, 1..=6);
             fill_hash(&mut t, 1..=hash_count);
-            let mut next = t.next_with_index(&Val::Nil, None);
+            let mut next = t.next_with_index(&Val::NIL, None);
             let mut visited = Vec::new();
             loop {
                 let (index, key) = match next {
@@ -4679,7 +4666,7 @@ mod tests {
                     TableNextWithIndex::End => break,
                     TableNextWithIndex::InvalidKey => panic!("cleared control must stay valid"),
                 };
-                t.insert(key, Val::Nil).unwrap();
+                t.insert(key, Val::NIL).unwrap();
                 visited.push(key);
                 // Follow the indexed successor itself, including the boundary
                 // into each hash storage variant: every hash hint must hold.
@@ -4696,7 +4683,7 @@ mod tests {
                     .collect::<Vec<_>>()
             );
             assert_eq!(t.array_len(), 0);
-            assert!(matches!(t.next(&Val::Nil), TableNext::End));
+            assert!(matches!(t.next(&Val::NIL), TableNext::End));
         }
     }
 
@@ -4712,13 +4699,13 @@ mod tests {
             fill_hash(&mut t, 1..=preset);
             let before = (1..=preset).count();
 
-            let key = Val::RustFn(crate::vm::RustFnId::catalog(0));
-            t.insert(key, Val::Num(1.0)).expect("first insert succeeds");
-            assert_eq!(t.get(&key), Val::Num(1.0));
+            let key = Val::rust_fn(crate::vm::RustFnId::catalog(0));
+            t.insert(key, Val::num(1.0)).expect("first insert succeeds");
+            assert_eq!(t.get(&key), Val::num(1.0));
 
-            t.insert(key, Val::Num(2.0))
+            t.insert(key, Val::num(2.0))
                 .expect("second insert succeeds");
-            assert_eq!(t.get(&key), Val::Num(2.0));
+            assert_eq!(t.get(&key), Val::num(2.0));
 
             assert_eq!(
                 keys(&t).len(),
@@ -4734,14 +4721,14 @@ mod tests {
             let mut t = Table::default();
             fill_hash(&mut t, 1..=count);
             assert_eq!(t.version(), 0);
-            assert_eq!(t.remove(&h(2)), Some(Val::Bool(true)));
+            assert_eq!(t.remove(&h(2)), Some(Val::boolean(true)));
             assert_eq!(t.version(), 0);
-            assert!(matches!(t.next(&h(1)), TableNext::Pair(Val::Num(3.5), _)));
-            assert!(matches!(t.next(&h(2)), TableNext::Pair(Val::Num(3.5), _)));
+            assert!(matches!(t.next(&h(1)), TableNext::Pair(key, _) if key == Val::num(3.5)));
+            assert!(matches!(t.next(&h(2)), TableNext::Pair(key, _) if key == Val::num(3.5)));
             assert!(matches!(t.next(&h(count + 1)), TableNext::InvalidKey));
             assert_eq!(t.get_with_index(&h(2)), None);
             assert_eq!(t.get_index(1), None);
-            assert!(!t.set_at_index(1, Val::Bool(false)));
+            assert!(!t.set_at_index(1, Val::boolean(false)));
         }
     }
 
@@ -4751,12 +4738,12 @@ mod tests {
         fill(&mut t, 1..=3);
         let (index, _) = t.get_with_index(&n(2)).unwrap();
         fill(&mut t, 4..=100);
-        assert_eq!(t.get_index(index), Some((n(2), Val::Bool(true))));
-        assert!(t.set_at_index(index, Val::Bool(false)));
-        assert_eq!(t.get(&n(2)), Val::Bool(false));
-        t.insert(n(2), Val::Nil).unwrap();
+        assert_eq!(t.get_index(index), Some((n(2), Val::boolean(true))));
+        assert!(t.set_at_index(index, Val::boolean(false)));
+        assert_eq!(t.get(&n(2)), Val::boolean(false));
+        t.insert(n(2), Val::NIL).unwrap();
         assert_eq!(t.get_index(index), None);
-        assert!(!t.set_at_index(index, Val::Bool(true)));
+        assert!(!t.set_at_index(index, Val::boolean(true)));
         assert_eq!(t.version(), 0);
     }
 
@@ -4766,7 +4753,7 @@ mod tests {
             let mut t = Table::default();
             fill_hash(&mut t, 1..=count);
             t.remove(&h(2));
-            t.insert(h(2), Val::Bool(false)).unwrap();
+            t.insert(h(2), Val::boolean(false)).unwrap();
             assert_eq!(t.version(), 1);
             assert_eq!(
                 keys(&t),
@@ -4789,15 +4776,15 @@ mod tests {
             0,
             0,
             vec![
-                (h(3), Val::Bool(true)),
-                (h(1), Val::Bool(true)),
-                (h(2), Val::Bool(true)),
+                (h(3), Val::boolean(true)),
+                (h(1), Val::boolean(true)),
+                (h(2), Val::boolean(true)),
             ],
         )
         .unwrap();
         assert_eq!(t.version(), 1);
         assert_eq!(t.get_index(0).map(|(key, _)| key), Some(h(3)));
-        t.rebuild_from_snapshot(0, 0, vec![(h(1), Val::Bool(true))])
+        t.rebuild_from_snapshot(0, 0, vec![(h(1), Val::boolean(true))])
             .unwrap();
         assert_eq!(t.version(), 2);
         assert_eq!(t.get_index(0).map(|(key, _)| key), Some(h(1)));
@@ -4806,12 +4793,12 @@ mod tests {
     #[test]
     fn array_capacity_overflow_returns_an_error_without_mutation() {
         let mut table = Table::default();
-        table.insert(n(1), Val::Bool(true)).unwrap();
+        table.insert(n(1), Val::boolean(true)).unwrap();
         assert!(matches!(
             table.reserve_array(usize::MAX),
             Err(TableError::GrowthFailed)
         ));
-        assert_eq!(table.get(&n(1)), Val::Bool(true));
+        assert_eq!(table.get(&n(1)), Val::boolean(true));
         assert_eq!(table.vlen, 1);
     }
 
@@ -4821,9 +4808,9 @@ mod tests {
             for remove in [n(1), h(0)] {
                 let make = || {
                     let mut table = Table::default();
-                    table.insert(n(1), Val::Bool(true)).unwrap();
+                    table.insert(n(1), Val::boolean(true)).unwrap();
                     for i in 0..hash_count {
-                        table.insert(h(i), Val::Bool(true)).unwrap();
+                        table.insert(h(i), Val::boolean(true)).unwrap();
                     }
                     table
                 };
@@ -4832,13 +4819,13 @@ mod tests {
                 let (index, _) = indexed.get_with_index(&remove).unwrap();
                 assert!(indexed.remove_at_index(index));
                 assert!(!indexed.remove_at_index(index));
-                keyed.insert(remove, Val::Nil).unwrap();
+                keyed.insert(remove, Val::NIL).unwrap();
                 assert_eq!(indexed.tally.dead(), keyed.tally.dead());
                 assert_eq!(indexed.lead, keyed.lead);
                 assert_eq!(indexed.version(), keyed.version());
                 assert_eq!(keys(&indexed), keys(&keyed));
-                indexed.insert(remove, Val::Bool(false)).unwrap();
-                keyed.insert(remove, Val::Bool(false)).unwrap();
+                indexed.insert(remove, Val::boolean(false)).unwrap();
+                keyed.insert(remove, Val::boolean(false)).unwrap();
                 assert_eq!(keys(&indexed), keys(&keyed));
             }
         }
@@ -4851,7 +4838,7 @@ mod tests {
             let mut table = window_table(len, Some(live_key));
             let before = array_shape(&table);
             assert!(matches!(
-                table.insert(n(write_key), Val::Bool(false)),
+                table.insert(n(write_key), Val::boolean(false)),
                 Err(TableError::GrowthFailed)
             ));
             assert_eq!(array_shape(&table), before);
@@ -4862,32 +4849,32 @@ mod tests {
     fn length_limit_refuses_append_insert_and_migration() {
         let mut empty = window_table(MAX_ARRAY_LEN, None);
         assert!(matches!(
-            empty.insert(n(MAX_ARRAY_LEN + 1), Val::Bool(true)),
+            empty.insert(n(MAX_ARRAY_LEN + 1), Val::boolean(true)),
             Err(TableError::GrowthFailed)
         ));
         assert_eq!(empty.vlen, MAX_ARRAY_LEN);
 
         let mut table = window_table(MAX_ARRAY_LEN, Some(MAX_ARRAY_LEN));
         assert!(matches!(
-            table.array_insert(1, Val::Bool(false)),
+            table.array_insert(1, Val::boolean(false)),
             Err(TableError::GrowthFailed)
         ));
         assert!(matches!(
-            table.set_list(MAX_ARRAY_LEN + 1, &[Val::Nil, Val::Nil]),
+            table.set_list(MAX_ARRAY_LEN + 1, &[Val::NIL, Val::NIL]),
             Err(TableError::GrowthFailed)
         ));
-        assert_eq!(table.get(&n(MAX_ARRAY_LEN)), Val::Bool(true));
+        assert_eq!(table.get(&n(MAX_ARRAY_LEN)), Val::boolean(true));
 
         let mut migration = window_table(MAX_ARRAY_LEN - 1, None);
         migration
-            .insert(n(MAX_ARRAY_LEN + 1), Val::Bool(true))
+            .insert(n(MAX_ARRAY_LEN + 1), Val::boolean(true))
             .unwrap();
         assert!(matches!(
-            migration.insert(n(MAX_ARRAY_LEN), Val::Bool(false)),
+            migration.insert(n(MAX_ARRAY_LEN), Val::boolean(false)),
             Err(TableError::GrowthFailed)
         ));
         assert_eq!(migration.vlen, MAX_ARRAY_LEN - 1);
-        assert_eq!(migration.get(&n(MAX_ARRAY_LEN + 1)), Val::Bool(true));
+        assert_eq!(migration.get(&n(MAX_ARRAY_LEN + 1)), Val::boolean(true));
     }
 
     #[test]
@@ -4910,7 +4897,7 @@ mod tests {
         assert_eq!(state.stack, before);
         assert_eq!(
             state.heap.as_table_ref(ptr).unwrap().get(&n(MAX_ARRAY_LEN)),
-            Val::Bool(true)
+            Val::boolean(true)
         );
     }
 
@@ -4946,10 +4933,10 @@ mod tests {
             assert!(matches!(error.kind(), ErrorKind::TableGrowthFailed));
             assert!(error.to_string().contains("table growth failed"));
             state.get_global("reached").unwrap();
-            assert!(matches!(state.pop_val(), Val::Nil));
+            assert!(state.pop_val().is_nil());
             assert_eq!(
                 state.heap.as_table_ref(ptr).unwrap().get(&n(live_key)),
-                Val::Bool(true)
+                Val::boolean(true)
             );
         }
     }
@@ -4958,18 +4945,18 @@ mod tests {
     #[test]
     fn snapshot_live_span_does_not_bound_structural_nil_tail() {
         let mut table = Table::default();
-        table.set_list(1, &[Val::Bool(true)]).unwrap();
+        table.set_list(1, &[Val::boolean(true)]).unwrap();
         for _ in 0..32 {
-            table.set_list(table.vlen + 1, &[Val::Nil]).unwrap();
+            table.set_list(table.vlen + 1, &[Val::NIL]).unwrap();
         }
         let (len, slots, entries) = table.snapshot_entries();
         assert_eq!((len, slots), (33, 1));
         let mut loaded = Table::default();
         loaded.rebuild_from_snapshot(len, slots, entries).unwrap();
         // Resetting the window at append would erase key 1 on the loaded side.
-        table.insert(n(34), Val::Bool(true)).unwrap();
-        loaded.insert(n(34), Val::Bool(true)).unwrap();
-        assert_eq!(loaded.get(&n(1)), Val::Bool(true));
+        table.insert(n(34), Val::boolean(true)).unwrap();
+        loaded.insert(n(34), Val::boolean(true)).unwrap();
+        assert_eq!(loaded.get(&n(1)), Val::boolean(true));
         assert_eq!(table.snapshot_entries(), loaded.snapshot_entries());
     }
 
@@ -4978,9 +4965,9 @@ mod tests {
     fn snapshot_round_trip_preserves_array_holes() {
         let mut t = Table::default();
         fill(&mut t, 1..=4);
-        t.insert(Val::Bool(true), Val::Bool(true)).unwrap();
-        t.insert(n(2), Val::Nil).unwrap();
-        t.insert(n(3), Val::Nil).unwrap();
+        t.insert(Val::boolean(true), Val::boolean(true)).unwrap();
+        t.insert(n(2), Val::NIL).unwrap();
+        t.insert(n(3), Val::NIL).unwrap();
         let (array_len, array_slots, entries) = t.snapshot_entries();
         assert_eq!((array_len, array_slots), (4, 4));
         let mut loaded = Table::default();
@@ -4988,23 +4975,23 @@ mod tests {
             .rebuild_from_snapshot(array_len, array_slots, entries)
             .unwrap();
         // Writing a hole must land in the array on both sides.
-        t.insert(n(3), Val::Num(3.0)).unwrap();
-        loaded.insert(n(3), Val::Num(3.0)).unwrap();
+        t.insert(n(3), Val::num(3.0)).unwrap();
+        loaded.insert(n(3), Val::num(3.0)).unwrap();
         assert_eq!(keys(&t), keys(&loaded));
-        assert_eq!(keys(&loaded), vec![n(1), n(3), n(4), Val::Bool(true)]);
+        assert_eq!(keys(&loaded), vec![n(1), n(3), n(4), Val::boolean(true)]);
         assert_eq!(t.array_len(), loaded.array_len());
 
         let mut bad = Table::default();
         assert!(
-            bad.rebuild_from_snapshot(1, 1, vec![(n(1), Val::Nil), (n(2), Val::Bool(true))])
+            bad.rebuild_from_snapshot(1, 1, vec![(n(1), Val::NIL), (n(2), Val::boolean(true))])
                 .is_err()
         );
         assert!(
-            bad.rebuild_from_snapshot(1, 1, vec![(n(2), Val::Nil)])
+            bad.rebuild_from_snapshot(1, 1, vec![(n(2), Val::NIL)])
                 .is_err()
         );
         assert!(
-            bad.rebuild_from_snapshot(3, 0, vec![(n(2), Val::Bool(true))])
+            bad.rebuild_from_snapshot(3, 0, vec![(n(2), Val::boolean(true))])
                 .is_err()
         );
         assert!(
@@ -5022,16 +5009,16 @@ mod tests {
         // A queue that has moved far: its window was dropped and re-anchored.
         let mut queue = Table::default();
         for i in 1..=1000 {
-            queue.insert(n(i), Val::Bool(true)).unwrap();
+            queue.insert(n(i), Val::boolean(true)).unwrap();
             if i > 3 {
-                queue.insert(n(i - 3), Val::Nil).unwrap();
+                queue.insert(n(i - 3), Val::NIL).unwrap();
             }
         }
         // The same logical state built without ever moving a window.
         let mut grown = Table::default();
         fill(&mut grown, 1..=1000);
         for i in 1..=997 {
-            grown.insert(n(i), Val::Nil).unwrap();
+            grown.insert(n(i), Val::NIL).unwrap();
         }
         assert!(queue.array.len() < 64, "the queue window must stay small");
         let saved = queue.snapshot_entries();
@@ -5044,8 +5031,8 @@ mod tests {
             .unwrap();
         for t in [&mut queue, &mut grown, &mut loaded] {
             assert_eq!(t.array_len(), 1000);
-            t.insert(n(500), Val::Num(5.0)).unwrap();
-            t.insert(n(1001), Val::Num(6.0)).unwrap();
+            t.insert(n(500), Val::num(5.0)).unwrap();
+            t.insert(n(1001), Val::num(6.0)).unwrap();
         }
         assert_eq!(keys(&queue), keys(&loaded));
         assert_eq!(keys(&grown), keys(&loaded));
@@ -5058,10 +5045,10 @@ mod tests {
         let literals = [h(7)];
         let mut t = Table::with_template_keys(&[0, 0], &literals);
         assert_eq!(t.tally.dead(), 1);
-        t.insert(h(7), Val::Bool(true)).unwrap();
+        t.insert(h(7), Val::boolean(true)).unwrap();
         assert_eq!(t.tally.dead(), 0);
-        t.insert(h(8), Val::Bool(true)).unwrap();
-        assert_eq!(t.get(&h(8)), Val::Bool(true));
+        t.insert(h(8), Val::boolean(true)).unwrap();
+        assert_eq!(t.get(&h(8)), Val::boolean(true));
     }
 
     /// A copied template table holds exactly the backing a key-by-key build
@@ -5088,22 +5075,22 @@ mod tests {
         // Forged bytecode can initialize one pinned slot live -> nil -> live.
         let literals = [h(7)];
         let mut inline = Table::default();
-        inline.insert(h(7), Val::Bool(true)).unwrap();
+        inline.insert(h(7), Val::boolean(true)).unwrap();
         inline.remove(&h(7));
         for mut t in [Table::with_template_keys(&[0], &literals), inline] {
             assert_eq!(t.tally.dead(), 1);
-            assert!(t.init_at_index(0, h(7), Val::Nil));
+            assert!(t.init_at_index(0, h(7), Val::NIL));
             assert_eq!(t.tally.dead(), 1);
-            assert!(t.init_at_index(0, h(7), Val::Bool(true)));
+            assert!(t.init_at_index(0, h(7), Val::boolean(true)));
             assert_eq!(t.tally.dead(), 0);
-            assert!(t.init_at_index(0, h(7), Val::Nil));
+            assert!(t.init_at_index(0, h(7), Val::NIL));
             assert_eq!(t.tally.dead(), 1);
-            assert!(t.init_at_index(0, h(7), Val::Bool(true)));
+            assert!(t.init_at_index(0, h(7), Val::boolean(true)));
             assert_eq!(t.tally.dead(), 0);
-            assert!(t.init_at_index(0, h(7), Val::Bool(false)));
+            assert!(t.init_at_index(0, h(7), Val::boolean(false)));
             assert_eq!(t.tally.dead(), 0);
-            assert_eq!(t.get(&h(7)), Val::Bool(false));
-            assert!(!t.init_at_index(0, h(8), Val::Nil));
+            assert_eq!(t.get(&h(7)), Val::boolean(false));
+            assert!(!t.init_at_index(0, h(8), Val::NIL));
             assert_eq!(t.tally.dead(), 0);
         }
     }
@@ -5129,8 +5116,8 @@ mod tests {
         for round in 0..3 {
             for i in 1..=count {
                 let (before, _) = t.get_with_index(&h(1)).unwrap();
-                t.insert(h(i), Val::Nil).unwrap();
-                t.insert(h(i), Val::Num(round as f64)).unwrap();
+                t.insert(h(i), Val::NIL).unwrap();
+                t.insert(h(i), Val::num(round as f64)).unwrap();
                 expected.retain(|key| *key != h(i));
                 expected.push(h(i));
                 assert!(map_slots(&t) <= 2 * count + 1);
@@ -5145,7 +5132,7 @@ mod tests {
             assert_eq!(keys(&t), expected);
         }
         for (pos, key) in expected.iter().enumerate() {
-            assert_eq!(t.get(key), Val::Num(2.0), "key at pairs position {pos}");
+            assert_eq!(t.get(key), Val::num(2.0), "key at pairs position {pos}");
         }
     }
 
@@ -5154,19 +5141,19 @@ mod tests {
         let mut t = Table::default();
         fill_hash(&mut t, 1..=8);
         let (old, _) = t.get_with_index(&h(3)).unwrap();
-        t.insert(h(3), Val::Nil).unwrap();
-        t.insert(h(5), Val::Nil).unwrap();
+        t.insert(h(3), Val::NIL).unwrap();
+        t.insert(h(5), Val::NIL).unwrap();
         let version = t.version();
         // Two vacated slots at once must not collide.
-        t.insert(h(3), Val::Num(3.0)).unwrap();
-        t.insert(h(5), Val::Num(5.0)).unwrap();
+        t.insert(h(3), Val::num(3.0)).unwrap();
+        t.insert(h(5), Val::num(5.0)).unwrap();
         assert_eq!(t.version(), version + 2);
         assert_eq!(t.get_index(old), None);
-        assert!(!t.set_at_index(old, Val::Bool(false)));
+        assert!(!t.set_at_index(old, Val::boolean(false)));
         assert!(!t.hash_slot_holds(old, &h(3)));
         let (new, value) = t.get_with_index(&h(3)).unwrap();
-        assert_eq!(value, Val::Num(3.0));
-        assert_eq!(t.get_index(new), Some((h(3), Val::Num(3.0))));
+        assert_eq!(value, Val::num(3.0));
+        assert_eq!(t.get_index(new), Some((h(3), Val::num(3.0))));
         // The cursor walk crosses both vacant slots.
         assert_eq!(
             keys(&t),
@@ -5177,9 +5164,9 @@ mod tests {
         );
         // Removing again tombstones the new slot; a third add reuses nothing
         // stale.
-        t.insert(h(3), Val::Nil).unwrap();
-        assert_eq!(t.get(&h(3)), Val::Nil);
-        t.insert(h(3), Val::Bool(true)).unwrap();
+        t.insert(h(3), Val::NIL).unwrap();
+        assert_eq!(t.get(&h(3)), Val::NIL);
+        t.insert(h(3), Val::boolean(true)).unwrap();
         assert_eq!(keys(&t).last(), Some(&h(3)));
     }
 
@@ -5189,10 +5176,10 @@ mod tests {
         fill_hash(&mut t, 1..=4);
         t.remove(&h(2));
         t.remove(&h(3));
-        assert!(matches!(t.next(&h(1)), TableNext::Pair(Val::Num(4.5), _)));
-        t.insert(h(5), Val::Bool(true)).unwrap();
+        assert!(matches!(t.next(&h(1)), TableNext::Pair(key, _) if key == Val::num(4.5)));
+        t.insert(h(5), Val::boolean(true)).unwrap();
         assert_eq!(t.version(), 1);
-        assert!(matches!(t.next(&h(4)), TableNext::Pair(Val::Num(5.5), _)));
+        assert!(matches!(t.next(&h(4)), TableNext::Pair(key, _) if key == Val::num(5.5)));
     }
 
     #[cfg(debug_assertions)]
@@ -5210,9 +5197,9 @@ mod tests {
     fn invariant_check_detects_live_append_key_in_hash_part() {
         let mut table = Table::default();
         table
-            .insert(n(2), Val::Bool(true))
+            .insert(n(2), Val::boolean(true))
             .expect("numeric table key is valid");
-        table.array.push(Val::Nil);
+        table.array.push(Val::NIL);
         table.vlen += 1;
         table.debug_assert_invariants();
     }
@@ -5223,7 +5210,7 @@ mod tests {
         let mut table = Table::with_capacity(INLINE_CAPACITY + 1);
         for key in 0..count {
             table
-                .insert(h(key), Val::Bool(true))
+                .insert(h(key), Val::boolean(true))
                 .expect("hash key is valid");
         }
         assert!(matches!(table.storage, TableStorage::Map(..)));
@@ -5250,7 +5237,7 @@ mod tests {
         // The witness must see slot 0 renamed from the number 0 to vacant.
         let mut table = Table::with_capacity(INLINE_CAPACITY + 1);
         table
-            .insert(n(0), Val::Bool(true))
+            .insert(n(0), Val::boolean(true))
             .expect("numeric table key is valid");
         table.debug_assert_invariants();
         let TableStorage::Map(map, _) = &mut table.storage else {

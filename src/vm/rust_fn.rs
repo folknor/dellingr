@@ -39,6 +39,14 @@ use super::lua_val::RustFunc;
 pub(crate) struct RustFnId(u32);
 
 impl RustFnId {
+    pub(super) fn from_index(index: u32) -> Self {
+        Self(index)
+    }
+
+    pub(super) fn raw_index(self) -> u32 {
+        self.0
+    }
+
     /// The catalog entry at `index`. Catalog positions are fixed per build.
     pub(crate) const fn catalog(index: usize) -> Self {
         assert!(index < u32::MAX as usize, "the catalog index fits in u32");

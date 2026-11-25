@@ -137,7 +137,7 @@ impl Frame {
     fn tfor_loop(state: &mut State, ip: &mut usize, base: usize, step: Instr) -> Result<()> {
         const _: () = assert!(Instr::fixed_charge(Instr::OP_TFOR_LOOP).is_none());
         let rl = base + step.a() as usize;
-        if !matches!(state.stack[rl + 3], Val::Nil) {
+        if !state.stack[rl + 3].is_nil() {
             Self::branch(state, ip, step.sj())?;
             state.stack[rl + 2] = state.stack[rl + 3];
         }
@@ -162,7 +162,7 @@ impl Frame {
     ) -> Result<()> {
         Self::tfor_loop(state, ip, base, step)?;
         let rl = base + step.a() as usize;
-        if let Val::Num(key) = state.stack[rl + 3]
+        if let Some(key) = state.stack[rl + 3].as_num()
             && key.to_bits() == 1.0f64.to_bits()
         {
             state.enter_ipairs_region(frame, ip, local_cost)?;
@@ -341,13 +341,13 @@ impl Frame {
                     if (ra..end).contains(&table) {
                         return Ok(());
                     }
-                    state.stack[ra..end].fill(Val::Nil);
+                    state.stack[ra..end].fill(Val::NIL);
                 }
                 Instr::OP_LOAD_BOOL if ra != table => {
-                    state.stack[ra] = Val::Bool(inst.b() != 0);
+                    state.stack[ra] = Val::boolean(inst.b() != 0);
                 }
                 Instr::OP_LOAD_NUM if ra != table => {
-                    state.stack[ra] = Val::Num(frame.get_number_constant(inst.b()));
+                    state.stack[ra] = Val::num(frame.get_number_constant(inst.b()));
                 }
                 Instr::OP_LOAD_STR if ra != table => {
                     state.stack[ra] = frame.literal(inst.b());
@@ -554,9 +554,9 @@ impl Frame {
             ($inst:ident, $f:path, rr) => {{
                 let lhs = state.stack[base + $inst.b() as usize];
                 let rhs = state.stack[base + $inst.c() as usize];
-                match (lhs, rhs) {
-                    (Val::Num(x), Val::Num(y)) => {
-                        state.stack[base + $inst.a() as usize] = Val::Num($f(x, y));
+                match (lhs.as_num(), rhs.as_num()) {
+                    (Some(x), Some(y)) => {
+                        state.stack[base + $inst.a() as usize] = Val::num($f(x, y));
                     }
                     _ => return Err(state.arithmetic_operands_error(lhs, rhs)),
                 }
@@ -564,17 +564,17 @@ impl Frame {
             ($inst:ident, $f:path, rk) => {{
                 let lhs = state.stack[base + $inst.b() as usize];
                 let y = frame.get_number_constant($inst.c());
-                match lhs {
-                    Val::Num(x) => state.stack[base + $inst.a() as usize] = Val::Num($f(x, y)),
-                    _ => return Err(state.arithmetic_operands_error(lhs, Val::Num(y))),
+                match lhs.as_num() {
+                    Some(x) => state.stack[base + $inst.a() as usize] = Val::num($f(x, y)),
+                    _ => return Err(state.arithmetic_operands_error(lhs, Val::num(y))),
                 }
             }};
             ($inst:ident, $f:path, kr) => {{
                 let x = frame.get_number_constant($inst.b());
                 let rhs = state.stack[base + $inst.c() as usize];
-                match rhs {
-                    Val::Num(y) => state.stack[base + $inst.a() as usize] = Val::Num($f(x, y)),
-                    _ => return Err(state.arithmetic_operands_error(Val::Num(x), rhs)),
+                match rhs.as_num() {
+                    Some(y) => state.stack[base + $inst.a() as usize] = Val::num($f(x, y)),
+                    _ => return Err(state.arithmetic_operands_error(Val::num(x), rhs)),
                 }
             }};
         }
@@ -591,15 +591,15 @@ impl Frame {
                 }
                 Instr::OP_LOAD_NIL => {
                     fixed_cost!(Instr::OP_LOAD_NIL);
-                    state.stack[ra..ra + inst.b() as usize].fill(Val::Nil);
+                    state.stack[ra..ra + inst.b() as usize].fill(Val::NIL);
                 }
                 Instr::OP_LOAD_BOOL => {
                     fixed_cost!(Instr::OP_LOAD_BOOL);
-                    state.stack[ra] = Val::Bool(inst.b() != 0);
+                    state.stack[ra] = Val::boolean(inst.b() != 0);
                 }
                 Instr::OP_LOAD_NUM => {
                     fixed_cost!(Instr::OP_LOAD_NUM);
-                    state.stack[ra] = Val::Num(frame.get_number_constant(inst.b()));
+                    state.stack[ra] = Val::num(frame.get_number_constant(inst.b()));
                 }
                 Instr::OP_LOAD_STR => {
                     fixed_cost!(Instr::OP_LOAD_STR);
@@ -756,7 +756,7 @@ impl Frame {
                     }
                     state.reg_set_list(ra, count, inst.c())?;
                     if inst.set_list_count().is_none() {
-                        state.stack.resize(frame.top, Val::Nil);
+                        state.stack.resize(frame.top, Val::NIL);
                     }
                 }
 
@@ -835,14 +835,15 @@ impl Frame {
                 }
                 Instr::OP_UNM => {
                     fixed_cost!(Instr::OP_UNM);
-                    match state.stack[base + inst.b() as usize] {
-                        Val::Num(n) => state.stack[ra] = Val::Num(-n),
-                        other => return Err(state.arithmetic_operands_error(other, other)),
+                    let operand = state.stack[base + inst.b() as usize];
+                    match operand.as_num() {
+                        Some(n) => state.stack[ra] = Val::num(-n),
+                        None => return Err(state.arithmetic_operands_error(operand, operand)),
                     }
                 }
                 Instr::OP_NOT => {
                     fixed_cost!(Instr::OP_NOT);
-                    state.stack[ra] = Val::Bool(!state.stack[base + inst.b() as usize].truthy());
+                    state.stack[ra] = Val::boolean(!state.stack[base + inst.b() as usize].truthy());
                 }
                 Instr::OP_LEN => {
                     fixed_cost!(Instr::OP_LEN);
@@ -872,7 +873,7 @@ impl Frame {
                         .expect("the range holds the value comparisons");
                     let lhs = state.stack[base + inst.b() as usize];
                     let rhs = state.stack[base + inst.c() as usize];
-                    state.stack[ra] = Val::Bool(state.compare_vals(op, lhs, rhs)?);
+                    state.stack[ra] = Val::boolean(state.compare_vals(op, lhs, rhs)?);
                 }
 
                 // Control flow
@@ -912,8 +913,8 @@ impl Frame {
                         clippy::float_cmp,
                         reason = "Lua `==` on numbers is exact IEEE equality"
                     )]
-                    let holds = match lhs {
-                        Val::Num(x) => match op {
+                    let holds = match lhs.as_num() {
+                        Some(x) => match op {
                             CompareOp::Lt => x < k,
                             CompareOp::Le => x <= k,
                             CompareOp::Gt => x > k,
@@ -921,7 +922,7 @@ impl Frame {
                             CompareOp::Eq => x == k,
                             CompareOp::Ne => x != k,
                         },
-                        _ => state.compare_vals(op, lhs, Val::Num(k))?,
+                        _ => state.compare_vals(op, lhs, Val::num(k))?,
                     };
                     if !holds {
                         Self::branch(state, ip, inst.sj())?;
@@ -942,13 +943,13 @@ impl Frame {
                 }
                 Instr::OP_BR_EQ_NIL => {
                     fixed_cost!(Instr::OP_BR_EQ_NIL);
-                    if !matches!(state.stack[ra], Val::Nil) {
+                    if !state.stack[ra].is_nil() {
                         Self::branch(state, ip, inst.sj())?;
                     }
                 }
                 Instr::OP_BR_NE_NIL => {
                     fixed_cost!(Instr::OP_BR_NE_NIL);
-                    if matches!(state.stack[ra], Val::Nil) {
+                    if state.stack[ra].is_nil() {
                         Self::branch(state, ip, inst.sj())?;
                     }
                 }
@@ -1022,7 +1023,7 @@ impl Frame {
                         return Ok(Leave::Call);
                     }
                     if let RetCount::Fixed(_) = results {
-                        state.stack.resize(frame.top, Val::Nil);
+                        state.stack.resize(frame.top, Val::NIL);
                     }
                 }
                 Instr::OP_RETURN => {

@@ -523,7 +523,7 @@ pub(crate) fn open_base(state: &mut State) -> Result<()> {
     // loudly instead.
     // bounded: a fixed list of protection fields.
     for &(name, value) in GLOBAL_ENV_PROTECTION_FIELDS {
-        state.set_table_str_key_value(-1, name, Val::Bool(value))?;
+        state.set_table_str_key_value(-1, name, Val::boolean(value))?;
     }
 
     // Address the _G table relative to the top: a host may call open_libs

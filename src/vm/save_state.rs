@@ -18,7 +18,7 @@
 //!   two-pass allocate-then-fill so cyclic graphs resolve. Those allocators
 //!   never run GC, which is what keeps the half-built graph alive until the
 //!   final collect.
-//! - **RustFns need stable ids.** A `Val::RustFn` is an entry of the State's
+//! - **RustFns need stable ids.** A Rust function value is an entry of the State's
 //!   Rust function table, never a code address (see `vm/rust_fn.rs`), so a
 //!   reachable one is saved as its entry's registered id (see
 //!   [`State::register_rust_fn`]) and the save fails fast if the entry has
@@ -64,6 +64,7 @@
 //!   host that content-hashes saves across upgrades must hash the payload
 //!   after the header, or accept that a version bump changes the bytes.
 
+use crate::vm::lua_val::ValKind;
 use std::borrow::Cow;
 use std::sync::Arc;
 
@@ -582,11 +583,11 @@ impl<'a> PathFinder<'a> {
         }];
         while let Some(task) = tasks.pop() {
             match task {
-                PathTask::Value { val, path } => match val {
-                    Val::RustFn(function) if function == target_function => {
+                PathTask::Value { val, path } => match val.kind() {
+                    ValKind::RustFn(function) if function == target_function => {
                         return Some(render_path(&self.breadcrumbs, path));
                     }
-                    Val::Obj(ptr) if self.env_reverse.contains_key(&ptr) => {
+                    ValKind::Obj(ptr) if self.env_reverse.contains_key(&ptr) => {
                         if self.environment_objects.insert(ptr) {
                             let table = self.state.heap.as_table_ref(ptr)?;
                             let metatable = table.get_metatable();
@@ -598,7 +599,7 @@ impl<'a> PathFinder<'a> {
                                     PathSegment::Metatable,
                                 );
                                 tasks.push(PathTask::Value {
-                                    val: Val::Obj(metatable),
+                                    val: Val::obj(metatable),
                                     path: child_path,
                                 });
                             }
@@ -624,7 +625,7 @@ impl<'a> PathFinder<'a> {
                             }
                         }
                     }
-                    Val::Obj(ptr) if self.objects.insert(ptr) => {
+                    ValKind::Obj(ptr) if self.objects.insert(ptr) => {
                         tasks.push(PathTask::Object { ptr, path });
                     }
                     _ => {}
@@ -654,7 +655,7 @@ impl<'a> PathFinder<'a> {
                                     PathSegment::Metatable,
                                 );
                                 tasks.push(PathTask::Value {
-                                    val: Val::Obj(metatable),
+                                    val: Val::obj(metatable),
                                     path: child_path,
                                 });
                             }
@@ -913,7 +914,7 @@ impl<'a> SaveBuilder<'a> {
             }
         }
         for value in identity_strings {
-            if let Val::Str(ptr) = value
+            if let ValKind::Str(ptr) = value.kind()
                 && let Some(key) = PointerIdKey::from_val(value)
                 && self.state.format_pointer_ids.contains_key(&key)
             {
@@ -1000,20 +1001,20 @@ impl<'a> SaveBuilder<'a> {
     }
 
     fn saved_reachable_pointer_value(&self, value: Val) -> Option<SavedVal> {
-        match value {
-            Val::Str(ptr) => self.string_ids.get(&ptr).copied().map(SavedVal::Str),
-            Val::RustFn(function) => self
+        match value.kind() {
+            ValKind::Str(ptr) => self.string_ids.get(&ptr).copied().map(SavedVal::Str),
+            ValKind::RustFn(function) => self
                 .state
                 .rust_fns
                 .save_id(function)
                 .map(|id| SavedVal::Fn(id.to_owned())),
-            Val::Obj(ptr) => self
+            ValKind::Obj(ptr) => self
                 .env_reverse
                 .get(&ptr)
                 .cloned()
                 .map(SavedVal::EnvObj)
                 .or_else(|| self.object_ids.get(&ptr).copied().map(SavedVal::Obj)),
-            Val::Nil | Val::Bool(_) | Val::Num(_) => None,
+            ValKind::Nil | ValKind::Bool(_) | ValKind::Num(_) => None,
         }
     }
 
@@ -1046,8 +1047,8 @@ impl<'a> SaveBuilder<'a> {
         let mut saved = Vec::with_capacity(entries.len());
         for (entry_index, (key, value)) in entries.into_iter().enumerate() {
             // Only a UTF-8 string key reads as a global's name.
-            let name = match key {
-                Val::Str(name) => match str::from_utf8(self.state.heap.get_string(name)) {
+            let name = match key.kind() {
+                ValKind::Str(name) => match str::from_utf8(self.state.heap.get_string(name)) {
                     Ok(name) => Some(name.to_owned()),
                     Err(_) => None,
                 },
@@ -1068,7 +1069,7 @@ impl<'a> SaveBuilder<'a> {
         let metatable = metatable
             .map(|mt| {
                 self.encode_environment_root(
-                    Val::Obj(mt),
+                    Val::obj(mt),
                     GLOBALS_TOKEN,
                     EnvironmentPart::Metatable,
                 )
@@ -1127,7 +1128,7 @@ impl<'a> SaveBuilder<'a> {
             }
             let metatable = metatable
                 .map(|mt| {
-                    self.encode_environment_root(Val::Obj(mt), token, EnvironmentPart::Metatable)
+                    self.encode_environment_root(Val::obj(mt), token, EnvironmentPart::Metatable)
                 })
                 .transpose()?;
             let state = self.state;
@@ -1232,12 +1233,12 @@ impl<'a> SaveBuilder<'a> {
         while let Some(task) = tasks.pop() {
             match task {
                 EncodeTask::Value { val, destination } => {
-                    let saved = match val {
-                        Val::Nil => Ok(SavedVal::Nil),
-                        Val::Bool(b) => Ok(SavedVal::Bool(b)),
-                        Val::Num(n) => Ok(SavedVal::Num(saved_num_bits(n))),
-                        Val::Str(ptr) => self.string_id(ptr).map(SavedVal::Str),
-                        Val::RustFn(function) => {
+                    let saved = match val.kind() {
+                        ValKind::Nil => Ok(SavedVal::Nil),
+                        ValKind::Bool(b) => Ok(SavedVal::Bool(b)),
+                        ValKind::Num(n) => Ok(SavedVal::Num(saved_num_bits(n))),
+                        ValKind::Str(ptr) => self.string_id(ptr).map(SavedVal::Str),
+                        ValKind::RustFn(function) => {
                             let Some(id) = self.state.rust_fns.save_id(function) else {
                                 let reachable_from = PathFinder::new(self.state, &self.env_reverse)
                                     .find(root, diagnostic_root, function)
@@ -1248,7 +1249,7 @@ impl<'a> SaveBuilder<'a> {
                             };
                             Ok(SavedVal::Fn(id.to_owned()))
                         }
-                        Val::Obj(ptr) => {
+                        ValKind::Obj(ptr) => {
                             if let Some(token) = self.env_reverse.get(&ptr) {
                                 Ok(SavedVal::EnvObj(token.clone()))
                             } else {
@@ -1257,7 +1258,10 @@ impl<'a> SaveBuilder<'a> {
                             }
                         }
                     }?;
-                    if matches!(val, Val::Str(_) | Val::RustFn(_) | Val::Obj(_)) {
+                    if matches!(
+                        val.kind(),
+                        ValKind::Str(_) | ValKind::RustFn(_) | ValKind::Obj(_)
+                    ) {
                         self.reachable_pointer_values.insert(saved.clone());
                     }
                     // An environment object is a token here; its contents
@@ -1336,7 +1340,7 @@ impl<'a> SaveBuilder<'a> {
                 let metatable = table.get_metatable();
                 if let Some(mt) = metatable {
                     tasks.push(EncodeTask::Value {
-                        val: Val::Obj(mt),
+                        val: Val::obj(mt),
                         destination: ValueDestination::Metatable { object: id },
                     });
                 }
@@ -1390,14 +1394,14 @@ impl<'a> SaveBuilder<'a> {
             }) => {
                 let (subject, pattern, pos, resumed) = (*subject, *pattern, *pos, *resumed);
                 tasks.push(EncodeTask::Value {
-                    val: Val::Str(pattern),
+                    val: Val::str(pattern),
                     destination: ValueDestination::GmatchString {
                         object: id,
                         pattern: true,
                     },
                 });
                 tasks.push(EncodeTask::Value {
-                    val: Val::Str(subject),
+                    val: Val::str(subject),
                     destination: ValueDestination::GmatchString {
                         object: id,
                         pattern: false,
@@ -1904,7 +1908,7 @@ fn materialize_payload(
                         // only: array slots carry implied keys, which an older
                         // dead hash control may repeat, and the map-storage
                         // marker and vacant slots have a nil key.
-                        if entry_index >= hash_start && !matches!(key, Val::Nil) {
+                        if entry_index >= hash_start && !key.is_nil() {
                             insert_runtime_key(
                                 &mut runtime_keys,
                                 key,
@@ -1925,8 +1929,8 @@ fn materialize_payload(
                 // object is only known here.
                 let metatable = match metatable {
                     None => None,
-                    Some(mt) => match decode_val(mt, &ctx)? {
-                        Val::Obj(mt_ptr) if state.heap.as_table_ref(mt_ptr).is_some() => {
+                    Some(mt) => match decode_val(mt, &ctx)?.kind() {
+                        ValKind::Obj(mt_ptr) if state.heap.as_table_ref(mt_ptr).is_some() => {
                             Some(mt_ptr)
                         }
                         _ => {
@@ -2130,7 +2134,7 @@ fn decode_env_table(
     let mut decoded = Vec::with_capacity(entries.len());
     for (entry_index, (key, value)) in entries.iter().enumerate() {
         let key = decode_val(key, ctx)?;
-        if entry_index >= hash_start && !matches!(key, Val::Nil) {
+        if entry_index >= hash_start && !key.is_nil() {
             insert_runtime_key(
                 &mut runtime_keys,
                 key,
@@ -2147,8 +2151,8 @@ fn decode_env_table(
     }
     let metatable = match metatable {
         None => None,
-        Some(mt) => match decode_val(mt, ctx)? {
-            Val::Obj(mt_ptr) if state.heap.as_table_ref(mt_ptr).is_some() => Some(mt_ptr),
+        Some(mt) => match decode_val(mt, ctx)?.kind() {
+            ValKind::Obj(mt_ptr) if state.heap.as_table_ref(mt_ptr).is_some() => Some(mt_ptr),
             _ => {
                 return Err(corrupt_arena(
                     CorruptionReason::Table(TableCorruption::MetatableNotTable),
@@ -2160,8 +2164,8 @@ fn decode_env_table(
     };
     let mut saved_pins = Vec::with_capacity(pins.len());
     for (index, pin) in pins.iter().enumerate() {
-        match decode_val(pin, ctx)? {
-            Val::Str(ptr) => saved_pins.push(ptr),
+        match decode_val(pin, ctx)?.kind() {
+            ValKind::Str(ptr) => saved_pins.push(ptr),
             _ => {
                 return Err(corrupt_arena(CorruptionReason::InvalidPin, index, location));
             }
@@ -2342,10 +2346,10 @@ fn insert_runtime_key(
 
 fn decode_val(saved: &SavedVal, ctx: &DecodeCtx<'_>) -> Result<Val, SnapshotError> {
     match saved {
-        SavedVal::Nil => Ok(Val::Nil),
-        SavedVal::Bool(b) => Ok(Val::Bool(*b)),
-        SavedVal::Num(bits) => Ok(Val::Num(f64::from_bits(*bits))),
-        SavedVal::Str(id) => Ok(Val::Str(*ctx.strings.get(*id as usize).ok_or_else(
+        SavedVal::Nil => Ok(Val::NIL),
+        SavedVal::Bool(b) => Ok(Val::boolean(*b)),
+        SavedVal::Num(bits) => Ok(Val::num(f64::from_bits(*bits))),
+        SavedVal::Str(id) => Ok(Val::str(*ctx.strings.get(*id as usize).ok_or_else(
             || {
                 corrupt_arena(
                     CorruptionReason::IdOutOfRange(SavedReference::String),
@@ -2354,18 +2358,18 @@ fn decode_val(saved: &SavedVal, ctx: &DecodeCtx<'_>) -> Result<Val, SnapshotErro
                 )
             },
         )?)),
-        SavedVal::Obj(id) => Ok(Val::Obj(*object_ref(ctx.objects, *id)?)),
+        SavedVal::Obj(id) => Ok(Val::obj(*object_ref(ctx.objects, *id)?)),
         SavedVal::Fn(id) => ctx
             .fn_forward
             .get(id.as_str())
             .copied()
-            .map(Val::RustFn)
+            .map(Val::rust_fn)
             .ok_or_else(|| SnapshotError::UnknownFunction(id.clone())),
         SavedVal::EnvObj(token) => ctx
             .env_forward
             .get(token)
             .copied()
-            .map(Val::Obj)
+            .map(Val::obj)
             .ok_or_else(|| SnapshotError::UnknownEnvObject(token.clone())),
     }
 }
@@ -4904,7 +4908,7 @@ mod tests {
         assert!(state.global_env.pins().contains(&builtin_name));
         assert!(!saved_strings.contains(&anchor_only));
         assert!(!encoded_strings.contains(&anchor_only));
-        assert!(state.heap.val_is_live(&Val::Str(anchor_only)));
+        assert!(state.heap.val_is_live(&Val::str(anchor_only)));
 
         // After the collection every colour is Unmarked, so this mark phase
         // starts clean; its marks are undone before anything can sweep.
@@ -4934,7 +4938,7 @@ mod tests {
             .into_iter()
             .find(|(_, token)| *token == "math")
             .expect("math is an environment table");
-        let key = Val::Str(state.heap.find_string(key).expect("the key is interned"));
+        let key = Val::str(state.heap.find_string(key).expect("the key is interned"));
         state
             .heap
             .as_table_ref(math)
@@ -4959,12 +4963,12 @@ mod tests {
         )
         .expect("setup addition loads");
         // A key the save mentions nowhere is setup's to contribute.
-        assert_eq!(math_field(&loaded, b"setup_only"), Val::Bool(true));
+        assert_eq!(math_field(&loaded, b"setup_only"), Val::boolean(true));
         let resave = loaded.save_state().expect("setup addition resaves");
         let restored =
             State::load_state(&resave.bytes, Box::new(crate::DefaultCallbacks), no_setup)
                 .expect("setup addition survives a round trip");
-        assert_eq!(math_field(&restored, b"setup_only"), Val::Bool(true));
+        assert_eq!(math_field(&restored, b"setup_only"), Val::boolean(true));
     }
 
     #[test]
@@ -4979,7 +4983,7 @@ mod tests {
         let save = state.save_state().expect("state saves");
         let loaded = State::load_state(&save.bytes, Box::new(crate::DefaultCallbacks), no_setup)
             .expect("state loads");
-        let Val::Num(zero) = math_field(&loaded, b"zero") else {
+        let ValKind::Num(zero) = math_field(&loaded, b"zero").kind() else {
             panic!("math.zero is a number");
         };
         assert_eq!(zero.to_bits(), (-0.0f64).to_bits());

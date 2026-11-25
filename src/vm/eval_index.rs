@@ -209,7 +209,7 @@ impl State {
         let metatable = self.heap.as_table_ref(receiver_metatable)?;
         let index_handler =
             metatable.value_if_key(entry.index_field, self.meta_names.get(MetaName::Index))?;
-        if index_handler != Val::Obj(entry.method_table) {
+        if index_handler != Val::obj(entry.method_table) {
             return None;
         }
 

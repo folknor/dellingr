@@ -243,6 +243,10 @@ tick budgets and re-record replays.
 
 ### Performance
 
+- Runtime Lua values occupy eight bytes, halving value storage in the stack
+  and table backing. NaNs are canonical when stored in the VM. Table backing
+  retains its fixed weights in the garbage collection score.
+
 - `string.gsub` with a Lua pattern and a function or table replacement no
   longer keeps its matcher state on the native stack while the replacement
   runs: each nested level through such a replacement takes about 1.4 KB

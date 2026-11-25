@@ -79,8 +79,9 @@ impl HashSlots {
         &self.entries
     }
 
-    pub(super) fn resident_bytes(&self) -> usize {
-        self.entries.capacity() * RESIDENT_BYTES_PER_HASH_ENTRY + self.index.allocation_size()
+    pub(super) fn resident_bytes(&self) -> u64 {
+        self.entries.capacity() as u64 * RESIDENT_BYTES_PER_HASH_ENTRY
+            + self.index.allocation_size() as u64
     }
 
     pub(super) fn reserve(&mut self, additional: usize, resident: &mut ResidentBytes) {
@@ -169,7 +170,7 @@ impl HashSlots {
     /// Append a vacant slot (a snapshot restoring one).
     #[cfg(feature = "snapshot")]
     pub(super) fn push_vacant(&mut self) {
-        self.entries.push((Val::Nil, Val::Nil));
+        self.entries.push((Val::NIL, Val::NIL));
     }
 
     /// Find real key `key`, live or dead, and hold its index entry for a
@@ -186,7 +187,7 @@ impl HashSlots {
     /// Drop every nil-valued slot (dead and vacant), keeping the others in
     /// order, and rebuild the index for the new positions.
     pub(super) fn retain_live(&mut self) {
-        self.entries.retain(|(_, value)| !matches!(value, Val::Nil));
+        self.entries.retain(|(_, value)| !value.is_nil());
         self.rebuild_index();
     }
 
@@ -195,7 +196,7 @@ impl HashSlots {
         self.index.clear();
         let entries = &self.entries;
         for (position, (key, _)) in entries.iter().enumerate() {
-            if !matches!(key, Val::Nil) {
+            if !key.is_nil() {
                 self.index
                     .insert_unique(hash_key(*key), position, |&at| hash_key(entries[at].0));
             }
@@ -208,8 +209,8 @@ impl HashSlots {
     pub(super) fn index_is_exact(&self) -> bool {
         let mut real = 0;
         for (position, (key, value)) in self.entries.iter().enumerate() {
-            if matches!(key, Val::Nil) {
-                if !matches!(value, Val::Nil) {
+            if key.is_nil() {
+                if !value.is_nil() {
                     return false;
                 }
                 continue;
@@ -234,7 +235,7 @@ impl HashSlots {
     /// move a real vacate makes.
     #[cfg(all(test, debug_assertions))]
     pub(super) fn vacate_for_test(&mut self, position: usize) {
-        self.entries[position] = (Val::Nil, Val::Nil);
+        self.entries[position] = (Val::NIL, Val::NIL);
         self.rebuild_index();
     }
 }
@@ -273,10 +274,11 @@ impl SlotMut<'_> {
         // Push first: a failed allocation leaves the old binding intact.
         self.entries.push((key, value));
         if self.entries.capacity() != capacity {
-            resident.add((self.entries.capacity() - capacity) * RESIDENT_BYTES_PER_HASH_ENTRY);
+            resident
+                .add((self.entries.capacity() - capacity) as u64 * RESIDENT_BYTES_PER_HASH_ENTRY);
         }
         *self.indexed = position;
-        self.entries[old] = (Val::Nil, Val::Nil);
+        self.entries[old] = (Val::NIL, Val::NIL);
         position
     }
 }

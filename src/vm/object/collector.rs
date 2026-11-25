@@ -249,7 +249,7 @@ mod tests {
         state
             .load(&crate::Program::compile("local function f() end f()", None).expect("compiles"))
             .expect("load");
-        let Val::Obj(main) = state.stack[state.stack.len() - 1] else {
+        let Some(main) = state.stack[state.stack.len() - 1].as_object_ptr() else {
             unreachable!("load pushes a closure");
         };
         let identity = Arc::as_ptr(
@@ -260,7 +260,7 @@ mod tests {
                 .runtime
                 .bytecode,
         ) as usize;
-        state.push_val(Val::Obj(main)).expect("push");
+        state.push_val(Val::obj(main)).expect("push");
         let _main = state.anchor().expect("anchor the main closure");
         state
             .call(crate::ArgCount::Fixed(0), crate::RetCount::Fixed(0))

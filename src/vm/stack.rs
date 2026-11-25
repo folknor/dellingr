@@ -90,7 +90,7 @@ impl State {
         if len > self.stack.len() {
             self.check_stack_space(len - self.stack.len())?;
         }
-        self.stack.resize(len, Val::Nil);
+        self.stack.resize(len, Val::NIL);
         Ok(())
     }
 
@@ -107,7 +107,7 @@ impl State {
     pub fn push_nil(&mut self) -> Result<()> {
         self.check_poisoned()?;
         self.check_stack_slot()?;
-        self.push_unchecked(Val::Nil);
+        self.push_unchecked(Val::NIL);
         Ok(())
     }
 
@@ -115,7 +115,7 @@ impl State {
     pub fn push_number(&mut self, n: f64) -> Result<()> {
         self.check_poisoned()?;
         self.check_stack_slot()?;
-        self.push_unchecked(Val::Num(n));
+        self.push_unchecked(Val::num(n));
         Ok(())
     }
 
@@ -123,7 +123,7 @@ impl State {
     pub fn push_boolean(&mut self, b: bool) -> Result<()> {
         self.check_poisoned()?;
         self.check_stack_slot()?;
-        self.push_unchecked(Val::Bool(b));
+        self.push_unchecked(Val::boolean(b));
         Ok(())
     }
 
@@ -237,7 +237,7 @@ impl State {
             .ok_or_else(|| {
                 super::Error::internal_fault(InternalFault::CaptureRangeOutsideString)
             })?;
-        self.push_unchecked(Val::Str(ptr));
+        self.push_unchecked(Val::str(ptr));
         Ok(())
     }
 
@@ -254,7 +254,7 @@ impl State {
             .resolve(handle)
             .ok_or_else(|| self.error(ErrorKind::InvalidRustFnHandle))?;
         self.check_stack_slot()?;
-        self.push_unchecked(Val::RustFn(function));
+        self.push_unchecked(Val::rust_fn(function));
         Ok(())
     }
 
@@ -269,7 +269,7 @@ impl State {
     /// Pushes a catalog or host function by its table entry.
     pub(crate) fn push_rust_fn_id(&mut self, function: RustFnId) -> Result<()> {
         self.check_stack_slot()?;
-        self.push_unchecked(Val::RustFn(function));
+        self.push_unchecked(Val::rust_fn(function));
         Ok(())
     }
 
@@ -385,7 +385,6 @@ impl State {
         let i = self.convert_idx(idx)?;
         let val = &self.stack[i];
         val.as_num()
-            .map(crate::numeral::canonical_nan)
             .ok_or_else(|| self.type_error(super::TypeError::Arithmetic(val.typ(&self.heap))))
     }
 
@@ -408,7 +407,7 @@ impl State {
         let slot = self.convert_idx(arg_number)?;
         let value = self.stack[slot];
         if let Some(number) = value.as_num() {
-            return Ok(crate::numeral::canonical_nan(number));
+            return Ok(number);
         }
         let func_name = self.active_rust_function_name();
         let e = ArgError::type_mismatch(
