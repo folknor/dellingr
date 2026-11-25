@@ -42,10 +42,12 @@ pub(crate) const GC_RESIDENT_BYTES_PER_UNIT: u64 = 256;
 /// representation.
 pub(crate) const RESIDENT_BYTES_PER_ARRAY_SLOT: u64 = 16;
 
-/// Resident bytes charged per slot of a table hash part's entry capacity (a
-/// key and a value); fixed for the reason [`RESIDENT_BYTES_PER_ARRAY_SLOT`]
-/// gives. The hash index's own allocation is charged separately.
-pub(crate) const RESIDENT_BYTES_PER_HASH_ENTRY: u64 = 32;
+/// Resident bytes charged per slot of a table hash part's entry capacity: 32
+/// for the key and value and 16 for the slot's share of the lookup index.
+/// Fixed for the reason [`RESIDENT_BYTES_PER_ARRAY_SLOT`] gives; the index is
+/// folded in here because its real allocation size depends on the target's
+/// hashbrown group backend and pointer width.
+pub(crate) const RESIDENT_BYTES_PER_HASH_ENTRY: u64 = 48;
 
 /// Initial VM value-stack reservation.
 pub(crate) const INITIAL_VM_STACK_CAPACITY: usize = 256;

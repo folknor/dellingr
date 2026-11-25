@@ -229,7 +229,14 @@ the threshold at an allocation check. Automatic mode also checks at taken
 Lua back edges, Lua call admission, and `table.move` copy boundaries.
 Resident bytes follow table capacity growth, so their timing is
 deterministic for a given build and anchor release history, subject to the
-cross-thread drop requirement above. It is not a cross-version contract: a release
+cross-thread drop requirement above. The charges are fixed amounts per table
+array and hash-entry slot of the capacity `Vec` records (after shrinking too)
+plus the byte length of each interned string, never a `size_of` or a
+dependency-reported size, so with matching source, dependency versions, build
+options, Rust toolchain and host inputs, automatic collections fire at the same
+points on every 64-bit target. A toolchain whose `Vec` capacity behavior
+differs can move them, and 32-bit targets can saturate thresholds differently.
+It is not a cross-version contract: a release
 may move allocation points or collection thresholds, which can change `%p` ids
 of rebuilt strings and `State::object_count()`. Such changes are called out in
 the changelog, like other replay-visible changes.

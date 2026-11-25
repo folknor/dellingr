@@ -38,9 +38,11 @@ tick budgets and re-record replays.
   between copies in `table.move`. Collection timing, and with it `%p` ids,
   `object_count` and snapshot contents, moves in any State holding table or
   string payload. Table backing is charged at a fixed 16 bytes per array
-  slot and 32 per hash entry, not at the in-memory value width, so pacing
-  does not move with the value representation or between targets (on
-  64-bit targets the charge equals the old width). Automatic thresholds (`gc_threshold`) are in the new
+  slot and 48 per hash entry (key, value and its share of the lookup
+  index), not at the in-memory value width or the hash index's real
+  allocation, so pacing does not move with the value representation or
+  between 64-bit targets and hashbrown group backends (docs/determinism.md,
+  "Garbage collection timing"). Automatic thresholds (`gc_threshold`) are in the new
   `State::gc_score` units; a `gc_set_threshold` threshold still counts
   `heap_size`. The next automatic threshold is at least the live score plus
   one, so growth factors 0 and 1 no longer collect again on an unchanged heap.

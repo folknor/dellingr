@@ -141,9 +141,14 @@ impl HashSlots {
         &self.entries
     }
 
+    /// Entry capacity times a fixed literal that covers the slot and its
+    /// share of the index. The index is not charged by its own size:
+    /// hashbrown's `allocation_size()` follows the group width and pointer
+    /// width, so it differs between SSE2, NEON and generic backends and
+    /// between hashbrown versions, and collection timing is replay-visible.
+    /// Index growth and rebuilds therefore move no score.
     pub(super) fn resident_bytes(&self) -> u64 {
         self.entries.capacity() as u64 * RESIDENT_BYTES_PER_HASH_ENTRY
-            + self.index.get().allocation_size() as u64
     }
 
     pub(super) fn reserve(&mut self, additional: usize, resident: &mut ResidentBytes) {
@@ -213,15 +218,14 @@ impl HashSlots {
         position
     }
 
-    /// Append to published backing, charging any vector or index growth.
+    /// Append to published backing, charging any entry-vector growth.
     pub(super) fn push_tracked(
         &mut self,
         key: Val,
         value: Val,
         resident: &mut ResidentBytes,
     ) -> usize {
-        let index = self.index.get();
-        if self.entries.len() < self.entries.capacity() && index.len() < index.capacity() {
+        if self.entries.len() < self.entries.capacity() {
             return self.push_new(key, value);
         }
         let old = self.resident_bytes();
