@@ -17,27 +17,37 @@ use super::super::error::{ConstructorTableOperation, ErrorKind, InternalFault, T
 use super::caches::TableKeySlot;
 use super::frame::Frame;
 use super::metamethod::{IndexOutcome, IndexStart};
-use super::object::{Captures, Upvalue};
+use super::object::{Captures, Upvalue, UpvalueRef};
 use super::{Error, Result, State, Val};
 use crate::compiler::UpvalueDesc;
 use crate::instr::{ArgCount, CompareOp, Instr, RetCount};
 use crate::limits::MAX_TABLE_BATCH_SIZE;
 
 impl State {
-    /// The value of upvalue `index` of the running closure.
+    /// The value of upvalue `index` of the running closure, whose capture
+    /// list is `upvalues` (`Captures::as_slice` of its frame).
+    ///
+    /// No closed-cell fast path: the open or closed test has to live
+    /// somewhere. Tagging it in the capture ref would make closing update
+    /// every alias (sibling closures, inherited captures, running frames),
+    /// and a shared descriptor brings back the dependent load it saves. A
+    /// stack that can reallocate rules out a pointer cell. What remains is
+    /// one well-predicted branch. Loops worth more go to typed regions,
+    /// which read and write number captures in their mirror.
     #[inline(always)]
-    pub(super) fn upvalue_value(&self, frame: &Frame, index: u16) -> Val {
-        let uv_ref = frame.upvalues.as_slice()[usize::from(index)];
+    pub(super) fn upvalue_value(&self, upvalues: &[UpvalueRef], index: u16) -> Val {
+        let uv_ref = upvalues[usize::from(index)];
         match self.upvalue_pool.get(uv_ref) {
             Upvalue::Open(stack_idx) => self.stack[*stack_idx],
             Upvalue::Closed(v) => *v,
         }
     }
 
-    /// Write upvalue `index` of the running closure.
+    /// Write upvalue `index` of the running closure, whose capture list is
+    /// `upvalues`.
     #[inline(always)]
-    pub(super) fn set_upvalue_value(&mut self, frame: &Frame, index: u16, val: Val) {
-        let uv_ref = frame.upvalues.as_slice()[usize::from(index)];
+    pub(super) fn set_upvalue_value(&mut self, upvalues: &[UpvalueRef], index: u16, val: Val) {
+        let uv_ref = upvalues[usize::from(index)];
         match self.upvalue_pool.get_mut(uv_ref) {
             Upvalue::Open(stack_idx) => self.stack[*stack_idx] = val,
             Upvalue::Closed(cell) => *cell = val,

@@ -950,6 +950,32 @@ bench wall --workload upvalue_bounce`, best of three: A `1b783c4`
 (`--commit`) 5.1 s (dd67fe71), B the same tree plus the change (dirty) 2.6
 s (2c1cbcdd). No corpus cost row moved. `frame.rs` is untouched.
 
+## Upvalue writes in typed regions and the capture slice, 2026-11-25
+
+Two changes on top of a1b9172, measured on bygg with `brokkr bench
+--rounds N --commit A --commit B wall`, one iteration per cell,
+interleaved. The arms were local variant commits squashed into the landed
+commit afterwards, so their hashes do not survive; each is named by what
+it held.
+
+- `Frame::run_frame` selects the running closure's capture slice once per
+  activation instead of at every `GET_UPVAL` and `SET_UPVAL`. Before the
+  region change, A (the two workloads registered, nothing else) against
+  B (the hoist), 3 pairs: `closed_tally` 7.1 / 7.1 / 7.1 s to 6.8 / 6.8 /
+  6.8 s, `queue` 1.5 s flat, `arithmetic` 1.9 s flat. With the region
+  change in both arms, A without the hoist against B with it, 4 pairs:
+  `closed_mode`, which the region declines, 6.0 / 6.0 / 6.2 / 6.0 s to 5.6
+  s in every pair; `queue` and `closure` flat (1.5 to 1.6 s, 2.5 to 2.6 s).
+  Native stack: +16 bytes per level in release, -32 in dev (see "Native
+  stack frames and cycles").
+- A typed loop region takes `SET_UPVAL`: each written capture lives in its
+  constant mirror slot and is written back at the region's exit. A (the
+  hoist) against B (plus the region change), 3 pairs: `closed_tally` 6.8 /
+  6.8 / 8.5 s to 3.8 s in every pair, `upvalue_bounce` 3.0 / 2.8 / 2.8 s to
+  2.6 s (cause not isolated), `numeric_index` 4.5 /
+  4.8 / 4.6 s to 4.4 / 4.4 / 4.5 s, `arithmetic` 1.9 s flat. No corpus cost
+  row moved.
+
 ## Key-position hints for dynamic string keys, 2026-11-24
 
 A `GET_TABLE` site with a string key keeps the position its key last sat
@@ -1195,6 +1221,7 @@ host and compiler, so its row does not compare with the one above it); the
 | bygg, same `rustc`: typed `State::invoke`, on top of b6da85b (b6da85b itself measured 3008 / 3056 in release; dev not re-measured) | 16576 | 3024 | 3072 |
 | bygg, same `rustc`: unsized `State`, on top of bea3fdd (bea3fdd itself measured 16576 / 3024 / 3072) | 16800 | 3104 | 3168 |
 | bygg, same `rustc`: `gsub` callback results appended in place, on top of 6a6c2b2 (6a6c2b2 itself measured 16880 / 3120 / 3184) | 16528 | 3104 | 3184 |
+| bygg, `rustc` of 2026-11-18: the capture slice selected once per activation, on top of a1b9172 (a1b9172 itself measured 16576 / 3216 / 3184) | 16544 | 3232 | 3200 |
 
 ### 2026-11-18: unsized `State`
 

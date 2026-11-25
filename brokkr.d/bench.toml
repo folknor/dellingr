@@ -302,6 +302,14 @@ xxhash = "e9eed60defdf4ce926c63fa12697c922"
 file = "bench/upvalue_bounce.lua"
 xxhash = "c68057f92cf97b94b928135afc1b1f43"
 
+[data.workloads.bench.closed_mode]
+file = "bench/closed_mode.lua"
+xxhash = "4a0af254dec4e589673e379a3c9fd38b"
+
+[data.workloads.bench.closed_tally]
+file = "bench/closed_tally.lua"
+xxhash = "6054e5d60607485922aeba698e1e6b36"
+
 [data.workloads.bench.local]
 file = "bench/local.lua"
 xxhash = "2489b23acb047b4a8b7066f03e5eabf2"
@@ -566,6 +574,14 @@ xxhash = "0201e96abe255a8931d80fff77ee9626"
 [data.workloads.hotpath.upvalue_bounce]
 file = "examples/numerics/upvalue_bounce.lua"
 xxhash = "c4180a1ce8302d2da27bb62d3a56f09a"
+
+[data.workloads.hotpath.closed_mode]
+file = "examples/numerics/closed_mode.lua"
+xxhash = "8bf1296555e8bd35c29bc555cdf80db9"
+
+[data.workloads.hotpath.closed_tally]
+file = "examples/numerics/closed_tally.lua"
+xxhash = "95d98c801d1b4bca32146aac4db09b18"
 
 [data.workloads.hotpath.local]
 file = "examples/calls/local.lua"

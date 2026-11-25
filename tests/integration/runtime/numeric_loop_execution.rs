@@ -9,7 +9,7 @@ use crate::support::eval_number;
 /// A loop whose body is straight-line arithmetic, a move and a literal load,
 /// so it runs as a typed region, with a closure taken before the loop that
 /// reads the captured locals after a failure. `{twin}` is spliced into the
-/// body: a free upvalue read there disqualifies the region without changing
+/// body: a free upvalue load never read disqualifies the region without changing
 /// any charge, giving the canonical reference.
 fn region_program(twin: &str) -> String {
     format!(
@@ -181,6 +181,74 @@ fn numeric_loop_region_field_reads_keep_canonical_semantics() {
             .contains("attempt to perform arithmetic on a string value"),
         "{error}"
     );
+}
+
+/// A loop reading and writing captured numbers: a running sum that wraps at
+/// a captured limit and a wrap count written on one arm only, an old value
+/// of the sum read into a local before the write and used after it, and an
+/// indexed read of `ys` that misses past 25 and answers through `__index`,
+/// exiting the region mid-pass after this pass's writes. With `open` the
+/// captures are locals of `run`, whose frame is live while `step` loops,
+/// so the cells are open; otherwise they are closed before `run` is called.
+fn upvalue_write_program(twin: &str, open: bool) -> String {
+    let (outer, inner) = if open { ("", "local") } else { ("local", "") };
+    format!(
+        r#"
+        local up = 0
+        {outer} sum, wraps, limit = 0.5, 0, 97
+        local ys = setmetatable({{}}, {{ __index = function(_, key) return key * 2 end }})
+        for i = 1, 25 do ys[i] = 31 - i end
+        function run()
+            {inner} sum, wraps, limit = 0.5, 0, 97
+            peek = function() return sum, wraps, limit end
+            local function step()
+                local d = 0
+                for i = 1, 40 do
+                    local old = sum
+                    sum = sum + i + ys[i]
+                    if sum > limit then
+                        sum = sum - limit
+                        wraps = wraps + 1
+                    end
+                    d = d + old
+                    {twin}
+                end
+                return d
+            end
+            return step()
+        end
+        "#
+    )
+}
+
+#[test]
+fn numeric_loop_region_writing_upvalues_matches_canonical_dispatch_at_every_budget() {
+    let models = [
+        CostModel::default(),
+        CostModel::default()
+            .with(Charge::Add, 0)
+            .with(Charge::Sub, 5),
+        CostModel::zero(),
+    ];
+    for open in [false, true] {
+        let region = upvalue_write_program("", open);
+        let canonical = upvalue_write_program("local _u = up", open);
+        for model in &models {
+            for budget in -1..=900 {
+                assert_eq!(
+                    region_outcome(model, &region, budget),
+                    region_outcome(model, &canonical, budget),
+                    "budget {budget} under {model:?}, open {open}"
+                );
+            }
+            // A collection at every back-edge checkpoint.
+            assert_eq!(
+                region_outcome_at(model, &region, i64::MAX, Some(1)),
+                region_outcome_at(model, &canonical, i64::MAX, Some(1)),
+                "collecting under {model:?}, open {open}"
+            );
+        }
+    }
 }
 
 /// A loop with forward branches, a write on one arm only, and indexed reads

@@ -322,6 +322,14 @@ impl Frame {
     ) -> Result<Leave> {
         let code: &[Instr] = &frame.bytecode.code;
         let base = frame.stack_bottom;
+        // The capture list is immutable once built and the frame outlives
+        // the activation, so its representation is selected once here
+        // rather than at every GET_UPVAL and SET_UPVAL. The slice stays live
+        // across the dispatch loop: measured when it landed, 16 bytes more
+        // per native level in release (32 fewer in dev), against about 7% on
+        // a loop dispatching closed captures (bench/closed_mode), which was
+        // judged worth it inside the native stack envelope (docs/limits.md).
+        let upvalues = frame.upvalues.as_slice();
         // A fixed charge is one weight, at most `u32::MAX`, and pending cost
         // stays below the flush threshold, at most `COST_CHECK_INTERVAL`, so
         // the production sum cannot overflow. The debug interval override
@@ -464,12 +472,12 @@ impl Frame {
                 // Upvalues
                 Instr::OP_GET_UPVAL => {
                     fixed_cost!(Instr::OP_GET_UPVAL);
-                    state.stack[ra] = state.upvalue_value(frame, inst.b());
+                    state.stack[ra] = state.upvalue_value(upvalues, inst.b());
                 }
                 Instr::OP_SET_UPVAL => {
                     fixed_cost!(Instr::OP_SET_UPVAL);
                     let val = state.stack[ra];
-                    state.set_upvalue_value(frame, inst.b(), val);
+                    state.set_upvalue_value(upvalues, inst.b(), val);
                 }
                 Instr::OP_CLOSE => {
                     fixed_cost!(Instr::OP_CLOSE);

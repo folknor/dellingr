@@ -68,6 +68,8 @@ examples! {
     methods: "examples/methods.lua",
     negative_zero: "examples/negative_zero.lua",
     numerics_arithmetic: "examples/numerics/arithmetic.lua",
+    numerics_closed_mode: "examples/numerics/closed_mode.lua",
+    numerics_closed_tally: "examples/numerics/closed_tally.lua",
     numerics_constants: "examples/numerics/constants.lua",
     numerics_cos: "examples/numerics/cos.lua",
     numerics_cull: "examples/numerics/cull.lua",

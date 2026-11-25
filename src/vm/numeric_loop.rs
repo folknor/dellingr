@@ -36,8 +36,9 @@
 //! - Types. A body holds only arithmetic, `UNM`, `MOVE`, `LOAD_NUM`,
 //!   loop-invariant field reads and calls to numeric leaves, so numbers in
 //!   give numbers out, and nothing else runs while the region does: no
-//!   other call, allocation, upvalue write or handler, and no store but a
-//!   number into a slot already live (a field leaf's, or a record's). The
+//!   other call, allocation or handler, and no store but a number into a
+//!   slot already live (a field leaf's, a record's, or a number upvalue's
+//!   cell; see the upvalue item below). The
 //!   only foreign code is the back-edge checkpoint
 //!   (`State::poll_gc_checkpoint`), which polls the interrupt and may
 //!   collect, and runs no Lua or host code. A guard at entry on every
@@ -53,7 +54,8 @@
 //! - Field reads. `GET_UPVAL r u; GET_FIELD r r k` (the scratch register
 //!   reused as the destination) and `GET_FIELD d s k` with `s` a register
 //!   the body never writes read a receiver that cannot change while the
-//!   region runs: nothing in it writes an upvalue, a register outside the
+//!   region runs: nothing in it writes the receiver's upvalue (a body
+//!   writing an upvalue reads no receiver through it), a register outside the
 //!   mirror or a table field under the read's key (a called field leaf's
 //!   and a record's store keys are checked against it at entry, and a
 //!   record never replaces a receiver register), a running closure's
@@ -109,7 +111,18 @@
 //!   the run, keyed by the record's metatable (`State::run_control_region`
 //!   says why each entry stays exact).
 //! - A `GET_UPVAL r u` whose register is next read as a number is a number
-//!   read once at entry, as a field read is.
+//!   read once at entry into upvalue `u`'s one mirror slot, and copied from
+//!   it at the load's own position. A `SET_UPVAL r u` copies `r` into that
+//!   slot, so later reads see the write and an earlier load keeps the old
+//!   value. A body that writes an upvalue makes no call (a leaf reads its
+//!   own captures, which may be the cell, once at its entry) and reads no
+//!   receiver through a written upvalue. The entry requires every written
+//!   upvalue to hold a number and to share its cell with no other upvalue
+//!   slot of the body. The cell is written back only at the region's exit,
+//!   every exit, `Err` included (`State::publish_captures`): it holds a
+//!   number throughout, so a checkpoint's collection sees the same roots,
+//!   and a running closure's open cells name enclosing frames' registers,
+//!   below this frame, so register publication never touches them.
 //! - The loop step reads the mirror's controls, which a body may have
 //!   written, computes the next value into a temporary, polls on the taken
 //!   back edge with the cursor past `FOR_LOOP`, and only then writes the
@@ -253,6 +266,10 @@ struct Body {
     record_sites: Box<[RecordSite]>,
     /// A loop's nested numeric loops, by `Prep` order. Empty for a leaf.
     inner: Box<[InnerLoop]>,
+    /// A loop's written upvalues: each one's constant mirror slot and
+    /// upvalue index, written back to the cell when the region exits
+    /// (`State::publish_captures`). Empty for a leaf.
+    captures: Box<[(u8, u16)]>,
     /// The body has forward branches, indexed reads, records, nested loops
     /// or method calls on a record, so it runs through
     /// `State::run_control_region` rather than as a straight line.
@@ -478,9 +495,11 @@ enum Constant {
         /// The `GET_FIELD` site's cache slot.
         cache: Option<u8>,
     },
-    /// A number upvalue of the running closure, read at entry: nothing a
-    /// region runs writes an upvalue, and a running closure's upvalues
-    /// never alias its own frame's registers.
+    /// A number upvalue of the running closure, read at entry into one
+    /// slot per upvalue. A region's own `SET_UPVAL` writes that slot and
+    /// its exit writes the cell back (`State::publish_captures`); nothing
+    /// else a region runs writes an upvalue, and a running closure's
+    /// upvalues never alias its own frame's registers.
     Upvalue(u16),
 }
 
@@ -739,6 +758,9 @@ struct Layout {
     tables: Vec<(u16, TableSource)>,
     /// A leaf's field sites.
     sites: Vec<FieldSite>,
+    /// Upvalues a loop body writes (`SET_UPVAL`), each held in its
+    /// `Constant::Upvalue` slot.
+    capture_writes: Vec<u16>,
 }
 
 impl Layout {
@@ -1235,6 +1257,16 @@ impl Layout {
         {
             return Some(CONSTANT_TAG | mirror_slot(slot));
         }
+        // One slot per upvalue: a region may write it (`SET_UPVAL`), and
+        // every later read of the cell must see that write.
+        if let Constant::Upvalue(index) = constant
+            && let Some(slot) = self
+                .constants
+                .iter()
+                .position(|c| matches!(c, Constant::Upvalue(other) if *other == index))
+        {
+            return Some(CONSTANT_TAG | mirror_slot(slot));
+        }
         if self.full() {
             return None;
         }
@@ -1652,6 +1684,28 @@ impl Layout {
                     Instr::OP_GET_UPVAL if fields => {
                         self.load(inst.a(), Callee::Upvalue(inst.b()), pc)?
                     }
+                    // A number written to an upvalue: a copy into the
+                    // upvalue's own constant slot, which every read of the
+                    // cell shares and the region's exit writes back
+                    // (`State::publish_captures`). It writes no register, so
+                    // the layout's register facts are untouched.
+                    Instr::OP_SET_UPVAL if fields => {
+                        const {
+                            assert!(Instr::fixed_charge(Instr::OP_SET_UPVAL).is_none());
+                        }
+                        let b = self.read(inst.a())?;
+                        let index = inst.b();
+                        let a = self.constant(Constant::Upvalue(index), None)?;
+                        if !self.capture_writes.contains(&index) {
+                            self.capture_writes.push(index);
+                        }
+                        LoopOp {
+                            kind: OpKind::Copy,
+                            a,
+                            b,
+                            c: 0,
+                        }
+                    }
                     Instr::OP_CALL if fields => self.call_site(inst, pc)?,
                     // A leaf's upvalue load defines a table receiver and
                     // writes no mirror slot; it is free, so it has no charge.
@@ -1836,6 +1890,23 @@ impl Layout {
         if self.loading.is_some() {
             return None;
         }
+        // A body that writes an upvalue holds no call: a leaf reads its own
+        // captures, which may be the written cell, once at its entry. Nor is
+        // a written upvalue a receiver read once at entry. (The entry would
+        // refuse that anyway, the cell being a number for its constant slot
+        // and a table for the receiver, but the plan should not depend on
+        // it.)
+        if !self.capture_writes.is_empty() {
+            let receiver_written = |receiver: &Receiver| matches!(receiver, Receiver::Upvalue(index) if self.capture_writes.contains(index));
+            if !self.calls.is_empty()
+                || self.indexed.iter().any(|(receiver, _)| receiver_written(receiver))
+                || self.constants.iter().any(|constant| {
+                    matches!(constant, Constant::Field { receiver, .. } if receiver_written(receiver))
+                })
+            {
+                return None;
+            }
+        }
         let control = self.force_control
             || !self.jumps.is_empty()
             || !self.indexed.is_empty()
@@ -1914,9 +1985,27 @@ impl Layout {
         };
         // bounded: the operations emitted by one bytecode scan
         for op in &mut self.ops {
+            // A `Copy` into an upvalue's slot (`SET_UPVAL`) is the one
+            // operation whose destination is a constant slot; every other
+            // `a` is a register slot or an index.
+            if let OpKind::Copy = op.kind {
+                op.a = fix(op.a);
+            }
             op.b = fix(op.b);
             op.c = fix(op.c);
         }
+        let captures = self
+            .capture_writes
+            .iter()
+            .map(|&index| {
+                let slot = self
+                    .constants
+                    .iter()
+                    .position(|c| matches!(c, Constant::Upvalue(other) if *other == index))
+                    .expect("a written upvalue has its constant slot");
+                (first + mirror_slot(slot), index)
+            })
+            .collect::<Vec<_>>();
         let constants = self
             .constants
             .iter()
@@ -1942,6 +2031,7 @@ impl Layout {
                 records: records.into_boxed_slice(),
                 record_sites: self.record_sites.into_boxed_slice(),
                 inner: self.inner.into_boxed_slice(),
+                captures: captures.into_boxed_slice(),
                 control,
             },
             registers,
@@ -2711,6 +2801,7 @@ impl State {
             *ip = region.body_pc;
         };
         self.publish_mirror(body, base, &x, written);
+        self.publish_captures(body, frame, &x, written);
         // Last, so no published number overwrites it.
         if CALLS
             && let Some(site) = loaded
@@ -2879,7 +2970,7 @@ impl State {
         // bounded: at most MAX_INDEXED indexed reads
         for (table, &(receiver, _)) in tables.iter_mut().zip(&body.indexed) {
             let value = match receiver {
-                Receiver::Upvalue(index) => self.upvalue_value(frame, index),
+                Receiver::Upvalue(index) => self.upvalue_value(frame.upvalues.as_slice(), index),
                 Receiver::Register(register) => self.stack[base + usize::from(register)],
             };
             let Val::Obj(ptr) = value else {
@@ -3337,6 +3428,7 @@ impl State {
             first_pass = false;
         };
         self.publish_mirror(body, base, &x, written);
+        self.publish_captures(body, frame, &x, written);
         // An exhausted `ipairs` step leaves nil in its results, over the
         // published key, as canonical TFOR_CALL does.
         if IPAIRS && let Some((results, vars)) = exhausted {
@@ -3489,10 +3581,15 @@ impl State {
             }
             let (value, receiver) = match site.callee {
                 Callee::Global { name, cache } => (self.read_global(frame, name, cache), Val::Nil),
-                Callee::Upvalue(index) => (self.upvalue_value(frame, index), Val::Nil),
+                Callee::Upvalue(index) => (
+                    self.upvalue_value(frame.upvalues.as_slice(), index),
+                    Val::Nil,
+                ),
                 Callee::Method { receiver, key } => {
                     let receiver = match receiver {
-                        Receiver::Upvalue(index) => self.upvalue_value(frame, index),
+                        Receiver::Upvalue(index) => {
+                            self.upvalue_value(frame.upvalues.as_slice(), index)
+                        }
                         Receiver::Register(register) => self.stack[base + usize::from(register)],
                     };
                     let Some(method) = self.region_method(receiver, frame.literal(key)) else {
@@ -3832,17 +3929,21 @@ impl State {
         for &(slot, constant) in &body.constants {
             x[at(slot)] = match constant {
                 Constant::Number(value) => value,
-                Constant::Upvalue(index) => match self.upvalue_value(frame, index) {
-                    Val::Num(n) => n,
-                    _ => return false,
-                },
+                Constant::Upvalue(index) => {
+                    match self.upvalue_value(frame.upvalues.as_slice(), index) {
+                        Val::Num(n) => n,
+                        _ => return false,
+                    }
+                }
                 Constant::Field {
                     receiver,
                     key,
                     cache,
                 } => {
                     let receiver = match receiver {
-                        Receiver::Upvalue(index) => self.upvalue_value(frame, index),
+                        Receiver::Upvalue(index) => {
+                            self.upvalue_value(frame.upvalues.as_slice(), index)
+                        }
                         Receiver::Register(register) => self.stack[base + usize::from(register)],
                     };
                     let Val::Obj(ptr) = receiver else {
@@ -3856,7 +3957,39 @@ impl State {
                 }
             };
         }
+        // A written upvalue's slot stands for its cell, so no other upvalue
+        // slot may name the same cell: two indices of one closure can share
+        // one, and the second slot would miss the first's writes.
+        let upvalues = frame.upvalues.as_slice();
+        // bounded: at most MIRROR_SLOTS written upvalues, each against at
+        // most MIRROR_SLOTS constants
+        for &(_, written) in &body.captures {
+            let cell = upvalues[usize::from(written)];
+            if body.constants.iter().any(|&(_, constant)| {
+                matches!(constant, Constant::Upvalue(index)
+                    if index != written && upvalues[usize::from(index)] == cell)
+            }) {
+                return false;
+            }
+        }
         true
+    }
+
+    /// Write each upvalue `body` wrote back to its cell, at the region's
+    /// exit. Only the exit publishes them: the cell held a number at entry
+    /// and the region writes only numbers, so a checkpoint's collection
+    /// sees the same roots whichever number it holds, and the checkpoint
+    /// runs no Lua or host code that could read it. An open cell names a
+    /// register of an enclosing frame, below this frame's base, so no
+    /// register publication overwrites it.
+    fn publish_captures(&mut self, body: &Body, frame: &Frame, x: &[f64], written: u32) {
+        let upvalues = frame.upvalues.as_slice();
+        // bounded: at most MIRROR_SLOTS written upvalues
+        for &(slot, index) in &body.captures {
+            if written & (1 << slot) != 0 {
+                self.set_upvalue_value(upvalues, index, Val::Num(x[at(slot)]));
+            }
+        }
     }
 
     /// One fixed charge of `weight` (nonzero) at cursor `ip`, exactly as the
@@ -4509,6 +4642,49 @@ mod tests {
             "local function f(o) local s = 0 for i = 1, 9 do s = o:m(s); o = i end end",
             // A callee loaded and never called holds a non-number.
             "local function f() local s = 0 for i = 1, 9 do s = s + 1 local _ = g end end",
+        ] {
+            assert_eq!(regions(source), 0, "{source}");
+        }
+    }
+
+    #[test]
+    fn regions_take_upvalue_writes_without_calls_or_receivers() {
+        // An upvalue read is a provisional callee load, and loads are off
+        // under fault injection.
+        let calls = usize::from(!cfg!(feature = "fault-injection"));
+        for source in [
+            "local n local function f() for i = 1, 9 do n = n + i end end",
+            "local s, w, k local function f() for i = 1, 9 do s = s + i if s > k then s = s - k w = w + 1 end end end",
+            // An old value read before the write.
+            "local n local function f() local d = 0 for i = 1, 9 do local old = n n = i d = d + old end return d end",
+        ] {
+            assert_eq!(regions(source), calls, "{source}");
+        }
+        // A write-only capture.
+        assert_eq!(
+            regions("local n local function f() for i = 1, 9 do n = i end end"),
+            1
+        );
+        // Both loops of a nest are planned.
+        assert_eq!(
+            regions(
+                "local n local function f() for i = 1, 9 do for j = 1, 3 do n = n + j end end end"
+            ),
+            2 * calls
+        );
+        assert_eq!(
+            regions("local n local function f() for i = 1, 9 do n = g(i) end end"),
+            0,
+            "a body writing an upvalue makes no call"
+        );
+        assert_eq!(
+            regions("local n local function f() local s = 0 for i = 1, 9 do s = g(i) end end"),
+            calls
+        );
+        for source in [
+            // A written upvalue read as a field or index receiver.
+            "local t local function f() local s = 0 for i = 1, 9 do s = s + t.x t = i end end",
+            "local t local function f() local s = 0 for i = 1, 9 do s = s + t[i] t = i end end",
         ] {
             assert_eq!(regions(source), 0, "{source}");
         }

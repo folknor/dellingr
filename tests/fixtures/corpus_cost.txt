@@ -61,6 +61,8 @@ examples/method_call_receivers.lua|5cb21d2734a39dbc7c70c07e80e31f2d|40
 examples/methods.lua|de8d9b88b214a51d6a804b1c118d9a5e|34
 examples/negative_zero.lua|065acf801523f2bf1867eae2281ab404|2
 examples/numerics/arithmetic.lua|6377d75406074f15184e1f03a00f15b8|7217916
+examples/numerics/closed_mode.lua|8bf1296555e8bd35c29bc555cdf80db9|5009004
+examples/numerics/closed_tally.lua|95d98c801d1b4bca32146aac4db09b18|5009004
 examples/numerics/constants.lua|04a3cab7b19967cd1f71ad224c5a5ea6|3505000
 examples/numerics/cos.lua|061e0ee13eb8db17b9da6ca0a41a0d65|3612000
 examples/numerics/cull.lua|7f6872ee5a301537ec57436c30278e9b|434768

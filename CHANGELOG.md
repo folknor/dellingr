@@ -346,6 +346,13 @@ tick budgets and re-record replays.
   it used to fall back to ordinary dispatch. On bygg `bench/upvalue_bounce`
   went from 5.1 s to 2.6 s. Results, costs and collection timing are
   unchanged.
+- A typed loop without calls may now also assign captured numbers
+  (`count = count + 1` on a closure's upvalue), where any upvalue write used
+  to fall back to ordinary dispatch. The captured value is kept in the loop
+  and written back when it leaves. On bygg `bench/closed_tally` went from
+  6.8 s to 3.8 s. A captured value that is not a number at the loop's start
+  declines the loop. Results, costs, the charged prefix at a budget refusal,
+  error locations, interrupt safepoints and collection timing are unchanged.
 - A typed loop may also read a number field of the element it read by a
   string key held in a local the loop never assigns
   (`sum = sum + us[i][key]`). On bygg `bench/column_key` went from 4.9 s to
