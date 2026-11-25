@@ -701,7 +701,11 @@ impl TombstonesAndDense {
 /// construction hashes and probes no key. The copy keeps the slot order, the
 /// index layout and the reserved capacity of a fresh build, so `pairs`
 /// order, snapshots and the backing charged to the collector are those of
-/// building the map key by key.
+/// building the map key by key. The copies share the prototype's index
+/// allocation copy-on-write (`hash_slots::Index`), and each is still charged
+/// the full index. The slot vector, keys included, stays per table: a field
+/// hit reads its key and value from one slot, and a key-free value block
+/// beside a shared key list would split them.
 ///
 /// Source compilation selects this layout only for unique, all-named
 /// constructors, whose bytecode initializes slots with pinned writes in
@@ -725,6 +729,7 @@ impl TemplatePrototype {
             let key = TableKey::from_prevalidated(literals[usize::from(*key_id)]);
             slots.push_if_absent(key.value(), Val::NIL);
         }
+        slots.share_index();
         Self {
             slots,
             reserved: key_ids.len(),
@@ -5079,6 +5084,52 @@ mod tests {
             assert_eq!(copy.resident_bytes(), prototype.slots.resident_bytes());
             assert_eq!(copy.tally.dead(), prototype.slots.len());
         }
+    }
+
+    /// Template copies share the prototype's index until a structural write.
+    /// A re-add that relocates and a new key each detach one copy, charging
+    /// exactly what the same writes charge a copy that owned its index from
+    /// the start, and leave the sibling and the prototype answering from
+    /// their own positions.
+    #[test]
+    fn shared_template_index_detaches_on_structural_writes_only() {
+        let literals = [h(7), h(8), h(9)];
+        let prototype = TemplatePrototype::build(&[0, 1, 2], &literals);
+        let mut unshared = HashSlots::with_capacity(3);
+        for key in literals {
+            unshared.push_if_absent(key, Val::NIL);
+        }
+        let owned = TemplatePrototype {
+            slots: unshared,
+            reserved: 3,
+        };
+        let mut a = Table::from_template(&prototype);
+        let mut b = Table::from_template(&prototype);
+        let mut c = Table::from_template(&owned);
+        assert_eq!(a.resident_bytes(), c.resident_bytes());
+        let charged = b.resident_bytes();
+        for (position, key) in literals.iter().enumerate() {
+            let value = Val::num(position as f64);
+            for t in [&mut a, &mut b, &mut c] {
+                assert!(t.init_at_index(position, *key, value));
+            }
+        }
+        for t in [&mut a, &mut c] {
+            t.remove(&h(7));
+            t.insert(h(7), Val::boolean(true)).unwrap();
+        }
+        assert_eq!(a.resident_bytes(), c.resident_bytes());
+        for t in [&mut a, &mut c] {
+            t.insert(h(10), Val::boolean(false)).unwrap();
+        }
+        assert_eq!(a.resident_bytes(), c.resident_bytes());
+        assert_eq!(a.get(&h(7)), Val::boolean(true));
+        assert_eq!(a.get(&h(10)), Val::boolean(false));
+        for (position, key) in literals.iter().enumerate() {
+            assert_eq!(b.get(key), Val::num(position as f64));
+            assert_eq!(prototype.slots.find(*key), Some(position));
+        }
+        assert_eq!(b.resident_bytes(), charged);
     }
 
     #[test]

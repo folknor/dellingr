@@ -23,6 +23,7 @@
 //! from the slot keys, which hash as a pointer or number bits.
 
 use std::hash::BuildHasher;
+use std::sync::Arc;
 
 use hashbrown::HashTable;
 
@@ -43,7 +44,54 @@ fn hash_key(key: Val) -> u64 {
 #[derive(Debug, Default)]
 pub(super) struct HashSlots {
     entries: Vec<(Val, Val)>,
-    index: HashTable<usize>,
+    index: Index,
+}
+
+/// The lookup index, owned or shared copy-on-write.
+///
+/// Constructor-template tables share their prototype's index: it holds
+/// positions only, never keys (each table's slots hold its own keys, which
+/// it marks), so a shared index carries no GC reference and outlives the
+/// runtime that built it safely. Every table built from one prototype has
+/// its keys at the same positions until its first structural change, and
+/// every index write goes through `owned`, which detaches first. A value
+/// write, a pinned initialization and a lookup never detach.
+///
+/// The detached copy is a clone, which keeps the bucket count, layout and
+/// growth headroom, so `resident_bytes` reports the same size shared or
+/// owned: each table is charged the full index whether or not it shares the
+/// allocation, and detaching moves no collection score.
+#[derive(Debug)]
+enum Index {
+    Owned(HashTable<usize>),
+    Shared(Arc<HashTable<usize>>),
+}
+
+impl Default for Index {
+    fn default() -> Self {
+        Self::Owned(HashTable::new())
+    }
+}
+
+impl Index {
+    #[inline(always)]
+    fn get(&self) -> &HashTable<usize> {
+        match self {
+            Self::Owned(table) => table,
+            Self::Shared(table) => table,
+        }
+    }
+
+    /// The index for a write, detaching a shared one first.
+    fn owned(&mut self) -> &mut HashTable<usize> {
+        if let Self::Shared(table) = self {
+            *self = Self::Owned(HashTable::clone(table));
+        }
+        match self {
+            Self::Owned(table) => table,
+            Self::Shared(_) => unreachable!("detached above"),
+        }
+    }
 }
 
 impl HashSlots {
@@ -52,24 +100,33 @@ impl HashSlots {
     pub(super) fn with_capacity(capacity: usize) -> Self {
         Self {
             entries: Vec::with_capacity(capacity),
-            index: HashTable::with_capacity(capacity),
+            index: Index::Owned(HashTable::with_capacity(capacity)),
+        }
+    }
+
+    /// Make the index shareable, so `copy_with_capacity` hands copies the
+    /// same allocation instead of a clone (`Index` says why that is sound).
+    pub(super) fn share_index(&mut self) {
+        if let Index::Owned(table) = &mut self.index {
+            self.index = Index::Shared(Arc::new(std::mem::take(table)));
         }
     }
 
     /// A copy of these slots and their index, with room for exactly
-    /// `capacity` slots (at least `len`). The index copy keeps the bucket
-    /// count and layout, so the copy is indistinguishable from the same
-    /// pushes made into `with_capacity(capacity)`: same order, same
-    /// `resident_bytes`. Constructor templates use it to skip rehashing and
+    /// `capacity` slots (at least `len`). A shared index is shared again;
+    /// an owned one is cloned, which keeps the bucket count and layout.
+    /// Either way the copy is indistinguishable from the same pushes made
+    /// into `with_capacity(capacity)`: same order, same `resident_bytes`. Constructor templates use it to skip rehashing and
     /// reprobing every key on every construction.
     pub(super) fn copy_with_capacity(&self, capacity: usize) -> Self {
         debug_assert!(capacity >= self.entries.len());
         let mut entries = Vec::with_capacity(capacity);
         entries.extend_from_slice(&self.entries);
-        Self {
-            entries,
-            index: self.index.clone(),
-        }
+        let index = match &self.index {
+            Index::Owned(table) => Index::Owned(table.clone()),
+            Index::Shared(table) => Index::Shared(Arc::clone(table)),
+        };
+        Self { entries, index }
     }
 
     /// The number of slots, vacant ones included.
@@ -86,15 +143,20 @@ impl HashSlots {
 
     pub(super) fn resident_bytes(&self) -> u64 {
         self.entries.capacity() as u64 * RESIDENT_BYTES_PER_HASH_ENTRY
-            + self.index.allocation_size() as u64
+            + self.index.get().allocation_size() as u64
     }
 
     pub(super) fn reserve(&mut self, additional: usize, resident: &mut ResidentBytes) {
         let old = self.resident_bytes();
         self.entries.reserve(additional);
-        let entries = &self.entries;
-        self.index
-            .reserve(additional, |&at| hash_key(entries[at].0));
+        let index = self.index.get();
+        // Room already there needs no write, so a shared index stays shared.
+        if index.capacity() - index.len() < additional {
+            let entries = &self.entries;
+            self.index
+                .owned()
+                .reserve(additional, |&at| hash_key(entries[at].0));
+        }
         resident.add(self.resident_bytes() - old);
     }
 
@@ -104,6 +166,7 @@ impl HashSlots {
     pub(super) fn find(&self, key: Val) -> Option<usize> {
         let entries = &self.entries;
         self.index
+            .get()
             .find(hash_key(key), |&at| entries[at].0 == key)
             .copied()
     }
@@ -113,7 +176,10 @@ impl HashSlots {
     #[inline(always)]
     pub(super) fn find_slot(&self, key: Val) -> Option<(usize, Val)> {
         let entries = &self.entries;
-        let at = *self.index.find(hash_key(key), |&at| entries[at].0 == key)?;
+        let at = *self
+            .index
+            .get()
+            .find(hash_key(key), |&at| entries[at].0 == key)?;
         Some((at, entries[at].1))
     }
 
@@ -142,6 +208,7 @@ impl HashSlots {
         self.entries.push((key, value));
         let entries = &self.entries;
         self.index
+            .owned()
             .insert_unique(hash_key(key), position, |&at| hash_key(entries[at].0));
         position
     }
@@ -153,8 +220,8 @@ impl HashSlots {
         value: Val,
         resident: &mut ResidentBytes,
     ) -> usize {
-        if self.entries.len() < self.entries.capacity() && self.index.len() < self.index.capacity()
-        {
+        let index = self.index.get();
+        if self.entries.len() < self.entries.capacity() && index.len() < index.capacity() {
             return self.push_new(key, value);
         }
         let old = self.resident_bytes();
@@ -181,12 +248,27 @@ impl HashSlots {
     /// Find real key `key`, live or dead, and hold its index entry for a
     /// write. The handle borrows these slots, so nothing can touch the
     /// index between this probe and a `relocate`; that is what lets the
-    /// re-add retarget the entry without probing for it again.
+    /// re-add retarget the entry without probing for it again. A shared
+    /// index is probed read-only and stays shared: most found keys only
+    /// take a value, and only a `relocate` detaches and probes again.
     #[inline]
     pub(super) fn find_mut(&mut self, key: Val) -> Option<SlotMut<'_>> {
         let Self { entries, index } = self;
-        let indexed = index.find_mut(hash_key(key), |&at| entries[at].0 == key)?;
-        Some(SlotMut { entries, indexed })
+        if let Index::Shared(table) = index {
+            let position = *table.find(hash_key(key), |&at| entries[at].0 == key)?;
+            return Some(SlotMut {
+                entries,
+                indexed: Indexed::Shared { index, position },
+            });
+        }
+        let Index::Owned(table) = index else {
+            unreachable!("shared handled above");
+        };
+        let indexed = table.find_mut(hash_key(key), |&at| entries[at].0 == key)?;
+        Some(SlotMut {
+            entries,
+            indexed: Indexed::Owned(indexed),
+        })
     }
 
     /// Drop every nil-valued slot (dead and vacant), keeping the others in
@@ -198,12 +280,12 @@ impl HashSlots {
 
     /// Index every real key at its current position.
     fn rebuild_index(&mut self) {
-        self.index.clear();
+        let index = self.index.owned();
+        index.clear();
         let entries = &self.entries;
         for (position, (key, _)) in entries.iter().enumerate() {
             if !key.is_nil() {
-                self.index
-                    .insert_unique(hash_key(*key), position, |&at| hash_key(entries[at].0));
+                index.insert_unique(hash_key(*key), position, |&at| hash_key(entries[at].0));
             }
         }
     }
@@ -225,7 +307,7 @@ impl HashSlots {
                 return false;
             }
         }
-        real == self.index.len()
+        real == self.index.get().len()
     }
 
     /// Test helper: swap two slots (the index follows), the kind of reorder
@@ -249,21 +331,35 @@ impl HashSlots {
 /// `HashSlots::find_mut`.
 pub(super) struct SlotMut<'a> {
     entries: &'a mut Vec<(Val, Val)>,
-    indexed: &'a mut usize,
+    indexed: Indexed<'a>,
+}
+
+/// The index entry a `SlotMut` holds: the bucket itself in an owned index,
+/// or the position and the index to detach in a shared one.
+enum Indexed<'a> {
+    Owned(&'a mut usize),
+    Shared {
+        index: &'a mut Index,
+        position: usize,
+    },
 }
 
 impl SlotMut<'_> {
     /// The key's position.
     #[inline]
     pub(super) fn position(&self) -> usize {
-        *self.indexed
+        match &self.indexed {
+            Indexed::Owned(indexed) => **indexed,
+            Indexed::Shared { position, .. } => *position,
+        }
     }
 
     /// The key's value. Writing it never changes which key the slot holds,
     /// so the index stays valid.
     #[inline]
     pub(super) fn value_mut(&mut self) -> &mut Val {
-        &mut self.entries[*self.indexed].1
+        let position = self.position();
+        &mut self.entries[position].1
     }
 
     /// Move the key to a new slot at the back holding `value`, leaving its
@@ -271,7 +367,7 @@ impl SlotMut<'_> {
     /// place: nothing is probed, erased or inserted. Returns the new
     /// position.
     pub(super) fn relocate(self, value: Val, resident: &mut ResidentBytes) -> usize {
-        let old = *self.indexed;
+        let old = self.position();
         let key = self.entries[old].0;
         debug_assert!(super::is_valid_table_key(&key));
         let position = self.entries.len();
@@ -282,7 +378,18 @@ impl SlotMut<'_> {
             resident
                 .add((self.entries.capacity() - capacity) as u64 * RESIDENT_BYTES_PER_HASH_ENTRY);
         }
-        *self.indexed = position;
+        match self.indexed {
+            Indexed::Owned(indexed) => *indexed = position,
+            Indexed::Shared { index, .. } => {
+                // Detaching keeps the charged size (`Index`). The old
+                // position is indexed under the key's hash.
+                let indexed = index
+                    .owned()
+                    .find_mut(hash_key(key), |&at| at == old)
+                    .expect("a shared index holds the relocated key's old position");
+                *indexed = position;
+            }
+        }
         self.entries[old] = (Val::NIL, Val::NIL);
         position
     }

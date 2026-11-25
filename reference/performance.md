@@ -631,6 +631,24 @@ its own cursor. Matched interleaved pairs on bygg against 8b07d97, release,
 `record_tables` fuses only its first field (the rest follow an `ADD_RK`).
 Native bytes per level: release unchanged, dev 16 bytes more.
 
+## Template tables share their prototype's index, 2026-11-25
+
+Constructor-template tables share the prototype's position index
+copy-on-write instead of cloning it; the first structural write detaches a
+clone of the same size, and every table is charged the full index, so
+collection pacing, snapshots and costs are unchanged. Matched interleaved
+pairs on bygg against d97a7db, release, 3 rounds best of 3:
+
+| Workload | d97a7db | Change | Paired rounds faster |
+|---|---|---|---|
+| `static_records` | 1303 ms | 1191 ms | 3 of 3 |
+| `record_tables` | 1527 ms | 1436 ms | 3 of 3 |
+| `wide_sweep` | 2015 ms | 1988 ms | 3 of 3 |
+| `object_fields` | 2350 ms | 2374 ms | 0 of 3 |
+
+`object_fields` builds its tables by stores, not templates; its 1% is the
+owned-or-shared dispatch on every probe, or layout.
+
 ## Stores through a metatable without `__newindex`, 2026-11-18
 
 A store into a table with a metatable used to look the key up on the

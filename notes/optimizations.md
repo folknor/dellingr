@@ -159,34 +159,18 @@ charges discarded. No workload has such a leaf.
 
 ### Shared record layouts: the storage side
 
-Residue of the compile-time table-shape prediction entry. The constructor
-side landed as an execution-side fusion (`Frame::template_init_run`: the
-leading run of static loads and pinned writes after a `NEW_TABLE_TEMPLATE`
-runs in one call); the batch-fill `DUPTABLE` form, a literal-prefilling
-bytecode plan and a compile-time `GET_FIELD_AT` were declined, with the
-reasons at `template_init_run` and `State::get_current_cached_field`.
+Residue after the shared template index landed (constructor-template tables
+share their prototype's position index copy-on-write, each still charged the
+full index, so pacing and snapshots did not move; `hash_slots::Index`).
 
-What remains open (2026-11-17 table hunter's lead rewrite): materialize each
-constructor's layout once in State-local runtime data, an instance holding a
-shape identity and dense values, the shape owning ordered names and the
-lookup index; structural mutation converts to dictionary storage carrying its
-history. Today every template instance copies the prototype's slot vector and
-clones its hashbrown index: `examples/alloc/record_tables.lua` allocates
-416 B per eight-field record, all in `reg_new_table_template` (alloc
-profile, bygg, 8b07d97), the index one of the two backing allocations.
-
-Why deferred: field reads no longer need it (the key-checked position hint),
-so the payoff is allocation and footprint only. Resident bytes, including
-the index, pace collection and `gc_score` reports real backing capacity, so
-dropping per-instance index bytes is a versioned, changelogged pacing change,
-or the accounting must charge a fictional footprint that follows the old
-mutation history. A distinct shaped storage variant need not slow ordinary
-Map probes, but conversion must keep reserved nil keys, vacant positions and
-compaction and reinsertion behaviour, and layout keys must stay rooted by
-surviving instances after the creating runtime is gone. Fusing pinned writes
-after a dynamic value (`ADD_RK` then `INIT_FIELD_PINNED` in
-`record_tables`) is a separate execution-side fusion that needs a witness
-that the register still holds the constructed table.
+Still per instance: the slot vector with its keys. A shape-owned key list
+beside a dense value block would drop the key copies, but the key-checked
+field hit (`Table::string_value_at`) would then read key and value from two
+allocations instead of one slot; it reopens only with a measured win on a
+field-read workload as well as on `record_tables`. Fusing pinned writes after
+a dynamic value (`ADD_RK` then `INIT_FIELD_PINNED` in `record_tables`) is a
+separate execution-side fusion that needs a witness that the register still
+holds the constructed table.
 
 ---
 
@@ -271,6 +255,10 @@ change yet:
   Perf symbol names here are unreliable: identical code folding gives one
   `reserve_rehash` body every map instantiation with the same bucket
   layout, which is why the old profile named `bytecode_caches`.
+  Unverified: the earlier profile, whose call stacks were unreliable, put
+  about 7% on building a `BTreeMap<ObjectPtr, String>`, probably
+  `build_env_reverse` run once per save in `SaveBuilder::new`. Confirm it
+  in a profile with reliable stacks before acting on it.
 - **Load:** the time is spread out. Decode of `SavedVal` and `SavedObject`
   is about 17%, `rebuild_from_snapshot` 5%, `validate_table_shape` 5%, and
   the remaining duplicate-key sets of tables past eight hash keys under 4%

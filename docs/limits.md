@@ -150,6 +150,9 @@ by `GC_RESIDENT_BYTES_PER_UNIT` (256). Resident bytes are the backing capacity
 of table arrays and hash parts, charged at a fixed 16 bytes per array slot and
 32 per hash entry whatever a value's in-memory width, plus the hash index's
 allocation, and the byte length of interned strings; a table's inline entries count only as the object.
+Every table is charged its full index, including tables built by one
+constructor that share a single index allocation until their first
+structural change, so sharing moves no score.
 `State::gc_score` reports the score. A host-set threshold
 (`gc_set_threshold`) counts objects plus distinct strings only, as
 `State::heap_size` does. The heap checks the active measure before each heap
