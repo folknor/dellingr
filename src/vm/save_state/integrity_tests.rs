@@ -150,16 +150,78 @@ fn corrupt_metatable_names_its_owner_instead_of_zero() {
 }
 
 #[test]
-fn saved_keys_share_numeric_equality_and_string_content_equality() {
-    let strings = vec![b"same".to_vec(), b"same".to_vec()];
+fn duplicate_string_arena_entries_are_refused() {
+    // The first repeat is reported, before any reference to either entry is
+    // checked: a table keyed by both ids would otherwise pass as two keys.
+    let mut payload = empty_payload();
+    payload.strings = vec![
+        b"a".to_vec(),
+        b"same".to_vec(),
+        b"b".to_vec(),
+        b"same".to_vec(),
+        b"a".to_vec(),
+    ];
+    payload.objects = vec![SavedObject::Table {
+        array_len: 0,
+        array_slots: 0,
+        entries: vec![
+            (SavedVal::Str(1), SavedVal::Bool(true)),
+            (SavedVal::Str(3), SavedVal::Bool(true)),
+        ],
+        metatable: None,
+    }];
+    assert!(matches!(
+        verify::verify_payload(payload),
+        Err(SnapshotError::CorruptArena {
+            index: 3,
+            location: SaveLocation::Strings,
+            reason: CorruptionReason::Duplicate {
+                entry: DuplicateEntry::String,
+                form: KeyForm::Saved,
+            },
+        })
+    ));
+}
+
+#[test]
+fn unique_keys_report_the_first_repeat_inline_and_after_spilling() {
+    for len in [3, INLINE_UNIQUE_KEYS, INLINE_UNIQUE_KEYS + 5] {
+        let mut keys = UniqueKeys::new();
+        for key in 0..len {
+            assert!(keys.insert(key), "key {key} of {len} is new");
+        }
+        for key in 0..len {
+            assert!(!keys.insert(key), "key {key} of {len} repeats");
+        }
+        assert!(keys.insert(len));
+    }
+}
+
+#[test]
+fn saved_keys_share_numeric_equality_and_compare_strings_by_id() {
+    // String content equality is the arena's rule (equal entries are refused,
+    // see `duplicate_string_arena_entries_are_refused`), so keys compare ids.
+    let strings = vec![b"a".to_vec(), b"b".to_vec()];
     let location = SaveLocation::TableEntries { object: 3 };
-    let key = |value: SavedVal| {
+    let zero = SavedVal::Num(0.0f64.to_bits());
+    let negative_zero = SavedVal::Num((-0.0f64).to_bits());
+    let (first, second) = (SavedVal::Str(0), SavedVal::Str(1));
+    fn key<'a>(value: &'a SavedVal, strings: &[Vec<u8>]) -> ResolvedKey<'a> {
+        let location = SaveLocation::TableEntries { object: 3 };
         value
-            .table_key(&strings, 2, location.clone())
+            .table_key(strings, 2, location)
             .expect("valid test key")
-    };
-    assert!(key(SavedVal::Num(0.0f64.to_bits())) == key(SavedVal::Num((-0.0f64).to_bits())));
-    assert!(key(SavedVal::Str(0)) == key(SavedVal::Str(1)));
+    }
+    assert!(key(&zero, &strings) == key(&negative_zero, &strings));
+    assert!(key(&first, &strings) != key(&second, &strings));
+    assert!(matches!(
+        SavedVal::Str(2).table_key(&strings, 2, location.clone()),
+        Err(SnapshotError::CorruptArena {
+            index: 2,
+            location: SaveLocation::Strings,
+            reason: CorruptionReason::IdOutOfRange(SavedReference::TableKeyString),
+        })
+    ));
     for invalid in [SavedVal::Nil, SavedVal::Num(f64::NAN.to_bits())] {
         assert!(matches!(
             invalid.table_key(&strings, 2, location.clone()),

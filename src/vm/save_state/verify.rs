@@ -5,7 +5,7 @@ use crate::compiler::verify::{self, BytecodeView};
 use super::super::table::{MAX_ARRAY_LEN, array_index, is_append_key};
 use super::{
     CorruptionReason, DuplicateEntry, InvalidBytecodeReason, KeyForm, SaveLocation, SavePayload,
-    SavedBytecode, SavedObject, SavedReference, SnapshotError, TableCorruption,
+    SavedBytecode, SavedObject, SavedReference, SnapshotError, TableCorruption, UniqueKeys,
     corrupt_arena as corrupt,
 };
 
@@ -234,6 +234,29 @@ fn validate_chunk_runtimes(payload: &SavePayload) -> Result<(), SnapshotError> {
     Ok(())
 }
 
+/// The string arena holds each content once. A save is written from an
+/// interned pool and deduplicated by string handle, so no engine save has two
+/// equal entries; refusing them here makes a string id a content identity, and
+/// every later duplicate check (table keys, pins, pointer values) compares ids
+/// instead of bytes. An ordered set bounds the work by comparisons over bytes
+/// the input itself carries.
+fn validate_unique_strings(payload: &SavePayload) -> Result<(), SnapshotError> {
+    let mut seen = BTreeSet::new();
+    for (index, content) in payload.strings.iter().enumerate() {
+        insert_unique(
+            &mut seen,
+            content.as_slice(),
+            CorruptionReason::Duplicate {
+                entry: DuplicateEntry::String,
+                form: KeyForm::Saved,
+            },
+            index,
+            SaveLocation::Strings,
+        )?;
+    }
+    Ok(())
+}
+
 fn validate_value(value: &super::SavedVal, payload: &SavePayload) -> Result<(), SnapshotError> {
     match value {
         super::SavedVal::Str(id) if (*id as usize) >= payload.strings.len() => Err(corrupt(
@@ -339,7 +362,7 @@ fn validate_table_shape(
                 location.clone(),
             ));
         }
-        let mut keys = BTreeSet::new();
+        let mut keys = UniqueKeys::new();
         for (entry_index, (key, value)) in entries.iter().enumerate() {
             validate_value(key, payload)?;
             validate_value(value, payload)?;
@@ -406,16 +429,16 @@ fn validate_table_shape(
                 continue;
             }
             let key = key.table_key(&payload.strings, entry_index, location.clone())?;
-            insert_unique(
-                &mut keys,
-                key,
-                CorruptionReason::Duplicate {
-                    entry: DuplicateEntry::TableKey,
-                    form: KeyForm::Saved,
-                },
-                entry_index,
-                location.clone(),
-            )?;
+            if !keys.insert(key) {
+                return Err(corrupt(
+                    CorruptionReason::Duplicate {
+                        entry: DuplicateEntry::TableKey,
+                        form: KeyForm::Saved,
+                    },
+                    entry_index,
+                    location.clone(),
+                ));
+            }
         }
         if let Some(value) = metatable {
             validate_value(value, payload)?;
@@ -550,9 +573,9 @@ fn validate_env_table(
         ));
     }
     validate_table_shape(payload, table, index, location)?;
-    // Pins are distinct strings by content, and only a sealed save has any.
-    // String arena ids are references, not identities: a forged payload may
-    // give equal bytes more than one id.
+    // Pins are distinct strings, and only a sealed save has any. The string
+    // arena was checked for equal entries first, so distinct ids are
+    // distinct contents.
     let mut seen = BTreeSet::new();
     for (pin_index, pin) in pins.iter().enumerate() {
         let super::SavedVal::Str(id) = pin else {
@@ -570,18 +593,9 @@ fn validate_env_table(
             ));
         }
         validate_value(pin, payload)?;
-        // `validate_value` has already checked the id; this lookup only
-        // borrows the bytes, so a miss reports the same corruption.
-        let Some(content) = payload.strings.get(*id as usize) else {
-            return Err(corrupt(
-                CorruptionReason::InvalidPin,
-                pin_index,
-                location.clone(),
-            ));
-        };
         insert_unique(
             &mut seen,
-            content.as_slice(),
+            *id,
             CorruptionReason::Duplicate {
                 entry: DuplicateEntry::Pin,
                 form: KeyForm::Saved,
@@ -658,6 +672,7 @@ pub(super) fn verify_payload(payload: SavePayload) -> Result<VerifiedSavePayload
     validate_nested_graph(&payload.bytecode)?;
     validate_closures(&payload)?;
     validate_chunk_runtimes(&payload)?;
+    validate_unique_strings(&payload)?;
     validate_references(&payload)?;
     // gmatch iterators are checked in `validate_references`: the saved
     // record is the iterator, so its state is checkable here.
@@ -688,7 +703,7 @@ mod tests {
 
     fn payload(records: Vec<super::super::SavedEnvRecord>, sealed: bool) -> SavePayload {
         SavePayload {
-            strings: vec![b"same".to_vec(), b"same".to_vec()],
+            strings: vec![b"same".to_vec(), b"other".to_vec()],
             globals_sealed: sealed,
             env_tables: records,
             ..SavePayload::empty(true)
@@ -724,10 +739,11 @@ mod tests {
                 })
             ));
         }
-        // Two saved ids with equal bytes are one runtime key.
+        // A repeated key is refused. Two ids with equal bytes cannot pose as
+        // two keys: the string arena refuses equal entries first.
         let duplicate_keys = vec![
             (SavedVal::Str(0), live.clone()),
-            (SavedVal::Str(1), live.clone()),
+            (SavedVal::Str(0), live.clone()),
         ];
         assert!(matches!(
             verify_payload(payload(
@@ -736,6 +752,26 @@ mod tests {
             )),
             Err(SnapshotError::CorruptArena {
                 location: SaveLocation::EnvironmentTable(0),
+                ..
+            })
+        ));
+        let mut equal_bytes = payload(
+            vec![env_record(
+                "math",
+                vec![
+                    (SavedVal::Str(0), live.clone()),
+                    (SavedVal::Str(1), live.clone()),
+                ],
+                Vec::new(),
+            )],
+            false,
+        );
+        equal_bytes.strings[1] = equal_bytes.strings[0].clone();
+        assert!(matches!(
+            verify_payload(equal_bytes),
+            Err(SnapshotError::CorruptArena {
+                location: SaveLocation::Strings,
+                index: 1,
                 ..
             })
         ));
@@ -758,7 +794,7 @@ mod tests {
         for (pins, sealed) in [
             (vec![SavedVal::Str(0)], false),
             (vec![SavedVal::Bool(true)], true),
-            (vec![SavedVal::Str(0), SavedVal::Str(1)], true),
+            (vec![SavedVal::Str(0), SavedVal::Str(0)], true),
         ] {
             assert!(matches!(
                 verify_payload(payload(vec![env_record("math", Vec::new(), pins)], sealed)),
@@ -1003,12 +1039,18 @@ mod tests {
                 Err(SnapshotError::CorruptArena { .. })
             ));
         }
+        // Two pins of equal bytes under different ids are refused at the
+        // string arena, before the pins are read.
         let mut duplicate_pin_contents = with_globals(vec![], vec![Str(0), Str(1)], true);
         let content = duplicate_pin_contents.strings[0].clone();
         duplicate_pin_contents.strings[1] = content;
         assert!(matches!(
-            validate_references(&duplicate_pin_contents),
-            Err(SnapshotError::CorruptArena { .. })
+            validate_unique_strings(&duplicate_pin_contents),
+            Err(SnapshotError::CorruptArena {
+                location: SaveLocation::Strings,
+                index: 1,
+                ..
+            })
         ));
     }
 }

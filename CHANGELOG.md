@@ -243,6 +243,14 @@ tick budgets and re-record replays.
 
 ### Performance
 
+- Snapshot save and load spend far less time checking for duplicates. Save
+  dropped a reachability set that repeated what its id maps already recorded.
+  Load compares keys as ids instead of copied bytes, so it no longer
+  allocates per string key. On a 2000-unit world, 2000 saves went from 3.3
+  to 1.6 s and 1500 loads from 3.3 to 2.3 s (bygg, three matched pairs each). Save bytes are
+  unchanged. Load now refuses a save whose string arena stores the same
+  string twice (`DuplicateEntry::String`); no engine save does that, and a
+  forged one used to be admitted.
 - Runtime Lua values occupy eight bytes, halving value storage in the stack
   and table backing. NaNs are canonical when stored in the VM. Table backing
   retains its fixed weights in the garbage collection score.

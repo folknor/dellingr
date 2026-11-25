@@ -169,6 +169,39 @@ classification in `decode_with`.
   batch on every exit, Ok or Err, as its own comment says. Reword the
   `eval_batched` doc to match.
 
+### Stale workload-file headers (2026-11-25)
+
+Both files are pinned in `brokkr.d/bench.toml`, so fix the wording at their
+next re-pin, not on its own.
+
+- `examples/calls/method.lua` opens "Probe: obj:method() desugars to a
+  method lookup + call. Every c:inc misses on the instance and resolves
+  through the metatable's __index." The hot loop now runs in a typed loop
+  region that calls the method of a loop-invariant receiver, so the
+  workload measures the region call, not a lookup per call
+  (reference/performance.md, "Method calls and field leaves in typed loop
+  regions").
+- `bench/patterns.lua` says K is chosen "so one call is ~100ms and the
+  standalone run takes a few seconds in a release build". The whole run now
+  takes well under a second on bygg, so the sizing claim no longer holds.
+
+### Snapshot load hashes forged input with a fixed seed (2026-11-25)
+
+The duplicate checks of load are ordered sets, and a set's work is bounded
+by its own table's keys. Later steps of a load still build hash indexes
+from what the save says, all seeded by `det_hash::FixedState`, whose seed is
+public: `Table::rebuild_from_snapshot` through `HashSlots::push_if_absent`,
+`StringPool::intern_storage` for every saved string, and
+`GlobalEnv::restore_environment_table`'s key sets. A forged save can choose
+numeric key bits (or string contents) that collide at the rebuild capacity.
+That makes insertion cluster, and then the save fails late, for example on
+two saved function ids that setup binds to one entry. This is not new, and a
+script can build the same tables at runtime. It only matters if a host loads
+saves from parties it does not trust and cares how long a rejection takes.
+docs/save-state.md already tells such hosts to authenticate saves. Decide
+whether "a forged save is cheap to reject" is a property the loader
+promises for its whole run or only for verification.
+
 ## Deferred forward-looking ideas
 
 ### Execution trace hook for a stepping debugger

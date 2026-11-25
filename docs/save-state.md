@@ -157,7 +157,8 @@ returns; the loaded State starts with an empty stack.
   also shows after the load, or that a value collected before the save had
   shown; no two live values share an id.
 - Duplicate keys in the saved global table and duplicate pins are rejected,
-  not silently replaced, as are pins in an unsealed save.
+  not silently replaced, as are pins in an unsealed save. So is a string
+  stored twice in the save's string arena, which no engine save holds.
 - Strings above `limits::MAX_STRING_BYTES` are rejected, also in saves written
   by earlier builds with the same format version.
 - A `string.gmatch` iterator is saved as its own typed record: subject,

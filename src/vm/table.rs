@@ -127,7 +127,7 @@ pub(super) enum TableKeyInput<S, O, F> {
 
 /// A table key represented with negative zero canonicalized and invalid keys
 /// removed. The reference payload types are chosen by the caller.
-#[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) enum NormalizedTableKey<S, O, F> {
     Bool(bool),
     Number(u64),

@@ -635,6 +635,8 @@ fn duplicate_text(f: &mut fmt::Formatter<'_>, entry: DuplicateEntry, form: KeyFo
     use DuplicateEntry as E;
     use KeyForm::{Materialized, Saved};
     f.write_str(match (entry, form) {
+        (E::String, Saved) => "duplicate saved string",
+        (E::String, Materialized) => "duplicate materialized string",
         (E::TableKey, Saved) => "duplicate saved table key",
         (E::TableKey, Materialized) => "duplicate materialized table key",
         (E::EnvironmentToken, Saved) => "duplicate environment token",
@@ -694,6 +696,8 @@ impl fmt::Display for SavedReference {
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum DuplicateEntry {
+    /// The string arena's contents: a save holds each string once.
+    String,
     /// A saved table's keys.
     TableKey,
     /// The environment tables' tokens.
@@ -960,6 +964,13 @@ mod tests {
             (
                 CorruptionReason::IdOutOfRange(SavedReference::NestedChunk),
                 "nested chunk id is out of range",
+            ),
+            (
+                CorruptionReason::Duplicate {
+                    entry: DuplicateEntry::String,
+                    form: KeyForm::Saved,
+                },
+                "duplicate saved string",
             ),
             (
                 CorruptionReason::Duplicate {

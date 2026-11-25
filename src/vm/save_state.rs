@@ -75,7 +75,7 @@ use crate::det_hash::{IndexMap as DetMap, map_with_capacity};
 use super::RustFnId;
 use super::global_env::{EnvRole, SavedEnvTable};
 use super::inventory::GcRoot;
-use super::object::{GcHeap, GmatchIter, GmatchObject, RawObject, StringPtr, Upvalue, UpvalueRef};
+use super::object::{GmatchIter, GmatchObject, RawObject, StringPtr, Upvalue, UpvalueRef};
 use super::rng::VmRng;
 use super::table::{InvalidTableKey, NormalizedTableKey, TableKeyInput, normalize_table_key};
 use super::{ObjectPtr, PointerIdKey, State, Val};
@@ -411,15 +411,27 @@ struct SaveBuilder<'a> {
     /// byte-wise comparisons per probe. Ids are still assigned in
     /// first-encounter order, so the payload is byte-identical to the
     /// content-keyed map this replaced.
-    string_ids: BTreeMap<StringPtr, u32>,
+    ///
+    /// The four id maps are lookup-only hash maps: an id comes from its
+    /// arena's length at first encounter, and the one map that is iterated
+    /// (`bytecode_ids`) is sorted by id at each use, so bucket order never
+    /// reaches the bytes. Keys are full generational handles, never bare
+    /// slots: the pointer-identity registry can hold a stale handle whose
+    /// slot a live object now occupies.
+    ///
+    /// No separate reachability set exists. Every id is assigned on the walk
+    /// from a saved root (strings and objects only through `string_id` and
+    /// `object_id` on that walk), and every environment table is saved
+    /// whole, so "has a saved id or token" is "reachable from saved state",
+    /// which is the whole filter `walk` applies to rendered identities.
+    string_ids: DetMap<StringPtr, u32>,
     bytecode: Vec<SavedBytecode>,
-    bytecode_ids: BTreeMap<usize, u32>,
+    bytecode_ids: DetMap<usize, u32>,
     upvalues: Vec<Option<SavedVal>>,
-    upvalue_ids: BTreeMap<usize, u32>,
+    upvalue_ids: DetMap<usize, u32>,
     objects: Vec<Option<PendingObject>>,
-    object_ids: BTreeMap<ObjectPtr, u32>,
+    object_ids: DetMap<ObjectPtr, u32>,
     roots: Vec<Option<SavedVal>>,
-    reachable_pointer_values: BTreeSet<SavedVal>,
 }
 
 #[derive(Clone, Copy)]
@@ -871,15 +883,14 @@ impl<'a> SaveBuilder<'a> {
             state,
             env_reverse: build_env_reverse(state),
             strings: Vec::new(),
-            string_ids: BTreeMap::new(),
+            string_ids: DetMap::default(),
             bytecode: Vec::new(),
-            bytecode_ids: BTreeMap::new(),
+            bytecode_ids: DetMap::default(),
             upvalues: Vec::new(),
-            upvalue_ids: BTreeMap::new(),
+            upvalue_ids: DetMap::default(),
             objects: Vec::new(),
-            object_ids: BTreeMap::new(),
+            object_ids: DetMap::default(),
             roots: Vec::new(),
-            reachable_pointer_values: BTreeSet::new(),
         }
     }
 
@@ -918,8 +929,7 @@ impl<'a> SaveBuilder<'a> {
                 && let Some(key) = PointerIdKey::from_val(value)
                 && self.state.format_pointer_ids.contains_key(&key)
             {
-                let id = self.string_id(ptr)?;
-                self.reachable_pointer_values.insert(SavedVal::Str(id));
+                self.string_id(ptr)?;
             }
         }
         let pointer_ids = self.state.format_pointer_ids.clone();
@@ -932,11 +942,9 @@ impl<'a> SaveBuilder<'a> {
             // object, the host can hold it and pass it back in after load,
             // and it resolves by its stable registration id. Keep its rendered identity whether or not the
             // saved graph reaches it (load skips one setup no longer
-            // registers, see `materialize_payload`).
-            if let Some(saved) = self.saved_reachable_pointer_value(val)
-                && (matches!(saved, SavedVal::Fn(_))
-                    || self.reachable_pointer_values.contains(&saved))
-            {
+            // registers, see `materialize_payload`). A heap value is
+            // reachable exactly when the walk gave it an id or token.
+            if let Some(saved) = self.saved_reachable_pointer_value(val) {
                 format_pointer_ids.push((saved, id));
             }
         }
@@ -1033,8 +1041,6 @@ impl<'a> SaveBuilder<'a> {
     /// survives whether or not any saved value still references it.
     fn encode_globals(&mut self) -> Result<(SavedObject, Vec<SavedVal>), SaveError> {
         let ptr = self.state.global_env.table();
-        self.reachable_pointer_values
-            .insert(SavedVal::EnvObj(GLOBALS_TOKEN.to_owned()));
         let table = self
             .state
             .heap
@@ -1107,9 +1113,8 @@ impl<'a> SaveBuilder<'a> {
         let mut records = Vec::with_capacity(canonical.len());
         for (token, ptr) in canonical {
             // The table's rendered identity survives whether or not any saved
-            // value still references it, as for the global table.
-            self.reachable_pointer_values
-                .insert(SavedVal::EnvObj(token.to_owned()));
+            // value still references it, as for the global table: its token
+            // is in `env_reverse` either way.
             let table = self
                 .state
                 .heap
@@ -1159,9 +1164,7 @@ impl<'a> SaveBuilder<'a> {
     fn encode_pins(&mut self, pins: &[StringPtr]) -> Result<Vec<SavedVal>, SaveError> {
         let mut saved = Vec::with_capacity(pins.len());
         for pin in pins {
-            let pin = SavedVal::Str(self.string_id(*pin)?);
-            self.reachable_pointer_values.insert(pin.clone());
-            saved.push(pin);
+            saved.push(SavedVal::Str(self.string_id(*pin)?));
         }
         Ok(saved)
     }
@@ -1258,12 +1261,6 @@ impl<'a> SaveBuilder<'a> {
                             }
                         }
                     }?;
-                    if matches!(
-                        val.kind(),
-                        ValKind::Str(_) | ValKind::RustFn(_) | ValKind::Obj(_)
-                    ) {
-                        self.reachable_pointer_values.insert(saved.clone());
-                    }
                     // An environment object is a token here; its contents
                     // are a record of their own (`encode_env_tables`).
                     self.write_value(destination, saved)?;
@@ -1897,7 +1894,7 @@ fn materialize_payload(
                 entries,
                 metatable,
             } => {
-                let mut runtime_keys = BTreeSet::new();
+                let mut runtime_keys = UniqueKeys::new();
                 let hash_start = *array_slots as usize;
                 let entries = entries
                     .iter()
@@ -1912,7 +1909,6 @@ fn materialize_payload(
                             insert_runtime_key(
                                 &mut runtime_keys,
                                 key,
-                                &state.heap,
                                 entry_index,
                                 CorruptionReason::Duplicate {
                                     entry: DuplicateEntry::TableKey,
@@ -1975,7 +1971,7 @@ fn materialize_payload(
     debug_assert_eq!(payload.cost.costing(), state.cost.costing());
     state.cost = payload.cost;
     state.next_format_pointer_id = payload.next_format_pointer_id;
-    let mut seen_pointer_values = BTreeSet::new();
+    let mut seen_pointer_values = UniqueKeys::new();
     let mut seen_pointer_ids = BTreeSet::new();
     let mut format_pointer_ids = map_with_capacity(payload.format_pointer_ids.len());
     for (index, (saved, id)) in payload.format_pointer_ids.iter().enumerate() {
@@ -2001,12 +1997,11 @@ fn materialize_payload(
         }
         let value = decode_val(saved, &ctx)?;
         // A duplicate value is corruption: the verifier already rejected
-        // saved duplicates, and distinct function ids resolve to distinct
-        // function table entries; this rechecks the resolved values.
+        // saved duplicates, but two saved function ids can resolve to one
+        // function table entry, so this rechecks the resolved values.
         insert_runtime_key(
             &mut seen_pointer_values,
             value,
-            &state.heap,
             index,
             CorruptionReason::Duplicate {
                 entry: DuplicateEntry::FormatPointerValue,
@@ -2129,7 +2124,7 @@ fn decode_env_table(
             location,
         ));
     };
-    let mut runtime_keys = BTreeSet::new();
+    let mut runtime_keys = UniqueKeys::new();
     let hash_start = *array_slots as usize;
     let mut decoded = Vec::with_capacity(entries.len());
     for (entry_index, (key, value)) in entries.iter().enumerate() {
@@ -2138,7 +2133,6 @@ fn decode_env_table(
             insert_runtime_key(
                 &mut runtime_keys,
                 key,
-                &state.heap,
                 entry_index,
                 CorruptionReason::Duplicate {
                     entry: DuplicateEntry::TableKey,
@@ -2255,40 +2249,92 @@ struct DecodeCtx<'a> {
     fn_forward: &'a BTreeMap<Cow<'static, str>, RustFnId>,
 }
 
-#[derive(Eq, Ord, PartialEq, PartialOrd)]
-enum SavedObjectKey {
+#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+enum SavedObjectKey<'a> {
     Object(u32),
-    EnvironmentObject(String),
+    EnvironmentObject(&'a str),
 }
 
-type ResolvedKey = NormalizedTableKey<Vec<u8>, SavedObjectKey, String>;
+/// A saved key in comparable form. A string is its arena id: the verifier
+/// rejects a string arena with two equal entries before any key is resolved,
+/// so an id is a content identity.
+type ResolvedKey<'a> = NormalizedTableKey<u32, SavedObjectKey<'a>, &'a str>;
+
+/// Keys kept inline before a uniqueness check spills to an ordered set.
+const INLINE_UNIQUE_KEYS: usize = 8;
+
+/// First-duplicate detection over keys inserted in entry order.
+///
+/// Most saved tables have a handful of hash keys, so the first
+/// `INLINE_UNIQUE_KEYS` distinct keys are compared linearly without an
+/// allocation; the ninth moves them all into a `BTreeSet`. One instance
+/// serves one table and is dropped with it: work and storage are bounded by
+/// that table's own keys, never by an earlier, larger table (a reused hash
+/// set would reset its retained capacity per table, which a forged save of
+/// one large table followed by many tiny ones turns quadratic), and ordered
+/// comparisons give a bound a fixed-seed hash cannot.
+pub(super) struct UniqueKeys<K> {
+    inline: [Option<K>; INLINE_UNIQUE_KEYS],
+    len: usize,
+    spilled: Option<BTreeSet<K>>,
+}
+
+impl<K: Copy + Ord> UniqueKeys<K> {
+    pub(super) fn new() -> Self {
+        Self {
+            inline: [None; INLINE_UNIQUE_KEYS],
+            len: 0,
+            spilled: None,
+        }
+    }
+
+    /// Record `key`; false when an equal key was recorded before.
+    pub(super) fn insert(&mut self, key: K) -> bool {
+        if let Some(set) = &mut self.spilled {
+            return set.insert(key);
+        }
+        if self.inline[..self.len].contains(&Some(key)) {
+            return false;
+        }
+        if self.len < INLINE_UNIQUE_KEYS {
+            self.inline[self.len] = Some(key);
+            self.len += 1;
+        } else {
+            let mut set: BTreeSet<K> = self.inline.iter().flatten().copied().collect();
+            set.insert(key);
+            self.spilled = Some(set);
+        }
+        true
+    }
+}
 
 impl SavedVal {
     /// Snapshot counterpart of `Val::table_key`. Reference payloads differ, but
     /// numeric equality and nil/NaN rejection come from the same normalizer.
-    fn table_key(
-        &self,
+    fn table_key<'a>(
+        &'a self,
         strings: &[Vec<u8>],
         index: usize,
         location: SaveLocation,
-    ) -> Result<ResolvedKey, SnapshotError> {
+    ) -> Result<ResolvedKey<'a>, SnapshotError> {
         let key = match self {
             SavedVal::Nil => TableKeyInput::Nil,
             SavedVal::Bool(value) => TableKeyInput::Bool(*value),
             SavedVal::Num(bits) => TableKeyInput::Number(f64::from_bits(*bits)),
             SavedVal::Str(id) => {
-                TableKeyInput::String(strings.get(*id as usize).cloned().ok_or_else(|| {
-                    corrupt_arena(
+                if (*id as usize) >= strings.len() {
+                    return Err(corrupt_arena(
                         CorruptionReason::IdOutOfRange(SavedReference::TableKeyString),
                         *id as usize,
                         SaveLocation::Strings,
-                    )
-                })?)
+                    ));
+                }
+                TableKeyInput::String(*id)
             }
             SavedVal::Obj(id) => TableKeyInput::Object(SavedObjectKey::Object(*id)),
-            SavedVal::Fn(id) => TableKeyInput::RustFn(id.clone()),
+            SavedVal::Fn(id) => TableKeyInput::RustFn(id.as_str()),
             SavedVal::EnvObj(id) => {
-                TableKeyInput::Object(SavedObjectKey::EnvironmentObject(id.clone()))
+                TableKeyInput::Object(SavedObjectKey::EnvironmentObject(id.as_str()))
             }
         };
         normalize_table_key(key).map_err(|error| invalid_key_error(error, index, location))
@@ -2307,37 +2353,24 @@ fn invalid_key_error(
     }
 }
 
-type RuntimeTableKey = NormalizedTableKey<Vec<u8>, ObjectPtr, RustFnId>;
-
-fn runtime_table_key(
-    value: Val,
-    heap: &GcHeap,
-    index: usize,
-    location: SaveLocation,
-) -> Result<RuntimeTableKey, SnapshotError> {
-    let key = value
-        .table_key()
-        .map_err(|error| invalid_key_error(error, index, location))?;
-    Ok(match key {
-        NormalizedTableKey::Bool(value) => NormalizedTableKey::Bool(value),
-        NormalizedTableKey::Number(value) => NormalizedTableKey::Number(value),
-        NormalizedTableKey::String(ptr) => {
-            NormalizedTableKey::String(heap.get_string(ptr).to_vec())
-        }
-        NormalizedTableKey::Object(ptr) => NormalizedTableKey::Object(ptr),
-        NormalizedTableKey::RustFn(func) => NormalizedTableKey::RustFn(func),
-    })
-}
+/// A materialized key in comparable form. Load allocates every saved string
+/// through the interning pool, so `StringPtr` equality is content equality.
+/// The check is load-bearing after the verifier's: distinct saved function
+/// ids can resolve to one entry (`bind_catalog` binds a catalog id to its
+/// entry whatever else names it), and only the resolved key sees that.
+type RuntimeTableKey = NormalizedTableKey<super::object::StringPtr, ObjectPtr, RustFnId>;
 
 fn insert_runtime_key(
-    keys: &mut BTreeSet<RuntimeTableKey>,
+    keys: &mut UniqueKeys<RuntimeTableKey>,
     value: Val,
-    heap: &GcHeap,
     index: usize,
     reason: CorruptionReason,
     location: SaveLocation,
 ) -> Result<(), SnapshotError> {
-    if keys.insert(runtime_table_key(value, heap, index, location.clone())?) {
+    let key = value
+        .table_key()
+        .map_err(|error| invalid_key_error(error, index, location.clone()))?;
+    if keys.insert(key) {
         Ok(())
     } else {
         Err(corrupt_arena(reason, index, location))

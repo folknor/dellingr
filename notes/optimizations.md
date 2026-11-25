@@ -439,10 +439,26 @@ step).
 ## Snapshot path
 
 Benched by the `snapshot` scenarios (`brokkr bench snapshot --scenario
-snapshot_save` or `snapshot_load`): a 2000-unit world graph saves in about
-2 ms and loads (this build's own save, teardown included) in about 2.8 ms on
-bygg (2026-11-24, ms-scale run, dirty tree at 8b98de6). No profile of either
-path is recorded yet; nothing here is a candidate until one is.
+snapshot_save` or `snapshot_load`). The first profile (perf, bygg,
+2026-11-25) put about a quarter of save in a reachability set that repeated
+the id maps, and about a third of load in per-table duplicate-key sets built
+from copied string bytes, run twice. Both were removed, and save now takes
+about 0.8 ms and load about 1.5 ms of a 2000-unit world (teardown included).
+What a perf profile of that build still shows, none of it measured as a
+change yet:
+
+- **Save:** `finish_object` spends about 16% converting each table's
+  `(Option<SavedVal>, Option<SavedVal>)` pending slots into the final pairs,
+  a second pass over every entry. Writing the saved pairs in place, with
+  "unfilled" tracked some other way, would remove it. About 5.5% is a
+  `reserve_rehash` of an `IndexMap<usize, Arc<BytecodeRuntime>>` (the
+  `bytecode_caches` shape) inside the measured loop. Find out where that
+  map grows before treating it as save cost. Id-map probes and `string_id`
+  are each under 5%.
+- **Load:** the time is spread out. Decode of `SavedVal` and `SavedObject`
+  is about 17%, `rebuild_from_snapshot` 5%, `validate_table_shape` 5%, and
+  the remaining duplicate-key sets of tables past eight hash keys under 4%
+  each. No single site dominates.
 
 ---
 
