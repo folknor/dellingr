@@ -1655,8 +1655,14 @@ impl State {
 
     /// Restore a save into a fresh [`State`].
     ///
-    /// Saved costing and counters are trusted input. For untrusted saves,
-    /// compare [`State::costing`] with the host's expected mode and weights at
+    /// Loading is a trusted-input operation. Decoding and verification hash
+    /// no save-controlled key, but materialization builds fixed-seed indexes
+    /// that a crafted save can make slow to build, whether the load then
+    /// succeeds or fails. Authenticate saves from an untrusted party before
+    /// calling this, even when the host only reads restored data.
+    ///
+    /// Saved costing and counters are trusted input. For saves the player may
+    /// have edited, compare [`State::costing`] with the host's expected mode and weights at
     /// the start of setup and return an error on mismatch, before executing
     /// scripts. After loading, set the host's budget and handle its result;
     /// setting a budget alone cannot enforce weights edited to zero, and a
@@ -1795,6 +1801,14 @@ fn corrupt_arena(reason: CorruptionReason, index: usize, location: SaveLocation)
     }
 }
 
+/// Every hash index this builds or probes is seeded by `det_hash::FixedState`
+/// on purpose: table hash parts, the string interner, the environment key
+/// sets, `format_pointer_ids`, the pattern caches of restored `gmatch`
+/// iterators and the bytecode runtime cache. The save decides what goes into
+/// them, so a crafted save can cluster the ones keyed by value (numeric table
+/// keys, string bytes). That costs time, never correctness, and is accepted
+/// because loading is a trusted-input operation (see `State::load_state`); the
+/// duplicate checks before and during this use ordered sets so they add none.
 fn materialize_payload(
     state: &mut State,
     payload: verify::VerifiedSavePayload,

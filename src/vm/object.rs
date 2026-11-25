@@ -1546,6 +1546,11 @@ impl StringPool {
     /// `bytes` back unused, so an owned caller can recycle the `Vec`. The
     /// probe, identity and resident length (never the capacity) are the
     /// same either way.
+    ///
+    /// The probe hashes content with the fixed seed, so chosen bytes (a
+    /// script's or a crafted save's) can collide. Equality settles every
+    /// probe, so collisions cost time only; snapshot load accepts that
+    /// because loading is a trusted-input operation (`State::load_state`).
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn intern_storage<B: AsRef<[u8]> + Into<Box<[u8]>>>(
         &mut self,

@@ -736,6 +736,11 @@ pub(super) struct SavedEnvTable {
 /// saved pins followed by every other string key setup gave a slot, so a
 /// deletion inherited from the save survives a setup that no longer installs
 /// the name. The table takes `phase`'s slot policy.
+///
+/// `mentioned` hashes saved table keys (numeric ones by their bits) and
+/// `pins` interned handles, both with the fixed seed, so a crafted save can
+/// cluster `mentioned`. That costs time only and is accepted because loading
+/// is a trusted-input operation (`State::load_state`).
 #[cfg(feature = "snapshot")]
 fn restore_environment_table(
     mut table: TableEditor<'_>,

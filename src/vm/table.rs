@@ -1597,6 +1597,10 @@ impl Table {
     /// the exact live-slot count is recomputed from them. Every caller,
     /// environment deltas included, passes the canonical live span; the
     /// rebuild also accepts a wider span with nil ends.
+    ///
+    /// The hash index is rebuilt with the fixed seed, so a crafted save's
+    /// numeric keys can cluster here; that is slow, not wrong, and accepted
+    /// because loading is a trusted-input operation (`State::load_state`).
     #[cfg(feature = "snapshot")]
     fn rebuild_from_snapshot(
         &mut self,

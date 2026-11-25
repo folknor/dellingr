@@ -188,7 +188,7 @@ returns; the loaded State starts with an empty stack.
   successful load the saved counters replace whatever setup charged or
   budgeted, so a budget that was configured at save time is still enforced.
   For trusted saves taken without a budget, call `set_cost_budget` afterwards.
-- Untrusted bytes can select Off mode or arbitrary weights, including all
+- Edited bytes can select Off mode or arbitrary weights, including all
   zeros. The cost-model version checks the schema, not the host's price list.
   Compare `State::costing()` with the expected `Costing` at the start of setup,
   before executing scripts, and reject a mismatch through `LoadError::Setup`.
@@ -249,8 +249,16 @@ returns; the loaded State starts with an empty stack.
   builds, while retaining the same format and identities.
 - A host that content-hashes saves across upgrades must hash the payload after
   the header, or accept that a version bump changes the bytes.
-- Saves are user-editable input. Authenticate them if tampering with future
-  RNG outcomes matters.
+- Saves are user-editable input, and loading is a trusted-input operation.
+  The decoder and structural verifier hash no save-controlled key; their
+  duplicate checks use ordered sets. Materialization builds and uses
+  fixed-seed indexes (table hash parts, the string interner, environment key
+  sets), whose construction can take superlinear time on crafted input,
+  whether the load then succeeds or fails. Nothing promises a latency bound
+  for rejecting a forged save. If saves can come from a party you do not
+  trust, authenticate them before calling `State::load_state`, even if the
+  host only reads restored data. Authenticate them too if tampering with
+  future RNG outcomes matters.
 
 ## Format release policy and golden review
 

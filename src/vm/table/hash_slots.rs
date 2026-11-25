@@ -30,6 +30,11 @@ use super::{ResidentBytes, TableLookupKey, Val};
 use crate::det_hash::FixedState;
 use crate::limits::tuning::RESIDENT_BYTES_PER_HASH_ENTRY;
 
+/// The seed is fixed on purpose: probe counts must not vary per process.
+/// Numeric keys hash by their bits, so a script or a forged save can pick
+/// keys that cluster and make inserts slow. That costs time only: equality
+/// decides lookups and the slot vector decides order. Snapshot load accepts
+/// it because loading is a trusted-input operation (docs/save-state.md).
 #[inline(always)]
 fn hash_key(key: Val) -> u64 {
     FixedState::default().hash_one(TableLookupKey(key))

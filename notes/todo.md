@@ -147,22 +147,15 @@ next re-pin, not on its own.
   standalone run takes a few seconds in a release build". The whole run now
   takes well under a second on bygg, so the sizing claim no longer holds.
 
-### Snapshot load hashes forged input with a fixed seed (2026-11-25)
+### A recorded bench arm only the reflog holds (2026-11-25)
 
-The duplicate checks of load are ordered sets, and a set's work is bounded
-by its own table's keys. Later steps of a load still build hash indexes
-from what the save says, all seeded by `det_hash::FixedState`, whose seed is
-public: `Table::rebuild_from_snapshot` through `HashSlots::push_if_absent`,
-`StringPool::intern_storage` for every saved string, and
-`GlobalEnv::restore_environment_table`'s key sets. A forged save can choose
-numeric key bits (or string contents) that collide at the rebuild capacity.
-That makes insertion cluster, and then the save fails late, for example on
-two saved function ids that setup binds to one entry. This is not new, and a
-script can build the same tables at runtime. It only matters if a host loads
-saves from parties it does not trust and cares how long a rejection takes.
-docs/save-state.md already tells such hosts to authenticate saves. Decide
-whether "a forged save is cheap to reject" is a property the loader
-promises for its whole run or only for verification.
+reference/performance.md "Field leaves with forward branches" names its B
+arm `d594c99`, a work-in-progress commit no branch or tag contains, so a
+`git gc` can drop it and the arm stops being rebuildable. Its `src/` is
+identical to 1b783c4's (only two markdown files differ), which the later
+"object_fields deltas, re-measured" section already says. Reword the
+table's arm line to name the source as 1b783c4's, keeping `d594c99` only
+as the label the cells were run under.
 
 ## Deferred forward-looking ideas
 

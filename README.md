@@ -246,12 +246,15 @@ function must be registered with a stable id (e.g. `register_rust_fn` or
 [docs/save-state.md](docs/save-state.md).
 
 Save files are user-editable input. Loading trusts the saved costing and cost
-counters. For untrusted saves, compare `State::costing()` with the host's
+counters. For saves the player may have edited, compare `State::costing()` with the host's
 expected `Costing` at the start of load setup and return an error on mismatch,
 before executing scripts. This comparison includes every weight and Off mode;
 matching `COST_MODEL_VERSION` alone does not enforce the host's prices. After
 a successful load, call `set_cost_budget` and handle its result to replace the
 saved budget and reset use. A budget alone cannot enforce prices edited to zero.
+Loading is a trusted-input operation: a crafted save can make restoring it
+slow, so authenticate saves from parties you do not trust before loading them,
+even to read data only.
 
 Saves containing a Lua string larger than
 `limits::MAX_STRING_BYTES` are rejected on load, including ones written by an

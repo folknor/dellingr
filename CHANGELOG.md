@@ -155,6 +155,13 @@ tick budgets and re-record replays.
   `&mut state` is unchanged; a field or return type naming `State` by value
   becomes `Box<State>`. `RustFunc` keeps its signature.
 
+- `State::load_state` is documented as a trusted-input operation. Decoding and
+  verification hash no save-controlled key, but materialization builds
+  fixed-seed hash indexes a crafted save can make slow, so no latency bound
+  covers rejecting a forged save; authenticate saves from untrusted parties
+  before loading, even to read data only. Documentation only; not
+  replay-visible.
+
 ### Added
 
 - `State::raw_fields(arg, keys)` reads a tuple of up to eight fields of one
