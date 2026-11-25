@@ -619,7 +619,6 @@ mod tests {
             "a call pools its frame stack"
         );
         state.frame_stacks[0].push(super::super::frame::Frame::new(
-            Arc::clone(closure.bytecode()),
             closure.runtime,
             closure.upvalues,
             0,

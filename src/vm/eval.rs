@@ -1146,7 +1146,6 @@ impl State {
             .and_then(|ptr| self.heap.as_lua_function_ref(ptr))
             .expect("an admitted Lua activation's function slot holds its closure");
         Frame::new(
-            Arc::clone(closure.bytecode()),
             Arc::clone(&closure.runtime),
             closure.upvalues.clone(),
             self.in_flight.stack_bottom,

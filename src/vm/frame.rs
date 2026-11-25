@@ -25,17 +25,26 @@ use crate::instr::{ArgCount, CompareOp, RetCount};
 /// between a verified open-result producer and its next-instruction consumer,
 /// when it can be shorter or longer than `top`.
 ///
-/// The frame owns its code handles rather than naming a State-owned record
-/// by id: the dispatch loop holds them by shared reference while it mutates
-/// the State, which an id resolved through the State cannot give without a
-/// lookup per access or a raw pointer whose validity would rest on rooting
-/// (and a Rust tail callee may collect the retired caller's closure while its
-/// activation record remains).
+/// The frame owns its code handle (the runtime) rather than borrowing a
+/// descriptor from a State-owned arena by id: the dispatch loop holds it by
+/// shared reference across operations that can collect, and a borrow from
+/// an arena the collector mutates or reclaims cannot span that. An id design
+/// would need a different reclamation scheme, and a Rust tail callee may
+/// collect the retired caller's closure while its activation record remains.
+///
+/// Frames live in a per-invocation vector, apart from `CallInfo`, because the
+/// loop holds `&Frame` into that vector across every native re-entry, so a
+/// nested invocation cannot grow the same vector. One activation stack for
+/// dispatch, diagnostics and GC is possible only by splitting resolution from
+/// re-entry: a resolver returns the prepared call (as `IndexOutcome::Call`
+/// does), the cursor is published and the frame borrow ends, and the driver
+/// runs the callee with full `&mut State`, reacquiring the frame by index.
 pub(super) struct Frame {
-    /// The bytecode being executed (shared via Arc; cheap to clone, immutable).
-    bytecode: Arc<Bytecode>,
     /// State-local literals and lookup caches shared by this bytecode's
-    /// closures and active frames.
+    /// closures and active frames, and the owner of the bytecode being
+    /// executed. The frame reads its code through it rather than holding a
+    /// second `Arc<Bytecode>`, which cost an atomic increment and decrement
+    /// on every Lua call for a handle the runtime already keeps alive.
     pub(super) runtime: Arc<BytecodeRuntime>,
     /// The index of the next (not current) instruction. While the frame runs,
     /// the dispatch loop's local cursor is authoritative and this copy is
@@ -58,14 +67,12 @@ impl Frame {
     /// No verification is repeated here: this runs on every call.
     #[must_use]
     pub(super) fn new(
-        bytecode: Arc<Bytecode>,
         runtime: Arc<BytecodeRuntime>,
         upvalues: Captures,
         stack_bottom: usize,
     ) -> Self {
-        let top = stack_bottom + usize::from(bytecode.max_stack);
+        let top = stack_bottom + usize::from(runtime.bytecode.max_stack);
         Self {
-            bytecode,
             runtime,
             ip: Cell::new(0),
             upvalues,
@@ -76,7 +83,7 @@ impl Frame {
 
     /// Get the bytecode being executed.
     pub(super) fn bytecode(&self) -> &Arc<Bytecode> {
-        &self.bytecode
+        &self.runtime.bytecode
     }
 
     pub(super) fn literal(&self, i: u16) -> Val {
@@ -165,12 +172,12 @@ impl Frame {
 
     #[must_use]
     pub(super) fn nested_bytecode(&self, i: u16) -> &Arc<Bytecode> {
-        &self.bytecode.nested[i as usize]
+        &self.runtime.bytecode.nested[i as usize]
     }
 
     #[must_use]
     pub(super) fn get_number_constant(&self, i: u16) -> f64 {
-        self.bytecode.number_literals[i as usize]
+        self.runtime.bytecode.number_literals[i as usize]
     }
 
     /// Publish the invocation's pending batch before code outside the
@@ -320,7 +327,7 @@ impl Frame {
         table: usize,
         upvalues: &[UpvalueRef],
     ) -> Result<()> {
-        let code: &[Instr] = &frame.bytecode.code;
+        let code: &[Instr] = &frame.runtime.bytecode.code;
         let base = frame.stack_bottom;
         let Some(ptr) = state.stack[table].as_object_ptr() else {
             return Ok(());
@@ -381,7 +388,7 @@ impl Frame {
     /// than stored per activation. A frame never waits on an `OP_TAILCALL`:
     /// a Lua callee replaces it, and a Rust callee completes in the arm.
     pub(super) fn pending_call_results(&self) -> RetCount {
-        self.bytecode.code[self.ip.get() - 1].call_results()
+        self.runtime.bytecode.code[self.ip.get() - 1].call_results()
     }
 
     /// Run one dispatch-loop invocation over `frames`, which holds its entry
@@ -498,7 +505,7 @@ impl Frame {
         local_cost: &mut u64,
         ip: &mut usize,
     ) -> Result<Leave> {
-        let code: &[Instr] = &frame.bytecode.code;
+        let code: &[Instr] = &frame.runtime.bytecode.code;
         let base = frame.stack_bottom;
         // The capture list is immutable once built and the frame outlives
         // the activation, so its representation is selected once here

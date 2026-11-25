@@ -303,63 +303,35 @@ entries below; check the cross-references before starting a subsumed item.
 Lua-to-Lua calls run in one dispatch loop over a per-invocation frame stack
 since 27ee714. What B-O1 listed and is still open:
 
-- `Closure` Arc bumps per call: `admitted_frame` clones bytecode and runtime
-  from the heap closure (and the capture list, an `Arc` bump only when it
-  has two or more captures), plus the `CallInfo` bytecode clone. The
-  closure is also looked up twice per call (`lua_function_bytecode` at
-  admission, then `admitted_frame`); on `composite/benchmark` at afcd2f0
-  (plantasjen) the two lookups' instrumented total matched c2932f8's single
-  lookup plus `initialize_frame`, so this is not a measured regression.
-  The closure's bytecode is now read through its runtime (one owner), so the
-  bytecode clones load one hop further. A route that removes the clones
-  without raw pointers (from a 2026-11-17 spar): split dispatch into segments
-  that end at every operation that can collect or re-enter, resolve an
-  executable id once per segment and borrow its descriptor beside disjoint
-  mutable services; a Rust tail callee keeps the id rooted through the
-  diagnostic activation. The cost is segment exits and re-resolution at those
-  boundaries, so it hinges on how often they occur.
-- `CallInfo` still parallels the frame stack (bytecode + ip for tracebacks,
-  `print` locations and the cache sweep). Merging needs the traceback to read
-  every invocation's frames, including the current frame of each natively
-  suspended invocation.
-- Generic-for Lua iterators and `__index`/`__newindex` function handlers
-  still re-enter natively per call (one `run_invocation` each). Flattening
-  them needs a continuation per frame (where the results go). That would also
-  take them off `MAX_NATIVE_CALL_DEPTH`.
-- The 2026-11-04 defect hunt (`vm-dispatch`) re-raised the first two bullets:
-  Lua call admission clones the bytecode for `CallInfo` and the bytecode
-  and runtime for the frame. It also clones the capture-list `Arc` when
-  the closure has two or more captures. Shorter capture lists are copied
-  inline. The references are dropped on return, and the closure in the
-  function slot already roots them. Its suggested shape is one stack:
-  merge the activation record into the frame, with records owned by
-  invocations and tracebacks walking frames. Tail calls now exist
-  (`State::tail_call_from_lua`; a tail admission overwrites the caller's
-  record in place and `State::replace_tail_frame` swaps the frame): with the
-  merge, replacing the caller would be one record instead of a record and a frame,
-  and the caller record a Rust tail callee keeps for diagnostics would be its
-  frame.
-
-- The 2026-11-17 performance hunt (calls scope, source-only) made both halves
-  its lead rewrites. One executor-owned activation stack whose activation holds
-  the execution descriptor, cursor, register base, vararg ownership, chain
-  accounting and return continuation; diagnostics and GC inspect the same
-  stack; an invocation is a stopping boundary within it. Resolve the closure
-  once and keep a non-owning execution view, relying on the function slot to
-  root it and on the boxed `Closure` for stable storage; separate execution
-  and control storage from the mutable VM services so execution can borrow
-  immutable descriptors while manipulating records by index. Merging the
-  structs but keeping the four `Arc` owners captures only part of it. Main
-  risk: a Rust tail callee can collect the retired caller's closure while its
-  diagnostic frame still exists (`tests/integration/runtime/tail_calls.rs`
-  exercises it), so executable state and diagnostic information need separate
-  lifetimes; rooting the old closure longer changes behaviour, and raw pointers
-  in place of the `Arc`s are unsafe. The heap hunter reached the same per-call
-  clone count from the closure side and proposed State-owned executable
-  records addressed by ID, so frames need no owned handles; the host hunter
-  counted the same clones on every root invocation and noted the frame stack is
-  already pooled.
-- Same hunt, continuations: `index_call`, `newindex_call` and `len_call`
+- Admission probes. On the ordinary direct Lua call that reaches frame
+  admission, the closure is looked up three times:
+  `publish_cost_unless_lua_callee`, `classify_callee` (which clones the
+  bytecode `Arc` for `CallInfo`) and `admitted_frame` (which clones the
+  runtime `Arc`, and the capture list's `Arc` only with two or more
+  captures). An eligible numeric leaf returns before classification, and a
+  host entry skips the cost probe. Frames no longer hold their own bytecode
+  `Arc` (they read it through the runtime). Consolidating the probes must
+  keep the cost-publication decision and the admission GC checkpoint, and a
+  heap borrow cannot span that checkpoint.
+- One activation stack (the `CallInfo`/frame merge). `CallInfo` parallels the
+  frame stacks with a bytecode `Arc` and a cursor for tracebacks, `print`
+  locations and the `ActiveChunk` root. The blocker is not tracebacks but
+  borrows: `eval_batched` holds `&Frame` into the invocation's vector across
+  every native re-entry, so a nested invocation cannot push onto it. Route
+  (2026-11-25 spar): split resolution from re-entry. A resolver that only
+  produces a value stays in the loop; one that needs a call returns it (the
+  shape `IndexOutcome::Call` already has), the cursor is published, the frame
+  borrow ends, and the driver runs the callee with full `&mut State` on the
+  same activation vector, the entry index being the unwind boundary, and
+  reacquires the frame by index. The unified activation would use its
+  runtime for the active-chunk root and diagnostics, and a retired activation
+  under a Rust tail callee keeps its runtime without rooting its closure.
+  Payoff (one `Arc` pair and a duplicated cursor per call, diagnostics and GC
+  on one stack) against the helper API split is the open question. Refused
+  shape: frames borrowing descriptors from a State-owned arena by id, since a
+  borrow cannot span a collection that mutates or reclaims the arena; an id
+  design would need a different reclamation scheme.
+- Continuations: `index_call`, `newindex_call` and `len_call`
   (`registers.rs`), the generic-for Lua iterator fallback (`eval_control.rs`),
   each custom sort comparison (`table_ops.rs`) and `gsub` function
   replacements each run a whole nested invocation lifecycle (native-depth
@@ -384,8 +356,24 @@ since 27ee714. What B-O1 listed and is still open:
   comparisons, cost about 1.5 s per probe run where the same number of plain
   Lua-to-Lua calls of the same comparator cost about 1.2 s beyond the loop.
   The re-entry plus all the native heap work is at most ~20 percent of a
-  comparison, so the sort half was not pursued (reasoning at `table_sort`);
-  measure a handler or iterator the same way before converting it.
+  comparison, so the sort half was not pursued (reasoning at `table_sort`).
+  That number bounds only the comparator: the first step here is a probe of
+  a tiny `__index` handler and a Lua iterator against equivalent plain Lua
+  calls, then `rust_boundary` (registered at both scales; it runs both paths)
+  for whether the saving shows in a mixed kernel. Design points settled in
+  the 2026-11-25 spar: the caller instruction at `ip - 1` decodes where
+  results go (`GET_FIELD`/`GET_TABLE`/`LEN` write the first result or nil to
+  `R[A]`; `SELF` likewise without replaying its `R[A+1]` write; `SET_*`
+  discard; `TFOR_CALL` projects into the loop registers from `R[A+3]`, and a
+  fused `TFOR_LOOP` must be the real next instruction), each after validating
+  the full returned count. The resolver's metamethod units and the logical
+  native-depth increment need an outstanding-call owner of their own: the
+  record's `chain` field is wrong, since `tail_call_from_lua` releases it
+  before the tail callee runs, while today the units are held until the
+  whole handler call returns. Keep the exit order too: the handler's cost
+  batch settles before result validation, a callee error is reported while
+  the callee still supplies source and traceback, and a refused admission
+  is reported at the caller opcode.
 
 Measurement lesson worth keeping: on plantasjen (Zen 3) the first flattened
 version moved frames and records by value and lost 14-22% to store-forwarding
