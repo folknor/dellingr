@@ -132,6 +132,10 @@ object = { version = "0.41.0", default-features = false, features = ["read_core"
 toml = "1.1.8"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
+# Keep the test profile at opt-level 0. The dev sweeps in tests/native_stack.rs
+# exercise the 4 MiB native-stack envelope promised for the unoptimized dev
+# build in docs/limits.md. Optimizing the test profile would bypass that check.
+
 # The bench harness `brokkr bench` runs (brokkr.d/bench.toml). A bin because a
 # script bench builds a bin target; gated so `cargo install dellingr` installs
 # only the CLI.

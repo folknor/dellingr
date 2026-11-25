@@ -1050,7 +1050,8 @@ unmeasured: no registered workload has that shape); the control runner and `try_
 paths. `method_step`'s `Body:step` (updates behind `if self.alive`) is
 such a leaf, and its caller's loop over records now runs as a region
 calling it. Measured on bygg with `brokkr bench wall`, interleaved
-`--commit` cells, A `f05b9ae`, B `d594c99` (the change), medians of three
+`--commit` cells, A `f05b9ae`, B with the same `src/` tree as the landed
+`1b783c4` (recorded under the run label `d594c99`), medians of three
 (`object_fields` and `global` of eight):
 
 | Workload | A | B |

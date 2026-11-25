@@ -1262,7 +1262,7 @@ impl State {
         // Expanding the trees during closure tracing instead (the first
         // closure that flags a runtime with nested prototypes walks its tree
         // into `trees`, and this pass goes) was built and refused on
-        // 2026-11-25 (variant 7e9b5a6 against c99f982, bygg, interleaved
+        // 2026-11-25 (baseline c99f982, bygg, interleaved
         // `--commit` rounds): `many_chunks` 1468 to 1448 ms (faster in 4 of
         // 5), but `gc_churn` 2486 to 2515 ms (slower in 4 of 4) and
         // `closure` +9 ms (2 of 4 either way). This pass costs a flag read

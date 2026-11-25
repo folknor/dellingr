@@ -2369,9 +2369,8 @@ fn invalid_key_error(
 
 /// A materialized key in comparable form. Load allocates every saved string
 /// through the interning pool, so `StringPtr` equality is content equality.
-/// The check is load-bearing after the verifier's: distinct saved function
-/// ids can resolve to one entry (`bind_catalog` binds a catalog id to its
-/// entry whatever else names it), and only the resolved key sees that.
+/// The verifier compares saved ids. If a load-time registry maps multiple
+/// saved ids to one entry, only the resolved key exposes the collision.
 type RuntimeTableKey = NormalizedTableKey<super::object::StringPtr, ObjectPtr, RustFnId>;
 
 fn insert_runtime_key(

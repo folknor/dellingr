@@ -263,4 +263,11 @@ impl RustFnTable {
     pub(crate) fn ids(&self) -> &BTreeMap<Cow<'static, str>, RustFnId> {
         &self.by_id
     }
+
+    /// Simulate a load-time registry where a second saved id resolves to an
+    /// existing entry. Public registration assigns a separate entry per id.
+    #[cfg(test)]
+    pub(super) fn alias_for_snapshot_test(&mut self, alias: &'static str, entry: RustFnId) {
+        assert!(self.by_id.insert(Cow::Borrowed(alias), entry).is_none());
+    }
 }

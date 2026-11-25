@@ -184,6 +184,48 @@ fn duplicate_string_arena_entries_are_refused() {
 }
 
 #[test]
+fn duplicate_materialized_table_keys_are_refused() {
+    let mut payload = empty_payload();
+    payload.objects.push(SavedObject::Table {
+        array_len: 0,
+        array_slots: 0,
+        entries: vec![
+            (
+                SavedVal::Fn("host.current".to_owned()),
+                SavedVal::Bool(true),
+            ),
+            (
+                SavedVal::Fn("host.legacy".to_owned()),
+                SavedVal::Bool(false),
+            ),
+        ],
+        metatable: None,
+    });
+    let bytes = encode_save(&payload).expect("forged table encodes");
+
+    let result = State::load_state(&bytes, Box::new(crate::DefaultCallbacks), |state| {
+        state.register_rust_fn("host.current", "host", |_| Ok(0))?;
+        let entry = state
+            .rust_fns
+            .lookup("host.current")
+            .expect("setup registered the current id");
+        state.rust_fns.alias_for_snapshot_test("host.legacy", entry);
+        Ok::<(), crate::error::Error>(())
+    });
+    assert!(matches!(
+        result,
+        Err(LoadError::Snapshot(SnapshotError::CorruptArena {
+            index: 1,
+            location: SaveLocation::TableEntries { object: 0 },
+            reason: CorruptionReason::Duplicate {
+                entry: DuplicateEntry::TableKey,
+                form: KeyForm::Materialized,
+            },
+        }))
+    ));
+}
+
+#[test]
 fn unique_keys_report_the_first_repeat_inline_and_after_spilling() {
     for len in [3, INLINE_UNIQUE_KEYS, INLINE_UNIQUE_KEYS + 5] {
         let mut keys = UniqueKeys::new();
