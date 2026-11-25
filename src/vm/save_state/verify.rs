@@ -12,17 +12,24 @@ use super::{
 /// A payload whose bytecode and closure references have been structurally checked.
 ///
 /// This type intentionally has no constructor outside this module.
-pub(super) struct VerifiedSavePayload(SavePayload);
+pub(super) struct VerifiedSavePayload {
+    payload: SavePayload,
+    register_tiers: Vec<crate::compiler::RegisterTier>,
+}
 
 impl VerifiedSavePayload {
+    pub(super) fn register_tier(&self, index: usize) -> crate::compiler::RegisterTier {
+        self.register_tiers[index]
+    }
+
     pub(super) fn has_standard_environment(&self) -> bool {
-        self.0.has_standard_environment
+        self.payload.has_standard_environment
     }
     pub(super) fn into_inner(self) -> SavePayload {
-        self.0
+        self.payload
     }
     pub(super) fn bytecode(&self) -> &[SavedBytecode] {
-        &self.0.bytecode
+        &self.payload.bytecode
     }
 }
 
@@ -651,9 +658,14 @@ fn validate_pointer_ids(payload: &SavePayload) -> Result<(), SnapshotError> {
 }
 
 pub(super) fn verify_payload(payload: SavePayload) -> Result<VerifiedSavePayload, SnapshotError> {
-    for (chunk, bytecode) in payload.bytecode.iter().enumerate() {
-        verify::validate_bytecode(bytecode).map_err(|error| rejected(chunk, &error))?;
-    }
+    let register_tiers = payload
+        .bytecode
+        .iter()
+        .enumerate()
+        .map(|(chunk, bytecode)| {
+            verify::validate_bytecode(bytecode).map_err(|error| rejected(chunk, &error))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     // This precedes materialization, including build_bytecode's out[idx] access.
     validate_nested_graph(&payload.bytecode)?;
     validate_closures(&payload)?;
@@ -662,7 +674,10 @@ pub(super) fn verify_payload(payload: SavePayload) -> Result<VerifiedSavePayload
     // gmatch iterators are checked in `validate_references`: the saved
     // record is the iterator, so its state is checkable here.
     validate_pointer_ids(&payload)?;
-    Ok(VerifiedSavePayload(payload))
+    Ok(VerifiedSavePayload {
+        payload,
+        register_tiers,
+    })
 }
 
 #[cfg(test)]

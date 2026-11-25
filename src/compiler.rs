@@ -29,6 +29,14 @@ pub(crate) enum UpvalueDesc {
     Upvalue(u8),
 }
 
+/// Width required by verified frame registers, including implicit ranges.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum RegisterTier {
+    #[default]
+    Narrow,
+    Wide,
+}
+
 /// Compiled, immutable bytecode for a single Lua function (chunk).
 ///
 /// Execution trusts the static contracts checked by finalization and snapshot
@@ -68,6 +76,7 @@ pub(crate) struct Bytecode {
     /// The registers a frame of this function reserves: parameters, locals
     /// and temporaries.
     pub(crate) max_stack: u16,
+    pub(crate) register_tier: RegisterTier,
     pub(crate) nested: Vec<Arc<Bytecode>>,
     /// Describes the upvalues this function captures.
     pub(crate) upvalues: Vec<UpvalueDesc>,
@@ -258,7 +267,8 @@ fn finalize_at_depth(bc: &mut Bytecode, depth: usize) -> Result<()> {
     // VM panic, which is precisely the failure mode this crate refuses.
     // Reporting it as a compile error keeps a compiler bug catchable instead
     // of fatal.
-    verify::validate_bytecode(bc).map_err(|error| validation_error(bc, error))?;
+    bc.register_tier =
+        verify::validate_bytecode(bc).map_err(|error| validation_error(bc, error))?;
     for child in &bc.nested {
         verify::validate_child(bc, child.as_ref()).map_err(|error| validation_error(bc, error))?;
     }
@@ -293,8 +303,11 @@ mod tests {
     }
 
     fn assert_verified_tree(bytecode: &Bytecode, seen: &mut OpenShapes) {
-        verify::validate_bytecode(bytecode)
-            .expect("compiler output must pass bytecode verification");
+        assert_eq!(
+            bytecode.register_tier,
+            verify::validate_bytecode(bytecode)
+                .expect("compiler output must pass bytecode verification")
+        );
         for instruction in &bytecode.code {
             match instruction.opcode() {
                 Instr::OP_CALL => {

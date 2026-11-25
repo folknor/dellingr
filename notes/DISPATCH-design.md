@@ -61,14 +61,49 @@ checks cost issue slots.
     The window helper takes a const width so both future tiers use the same
     padding code. Dispatch will supply those widths in link 3.
 
+## Ruling from link 2
+
+13. The shared verifier selects the register tier from the highest slot in
+    its checked register ranges. Frame reservation alone is insufficient:
+    a saved function can reserve slots that no instruction addresses.
+    CLOSE and empty fixed RETURN are endpoints and do not raise the tier.
+    Compile finalization and snapshot materialization attach the same tier
+    to Bytecode. Snapshot serialization still uses the original instruction
+    words and fields.
+
+## Open decision from link 2
+
+Settle the executable operand representation and numeric-loop plan ownership
+before finishing narrowing. The canonical instruction word mixes register
+indices with counts, pool indices and jump offsets. A typed operand side
+stream can preserve those words for dispatch and serialization but adds a
+second fetch and more memory per instruction. A repacked executable word
+can use one fetch but needs a layout and a way to retain or recover the
+canonical words, including wide non-register operands.
+
+NumericLoops currently builds fused regions and frame-register maps per
+State in BytecodeRuntime. Recognition takes the State's CostState and the
+result carries the selected weights. Ruling 5 places narrowing of those
+maps at compile and snapshot load, where no State cost model is available.
+One route is to split cost-independent recognition and register mapping
+from per-State charge binding. Another is to permit checked narrowing of
+the derived maps at runtime-bundle construction while keeping the tier and
+canonical instruction operands fixed at the producers. The latter needs an
+explicit ruling on the timing exception. Decide both the representation
+and the map ownership in spar before dispatch is built against them.
+
 ## Links
 
 1. Done (with 1a): private stack type with logical end, every crate site
    moved to it, padding machinery, no dispatch change; native-calls table
    re-measured. Matched A/B against 02589f4 measured a regression (below).
-2. Executable operand narrowing and tier selection at both producers, with
-   verifier-side tests for implicit offsets and forged snapshot operands at
-   tier boundaries. Medium.
+2. Partial: shared verifier selects the tier for both producers, with
+   tests for implicit offsets, one-past endpoints and forged snapshot
+   operands at tier boundaries. Executable operands remain outstanding.
+   2a. Resolve the open decision in spar, then build checked executable
+       operand narrowing for both producers and cover the derived maps as
+       ruled. Medium, or medium-large if numeric-loop recognition and cost
+       binding need to be split. Finish before link 3.
 3. Dispatch arms (`run_frame`, `registers.rs` fast paths, `eval_control.rs`
    numeric-for, `numeric_loop.rs` entry) on the per-arm window. Gate: native
    bytes dev and release re-measured under the envelope (ruling 11), matched
