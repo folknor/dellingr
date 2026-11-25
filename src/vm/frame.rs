@@ -478,9 +478,23 @@ impl Frame {
 
     /// Dispatch one activation of `frame` from the cursor `ip` until it calls
     /// a Lua function (admitted, its frame for the caller to push) or
-    /// returns. Inlined, so `ip` stays a register for the whole run; the
-    /// caller publishes it on every exit, which is why nothing here writes
-    /// `Frame::ip` and every error simply propagates.
+    /// returns. `ip` is owned by the caller, which publishes it to
+    /// `Frame::ip` on every exit, so nothing here writes `Frame::ip` and
+    /// every error simply propagates with `ip` as it stands. Outlined helpers
+    /// that move the cursor get a copy (`with_cursor!`), never `ip` itself:
+    /// an escaped address kept the cursor in a stack slot, loaded and stored
+    /// on every dispatch.
+    ///
+    /// Bounds checks stay on the instruction fetch and on register access.
+    /// Measured on bygg (Zen 5) at 4495fca, matched interleaved pairs: making
+    /// every value-stack index unchecked took `closed_mode` 13% and the
+    /// composite 4% faster, and an unchecked fetch alone 1 to 3%. Unchecked
+    /// access would turn a verifier gap into memory unsafety reachable from
+    /// a snapshot file, so neither is done with `unsafe`. The safe route for
+    /// registers is a padded value stack with a logical end, borrowed per arm
+    /// as a fixed-size array indexed by narrowed operands; a safe fetch would
+    /// need a paged executable stream, refused as costing transitions and
+    /// live cursor state for at most the fetch check's 1 to 3%.
     ///
     /// One `match` is the dispatch on purpose. Threaded dispatch, where each
     /// handler transfers straight to the next (which can give each handler
@@ -553,6 +567,19 @@ impl Frame {
                     #[cfg(feature = "cost-check-interval")]
                     Self::charge_fixed(state, local_cost, *ip, charge)?;
                 }
+            }};
+        }
+
+        // An outlined helper that moves the cursor gets a copy, written back
+        // when it returns, Ok or Err. Passing `ip` itself would let its
+        // address escape into the call, which keeps the cursor in a stack
+        // slot for the whole loop: every dispatch then loads and stores it.
+        macro_rules! with_cursor {
+            (|$cursor:ident| $call:expr) => {{
+                let mut $cursor = *ip;
+                let result = $call;
+                *ip = $cursor;
+                result
             }};
         }
 
@@ -665,7 +692,14 @@ impl Frame {
                 Instr::OP_NEW_TABLE_TEMPLATE => {
                     fixed_cost!(Instr::OP_NEW_TABLE_TEMPLATE);
                     state.reg_new_table_template(frame, ra, inst.b());
-                    Self::template_init_run(frame, state, local_cost, ip, ra, upvalues)?;
+                    with_cursor!(|cursor| Self::template_init_run(
+                        frame,
+                        state,
+                        local_cost,
+                        &mut cursor,
+                        ra,
+                        upvalues
+                    ))?;
                 }
 
                 // Table reads
@@ -977,11 +1011,17 @@ impl Frame {
                 // `for` loops
                 Instr::OP_FOR_PREP => {
                     fixed_cost!(Instr::OP_FOR_PREP);
-                    state.instr_for_prep(frame, ra, ip, inst.sj(), local_cost)?;
+                    with_cursor!(|cursor| state.instr_for_prep(
+                        frame,
+                        ra,
+                        &mut cursor,
+                        inst.sj(),
+                        local_cost
+                    ))?;
                 }
                 Instr::OP_FOR_LOOP => {
                     fixed_cost!(Instr::OP_FOR_LOOP);
-                    state.instr_for_loop(ra, ip, inst.sj())?;
+                    with_cursor!(|cursor| state.instr_for_loop(ra, &mut cursor, inst.sj()))?;
                 }
                 Instr::OP_TFOR_CALL => {
                     fixed_cost!(Instr::OP_TFOR_CALL);
@@ -1009,7 +1049,14 @@ impl Frame {
                         && step.opcode() == Instr::OP_TFOR_LOOP
                     {
                         *ip += 1;
-                        Self::tfor_fused_loop(state, frame, ip, base, step, local_cost)?;
+                        with_cursor!(|cursor| Self::tfor_fused_loop(
+                            state,
+                            frame,
+                            &mut cursor,
+                            base,
+                            step,
+                            local_cost
+                        ))?;
                     }
                 }
                 Instr::OP_TFOR_LOOP => Self::tfor_loop(state, ip, base, inst)?,

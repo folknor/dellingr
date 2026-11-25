@@ -455,7 +455,8 @@ fn jump_target(pc: usize, inst: Instr, code_len: usize) -> Option<usize> {
 // a VM bug, not a recoverable Lua error.
 //
 // Every register an instruction names lies inside the frame the function
-// reserves (`max_stack`), so execution indexes registers without checking.
+// reserves (`max_stack`), so execution indexes registers with no fallible
+// Lua-level check; the slice bounds check stays, so a gap here panics.
 // Open results are the only place the stack top differs from the frame top
 // between instructions: a producer (a call asking for all results, a vararg
 // of every value) must be followed by its consumer (a call with open

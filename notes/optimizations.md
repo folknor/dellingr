@@ -18,99 +18,44 @@ plantasjen) unless noted.
 
 ## Investigate
 
-### Per-instruction weight of the register dispatch loop (2026-10-23)
+### Per-instruction weight of the register dispatch loop (re-measured 2026-11-25)
 
-The entries below share one measurement. perf on plantasjen (Zen 3),
-register VM just before the field-read rework: a three-field
-`same_obj_read` variant ran about 33 cycles and about 86 machine
-instructions per VM op with only 0.14 branch misses per kernel iteration,
-so the cost is spread across every op, not mispredicts. The shared dispatch
-head was about 40% of `Frame::run` cycles; holding the cursor and base in
-locals (`Frame::run_frame`) took arithmetic from 3600 to 3400 ms and
-same_obj_read from about 3800 to 3600 (interleaved pairs, plantasjen), so
-part of that share was recoverable and part was the sample landing site of
-work in the handlers.
+Re-measured on bygg (Zen 5, 9950X3D2) at 4495fca with the 8-byte `Val`.
+`bench/closed_mode` (canonical dispatch of upvalue, arithmetic and branch
+ops): about 55 machine instructions and 9 cycles per VM op at an IPC near 6,
+branch misses negligible. The loop is issue-bound, so retired instructions
+now translate into cycles, unlike the Zen 3 readings this entry replaced
+(where removed checks moved cycles within about 2%).
 
-Where it stands (2026-10-23): the cursor-in-a-local change (a378895) and
-recording call sites only on paths that can call (4794237) shipped; the
-bounds-check entry below was measured and is not pursued. What remains is
-in the single-digit-percent band that code-layout noise alone moves on these
-benches, so the program is parked: pick an entry up only with a workload
-where it shows clearly. The 8-byte NaN-boxed `Val` has landed, so re-measure
-these costs before trusting the figures above.
+Done: the dispatch cursor was in a stack slot (load and store per
+dispatch) because outlined helpers took `&mut ip`; they now get a copy
+(`with_cursor!` in `run_frame`). Matched pairs, 3 rounds: closed_mode -2.2%,
+wide_sweep, key_sweep, composite -0.5 to -1%, arithmetic +0.8% (1 of 3
+faster). Release native bytes unchanged, dev +32 per level.
 
-Each suspect is independent. Work one at a time: perf before and after
-(`scripts/perf_hot_lines.py` filters the annotate output), interleaved
-`--bench` pairs on arithmetic, same_obj_read and the composite, and
-`brokkr test native_bytes_per_level` (dev and release) for anything that
-touches `Frame::run`, whose frame is live across every native re-entry.
+Still open below this entry: register bounds checks (the padded stack chain),
+"Cost accounting on every arithmetic op" (the pending batch is the same kind
+of escaped `&mut` slot, `0x8(%rsp)`, loaded and stored per charge), and
+`GET_UPVAL` indirection. The code slice's pointer and length are still
+reloaded from spill slots at the dispatch head; nothing shown recovers them.
 
-### Register access bounds checks
+### Register access bounds checks: padded value stack (chain, design settled)
 
-Measured 2026-10-23 at eb52657 on plantasjen and not pursued: insufficient
-demonstrated payoff. Kept so the experiments are not rerun.
+Measured 2026-11-25 on bygg, 4495fca, matched interleaved `--commit` pairs,
+3 rounds: making every value-stack index unchecked (throwaway newtype over
+`State.stack`) took closed_mode 4364 to 3782 ms (-13%), the composite
+`benchmark` -4%, wide_sweep -6%, key_sweep -5%, each 3 of 3; arithmetic flat
+(its hot loop is a typed region). Instructions on closed_mode 86.1e9 to
+72.6e9. This overturns the 2026-10 Zen 3 refusal.
 
-What: every register read and write in the dispatch loop indexes
-`state.stack[...]`, a bounds-checked `Vec` access (`cmp len, idx` / `jae
-panic_bounds_check`, with the stack pointer and length reloaded from `State`
-at each access), although admission reserves `[base, base + max_stack)` and
-the verifier bounds every register operand by `max_stack`.
-
-Three throwaway experiments, each against HEAD built by `--commit`, harness
-`warm_avg_us`, interleaved `--bench 3` cells (A had a launch spread under 1%
-on every workload):
-
-- **Checks removed, pointer still reloaded** (`get_unchecked` on every
-  register access in `run_frame`, the `registers.rs` fast paths and the
-  numeric-for helpers). Whole-process retired instructions fell 4-8% and
-  branches 8-15%, but cycles moved between about -2% and +2%: arithmetic
-  -2.0/-2.3%, same_obj_read +0.5/+1.6% (slower, more branch misses), the
-  composite +0.3/-0.7%. The checks are predicted and fused; removing them
-  alone buys nothing outside the layout band.
-- **Activation-wide raw register pointer, unchecked** (held in a local,
-  refreshed after every arm whose helper may push). Arithmetic -1.3/-1.7%,
-  composite +0.3/-0.7% (cycles +1.1%), same_obj_read -3.6/-6.6% with its
-  branch misses halved and a 3-4% launch spread of its own. The field-read
-  gain beat every A launch, but its mechanism is unresolved (layout is
-  plausible), and its soundness rests on every arm remembering to refresh.
-- **The same pointer plus a cached length, checks kept** (the best a safe
-  borrowed-slice view could compile to with today's helper boundaries).
-  same_obj_read -0.8/-1.8%, arithmetic about -1.5% (one cell), composite
-  0.0% (one cell).
-
-None clears a repeatable gain on representative work, and the composite is
-flat in all three. Note the composite does not stress repeated reads of one
-persistent object; same_obj_read does, and is where the only large delta was.
-Untested residue: a split-borrow design whose field-cache hit writes through
-the retained register slice (no refresh after a hit). Revisit only with
-evidence that persistent-object field reads dominate real callbacks.
-
-The original sketch overpromised: a slice of length `max_stack` does not let
-LLVM drop checks on dynamic operands, since the verifier's proof is not
-visible to it; only `unsafe` or a per-instruction range proof removes them.
-
-The 2026-11-17 performance hunt (dispatch scope, source-only) proposed the
-structural version rather than unchecked indexing: split execution into a hot
-register executor and a boundary driver. Enter the executor with validated
-code, a frame-relative register window, constant bases and the narrow runtime
-pieces it needs; use admission-backed unchecked access inside it, with the
-verification capability covering every producer including snapshot loads; run
-non-growing ops and direct table fast paths (field probes and global-cache
-operations already neither collect nor re-enter) through narrow borrows;
-return an action to the driver before stack reshaping, allocation or re-entry;
-reacquire the window after. Its point is an enforceable lifetime for the
-addressing assumptions, and a home for fused handlers' native-local
-intermediates. Risks it named: a stack pointer cannot survive callbacks or
-vector growth; a long-lived register slice cannot overlap unrestricted `State`
-access; open-result producer/consumer pairs change the stack length mid-pair;
-the boundary driver must stay small, since it is live across native re-entry.
-It is the "split-borrow design" residue above, argued as half of one engine
-redesign with fused operations, not as a standalone bounds-check removal.
-
-Lateral: in every build measured, the dispatch head reloads the code slice's
-pointer and length from spill slots (`cmp 0x298(%rsp)` / `mov 0x2e8(%rsp)`)
-each instruction. Not shown to be recoverable: keeping them resident competes
-for the same registers as handler temporaries.
+`unsafe` unchecked access is refused: the verifier would become a
+memory-safety boundary for snapshot files. The safe design (sparred with
+codex, session 01a21310) is in `notes/DISPATCH-design.md`: a private value
+stack with a logical end and initialized padding, borrowed per dispatch arm
+as a fixed-size array tier indexed by narrowed operands, so the physical bound
+is a type fact. Expected to recover a fraction of the experiment's gain
+(per-arm borrows keep one check per arm; the experiment also removed checks
+outside dispatch).
 
 ### Cost accounting on every arithmetic op
 
@@ -579,14 +524,6 @@ path is recorded yet; nothing here is a candidate until one is.
   (`rust_call_releases_callee_slot_before_callback_push` in
   tests/integration/host/host_call_preflight.rs). Moving the callee elsewhere still shifts
   the arguments; see the comment at the remove in src/vm/eval.rs.
-- **Dispatch micro-items, verify with asm/bench first (B-O6):** opcode space
-  is already dense (every opcode number up to the last is assigned), so a
-  renumbering (or `#[repr(u8)]` enum with a validated dense range) has
-  nothing left to close; LLVM
-  likely already emits one jump table with a few dead slots. The
-  dispatch head's `code[*ip]` bounds-checks every fetch; with one-time validation that all jump targets are in-bounds at
-  load/finalize time, the fetch could use a pointer/len cursor - only if
-  profiles show it; keep panics over UB.
 - **`string.format` cached plan (deferred, 2026-11-24):** `perf record` of
   release `bench/format_literals.lua` (bygg, b85864e) put about half of
   `format`'s own samples (about 10% of the run) on the bytewise scan for the
