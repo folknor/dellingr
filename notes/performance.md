@@ -188,19 +188,6 @@ measurement attributing branch misses to the dispatch branch before work
 begins. The stable-Rust route that tests the actual next opcode and enters
 its handler directly lives under PERF-002.
 
-## PERF-045 - `resolve_callees` boxes field slots per static field-leaf site on every region entry
-
-Each typed-region entry allocates a `Box` of field slots for every static
-field-leaf call site in `State::resolve_callees`. Unmeasured; it is the same
-order of per-entry work as the relied-key collection that 42bc2a0 removed,
-measured, and reverted (about two small allocations per entry, under 0.3% of
-`object_fields`, below that workload's layout noise). Taking it alone is not
-expected to clear noise.
-
-**Classification:** local, low ceiling. Only worth doing alongside a change
-that restructures region entry for another reason, measured with a
-layout-controlled comparison.
-
 ## Accounts added to existing entries
 
 This hunt's account of these mechanisms went into the entry already filed for

@@ -3635,6 +3635,17 @@ impl State {
             let fields = if leaf.sites.is_empty() {
                 None
             } else {
+                // One allocation per field-bearing static call site reached
+                // at entry, at most MAX_CALLS; the passes reuse the slots.
+                // Inlining FieldSlots into Resolved, or keeping a reusable
+                // buffer on State, was weighed and passed over: entry
+                // already does a method walk, slot validation, an Arc clone
+                // and a relied-key collection per site, so the allocation is
+                // a small share even of a short entry (a loop of two to four
+                // substeps entered once per outer item), and inlining would
+                // reserve MAX_FIELD_SITES slots for field-free callees too.
+                // Revisit if repeated short static entries make allocation a
+                // material part of admission.
                 let mut fields = Box::new([None; MAX_FIELD_SITES]);
                 let param = |register: u16| (skip == 1 && register == 0).then_some(receiver);
                 if !self.resolve_sites(closure, leaf, param, base, &mut fields) {
