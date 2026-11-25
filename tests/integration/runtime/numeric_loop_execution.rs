@@ -6,6 +6,12 @@
 //! the standalone corpus tests, instead of the serial one (brokkr.toml, the
 //! comment above the default sweep). Tests placed here therefore run
 //! concurrently: each builds its own `State` and must keep to small memory.
+//!
+//! A sweep compiles each source once and loads the `Program` into a fresh
+//! State per outcome: a `Program` is immutable bytecode, and every cache,
+//! region plan and interned literal belongs to the State that loads it, so
+//! no outcome warms the next. Compiling per outcome was about a third of
+//! the slowest sweep's dev time; the rest is State construction and the run.
 
 /// This module's path; the lane partition in `corpus::run_examples` derives
 /// its selector from it, so a rename fails there instead of moving the tests.
@@ -44,22 +50,26 @@ fn region_program(twin: &str) -> String {
 
 /// Outcome of `run()` under `budget`: whether it completed, the meter, and
 /// what the captured locals hold afterwards.
-fn region_outcome(model: &CostModel, source: &str, budget: i64) -> (bool, u64, [f64; 3]) {
-    region_outcome_at(model, source, budget, None)
+fn region_outcome(
+    model: &CostModel,
+    program: &dellingr::Program,
+    budget: i64,
+) -> (bool, u64, [f64; 3]) {
+    region_outcome_at(model, program, budget, None)
 }
 
 /// `region_outcome` with the host-set GC threshold `gc_threshold`: 1
 /// collects at every back-edge checkpoint.
 fn region_outcome_at(
     model: &CostModel,
-    source: &str,
+    program: &dellingr::Program,
     budget: i64,
     gc_threshold: Option<usize>,
 ) -> (bool, u64, [f64; 3]) {
     let mut state = State::builder()
         .costing(Costing::Metered(model.clone()))
         .build();
-    support::run(&mut state, source);
+    support::run_program(&mut state, program);
     if let Some(threshold) = gc_threshold {
         state.gc_set_threshold(threshold);
     }
@@ -96,8 +106,8 @@ fn region_outcome_at(
 
 #[test]
 fn numeric_loop_region_matches_canonical_dispatch_at_every_budget() {
-    let region = region_program("");
-    let canonical = region_program("local _u = up");
+    let region = support::compile(region_program(""));
+    let canonical = support::compile(region_program("local _u = up"));
     let models = [
         CostModel::default(),
         CostModel::default()
@@ -142,8 +152,8 @@ fn field_region_program(twin: &str) -> String {
 
 #[test]
 fn numeric_loop_region_with_field_reads_matches_canonical_dispatch_at_every_budget() {
-    let region = field_region_program("");
-    let canonical = field_region_program("local _u = up");
+    let region = support::compile(field_region_program(""));
+    let canonical = support::compile(field_region_program("local _u = up"));
     let models = [
         CostModel::default(),
         CostModel::default()
@@ -242,8 +252,8 @@ fn numeric_loop_region_writing_upvalues_matches_canonical_dispatch_at_every_budg
         CostModel::zero(),
     ];
     for open in [false, true] {
-        let region = upvalue_write_program("", open);
-        let canonical = upvalue_write_program("local _u = up", open);
+        let region = support::compile(upvalue_write_program("", open));
+        let canonical = support::compile(upvalue_write_program("local _u = up", open));
         for model in &models {
             for budget in -1..=900 {
                 assert_eq!(
@@ -297,8 +307,8 @@ fn control_region_program(twin: &str) -> String {
 
 #[test]
 fn numeric_loop_region_with_branches_matches_canonical_dispatch_at_every_budget() {
-    let region = control_region_program("");
-    let canonical = control_region_program("local _u = up");
+    let region = support::compile(control_region_program(""));
+    let canonical = support::compile(control_region_program("local _u = up"));
     let models = [
         CostModel::default(),
         CostModel::default()
@@ -347,8 +357,8 @@ fn leaf_program(twin: &str) -> String {
 
 #[test]
 fn numeric_leaf_matches_canonical_call_at_every_budget() {
-    let leaf = leaf_program("");
-    let canonical = leaf_program("local _u = false");
+    let leaf = support::compile(leaf_program(""));
+    let canonical = support::compile(leaf_program("local _u = false"));
     let models = [
         CostModel::default(),
         CostModel::default()
@@ -397,8 +407,8 @@ fn global_call_program(twin: &str) -> String {
 
 #[test]
 fn numeric_loop_region_with_leaf_calls_matches_canonical_dispatch_at_every_budget() {
-    let region = global_call_program("");
-    let canonical = global_call_program("local _u = false");
+    let region = support::compile(global_call_program(""));
+    let canonical = support::compile(global_call_program("local _u = false"));
     let models = [
         CostModel::default(),
         CostModel::default()
@@ -530,8 +540,8 @@ fn field_leaf_program(twin: &str) -> String {
 
 #[test]
 fn field_leaf_matches_canonical_call_at_every_budget() {
-    let leaf = field_leaf_program("");
-    let canonical = field_leaf_program("local _u = false");
+    let leaf = support::compile(field_leaf_program(""));
+    let canonical = support::compile(field_leaf_program("local _u = false"));
     let models = [
         CostModel::default(),
         CostModel::default()
@@ -655,8 +665,8 @@ fn method_region_program(twin: &str) -> String {
 
 #[test]
 fn numeric_loop_region_with_method_calls_matches_canonical_dispatch_at_every_budget() {
-    let region = method_region_program("");
-    let canonical = method_region_program("local _u = false");
+    let region = support::compile(method_region_program(""));
+    let canonical = support::compile(method_region_program("local _u = false"));
     let models = [
         CostModel::default(),
         CostModel::default()
@@ -812,8 +822,8 @@ fn record_method_program(twin: &str, leaf_twin: &str) -> String {
 
 #[test]
 fn numeric_loop_region_with_method_calls_on_records_matches_canonical_dispatch_at_every_budget() {
-    let region = record_method_program("", "");
-    let canonical = record_method_program("local _u = up", "local _u = false");
+    let region = support::compile(record_method_program("", ""));
+    let canonical = support::compile(record_method_program("local _u = up", "local _u = false"));
     let models = [
         CostModel::default(),
         CostModel::default()
@@ -889,8 +899,8 @@ fn branching_leaf_program(twin: &str, leaf_twin: &str) -> String {
 
 #[test]
 fn branching_field_leaves_match_canonical_dispatch_at_every_budget() {
-    let fast = branching_leaf_program("", "");
-    let canonical = branching_leaf_program("local _u = up", "local _u = false");
+    let fast = support::compile(branching_leaf_program("", ""));
+    let canonical = support::compile(branching_leaf_program("local _u = up", "local _u = false"));
     let models = [
         CostModel::default(),
         CostModel::default()
@@ -950,8 +960,11 @@ fn straight_branching_leaf_program(twin: &str, leaf_twin: &str) -> String {
 
 #[test]
 fn straight_line_loops_calling_branching_leaves_match_canonical_dispatch_at_every_budget() {
-    let fast = straight_branching_leaf_program("", "");
-    let canonical = straight_branching_leaf_program("local _u = up", "local _u = false");
+    let fast = support::compile(straight_branching_leaf_program("", ""));
+    let canonical = support::compile(straight_branching_leaf_program(
+        "local _u = up",
+        "local _u = false",
+    ));
     let models = [
         CostModel::default(),
         CostModel::default()
@@ -1010,8 +1023,8 @@ fn nested_region_program(twin: &str) -> String {
 
 #[test]
 fn numeric_loop_region_with_nested_loops_matches_canonical_dispatch_at_every_budget() {
-    let region = nested_region_program("");
-    let canonical = nested_region_program("local _u = up");
+    let region = support::compile(nested_region_program(""));
+    let canonical = support::compile(nested_region_program("local _u = up"));
     let models = [
         CostModel::default(),
         CostModel::default()
@@ -1082,8 +1095,8 @@ fn record_region_program(twin: &str) -> String {
 
 #[test]
 fn numeric_loop_region_with_records_matches_canonical_dispatch_at_every_budget() {
-    let region = record_region_program("");
-    let canonical = record_region_program("local _u = up");
+    let region = support::compile(record_region_program(""));
+    let canonical = support::compile(record_region_program("local _u = up"));
     let models = [
         CostModel::default(),
         CostModel::default()
@@ -1173,8 +1186,8 @@ fn ipairs_record_program(twin: &str) -> String {
 
 #[test]
 fn ipairs_region_with_records_matches_canonical_dispatch_at_every_budget() {
-    let region = ipairs_record_program("");
-    let canonical = ipairs_record_program("local _u = up");
+    let region = support::compile(ipairs_record_program(""));
+    let canonical = support::compile(ipairs_record_program("local _u = up"));
     let models = [
         CostModel::default(),
         CostModel::default()
@@ -1245,8 +1258,8 @@ fn keyed_record_program(twin: &str) -> String {
 
 #[test]
 fn numeric_loop_region_with_keyed_records_matches_canonical_dispatch_at_every_budget() {
-    let region = keyed_record_program("");
-    let canonical = keyed_record_program("local _u = up");
+    let region = support::compile(keyed_record_program(""));
+    let canonical = support::compile(keyed_record_program("local _u = up"));
     let models = [
         CostModel::default(),
         CostModel::default()
@@ -1316,8 +1329,8 @@ fn record_test_program(twin: &str) -> String {
 
 #[test]
 fn numeric_loop_region_with_record_tests_matches_canonical_dispatch_at_every_budget() {
-    let region = record_test_program("");
-    let canonical = record_test_program("local _u = up");
+    let region = support::compile(record_test_program(""));
+    let canonical = support::compile(record_test_program("local _u = up"));
     let models = [
         CostModel::default(),
         CostModel::default()
@@ -1389,7 +1402,11 @@ fn record_test_root_program(twin: &str) -> String {
 /// `run()` of `source` under `budget` with a collection at every
 /// checkpoint: whether it completed, the meter, and the live object count
 /// right after it returned, which the roots at its last checkpoint decided.
-fn rooted_outcome(model: &CostModel, source: &str, budget: i64) -> (Option<f64>, u64, usize) {
+fn rooted_outcome(
+    model: &CostModel,
+    program: &dellingr::Program,
+    budget: i64,
+) -> (Option<f64>, u64, usize) {
     let mut state = State::builder()
         .costing(Costing::Metered(model.clone()))
         .build();
@@ -1402,7 +1419,7 @@ fn rooted_outcome(model: &CostModel, source: &str, budget: i64) -> (Option<f64>,
         })
         .expect("census is pushed");
     state.set_global("census").expect("census is installed");
-    support::run(&mut state, source);
+    support::run_program(&mut state, program);
     state.gc_set_threshold(1);
     state.set_cost_budget(budget).expect("the State is metered");
     state.get_global("run").expect("run is defined");
@@ -1424,11 +1441,11 @@ fn rooted_outcome(model: &CostModel, source: &str, budget: i64) -> (Option<f64>,
 
 #[test]
 fn record_tests_root_what_canonical_dispatch_roots_at_every_budget() {
-    let region = record_test_root_program("");
+    let region = support::compile(record_test_root_program(""));
     // A free load of a table upvalue into `k`, overwritten next, refuses
     // the region without moving any register, so every dead register holds
     // what it would in the region.
-    let canonical = record_test_root_program("k = up");
+    let canonical = support::compile(record_test_root_program("k = up"));
     let models = [CostModel::default(), CostModel::zero()];
     for model in &models {
         for budget in -1..=600 {

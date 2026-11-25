@@ -34,6 +34,18 @@ impl PushNewRustFn for State {
     }
 }
 
+/// Compile `source` as an unnamed chunk, for a test that loads the same
+/// source into many States.
+pub(crate) fn compile(source: impl AsRef<[u8]>) -> dellingr::Program {
+    let source = source.as_ref();
+    dellingr::Program::compile(source, None).unwrap_or_else(|error| {
+        panic!(
+            "test source must compile:\n{}\n{error}",
+            String::from_utf8_lossy(source)
+        )
+    })
+}
+
 /// Compile `source` as an unnamed chunk and push it onto `state`'s stack.
 pub(crate) fn load(state: &mut State, source: impl AsRef<[u8]>) {
     let source = source.as_ref();
@@ -45,6 +57,15 @@ pub(crate) fn load(state: &mut State, source: impl AsRef<[u8]>) {
             String::from_utf8_lossy(source)
         );
     }
+}
+
+/// Load a compiled `program` and call its main chunk with no arguments
+/// and no results.
+pub(crate) fn run_program(state: &mut State, program: &dellingr::Program) {
+    state.load(program).expect("a compiled test program loads");
+    state
+        .call(ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect("the test program's main chunk runs");
 }
 
 /// Load `source` and call it with no arguments, keeping `results` of its
