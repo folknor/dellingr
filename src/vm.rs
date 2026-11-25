@@ -2379,6 +2379,44 @@ mod runtime_tests {
         assert!(field_handles(&state).is_empty(), "the prune clears it");
     }
 
+    #[test]
+    fn field_hint_answers_from_dead_cache_entry_without_refill() {
+        let _hits = caches::HitMode::required();
+        let mut state = State::new();
+        state.gc_disable_auto();
+        state.heap.force_runtime_cache_prune();
+        state.gc_collect();
+
+        crate::Program::compile(
+            "function get(t) return t.k end get({ k = 1 }) return { k = 2 }, 'k'",
+            None,
+        )
+        .and_then(|program| state.load(&program))
+        .and_then(|()| state.call(ArgCount::Fixed(0), RetCount::Fixed(2)))
+        .expect("chunk returns the second table and its key");
+        state.gc_collect();
+
+        let receiver = state.stack[0].as_object_ptr().expect("receiver is a table");
+        let key = state.stack[1];
+        let mut entries = state
+            .bytecode_caches
+            .values()
+            .flat_map(|runtime| &runtime.caches.field_lookup)
+            .filter_map(|cache| Some((cache, cache.get_field()?)));
+        let (cache, stale) = entries.next().expect("the field site kept its entry");
+        assert!(entries.next().is_none(), "only one field site was warmed");
+        assert!(!state.heap.val_is_live(&Val::obj(stale.table)));
+
+        // Drive the dispatch hint directly, independent of numeric leaf calls.
+        assert_eq!(
+            state.get_current_cached_field(receiver, key, cache),
+            Some(Val::num(2.0))
+        );
+        let retained = cache.get_field().expect("the hint kept the entry");
+        assert_eq!(retained.table, stale.table);
+        assert_eq!(retained.slot, stale.slot);
+    }
+
     /// Cache handles are weak: a pruning collection that frees a cached
     /// object must clear every entry naming it, or a later object reusing its
     /// arena slot with a wrapped generation would satisfy the entry's handle
