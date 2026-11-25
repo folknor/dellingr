@@ -218,6 +218,46 @@ fn field_sites_answer_mixed_receivers_like_the_keyed_lookup() {
     assert_eq!(val, 10_100.0 * 1_000_000.0 + 42_000.0 + 233.0);
 }
 
+/// One canonical `SET_FIELD` site (the call keeps it out of field leaves)
+/// whose cache a fresh record refills just before each probe: a tombstone
+/// behind `__newindex`, a live key behind `__newindex`, an absent key behind
+/// `__newindex`, a position past an inline record's end, another key at the
+/// position, and a table gaining the key raw. The store tests the keyed and
+/// same-table cached paths and pins these receivers for any cross-receiver
+/// store hint (refused at `State::store_field`).
+#[test]
+fn set_field_sites_store_into_mixed_receivers_like_the_keyed_store() {
+    let val = support::eval_number(
+        r#"
+        local function rec(b) return { a = 1, b = b, c = 3, d = 4, e = 5, f = 6 } end
+        local seen = 0
+        local swapped = { b = 20, a = 1, c = 3, d = 4, e = 5, f = 6 }
+        local dead = setmetatable(rec(0),
+            { __newindex = function() seen = seen + 10000 end })
+        dead.b = nil
+        local guarded = setmetatable(rec(50),
+            { __newindex = function() seen = seen + 1 end })
+        local absent = setmetatable({ a = 1, c = 3, d = 4, e = 5, f = 6, g = 7 },
+            { __newindex = function() seen = seen + 100 end })
+        local list = { rec(10), dead, rec(11), guarded, rec(12), absent,
+            rec(13), { b = 60 }, rec(14), swapped, rec(15), { x = 1 } }
+        local function write(t, v) t.b = v return tostring(v) end
+        for _ = 1, 2 do
+            for i = 1, #list do write(list[i], i) end
+        end
+        local sum = 0
+        for i = 1, #list do
+            if (rawget(list[i], "b") or 0) ~= i then sum = sum + 10 ^ i end
+        end
+        return sum + seen
+    "#,
+    );
+    // Every receiver ends holding b = i except `dead` (2) and `absent` (6),
+    // whose two stores each go to their handler (10000 and 100 per store);
+    // `guarded` overwrites its live key without its handler.
+    assert_eq!(val, 100.0 + 1_000_000.0 + 20_200.0);
+}
+
 /// The dynamic-key counterpart: one `GET_TABLE` site whose key-position hint
 /// a run of same-layout records warms, then receivers where that position
 /// holds another key, a tombstone, a re-added key past it, an inline record,

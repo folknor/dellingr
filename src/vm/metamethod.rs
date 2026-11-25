@@ -179,7 +179,14 @@ impl State {
         // tables re-checked on every hit did not pay (see
         // `MethodLookupCacheEntry`); a deeper raw hit fills the epoch-guarded
         // route entry instead (`RouteLookupCacheEntry`), keyed by the
-        // receiver's metatable held here.
+        // receiver's metatable held here. Neither fills the site's own-field
+        // entry: that entry means a raw slot of the table it names, so
+        // naming the handler table there would accelerate nothing for this
+        // receiver (the dispatch hint key-checks the receiver's own slot,
+        // which lacks an inherited key) and would only evict the own entry.
+        // What a table-only chain needs is covered by these two entries; a
+        // string receiver or a string handler on the way leaves routes out
+        // and is the remaining gap, which a field-entry fill would not close.
         let mut method_fill = None;
         let mut route_fill: Option<ObjectPtr> = None;
         let (mut receiver, mut handler) = match start {
@@ -487,6 +494,21 @@ impl State {
         // store (`State::try_set_field_cached`), which leaves inherited
         // routes standing, never rewrites a route's link.
         let cache = cache.filter(|_| key != self.meta_names.get(MetaName::Index));
+        // No cross-receiver store hint (the read side's key-checked position
+        // applied to stores). It is sound: `renew_slot` on the receiver
+        // proves a live slot under the site's key and mints the receiver's
+        // token, which is what `GcHeap::overwrite_live_slot` needs, and an
+        // existing key's overwrite consults no `__newindex`. It was refused
+        // on cost, not soundness. In the dispatch arm's
+        // `try_set_field_cached` it grew release native levels through a
+        // `SET_FIELD` by 16 bytes (`newindex_field` 656 to 672). Here,
+        // behind the outlined call, it is the store twin of the read-side
+        // refill that measured no gain (see `State::get_cached_field`), and
+        // on a raw store it trades one mutable probe for a read and a second
+        // access. No workload drives canonical cross-receiver overwrites:
+        // stores over record arrays run in regions and field leaves, whose
+        // record slot already reuses positions. Reopen on such a workload,
+        // measured.
         // A string key with a value is a raw store whose insert reports the
         // slot it wrote, so the cache is filled without a second lookup.
         let raw_string = if val.is_nil() {

@@ -109,6 +109,18 @@ impl Bytecode {
     /// the example corpus stays well under the cap in every family, and a
     /// site past it is correct, only uncached. What matters is the count of
     /// cache-bearing sites per family in one function, not function size.
+    ///
+    /// A `GET_FIELD` and the `SET_FIELD` of the same receiver and key
+    /// (`self.n = self.n + 1`) keep separate slots, also on purpose. A shared
+    /// own-field cell would be sound with receiver identity checked at use
+    /// and `__index` stores kept out (a read-filled entry for `__index`
+    /// would let the cached store skip route retirement). It pays only when
+    /// the read refills the cell on every receiver switch, i.e. receivers
+    /// alternating between layouts that hold the key at different positions;
+    /// a fixed receiver warms both sites in one pass (the store fills from
+    /// its own insert), same-position receivers are answered by the read's
+    /// position hint without a refill, and field leaves already share one
+    /// site per source and key. No workload has the alternating shape.
     fn assign_cache_slots(&mut self) {
         /// Allocate the next slot of one cache family, or `None` once the
         /// family holds `MAX_CACHE_SLOTS` slots.

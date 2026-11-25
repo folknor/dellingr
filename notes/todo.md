@@ -133,8 +133,19 @@ At the next re-pin of `examples/strings/patterns.lua`, label
 
 ### Stale workload-file headers (2026-11-25)
 
-Both files are pinned in `brokkr.d/bench.toml`, so fix the wording at their
-next re-pin, not on its own.
+Every file here is pinned in `brokkr.d/bench.toml`, so fix the wording at
+its next re-pin, not on its own.
+
+- `examples/fields/polymorphic.lua` (which `bench/polymorphic.lua` defers
+  to) says it iterates "a fresh table at each step, so per-callsite IC never
+  hits". Its kernel (two fields, a numeric `for`) now runs in a typed loop
+  region, and the
+  dispatch field site reads the cached position in any receiver anyway;
+  `wide_sweep` is the workload for that hint. `examples/fields/same_obj_read.lua`
+  repeats the description when it points at `fields/polymorphic.lua`.
+- `examples/calls/method_polymorphic.lua` says the classes outnumber the
+  method cache's two entries per site; its kernel runs in typed loop
+  regions, whose per-run cache keys up to eight metatables.
 
 - `examples/calls/method.lua` opens "Probe: obj:method() desugars to a
   method lookup + call. Every c:inc misses on the instance and resolves

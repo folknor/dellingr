@@ -214,27 +214,18 @@ spare for it.
 GET_FIELD and SELF read the site's cached position in any table receiver as
 a key-checked hint (`State::get_current_cached_field`, `Table::string_value_at`;
 the measurements and the refused shape-id IC are recorded there). What is
-left:
-
-- One position per site. A site whose receivers alternate between layouts
-  that hold the key at different positions misses on every switch and
-  refills from the keyed lookup. N positions per site cover the same hits a
-  per-site set of N shape guards would, with no table field; each failed
-  guess reads another slot of the receiver, where a shape guard would
-  compare an already-loaded id. Promote on a workload with persistent
-  alternating-offset misses.
-- SET_FIELD keeps the same-table entry only. A cross-receiver store hint
-  must prove what `GcHeap::overwrite_live_slot` requires (a live, non-nil
-  overwrite of a key other than `__index` through a token valid for the
-  current receiver), so it is not the read hint reused. Coverage only: the
-  read hint holds a position, never a value, so it is sound without it.
-- `bench/polymorphic` and `examples/fields/polymorphic.lua` (2 fields, a
-  numeric `for`) now run entirely in a typed loop region, so their header's
-  "per-callsite IC never hits" no longer describes them; `wide_sweep` is the
-  workload that exercises the dispatch hint.
-- The host hunter noted fresh option tables built by hosts get nothing from
-  identity caches; the position hint now serves them when they share a
-  layout.
+left is one position per site. A site whose receivers alternate between
+layouts that hold the key at different positions misses on every switch and
+refills from the keyed lookup. N positions per site cover the same hits a
+per-site set of N shape guards would, with no table field; each failed
+guess reads another slot of the receiver, where a shape guard would compare
+an already-loaded id. The same alternating shape is the only one where a
+`GET_FIELD`/`SET_FIELD` pair on one receiver and key would gain from
+sharing a cell (the read's refill would warm the store); the reasoning is at
+`Bytecode::assign_cache_slots`. No registered workload has it: promote
+either on one with persistent alternating-offset misses. A cross-receiver
+store hint is refused on cost, not soundness (reasoning at
+`State::store_field`).
 
 ### Compiler-recognized field-update fusion
 
@@ -370,42 +361,6 @@ it reads as many tables as the uncached miss, so it saved nothing on
 `bench/method_chain.lua`. The repeated direct attempt that cost it its time
 is gone since the register-native rewrite (each table read once per
 lookup; 85.3 to 64.7 ms warm, plantasjen, df80d81 against the rewrite).
-
-### GET_FIELD slow-path cache repopulation after `__index` resolution
-
-What: after `State::resolve_index` resolves through `__index`, the resolved value lives somewhere
-identifiable (the index table for the table-handler case). The method IC
-already caches this. The direct-field cache could also populate when the
-resolution happened to bottom out in a raw entry on a relevant table,
-even though that entry wasn't on the receiver itself.
-
-Why deferred: substantial overlap with the method IC, which already
-handles the OOP case. The remaining cases (multi-level `__index` chains
-without metatables in the middle) are uncommon.
-
----
-
-## Compiler-side ideas
-
-### GET/SET cache slot sharing
-
-What: when the compiler can prove a `OP_GET_FIELD` and `OP_SET_FIELD`
-refer to the same (receiver, key), assign them the same cache slot.
-Saves a slot per such pair and shares warmup state.
-
-Sketch: parser-time def-use analysis. For `self.count = self.count + 1`,
-both the GET and SET refer to `self`'s `count`. They could share an
-entry shape (table_ptr, version, index) since both lookups bottom out
-in the same table at the same index.
-
-Why deferred: requires DEF-USE analysis that the parser doesn't currently
-do. The memory savings are small (one cache slot per pair = ~24 bytes per
-shared site). The warmup-sharing benefit is one fewer slow-path call per
-new pair, which is bounded.
-
-Signal: profiling showing the parser is fast and we have headroom to add
-analysis passes, OR a workload where many distinct (receiver, key) pairs
-each get fewer than ~3 accesses (so warmup amortization matters).
 
 ---
 

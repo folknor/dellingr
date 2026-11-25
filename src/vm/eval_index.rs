@@ -124,7 +124,7 @@ impl State {
         // A different receiver goes to the keyed lookup: the dispatch hit
         // (`get_current_cached_field`) already tried the cached position as
         // a key-checked hint. Repeating it here behind the resolver call,
-        // with a refill, was measured at fea24a2 on bygg: no wall gain, and
+        // with a refill, was measured against fea24a2 on bygg: no wall gain, and
         // record_tables about 3 percent slower; past the call a Map probe
         // costs about what the position check and the refill do.
         if entry.table != ptr {
