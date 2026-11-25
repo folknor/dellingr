@@ -190,10 +190,7 @@ impl State {
                 };
                 let len = if let Some(bytes) = value.as_string(&self.heap) {
                     bytes.len()
-                } else if let Some(table) = value
-                    .as_object_ptr()
-                    .and_then(|ptr| self.heap.as_table_ref(ptr))
-                {
+                } else if let Some(table) = self.heap.table_of(value) {
                     table.array_len()
                 } else {
                     return Ok(None);
@@ -226,8 +223,8 @@ impl State {
                     return Ok(None);
                 }
                 let Some(table) = self.stack[idx + 1]
-                    .as_object_ptr()
-                    .and_then(|ptr| self.heap.as_table_ref(ptr))
+                    .as_table_ptr()
+                    .map(|ptr| self.heap.table(ptr))
                 else {
                     return Ok(None);
                 };
@@ -329,7 +326,7 @@ impl State {
         if n == 0 {
             return Ok(None);
         }
-        let name = self.stack[idx + 1].typ(&self.heap).as_str();
+        let name = self.stack[idx + 1].typ().as_str();
         self.enter_leaf(None)?;
         self.stack.truncate(idx);
         self.check_stack_slot_at(idx)?;
@@ -348,10 +345,7 @@ impl State {
             return Ok(None);
         }
         let table = self.stack[idx + 1];
-        let Some(ptr) = table
-            .as_object_ptr()
-            .filter(|&ptr| self.heap.as_table_ref(ptr).is_some())
-        else {
+        let Some(ptr) = table.as_table_ptr() else {
             return Ok(None);
         };
         let (key, value) = (self.stack[idx + 2], self.stack[idx + 3]);
@@ -359,10 +353,7 @@ impl State {
             return Ok(None);
         }
         self.enter_leaf(Some(Charge::Rawset))?;
-        self.heap
-            .edit_table(ptr)
-            .expect("the argument is a table")
-            .insert(key, value)?;
+        self.heap.edit_table(ptr).insert(key, value)?;
         self.stack[idx] = table;
         self.stack.truncate(idx + 1);
         Ok(Some(1))
@@ -439,9 +430,9 @@ impl State {
     /// The table argument of `table.insert` or `table.remove` when the raw
     /// storage path applies (a table whose metatable, if any, defines none
     /// of `__len`, `__index`, `__newindex`), with its border.
-    fn plain_sequence(&self, value: Val) -> Option<(super::object::ObjectPtr, usize)> {
-        let ptr = value.as_object_ptr()?;
-        let table = self.heap.as_table_ref(ptr)?;
+    fn plain_sequence(&self, value: Val) -> Option<(super::object::TablePtr, usize)> {
+        let ptr = value.as_table_ptr()?;
+        let table = self.heap.table(ptr);
         if self.has_sequence_metafields(table.get_metatable()) {
             return None;
         }
@@ -468,7 +459,6 @@ impl State {
         self.enter_leaf(Some(Charge::TableInsert))?;
         self.heap
             .edit_table(ptr)
-            .expect("the argument is a table")
             .array_insert_at_len(pos, len, value)?;
         self.stack.truncate(idx);
         Ok(Some(0))
@@ -499,11 +489,7 @@ impl State {
         self.enter_leaf(Some(Charge::TableRemove))?;
         self.stack.truncate(idx + 2);
         self.check_stack_space_at(idx + 1, 1)?;
-        let removed = self
-            .heap
-            .edit_table(ptr)
-            .expect("the argument is a table")
-            .array_remove_at_len(pos, len)?;
+        let removed = self.heap.edit_table(ptr).array_remove_at_len(pos, len)?;
         self.stack[idx] = removed;
         self.stack.truncate(idx + 1);
         Ok(Some(1))

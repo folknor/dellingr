@@ -17,6 +17,22 @@ figures are in reference/native-calls.md ("Current native bytes per level");
 the history of the largest cycle across both profiles is under "Native stack
 frames and cycles" below.
 
+## Typed object arenas, 2026-11-26
+
+Tables, Lua closures and gmatch iterators moved out of one shared
+`RawObject` arena into one arena per kind, and `Val` gained a tag per kind,
+so `typ` and every kind test read only the value word and a closure or
+iterator no longer occupies a table-sized slot (`Option<Closure>` is 24
+bytes; a table slot is unchanged). Matched `--commit` rounds on bygg,
+f26fc35 against the variant built as a local commit, three interleaved
+single-iteration cells each: `record_tables` 1.4-1.5 s to 1.3 s (3 of 3),
+`factory_closure` 4.4-4.5 s to 4.3-4.4 s, `gc_churn` 2.4 s to 2.3-2.4 s,
+`list_literals` 2.1 s to 2.0-2.1 s, `fill` 1.0 s to 993-1000 ms;
+`closure`, `same_obj_read` and `handler_reentry` flat. The release
+`native_bytes_per_level` peak fell from 1808 to 1792 bytes; the
+release-with-snapshot rows moved up to 32 bytes either way (the table in
+`native-calls.md`).
+
 ## Activation records keyed by runtime-cache identity, 2026-11-25
 
 A Lua call used to take two `Arc` owners: `classify_callee` cloned the

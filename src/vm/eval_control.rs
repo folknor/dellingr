@@ -29,13 +29,13 @@ impl State {
         let step_val = self.stack[slot + 2];
         let step = step_val
             .as_num()
-            .ok_or_else(|| self.type_error(TypeError::NumericForStep(step_val.typ(&self.heap))))?;
+            .ok_or_else(|| self.type_error(TypeError::NumericForStep(step_val.typ())))?;
         let end = end_val
             .as_num()
-            .ok_or_else(|| self.type_error(TypeError::NumericForLimit(end_val.typ(&self.heap))))?;
-        let start = start_val.as_num().ok_or_else(|| {
-            self.type_error(TypeError::NumericForInitialValue(start_val.typ(&self.heap)))
-        })?;
+            .ok_or_else(|| self.type_error(TypeError::NumericForLimit(end_val.typ())))?;
+        let start = start_val
+            .as_num()
+            .ok_or_else(|| self.type_error(TypeError::NumericForInitialValue(start_val.typ())))?;
         if check_numeric_for_condition(start, end, step) {
             for (local_slot, n) in (slot..).zip([start, end, step, start]) {
                 self.stack[local_slot] = Val::num(n);
@@ -141,9 +141,7 @@ impl State {
         // the state riding along unread. Neither enters `call_unguarded`.
         let rust_call = match iterator.kind() {
             ValKind::RustFn(f) => Some((f, state, control)),
-            _ => self
-                .gmatch_step_of(iterator)
-                .map(|step| (step, iterator, state)),
+            _ => Self::gmatch_step_of(iterator).map(|step| (step, iterator, state)),
         };
         if let Some((f, first, second)) = rust_call {
             return crate::native_call!(
@@ -215,12 +213,10 @@ impl State {
         cursor_slot: Option<u8>,
         caches: &RuntimeCaches,
     ) -> bool {
-        let Some(table_ptr) = state.as_object_ptr() else {
+        let Some(table_ptr) = state.as_table_ptr() else {
             return false;
         };
-        let Some(tbl) = self.heap.as_table_ref(table_ptr) else {
-            return false;
-        };
+        let tbl = self.heap.table(table_ptr);
 
         let cursor = caches.tfor_cursor(cursor_slot);
         let hint = match cursor.and_then(TforCursorSlot::get) {
@@ -253,7 +249,7 @@ impl State {
         control: Val,
         num_vars: u8,
     ) -> bool {
-        let (Some(old_index), Some(table)) = (control.as_num(), state.as_object_ptr()) else {
+        let (Some(old_index), Some(table)) = (control.as_num(), state.as_table_ptr()) else {
             return false;
         };
         match self.ipairs_step(table, old_index) {
@@ -270,13 +266,11 @@ impl State {
     /// iterator callback makes it, for the steps that need no callback: the
     /// one rule the dispatch loop's fast step and the typed ipairs region
     /// (`vm/numeric_loop.rs`) share. `Fallback` leaves the step to the
-    /// callback: a non-table state, an invalid control (the callback raises
+    /// callback: an invalid control (the callback raises
     /// the error), or a raw nil on a table with a metatable (`__index`).
     #[inline(always)]
-    pub(super) fn ipairs_step(&self, table: super::object::ObjectPtr, control: f64) -> IpairsStep {
-        let Some(tbl) = self.heap.as_table_ref(table) else {
-            return IpairsStep::Fallback;
-        };
+    pub(super) fn ipairs_step(&self, table: super::object::TablePtr, control: f64) -> IpairsStep {
+        let tbl = self.heap.table(table);
         let Some(key) = crate::lua_std::ipairs_next_index(control) else {
             return IpairsStep::Fallback;
         };

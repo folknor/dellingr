@@ -326,13 +326,9 @@ impl State {
         // out-of-line numeric leaf attempt is worth calling: only a closure
         // with a leaf plan pays for it, and `try_numeric_leaf` still owns
         // every reason to decline (`vm/numeric_loop.rs`).
-        let has_leaf = match self.stack[idx].kind() {
-            ValKind::Obj(ptr) => self
-                .heap
-                .as_lua_function_ref(ptr)
-                .map(|closure| closure.runtime.numeric_leaf.is_some()),
-            _ => None,
-        };
+        let has_leaf = self.stack[idx]
+            .as_closure_ptr()
+            .map(|ptr| self.heap.closure(ptr).runtime.numeric_leaf.is_some());
         match has_leaf {
             None => Frame::flush_local_cost(self, local_cost)?,
             Some(true) => {
@@ -376,11 +372,7 @@ impl State {
     /// resolves to a Lua function: resolution is not inspected here.
     #[inline(always)]
     fn publish_cost_unless_lua_callee(&mut self, idx: usize, local_cost: &mut u64) -> Result<()> {
-        let lua = match self.stack[idx].kind() {
-            ValKind::Obj(ptr) => self.heap.as_lua_function_ref(ptr).is_some(),
-            _ => false,
-        };
-        if lua {
+        if self.stack[idx].is_lua_closure() {
             Ok(())
         } else {
             Frame::flush_local_cost(self, local_cost)
@@ -696,23 +688,21 @@ impl State {
             // callable once `getmetatable("").__call` is set). This branch is
             // already off the function fast paths above.
             let metatable_ptr = match func_val.kind() {
-                ValKind::Obj(ptr) => self
+                ValKind::Obj(_) => self
                     .heap
-                    .as_table_ref(ptr)
+                    .table_of(func_val)
                     .and_then(super::table::Table::get_metatable),
                 ValKind::Str(_) => self.string_metatable,
                 _ => None,
             };
             let call_handler = metatable_ptr.map_or(Val::NIL, |mt_ptr| {
                 let call_key = self.meta_names.get(super::MetaName::Call);
-                self.heap
-                    .as_table_ref(mt_ptr)
-                    .map_or(Val::NIL, |mt| mt.get(&call_key))
+                self.heap.table(mt_ptr).get(&call_key)
             });
             if call_handler.is_nil() {
                 // Resolving a callable is execution, even when it has no
                 // handler, so this reaches the reporting boundary too.
-                break self.type_error(TypeError::FunctionCall(func_val.typ(&self.heap)));
+                break self.type_error(TypeError::FunctionCall(func_val.typ()));
             }
             // The receiver becomes the first argument.
             let Some(combined) = num_args.checked_add(1) else {
@@ -742,9 +732,7 @@ impl State {
             self.stack[idx] = call_handler;
             self.stack.insert(idx + 1, func_val);
             num_args = combined;
-            let handler_is_function = call_handler
-                .as_object_ptr()
-                .is_some_and(|ptr| self.heap.get(ptr).typ() == super::LuaType::Function);
+            let handler_is_function = call_handler.typ() == super::LuaType::Function;
             if !handler_is_function {
                 #[cfg(not(feature = "fault-injection"))]
                 let injected = false;
@@ -991,7 +979,7 @@ impl State {
                 text = crate::number_text::number_to_text(num);
                 text.as_bytes()
             } else {
-                return Err(self.type_error(TypeError::Concat(val.typ(&self.heap))));
+                return Err(self.type_error(TypeError::Concat(val.typ())));
             };
             if let Some(buffer) = buffer.as_mut() {
                 crate::limits::checked_string_growth(buffer.len(), bytes.len())?;
@@ -1156,23 +1144,16 @@ impl State {
             .drain(caller_start as usize..callee_start as usize);
     }
 
-    /// Classify a non-Rust callee by one borrow of its object: a Lua
-    /// function (with its bytecode, the rest of the closure not cloned), a
-    /// gmatch iterator, or anything else for `__call` resolution. It replaced
-    /// a Lua-function probe followed by a gmatch probe of the same object,
-    /// which cost the dev native frame of every re-entry through
-    /// `begin_call` 16 to 32 bytes; release frames did not move.
+    /// Classify a non-Rust callee by its tag. Only a closure needs an arena
+    /// read, to borrow its bytecode for admission.
     #[inline(always)]
     fn classify_callee(&self, func: Val) -> CalleeKind {
-        match func.kind() {
-            ValKind::Obj(ptr) => match self.heap.get(ptr) {
-                super::object::RawObject::LuaFn(closure) => {
-                    CalleeKind::Lua(LuaCallee::of(closure.bytecode()))
-                }
-                super::object::RawObject::Gmatch(_) => CalleeKind::Gmatch,
-                super::object::RawObject::Table(_) => CalleeKind::Other,
-            },
-            _ => CalleeKind::Other,
+        if let Some(ptr) = func.as_closure_ptr() {
+            CalleeKind::Lua(LuaCallee::of(self.heap.closure(ptr).bytecode()))
+        } else if func.is_gmatch() {
+            CalleeKind::Gmatch
+        } else {
+            CalleeKind::Other
         }
     }
 
@@ -1180,8 +1161,8 @@ impl State {
     /// its function slot.
     pub(super) fn admitted_frame(&self) -> Frame {
         let closure = self.stack[self.in_flight.stack_bottom - 1]
-            .as_object_ptr()
-            .and_then(|ptr| self.heap.as_lua_function_ref(ptr))
+            .as_closure_ptr()
+            .map(|ptr| self.heap.closure(ptr))
             .expect("an admitted Lua activation's function slot holds its closure");
         Frame::new(
             Arc::clone(&closure.runtime),
@@ -1514,7 +1495,7 @@ impl State {
         self.check_stack_space(1)?;
         let runtime = self.resolve_bytecode_runtime(bytecode)?;
         let obj = self.alloc_closure(runtime, Captures::EMPTY);
-        self.push_unchecked(Val::obj(obj));
+        self.push_unchecked(Val::lua_fn(obj));
         Ok(())
     }
 
@@ -1524,7 +1505,7 @@ impl State {
         &mut self,
         runtime: Arc<super::BytecodeRuntime>,
         upvalues: Captures,
-    ) -> super::object::ObjectPtr {
+    ) -> super::object::ClosurePtr {
         let identity = Arc::as_ptr(&runtime.bytecode) as usize;
         // No host callback or fallible operation occurs from this push through
         // its matching pop. The allocator's collection check must see the

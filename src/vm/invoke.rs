@@ -135,7 +135,7 @@ fn decode_with<T: for<'s> Convert<'s>>(state: &State, slot: usize, position: u8)
             index: position,
             detail,
             expected,
-            received: val.typ(&state.heap),
+            received: val.typ(),
         })
     })
 }

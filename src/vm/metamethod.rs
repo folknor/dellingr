@@ -24,7 +24,7 @@ use super::caches::{
 };
 use super::frame::Frame;
 use super::lua_val::Val;
-use super::object::ObjectPtr;
+use super::object::TablePtr;
 use super::table::SlotRef;
 use crate::error::{ErrorKind, TypeError};
 use crate::vm::lua_val::ValKind;
@@ -38,7 +38,7 @@ pub(super) enum IndexStart {
     Receiver,
     /// The receiver is a table whose raw lookup already missed; this is its
     /// metatable.
-    AfterRawMiss(ObjectPtr),
+    AfterRawMiss(TablePtr),
 }
 
 /// How an `__index` lookup resolved.
@@ -105,7 +105,7 @@ impl State {
     #[cold]
     #[inline(never)]
     fn index_handler_error(&self, handler: Val) -> super::Error {
-        self.type_error(TypeError::TableIndex(handler.typ(&self.heap)))
+        self.type_error(TypeError::TableIndex(handler.typ()))
     }
 
     /// Resolve `receiver[key]` up to the point where it answers or must call
@@ -188,21 +188,18 @@ impl State {
         // string receiver or a string handler on the way leaves routes out
         // and is the remaining gap, which a field-entry fill would not close.
         let mut method_fill = None;
-        let mut route_fill: Option<ObjectPtr> = None;
+        let mut route_fill: Option<TablePtr> = None;
         let (mut receiver, mut handler) = match start {
             IndexStart::AfterRawMiss(metatable) => {
-                let handler = self
-                    .heap
-                    .as_table_ref(metatable)
-                    .map_or(Val::NIL, |mt| mt.get(&index_key));
+                let handler = self.heap.table(metatable).get(&index_key);
                 (receiver, handler)
             }
             IndexStart::Receiver => match receiver.kind() {
                 ValKind::Obj(ptr) => {
-                    let Some((direct, metatable)) = self.get_table_field_direct(ptr, key, cache)
-                    else {
+                    let Some(ptr) = ptr.as_table() else {
                         return Err(self.index_handler_error(receiver));
                     };
+                    let (direct, metatable) = self.get_table_field_direct(ptr, key, cache);
                     if let Some(val) = direct {
                         return Ok(Some(val));
                     }
@@ -227,10 +224,7 @@ impl State {
                         }
                         return Ok(Some(val));
                     }
-                    let found = self
-                        .heap
-                        .as_table_ref(metatable)
-                        .and_then(|mt| mt.find_keyed(&index_key));
+                    let found = self.heap.table(metatable).find_keyed(&index_key);
                     let Some((index_field, handler)) = found else {
                         return Ok(Some(Val::NIL));
                     };
@@ -258,9 +252,8 @@ impl State {
         // lookup on a walk the route and method caches mostly skip does not
         // pay for either.
         loop {
-            if let Some(table_ptr) = handler.as_object_ptr()
-                && let Some(table) = self.heap.as_table_ref(table_ptr)
-            {
+            if let Some(table_ptr) = handler.as_table_ptr() {
+                let table = self.heap.table(table_ptr);
                 let val = match method_fill.take() {
                     Some((receiver_metatable, index_field)) => match table.find_slot(&key) {
                         Some((method_slot, method)) => {
@@ -307,9 +300,7 @@ impl State {
                 if !val.is_nil() {
                     return Ok(Some(val));
                 }
-                let next_mt = table
-                    .get_metatable()
-                    .and_then(|mt_ptr| self.heap.as_table_ref(mt_ptr));
+                let next_mt = table.get_metatable().map(|mt_ptr| self.heap.table(mt_ptr));
                 let next = next_mt.map_or(Val::NIL, |mt| mt.get(&index_key));
                 if next.is_nil() {
                     return Ok(Some(Val::NIL));
@@ -324,10 +315,8 @@ impl State {
                     if let Some(mt) = next_mt {
                         mt.mark_on_route();
                     }
-                    if *units == 0
-                        && let Some(mt) = self.heap.as_table_ref(receiver_metatable)
-                    {
-                        mt.mark_on_route();
+                    if *units == 0 {
+                        self.heap.table(receiver_metatable).mark_on_route();
                     }
                 }
                 // A table step that continues holds a unit until the lookup
@@ -340,7 +329,7 @@ impl State {
             }
             let calls = match handler.kind() {
                 // A Lua closure or a gmatch iterator.
-                ValKind::Obj(ptr) => self.heap.get(ptr).typ() == LuaType::Function,
+                ValKind::Obj(ptr) => ptr.typ() == LuaType::Function,
                 ValKind::RustFn(_) => true,
                 ValKind::Str(_) => {
                     // Routes run through tables only.
@@ -397,11 +386,8 @@ impl State {
             return Err(self.type_error(TypeError::TableIndex(LuaType::String)));
         };
         let index_key = self.meta_names.get(MetaName::Index);
-        let (handler, shape) = match self.heap.as_table_ref(mt_ptr) {
-            Some(mt) => match mt.find_slot(&index_key) {
-                Some((slot, handler)) => (handler, Some(slot)),
-                None => (Val::NIL, None),
-            },
+        let (handler, shape) = match self.heap.table(mt_ptr).find_slot(&index_key) {
+            Some((slot, handler)) => (handler, Some(slot)),
             None => (Val::NIL, None),
         };
         if handler.is_nil() {
@@ -409,9 +395,8 @@ impl State {
         }
         if let Some(cache) = cache
             && let Some(shape) = shape
-            && let Some(lib_ptr) = handler.as_object_ptr()
-            && let Some(tbl) = self.heap.as_table_ref(lib_ptr)
-            && let Some((slot, method)) = tbl.find_slot(&key)
+            && let Some(lib_ptr) = handler.as_table_ptr()
+            && let Some((slot, method)) = self.heap.table(lib_ptr).find_slot(&key)
         {
             self.string_mt_index_shape = Some(shape);
             cache.set_string_method(StringMethodCacheEntry {
@@ -425,12 +410,12 @@ impl State {
 
     /// The `__newindex` handler of table `ptr`'s metatable, or nil.
     #[inline(always)]
-    fn newindex_handler(&self, ptr: ObjectPtr) -> Val {
+    fn newindex_handler(&self, ptr: TablePtr) -> Val {
         let Some(mt) = self
             .heap
-            .as_table_ref(ptr)
-            .and_then(super::table::Table::get_metatable)
-            .and_then(|mt| self.heap.as_table_ref(mt))
+            .table(ptr)
+            .get_metatable()
+            .map(|mt| self.heap.table(mt))
         else {
             return Val::NIL;
         };
@@ -454,12 +439,8 @@ impl State {
     /// no presence lookup first; when false, presence decides whether
     /// `__newindex` is consulted. Reads one header when a metatable is set.
     #[inline(always)]
-    pub(super) fn newindex_absent(&self, mt: Option<ObjectPtr>) -> bool {
-        mt.is_none_or(|mt| {
-            self.heap
-                .as_table_ref(mt)
-                .is_none_or(super::table::Table::known_no_newindex)
-        })
+    pub(super) fn newindex_absent(&self, mt: Option<TablePtr>) -> bool {
+        mt.is_none_or(|mt| self.heap.table(mt).known_no_newindex())
     }
 
     /// Store `receiver.key = val` for a bytecode field write the set cache
@@ -480,11 +461,10 @@ impl State {
         cache: Option<&SetFieldLookupCacheSlot>,
         local_cost: &mut u64,
     ) -> Result<Option<u32>> {
-        let Some((ptr, mt)) = receiver.as_object_ptr().and_then(|ptr| {
-            self.heap
-                .as_table_ref(ptr)
-                .map(|tbl| (ptr, tbl.get_metatable()))
-        }) else {
+        let Some((ptr, mt)) = receiver
+            .as_table_ptr()
+            .map(|ptr| (ptr, self.heap.table(ptr).get_metatable()))
+        else {
             return Err(self.index_handler_error(receiver));
         };
         // With no metatable, or one known to hold no `__newindex`, there is
@@ -516,10 +496,7 @@ impl State {
         } else {
             key.as_string_ptr()
         };
-        let mut tbl = self
-            .heap
-            .edit_table(ptr)
-            .expect("checked to be a table just above");
+        let mut tbl = self.heap.edit_table(ptr);
         if raw {
             if let Some(name) = raw_string {
                 let slot = tbl.store_string_key(name, val);
@@ -545,9 +522,9 @@ impl State {
         // have dropped every other root of the receiver.
         let handler = self.newindex_handler(ptr);
         if !handler.is_nil() {
-            return self.resolve_newindex(Val::obj(ptr), handler, key, val, local_cost);
+            return self.resolve_newindex(Val::table(ptr), handler, key, val, local_cost);
         }
-        let mut tbl = self.heap.edit_table(ptr).expect("the receiver is a table");
+        let mut tbl = self.heap.edit_table(ptr);
         if let Some(name) = raw_string {
             let slot = tbl.store_string_key(name, val);
             Self::fill_set_cache(cache, ptr, slot);
@@ -558,7 +535,7 @@ impl State {
     }
 
     #[inline(always)]
-    fn fill_set_cache(cache: Option<&SetFieldLookupCacheSlot>, table: ObjectPtr, slot: SlotRef) {
+    fn fill_set_cache(cache: Option<&SetFieldLookupCacheSlot>, table: TablePtr, slot: SlotRef) {
         if let Some(cache) = cache {
             cache.set(FieldLookupCacheEntry { table, slot });
         }
@@ -570,20 +547,17 @@ impl State {
     #[inline(always)]
     pub(super) fn store_new_key(
         &mut self,
-        ptr: ObjectPtr,
+        ptr: TablePtr,
         key: Val,
         val: Val,
         local_cost: &mut u64,
     ) -> Result<Option<u32>> {
         let handler = self.newindex_handler(ptr);
         if handler.is_nil() {
-            self.heap
-                .edit_table(ptr)
-                .expect("the receiver is a table")
-                .insert(key, val)?;
+            self.heap.edit_table(ptr).insert(key, val)?;
             return Ok(None);
         }
-        self.resolve_newindex(Val::obj(ptr), handler, key, val, local_cost)
+        self.resolve_newindex(Val::table(ptr), handler, key, val, local_cost)
     }
 
     /// Resolve a store into `target`, whose raw lookup missed and whose
@@ -640,28 +614,20 @@ impl State {
         loop {
             let calls = match handler.kind() {
                 ValKind::Obj(ptr) => {
-                    if let Some(table) = self.heap.as_table_ref(ptr) {
+                    if let Some(ptr) = ptr.as_table() {
+                        let table = self.heap.table(ptr);
                         if self.newindex_absent(table.get_metatable()) {
                             // A terminal table step either way, and a raw
                             // store whether or not it holds the key: the
                             // insert is the one lookup.
-                            self.heap
-                                .edit_table(ptr)
-                                .expect("checked to be a table just above")
-                                .insert(key, val)?;
+                            self.heap.edit_table(ptr).insert(key, val)?;
                             return Ok(true);
                         }
-                        let existing = self
-                            .heap
-                            .as_table_ref(ptr)
-                            .and_then(|table| table.find_slot(&key));
+                        let existing = self.heap.table(ptr).find_slot(&key);
                         if let Some((slot, _)) = existing {
                             // A terminal table that holds the key: write
                             // through the slot just found, unit-free.
-                            let mut table = self
-                                .heap
-                                .edit_table(ptr)
-                                .expect("checked to be a table just above");
+                            let mut table = self.heap.edit_table(ptr);
                             if val.is_nil() {
                                 table.remove_slot(slot);
                             } else {
@@ -682,14 +648,11 @@ impl State {
                         // A terminal table step without the key, and with no
                         // `__newindex` of its own, stores raw and takes no
                         // unit.
-                        self.heap
-                            .edit_table(ptr)
-                            .expect("checked to be a table just above")
-                            .insert(key, val)?;
+                        self.heap.edit_table(ptr).insert(key, val)?;
                         return Ok(true);
                     }
                     // A Lua closure or a gmatch iterator.
-                    self.heap.get(ptr).typ() == LuaType::Function
+                    ptr.typ() == LuaType::Function
                 }
                 ValKind::RustFn(_) => true,
                 _ => false,

@@ -118,13 +118,16 @@ profile. Since the envelope split it is 4 MiB in dev and 2 MiB in release
 demand, not stack: raising it is replay-visible, so it waits for a script
 that legitimately nests calls made from Rust past 150.
 
-### 8-byte NaN-boxed `Val` (C-O7)
+### Per-kind arenas keep their high-water storage (2026-11-26)
 
-Residue: typed arenas with distinct table and closure tags (the 2026-11-17
-hunt's other half). `Val` is now an 8-byte NaN-boxed word, but its `Obj`
-tag names neither a table nor a closure, so access resolves the handle and
-examines `RawObject`, and `Val::typ` dereferences the heap. Two tags are
-spare for it.
+Tables, closures and gmatch iterators each have their own arena
+(`GcHeap`), so slots freed in one kind are never reused by another: a
+State that peaks on iterators and later on closures holds both peaks'
+slot vectors, and `Occupancy::sweep` walks each arena's summary vector to
+its historical length on every collection. An empty-arena early-out in the
+sweep is cheap; releasing an emptied arena's storage needs a proof that no
+weak handle (runtime caches between prunes) can alias a restarted
+generation. No workload has the alternating shape; promote on one.
 
 ---
 

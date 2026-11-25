@@ -399,7 +399,7 @@ impl State {
         let i = self.convert_idx(idx)?;
         let val = &self.stack[i];
         val.as_num()
-            .ok_or_else(|| self.type_error(super::TypeError::Arithmetic(val.typ(&self.heap))))
+            .ok_or_else(|| self.type_error(super::TypeError::Arithmetic(val.typ())))
     }
 
     /// `State::check_type` for a number followed by [`Self::to_number`], in
@@ -428,7 +428,7 @@ impl State {
             arg_number,
             func_name.as_deref(),
             LuaType::Number,
-            Some(value.typ(&self.heap)),
+            Some(value.typ()),
         );
         Err(self.error(ErrorKind::ArgError(e)))
     }
@@ -532,7 +532,7 @@ impl State {
                 idx,
                 function_name,
                 super::LuaType::String,
-                Some(val.typ(&self.heap)),
+                Some(val.typ()),
             ))),
         )
     }
@@ -546,14 +546,14 @@ impl State {
     /// For objects (tables/functions), the type is looked up in the heap.
     pub fn typ(&self, idx: isize) -> super::LuaType {
         self.at_index(idx)
-            .map_or(super::LuaType::Nil, |val| val.typ(&self.heap))
+            .map_or(super::LuaType::Nil, |val| val.typ())
     }
 
     /// Like [`State::typ`], but returns [`ErrorKind::InvalidStackIndex`]
     /// when the index is invalid.
     pub fn try_typ(&self, idx: isize) -> Result<super::LuaType> {
         self.check_poisoned()?;
-        self.at_index(idx).map(|val| val.typ(&self.heap))
+        self.at_index(idx).map(|val| val.typ())
     }
 
     /// Returns true if the values at the two indices are primitively equal.

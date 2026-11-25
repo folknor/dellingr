@@ -75,10 +75,10 @@ use crate::det_hash::{IndexMap as DetMap, map_with_capacity};
 use super::RustFnId;
 use super::global_env::{EnvRole, SavedEnvTable};
 use super::inventory::GcRoot;
-use super::object::{GmatchIter, GmatchObject, RawObject, StringPtr, Upvalue, UpvalueRef};
+use super::object::{GmatchIter, ObjectPtr, ObjectRef, StringPtr, TablePtr, Upvalue, UpvalueRef};
 use super::rng::VmRng;
 use super::table::{InvalidTableKey, NormalizedTableKey, TableKeyInput, normalize_table_key};
-use super::{ObjectPtr, PointerIdKey, State, Val};
+use super::{PointerIdKey, State, Val};
 use crate::COST_MODEL_VERSION;
 use crate::compiler::{Bytecode, UpvalueDesc};
 use crate::cost_meter::CostState;
@@ -120,7 +120,7 @@ fn env_token(role: EnvRole) -> &'static str {
 }
 
 /// Object -> token for the environment tables (not the global table).
-pub(super) fn environment_tokens(state: &State) -> BTreeMap<ObjectPtr, &'static str> {
+pub(super) fn environment_tokens(state: &State) -> BTreeMap<TablePtr, &'static str> {
     state
         .global_env
         .env_tables()
@@ -542,7 +542,7 @@ enum PathTask {
 enum PathObjectChildren {
     Table {
         entries: Vec<(Val, Val)>,
-        metatable: Option<ObjectPtr>,
+        metatable: Option<TablePtr>,
     },
     Closure(super::object::Captures),
 }
@@ -624,7 +624,7 @@ impl<'a> PathFinder<'a> {
                     }
                     ValKind::Obj(ptr) if self.env_reverse.contains_key(&ptr) => {
                         if self.environment_objects.insert(ptr) {
-                            let table = self.state.heap.as_table_ref(ptr)?;
+                            let table = self.state.heap.table(ptr.as_table()?);
                             let metatable = table.get_metatable();
                             let (_, _, entries) = table.snapshot_entries();
                             if let Some(metatable) = metatable {
@@ -634,7 +634,7 @@ impl<'a> PathFinder<'a> {
                                     PathSegment::Metatable,
                                 );
                                 tasks.push(PathTask::Value {
-                                    val: Val::obj(metatable),
+                                    val: Val::table(metatable),
                                     path: child_path,
                                 });
                             }
@@ -666,20 +666,22 @@ impl<'a> PathFinder<'a> {
                     _ => {}
                 },
                 PathTask::Object { ptr, path } => {
-                    let children = match self.state.heap.get(ptr) {
-                        RawObject::Table(table) => {
+                    let children = match ptr.view() {
+                        ObjectRef::Table(ptr) => {
+                            let table = self.state.heap.table(ptr);
                             let (_, _, entries) = table.snapshot_entries();
                             PathObjectChildren::Table {
                                 entries,
                                 metatable: table.get_metatable(),
                             }
                         }
-                        RawObject::LuaFn(closure) => {
+                        ObjectRef::LuaFn(ptr) => {
+                            let closure = self.state.heap.closure(ptr);
                             PathObjectChildren::Closure(closure.upvalues.clone())
                         }
                         // Only strings hang off an iterator, and no
                         // unregistered function is reachable through one.
-                        RawObject::Gmatch(_) => continue,
+                        ObjectRef::Gmatch(_) => continue,
                     };
                     match children {
                         PathObjectChildren::Table { entries, metatable } => {
@@ -690,7 +692,7 @@ impl<'a> PathFinder<'a> {
                                     PathSegment::Metatable,
                                 );
                                 tasks.push(PathTask::Value {
-                                    val: Val::obj(metatable),
+                                    val: Val::table(metatable),
                                     path: child_path,
                                 });
                             }
@@ -1074,11 +1076,7 @@ impl<'a> SaveBuilder<'a> {
     /// survives whether or not any saved value still references it.
     fn encode_globals(&mut self) -> Result<(SavedObject, Vec<SavedVal>), SaveError> {
         let ptr = self.state.global_env.table();
-        let table = self
-            .state
-            .heap
-            .as_table_ref(ptr)
-            .ok_or(SaveError::from(SaveFault::EnvironmentObjectNotTable))?;
+        let table = self.state.heap.table(ptr);
         let (array_len, array_slots, entries) = table.snapshot_entries();
         let metatable = table.get_metatable();
         let array_slots = u32::try_from(array_slots)
@@ -1108,7 +1106,7 @@ impl<'a> SaveBuilder<'a> {
         let metatable = metatable
             .map(|mt| {
                 self.encode_environment_root(
-                    Val::obj(mt),
+                    Val::table(mt),
                     GLOBALS_TOKEN,
                     EnvironmentPart::Metatable,
                 )
@@ -1136,7 +1134,7 @@ impl<'a> SaveBuilder<'a> {
     /// carries it: that is what keeps a setup value for a key the save holds
     /// from silently winning in some saves and losing in others.
     fn encode_env_tables(&mut self) -> Result<Vec<SavedEnvRecord>, SaveError> {
-        let canonical: BTreeMap<&'static str, ObjectPtr> = self
+        let canonical: BTreeMap<&'static str, TablePtr> = self
             .state
             .global_env
             .env_tables()
@@ -1148,11 +1146,7 @@ impl<'a> SaveBuilder<'a> {
             // The table's rendered identity survives whether or not any saved
             // value still references it, as for the global table: its token
             // is in `env_reverse` either way.
-            let table = self
-                .state
-                .heap
-                .as_table_ref(ptr)
-                .ok_or(SaveError::from(SaveFault::EnvironmentObjectNotTable))?;
+            let table = self.state.heap.table(ptr);
             let (array_len, array_slots, entries) = table.snapshot_entries();
             let metatable = table.get_metatable();
             let array_slots = u32::try_from(array_slots)
@@ -1166,7 +1160,7 @@ impl<'a> SaveBuilder<'a> {
             }
             let metatable = metatable
                 .map(|mt| {
-                    self.encode_environment_root(Val::obj(mt), token, EnvironmentPart::Metatable)
+                    self.encode_environment_root(Val::table(mt), token, EnvironmentPart::Metatable)
                 })
                 .transpose()?;
             let state = self.state;
@@ -1372,8 +1366,9 @@ impl<'a> SaveBuilder<'a> {
         id: u32,
         tasks: &mut Vec<EncodeTask>,
     ) -> Result<(), SaveError> {
-        let pending = match self.state.heap.get(ptr) {
-            RawObject::Table(table) => {
+        let pending = match ptr.view() {
+            ObjectRef::Table(ptr) => {
+                let table = self.state.heap.table(ptr);
                 let (array_len, array_slots, entries) = table.snapshot_entries();
                 // MAX_ARRAY_LEN keeps the logical length below 2^53.
                 let array_len = array_len as u64;
@@ -1383,7 +1378,7 @@ impl<'a> SaveBuilder<'a> {
                 let metatable = table.get_metatable();
                 if let Some(mt) = metatable {
                     tasks.push(EncodeTask::Value {
-                        val: Val::obj(mt),
+                        val: Val::table(mt),
                         destination: ValueDestination::Metatable { object: id },
                     });
                 }
@@ -1410,7 +1405,8 @@ impl<'a> SaveBuilder<'a> {
                     metatable: metatable.map(|_| SavedVal::Nil),
                 }
             }
-            RawObject::LuaFn(closure) => {
+            ObjectRef::LuaFn(ptr) => {
+                let closure = self.state.heap.closure(ptr);
                 let chunk = self.encode_bytecode(closure.bytecode())?;
                 let captures = closure.upvalues.as_slice();
                 for (idx, uv_ref) in captures.iter().copied().enumerate().rev() {
@@ -1425,44 +1421,38 @@ impl<'a> SaveBuilder<'a> {
                     upvalues: vec![0; captures.len()],
                 }
             }
-            RawObject::Gmatch(GmatchObject {
-                iter:
-                    GmatchIter::General {
-                        subject,
-                        pattern,
-                        pos,
-                        resumed,
-                    },
-                ..
-            }) => {
-                let (subject, pattern, pos, resumed) = (*subject, *pattern, *pos, *resumed);
-                tasks.push(EncodeTask::Value {
-                    val: Val::str(pattern),
-                    destination: ValueDestination::GmatchString {
-                        object: id,
-                        pattern: true,
-                    },
-                });
-                tasks.push(EncodeTask::Value {
-                    val: Val::str(subject),
-                    destination: ValueDestination::GmatchString {
-                        object: id,
-                        pattern: false,
-                    },
-                });
-                SavedObject::GmatchIter {
-                    subject: SavedVal::Nil,
-                    pattern: SavedVal::Nil,
-                    pos: pos as u64,
+            ObjectRef::Gmatch(ptr) => match self.state.heap.gmatch(ptr) {
+                GmatchIter::General {
+                    subject,
+                    pattern,
+                    pos,
                     resumed,
+                } => {
+                    tasks.push(EncodeTask::Value {
+                        val: Val::str(pattern),
+                        destination: ValueDestination::GmatchString {
+                            object: id,
+                            pattern: true,
+                        },
+                    });
+                    tasks.push(EncodeTask::Value {
+                        val: Val::str(subject),
+                        destination: ValueDestination::GmatchString {
+                            object: id,
+                            pattern: false,
+                        },
+                    });
+                    SavedObject::GmatchIter {
+                        subject: SavedVal::Nil,
+                        pattern: SavedVal::Nil,
+                        pos: pos as u64,
+                        resumed,
+                    }
                 }
-            }
-            RawObject::Gmatch(GmatchObject {
-                iter: GmatchIter::Empty { pos, len },
-                ..
-            }) => SavedObject::GmatchEmptyIter {
-                pos: *pos as u64,
-                len: *len as u64,
+                GmatchIter::Empty { pos, len } => SavedObject::GmatchEmptyIter {
+                    pos: pos as u64,
+                    len: len as u64,
+                },
             },
         };
         // The expansion task is the next one popped after the reference
@@ -1758,9 +1748,9 @@ fn encode_save(payload: &SavePayload) -> Result<Vec<u8>, SaveError> {
 fn build_env_reverse(state: &State) -> BTreeMap<ObjectPtr, String> {
     let mut reverse: BTreeMap<ObjectPtr, String> = environment_tokens(state)
         .into_iter()
-        .map(|(ptr, token)| (ptr, token.to_owned()))
+        .map(|(ptr, token)| (ptr.into(), token.to_owned()))
         .collect();
-    reverse.insert(state.global_env.table(), GLOBALS_TOKEN.to_owned());
+    reverse.insert(state.global_env.table().into(), GLOBALS_TOKEN.to_owned());
     reverse
 }
 
@@ -1768,8 +1758,8 @@ fn build_env_reverse(state: &State) -> BTreeMap<ObjectPtr, String> {
 /// rebuilt record so saved `EnvObj` tokens resolve to the new objects.
 /// Loading does not reconstruct token names from builtin names or literals;
 /// capture uses this module's token schema on both sides of the round trip.
-fn build_env_forward(state: &State) -> BTreeMap<String, ObjectPtr> {
-    let mut forward: BTreeMap<String, ObjectPtr> = environment_tokens(state)
+fn build_env_forward(state: &State) -> BTreeMap<String, TablePtr> {
+    let mut forward: BTreeMap<String, TablePtr> = environment_tokens(state)
         .into_iter()
         .map(|(ptr, token)| (token.to_owned(), ptr))
         .collect();
@@ -1852,12 +1842,12 @@ fn materialize_payload(
 
     let mut objects = Vec::with_capacity(payload.objects.len());
     for obj in &payload.objects {
-        let ptr = match obj {
+        let value = match obj {
             // Tables are filled (and sized) in the second pass via
             // rebuild_from_snapshot, so allocate an empty shell here. None of
             // these allocators run GC, which is what keeps the half-built graph
             // alive until the final collect.
-            SavedObject::Table { .. } => state.heap.no_gc_allocator().alloc_table(),
+            SavedObject::Table { .. } => Val::table(state.heap.no_gc_allocator().alloc_table()),
             SavedObject::Closure {
                 chunk,
                 upvalues: saved_upvalues,
@@ -1875,15 +1865,15 @@ fn materialize_payload(
                     .collect::<Result<Vec<_>, _>>()?;
                 let refs = super::object::Captures::from_exact(refs.into_iter());
                 let runtime = state.resolve_bytecode_runtime_no_gc(bc);
-                state.heap.no_gc_allocator().alloc_lua_fn(runtime, refs)
+                Val::lua_fn(state.heap.no_gc_allocator().alloc_lua_fn(runtime, refs))
             }
             SavedObject::GmatchIter { .. } | SavedObject::GmatchEmptyIter { .. } => {
                 let iter = materialize_gmatch(obj, &strings, objects.len())?;
                 let program = state.gmatch_program(&iter);
-                state.heap.no_gc_allocator().alloc_gmatch(iter, program)
+                Val::gmatch(state.heap.no_gc_allocator().alloc_gmatch(iter, program))
             }
         };
-        objects.push(ptr);
+        objects.push(value);
     }
 
     let ctx = DecodeCtx {
@@ -1937,10 +1927,8 @@ fn materialize_payload(
                 // object is only known here.
                 let metatable = match metatable {
                     None => None,
-                    Some(mt) => match decode_val(mt, &ctx)?.kind() {
-                        ValKind::Obj(mt_ptr) if state.heap.as_table_ref(mt_ptr).is_some() => {
-                            Some(mt_ptr)
-                        }
+                    Some(mt) => match decode_val(mt, &ctx)?.as_table_ptr() {
+                        Some(mt_ptr) => Some(mt_ptr),
                         _ => {
                             return Err(corrupt_arena(
                                 CorruptionReason::Table(TableCorruption::MetatableNotTable),
@@ -1950,14 +1938,14 @@ fn materialize_payload(
                         }
                     },
                 };
-                let ptr = objects[idx];
-                let mut table = state.heap.edit_table(ptr).ok_or_else(|| {
+                let ptr = objects[idx].as_table_ptr().ok_or_else(|| {
                     corrupt_arena(
                         CorruptionReason::Table(TableCorruption::MaterializedWrongType),
                         idx,
                         SaveLocation::Objects,
                     )
                 })?;
+                let mut table = state.heap.edit_table(ptr);
                 // The verifier bounds `array_len` by MAX_ARRAY_LEN, so it fits.
                 let array_len: usize = crate::saturate::saturating_cast(*array_len);
                 table
@@ -2059,7 +2047,6 @@ fn restore_environment(
     ctx: &DecodeCtx<'_>,
 ) -> Result<(), SnapshotError> {
     let globals = decode_env_table(
-        state,
         &payload.globals,
         &payload.global_pins,
         SaveLocation::Globals,
@@ -2075,7 +2062,6 @@ fn restore_environment(
         env.push((
             ptr,
             decode_env_table(
-                state,
                 &record.table,
                 &record.pins,
                 SaveLocation::EnvironmentTable(index),
@@ -2117,7 +2103,6 @@ fn restore_environment(
 /// checked for uniqueness (the verifier can only check them in saved form),
 /// its metatable and its pins.
 fn decode_env_table(
-    state: &State,
     table: &SavedObject,
     pins: &[SavedVal],
     location: SaveLocation,
@@ -2157,8 +2142,8 @@ fn decode_env_table(
     }
     let metatable = match metatable {
         None => None,
-        Some(mt) => match decode_val(mt, ctx)?.kind() {
-            ValKind::Obj(mt_ptr) if state.heap.as_table_ref(mt_ptr).is_some() => Some(mt_ptr),
+        Some(mt) => match decode_val(mt, ctx)?.as_table_ptr() {
+            Some(mt_ptr) => Some(mt_ptr),
             _ => {
                 return Err(corrupt_arena(
                     CorruptionReason::Table(TableCorruption::MetatableNotTable),
@@ -2244,7 +2229,7 @@ fn upvalues_ref(upvalues: &[UpvalueRef], id: u32) -> Result<&UpvalueRef, Snapsho
     })
 }
 
-fn object_ref(objects: &[ObjectPtr], id: u32) -> Result<&ObjectPtr, SnapshotError> {
+fn object_ref(objects: &[Val], id: u32) -> Result<&Val, SnapshotError> {
     objects.get(id as usize).ok_or_else(|| {
         corrupt_arena(
             CorruptionReason::IdOutOfRange(SavedReference::Object),
@@ -2256,8 +2241,8 @@ fn object_ref(objects: &[ObjectPtr], id: u32) -> Result<&ObjectPtr, SnapshotErro
 
 struct DecodeCtx<'a> {
     strings: &'a [super::object::StringPtr],
-    objects: &'a [ObjectPtr],
-    env_forward: &'a BTreeMap<String, ObjectPtr>,
+    objects: &'a [Val],
+    env_forward: &'a BTreeMap<String, TablePtr>,
     fn_forward: &'a BTreeMap<Cow<'static, str>, RustFnId>,
 }
 
@@ -2402,7 +2387,7 @@ fn decode_val(saved: &SavedVal, ctx: &DecodeCtx<'_>) -> Result<Val, SnapshotErro
                 )
             },
         )?)),
-        SavedVal::Obj(id) => Ok(Val::obj(*object_ref(ctx.objects, *id)?)),
+        SavedVal::Obj(id) => object_ref(ctx.objects, *id).copied(),
         SavedVal::Fn(id) => ctx
             .fn_forward
             .get(id.as_str())
@@ -2413,7 +2398,7 @@ fn decode_val(saved: &SavedVal, ctx: &DecodeCtx<'_>) -> Result<Val, SnapshotErro
             .env_forward
             .get(token)
             .copied()
-            .map(Val::obj)
+            .map(Val::table)
             .ok_or_else(|| SnapshotError::UnknownEnvObject(token.clone())),
     }
 }
@@ -4983,11 +4968,7 @@ mod tests {
             .find(|(_, token)| *token == "math")
             .expect("math is an environment table");
         let key = Val::str(state.heap.find_string(key).expect("the key is interned"));
-        state
-            .heap
-            .as_table_ref(math)
-            .expect("math is a table")
-            .get(&key)
+        state.heap.table(math).get(&key)
     }
 
     #[test]

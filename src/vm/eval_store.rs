@@ -4,7 +4,7 @@ use super::State;
 use super::Val;
 use super::caches::{FieldLookupCacheEntry, SetFieldLookupCacheSlot};
 use super::frame::Frame;
-use super::object::ObjectPtr;
+use super::object::TablePtr;
 
 impl State {
     /// `R[table][key] = val` without temporaries: a plain table, or one
@@ -29,8 +29,8 @@ impl State {
         val: Val,
     ) -> Result<bool> {
         let tbl_val = self.stack[table_idx];
-        let ptr = tbl_val.as_object_ptr();
-        match ptr.and_then(|ptr| self.heap.edit_table(ptr)) {
+        let ptr = tbl_val.as_table_ptr();
+        match ptr.map(|ptr| self.heap.edit_table(ptr)) {
             Some(mut tbl) => {
                 let mt = tbl.get_metatable();
                 if mt.is_none() {
@@ -45,7 +45,7 @@ impl State {
                     )
                 }
             }
-            None => Err(self.type_error(TypeError::TableIndex(tbl_val.typ(&self.heap)))),
+            None => Err(self.type_error(TypeError::TableIndex(tbl_val.typ()))),
         }
     }
 
@@ -54,13 +54,13 @@ impl State {
     #[inline(never)]
     fn store_through_metatable(
         &mut self,
-        ptr: ObjectPtr,
-        mt: Option<ObjectPtr>,
+        ptr: TablePtr,
+        mt: Option<TablePtr>,
         key: Val,
         val: Val,
     ) -> Result<bool> {
         let absent = self.newindex_absent(mt);
-        let mut tbl = self.heap.edit_table(ptr).expect("the receiver is a table");
+        let mut tbl = self.heap.edit_table(ptr);
         if absent {
             // A metatable known to hold no `__newindex` makes the store raw
             // whether or not the key is present, so the insert is the only
@@ -94,11 +94,8 @@ impl State {
         if let Some(s) = val.as_string(&self.heap) {
             return Ok(Some(Val::num(s.len() as f64)));
         }
-        let Some(tbl) = val
-            .as_object_ptr()
-            .and_then(|ptr| self.heap.as_table_ref(ptr))
-        else {
-            return Err(self.type_error(TypeError::Length(val.typ(&self.heap))));
+        let Some(tbl) = self.heap.table_of(val) else {
+            return Err(self.type_error(TypeError::Length(val.typ())));
         };
         // The border is computed only when no handler replaces it.
         let handler = self.metatable_field(tbl.get_metatable(), super::MetaName::Len);
@@ -113,7 +110,7 @@ impl State {
     #[inline(always)]
     pub(super) fn try_set_field_cached(
         &mut self,
-        ptr: ObjectPtr,
+        ptr: TablePtr,
         key: Val,
         val: Val,
         cache: &SetFieldLookupCacheSlot,
@@ -125,27 +122,13 @@ impl State {
         if entry.table != ptr {
             return false;
         }
-        // Validate under a shared borrow: `heap.as_table` moves the global
-        // table's mutation epoch, which a miss must not do.
-        let (slot, renewed) = {
-            let Some(tbl) = self.heap.as_table_ref(ptr) else {
-                return false;
-            };
-            if tbl.slot_is_current(entry.slot) {
-                (entry.slot, false)
-            } else {
-                let Some((slot, _)) = tbl.renew_slot(entry.slot, key) else {
-                    return false;
-                };
-                (slot, true)
-            }
+        // This cache is filled for live fields other than `__index`.
+        let Some(slot) = self.heap.overwrite_cached_slot(ptr, entry.slot, key, val) else {
+            return false;
         };
-        // A live overwrite under the site's key, never `__index` (the set
-        // cache is not filled for it), so inherited routes stay standing.
-        let did_set = self.heap.overwrite_live_slot(ptr, slot, val);
-        if did_set && renewed {
+        if slot != entry.slot {
             cache.set(FieldLookupCacheEntry { table: ptr, slot });
         }
-        did_set
+        true
     }
 }

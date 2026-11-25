@@ -169,7 +169,7 @@ use super::caches::{FieldLookupCacheEntry, FieldLookupCacheSlot, SetFieldLookupC
 use super::eval::FRAME_HEADROOM;
 use super::eval_control::IpairsStep;
 use super::frame::Frame;
-use super::object::{ObjectPtr, Upvalue};
+use super::object::{TablePtr, Upvalue};
 use super::table::SlotRef;
 use crate::compiler::Bytecode;
 use crate::cost_meter::CostState;
@@ -531,7 +531,7 @@ enum TableSource {
 const MAX_FIELD_SITES: usize = 16;
 
 /// A field leaf's sites resolved to live slots, in site order.
-type FieldSlots = [Option<(ObjectPtr, SlotRef)>; MAX_FIELD_SITES];
+type FieldSlots = [Option<(TablePtr, SlotRef)>; MAX_FIELD_SITES];
 
 /// One field a leaf reads or stores: a receiver source and a key literal,
 /// shared by every `GET_FIELD` and `SET_FIELD` of the body that names both.
@@ -2548,7 +2548,7 @@ impl Resolved {
 /// record (`Callee::Dynamic`): the receiver metatable it was found through,
 /// the method, its runtime (which holds the leaf plan) and its field sites.
 struct RegionMethod {
-    meta: ObjectPtr,
+    meta: TablePtr,
     method: Val,
     runtime: Arc<BytecodeRuntime>,
     /// The leaf's upvalue field sites, resolved at admission.
@@ -3099,27 +3099,24 @@ impl State {
         // `IPAIRS` is the head's own test (`run_control_shape`).
         let ipairs_table = match region.head {
             Head::Ipairs { base: first, .. } if IPAIRS => {
-                match self.stack[base + usize::from(first) + 1].kind() {
-                    ValKind::Obj(ptr) if self.heap.as_table_ref(ptr).is_some() => Some(ptr),
-                    _ => return Ok(()),
-                }
+                let Some(ptr) = self.stack[base + usize::from(first) + 1].as_table_ptr() else {
+                    return Ok(());
+                };
+                Some(ptr)
             }
             _ => None,
         };
         let mut exhausted: Option<(usize, u8)> = None;
-        let mut tables = [None::<ObjectPtr>; MAX_INDEXED];
+        let mut tables = [None::<TablePtr>; MAX_INDEXED];
         // bounded: at most MAX_INDEXED indexed reads
         for (table, &(receiver, _)) in tables.iter_mut().zip(&body.indexed) {
             let value = match receiver {
                 Receiver::Upvalue(index) => self.upvalue_value(frame.upvalues.as_slice(), index),
                 Receiver::Register(register) => self.stack[base + usize::from(register)],
             };
-            let ValKind::Obj(ptr) = value.kind() else {
+            let Some(ptr) = value.as_table_ptr() else {
                 return Ok(());
             };
-            if self.heap.as_table_ref(ptr).is_none() {
-                return Ok(());
-            }
             *table = Some(ptr);
         }
         let mut keys = [Val::NIL; MAX_RECORD_SITES];
@@ -3140,7 +3137,7 @@ impl State {
         let mut methods: [Vec<RegionMethod>; MAX_CALLS] = Default::default();
         // Per call site: the method and receiver a method lookup on a record
         // found this pass, and the cache entry.
-        let mut current = [(Val::NIL, None::<ObjectPtr>, 0usize); MAX_CALLS];
+        let mut current = [(Val::NIL, None::<TablePtr>, 0usize); MAX_CALLS];
         let mut method_keys = [Val::NIL; MAX_CALLS];
         // A method's field sites this pass, resolved before its leaf runs.
         let mut method_slots: FieldSlots = [None; MAX_FIELD_SITES];
@@ -3167,8 +3164,8 @@ impl State {
                 }
             }
         }
-        let mut records = [None::<ObjectPtr>; MAX_RECORDS];
-        let mut found = [None::<(ObjectPtr, SlotRef)>; MAX_RECORD_SITES];
+        let mut records = [None::<TablePtr>; MAX_RECORDS];
+        let mut found = [None::<(TablePtr, SlotRef)>; MAX_RECORD_SITES];
         let step_pc = region.step_pc;
         let mut written: u32 = 0;
         let mut published: u32 = 0;
@@ -3232,11 +3229,8 @@ impl State {
                             let (_, exit) = body.indexed[usize::from(op.b)];
                             let table = tables[usize::from(op.b) % MAX_INDEXED]
                                 .expect("every indexed receiver was resolved at entry");
-                            let value = self
-                                .heap
-                                .as_table_ref(table)
-                                .map(|tbl| tbl.get_number(x[at(op.c)]));
-                            let Some(n) = value.and_then(|value| value.as_num()) else {
+                            let value = self.heap.table(table).get_number(x[at(op.c)]);
+                            let Some(n) = value.as_num() else {
                                 *ip = exit;
                                 break 'pass Ok(());
                             };
@@ -3248,18 +3242,11 @@ impl State {
                             let (_, exit) = body.indexed[usize::from(op.b)];
                             let table = tables[usize::from(op.b) % MAX_INDEXED]
                                 .expect("every indexed receiver was resolved at entry");
-                            let value = self
-                                .heap
-                                .as_table_ref(table)
-                                .map(|tbl| tbl.get_number(x[at(op.c)]));
-                            let Some(record) = value.and_then(|value| value.as_object_ptr()) else {
+                            let value = self.heap.table(table).get_number(x[at(op.c)]);
+                            let Some(record) = value.as_table_ptr() else {
                                 *ip = exit;
                                 break 'pass Ok(());
                             };
-                            if self.heap.as_table_ref(record).is_none() {
-                                *ip = exit;
-                                break 'pass Ok(());
-                            }
                             let id = usize::from(op.a) % MAX_RECORDS;
                             records[id] = Some(record);
                             let (register, slot) = body.records[id];
@@ -3267,7 +3254,7 @@ impl State {
                             // leaves it: no exit publishes an older number over
                             // it, and the next checkpoint republishes a number
                             // written after it.
-                            self.stack[base + usize::from(register)] = Val::obj(record);
+                            self.stack[base + usize::from(register)] = Val::table(record);
                             if let Some(slot) = slot {
                                 written &= !(1 << slot);
                                 published &= !(1 << slot);
@@ -3281,14 +3268,10 @@ impl State {
                             let id = usize::from(op.a) % MAX_RECORDS;
                             let (register, _) = body.records[id];
                             let value = self.stack[base + usize::from(register)];
-                            let ValKind::Obj(record) = value.kind() else {
+                            let Some(record) = value.as_table_ptr() else {
                                 *ip = region.body_pc;
                                 break 'pass Ok(());
                             };
-                            if self.heap.as_table_ref(record).is_none() {
-                                *ip = region.body_pc;
-                                break 'pass Ok(());
-                            }
                             records[id] = Some(record);
                         }
                         OpKind::RecordRead if RECORDS => {
@@ -3608,7 +3591,7 @@ impl State {
                 Some(resolved) => (resolved.callee, resolved.receiver),
                 None => {
                     let (method, receiver, _) = current[index];
-                    (method, receiver.map_or(Val::NIL, Val::obj))
+                    (method, receiver.map_or(Val::NIL, Val::table))
                 }
             };
             self.stack[function] = callee;
@@ -3677,11 +3660,11 @@ impl State {
     #[inline(always)]
     fn record_slot(
         &self,
-        table: ObjectPtr,
+        table: TablePtr,
         key: Val,
-        found: &mut Option<(ObjectPtr, SlotRef)>,
+        found: &mut Option<(TablePtr, SlotRef)>,
     ) -> Option<(SlotRef, Val)> {
-        let tbl = self.heap.as_table_ref(table)?;
+        let tbl = self.heap.table(table);
         if let Some((last, slot)) = *found {
             if last == table
                 && let Some(value) = tbl.read_slot(slot)
@@ -3769,10 +3752,7 @@ impl State {
                 // region runs captures a register or changes the depth.
                 Callee::Dynamic { .. } => continue,
             };
-            let ValKind::Obj(ptr) = value.kind() else {
-                return false;
-            };
-            let Some(closure) = self.heap.as_lua_function_ref(ptr) else {
+            let Some(closure) = self.heap.closure_of(value) else {
                 return false;
             };
             let Some(leaf) = closure.runtime.numeric_leaf.as_ref() else {
@@ -3900,14 +3880,14 @@ impl State {
     /// run here (`State::admit_method`).
     fn region_method_entry(
         &self,
-        table: ObjectPtr,
+        table: TablePtr,
         key: Val,
         entries: &mut Vec<RegionMethod>,
         site: &CallSite,
         base: usize,
         relied: &[Val],
     ) -> Option<usize> {
-        let tbl = self.heap.as_table_ref(table)?;
+        let tbl = self.heap.table(table);
         if !tbl.get(&key).is_nil() {
             return None;
         }
@@ -3918,7 +3898,7 @@ impl State {
         if entries.len() >= MAX_METHOD_CLASSES {
             return None;
         }
-        let method = self.region_method(Val::obj(table), key)?;
+        let method = self.region_method(Val::table(table), key)?;
         entries.push(self.admit_method(meta, method, site, base, relied)?);
         Some(entries.len() - 1)
     }
@@ -3933,16 +3913,13 @@ impl State {
     /// receiver sites are found per pass (`State::method_fields`).
     fn admit_method(
         &self,
-        meta: ObjectPtr,
+        meta: TablePtr,
         method: Val,
         site: &CallSite,
         base: usize,
         relied: &[Val],
     ) -> Option<RegionMethod> {
-        let ValKind::Obj(ptr) = method.kind() else {
-            return None;
-        };
-        let closure = self.heap.as_lua_function_ref(ptr)?;
+        let closure = self.heap.closure_of(method)?;
         let runtime = &closure.runtime;
         let leaf = runtime.numeric_leaf.as_ref()?;
         if site.results == 1 && leaf.result.is_none() {
@@ -3984,10 +3961,8 @@ impl State {
                         Upvalue::Open(_) => return None,
                         Upvalue::Closed(value) => *value,
                     };
-                    let ValKind::Obj(table) = value.kind() else {
-                        return None;
-                    };
-                    let (slot, value) = self.heap.as_table_ref(table)?.find_slot(&key)?;
+                    let table = value.as_table_ptr()?;
+                    let (slot, value) = self.heap.table(table).find_slot(&key)?;
                     if site.number && value.as_num().is_none() {
                         return None;
                     }
@@ -4014,7 +3989,7 @@ impl State {
     fn method_fields(
         &self,
         entry: &mut RegionMethod,
-        receiver: ObjectPtr,
+        receiver: TablePtr,
         out: &mut FieldSlots,
     ) -> bool {
         let RegionMethod {
@@ -4057,23 +4032,19 @@ impl State {
     /// any other handler, a nil answer, or too deep a walk.
     fn region_method(&self, receiver: Val, key: Val) -> Option<Val> {
         let index_key = self.meta_names.get(MetaName::Index);
-        let ValKind::Obj(mut table) = receiver.kind() else {
-            return None;
-        };
+        let mut table = receiver.as_table_ptr()?;
         let mut depth = self.in_flight.metamethod_depth;
         let mut first = true;
         // bounded: each continuing step past the first takes a depth unit,
         // and the walk stops at MAX_METAMETHOD_DEPTH
         loop {
-            let tbl = self.heap.as_table_ref(table)?;
+            let tbl = self.heap.table(table);
             let value = tbl.get(&key);
             if !value.is_nil() {
                 return Some(value);
             }
-            let metatable = self.heap.as_table_ref(tbl.get_metatable()?)?;
-            let ValKind::Obj(next) = metatable.get(&index_key).kind() else {
-                return None;
-            };
+            let metatable = self.heap.table(tbl.get_metatable()?);
+            let next = metatable.get(&index_key).as_table_ptr()?;
             if !first {
                 if depth >= MAX_METAMETHOD_DEPTH {
                     return None;
@@ -4124,13 +4095,13 @@ impl State {
                         }
                         Receiver::Register(register) => self.stack[base + usize::from(register)],
                     };
-                    let ValKind::Obj(ptr) = receiver.kind() else {
+                    let Some(ptr) = receiver.as_table_ptr() else {
                         return false;
                     };
                     let cache = frame.runtime.caches.field(cache);
                     let Some(n) = self
                         .get_table_field_direct(ptr, frame.literal(key), cache)
-                        .and_then(|(value, _)| value)
+                        .0
                         .and_then(|value| value.as_num())
                     else {
                         return false;
@@ -4267,10 +4238,7 @@ impl State {
         if cfg!(feature = "fault-injection") {
             return false;
         }
-        let ValKind::Obj(ptr) = self.stack[idx].kind() else {
-            return false;
-        };
-        let Some(closure) = self.heap.as_lua_function_ref(ptr) else {
+        let Some(closure) = self.heap.closure_of(self.stack[idx]) else {
             return false;
         };
         let Some(leaf) = closure.runtime.numeric_leaf.as_ref() else {
@@ -4379,7 +4347,7 @@ impl State {
         leaf: &NumericLeaf,
         param: impl Fn(u16) -> Option<Val>,
         open_below: usize,
-        fields: &mut [Option<(ObjectPtr, SlotRef)>; MAX_FIELD_SITES],
+        fields: &mut [Option<(TablePtr, SlotRef)>; MAX_FIELD_SITES],
     ) -> bool {
         // The inline-cache differential compares leaves with the canonical
         // path, as library leaves do (`vm/leaf.rs`).
@@ -4411,12 +4379,10 @@ impl State {
                     }
                 }
             };
-            let ValKind::Obj(table) = receiver.kind() else {
+            let Some(table) = receiver.as_table_ptr() else {
                 return false;
             };
-            let Some(tbl) = self.heap.as_table_ref(table) else {
-                return false;
-            };
+            let tbl = self.heap.table(table);
             let key = runtime.literals[usize::from(site.key)];
             if site.store && key == index_key {
                 return false;
@@ -4468,7 +4434,7 @@ impl State {
     fn run_leaf_fields(
         &mut self,
         leaf: &NumericLeaf,
-        fields: &[Option<(ObjectPtr, SlotRef)>; MAX_FIELD_SITES],
+        fields: &[Option<(TablePtr, SlotRef)>; MAX_FIELD_SITES],
         argument: impl Fn(u16) -> f64,
     ) -> (f64, LeafPath) {
         let body = &leaf.body;
@@ -4498,7 +4464,7 @@ impl State {
     fn run_fields(
         &mut self,
         body: &Body,
-        fields: &[Option<(ObjectPtr, SlotRef)>; MAX_FIELD_SITES],
+        fields: &[Option<(TablePtr, SlotRef)>; MAX_FIELD_SITES],
         x: &mut [f64; MIRROR_SLOTS],
     ) -> LeafPath {
         if body.control {
@@ -4514,7 +4480,7 @@ impl State {
     fn run_field_ops<const CONTROL: bool>(
         &mut self,
         body: &Body,
-        fields: &[Option<(ObjectPtr, SlotRef)>; MAX_FIELD_SITES],
+        fields: &[Option<(TablePtr, SlotRef)>; MAX_FIELD_SITES],
         x: &mut [f64; MIRROR_SLOTS],
     ) -> LeafPath {
         let mut path = if CONTROL { 0 } else { FULL_PATH };
@@ -4534,8 +4500,8 @@ impl State {
                     // is seen, as canonical execution would see it.
                     let value = self
                         .heap
-                        .as_table_ref(table)
-                        .and_then(|tbl| tbl.read_slot(slot))
+                        .table(table)
+                        .read_slot(slot)
                         .expect("a resolved site stays live");
                     if value.truthy() == truthy {
                         k = usize::from(op.a);
@@ -4550,10 +4516,7 @@ impl State {
                 OpKind::Read => {
                     let (table, slot) =
                         fields[usize::from(op.b)].expect("resolve_sites resolved every site");
-                    let value = self
-                        .heap
-                        .as_table_ref(table)
-                        .and_then(|tbl| tbl.read_slot(slot));
+                    let value = self.heap.table(table).read_slot(slot);
                     let Some(n) = value.and_then(|value| value.as_num()) else {
                         panic!(
                             "a read site resolved to a number stays one: stores write numbers into live slots"

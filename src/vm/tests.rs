@@ -603,8 +603,8 @@ fn set_global_fn(state: &mut State, name: &str, function: crate::RustFunc) {
 }
 
 fn live_table(state: &State, val: Val) -> bool {
-    val.as_object_ptr()
-        .and_then(|ptr| state.heap.as_table_ref(ptr))
+    val.as_table_ptr()
+        .map(|ptr| state.heap.table(ptr))
         .is_some()
 }
 
@@ -1637,4 +1637,121 @@ fn gmatch_string_checks_preserve_relative_indexes_in_nested_frames() {
         .unwrap();
     state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
     assert_eq!(state.get_top(), 2, "nested calls preserve host operands");
+}
+
+fn run_object_identity_script(state: &mut State, source: &str) {
+    let program = crate::Program::compile(source, None).expect("identity script compiles");
+    state.load(&program).expect("identity script loads");
+    state
+        .call(crate::ArgCount::Fixed(0), RetCount::Fixed(0))
+        .expect("object identities agree");
+}
+
+fn state_with_equal_object_payloads() -> Box<State> {
+    let mut state = State::new();
+    let program = crate::Program::compile("return 42", None).expect("test closure compiles");
+    let runtime = state
+        .resolve_bytecode_runtime(&program.bytecode)
+        .expect("test closure runtime");
+    let table = state.heap.no_gc_allocator().alloc_table();
+    let payload = table.payload();
+
+    // Match the table's slot and generation in each of the other arenas.
+    // The standard library uses tables but leaves these two arenas empty.
+    let closure = loop {
+        let ptr = state.heap.no_gc_allocator().alloc_lua_fn(
+            std::sync::Arc::clone(&runtime),
+            super::object::Captures::EMPTY,
+        );
+        if ptr.payload() == payload {
+            break ptr;
+        }
+        assert!(ptr.payload() < payload);
+    };
+    let iter = loop {
+        let ptr = state
+            .heap
+            .no_gc_allocator()
+            .alloc_gmatch(super::GmatchIter::Empty { pos: 0, len: 2 }, None);
+        if ptr.payload() == payload {
+            break ptr;
+        }
+        assert!(ptr.payload() < payload);
+    };
+    for (name, value) in [
+        ("identity_table", Val::table(table)),
+        ("identity_closure", Val::lua_fn(closure)),
+        ("identity_iter", Val::gmatch(iter)),
+    ] {
+        state
+            .set_global_value(name, value)
+            .expect("identity value fits in globals");
+    }
+    run_object_identity_script(
+        &mut state,
+        r#"
+        local t, f, g = identity_table, identity_closure, identity_iter
+        identity_keys = {[t] = "table", [f] = "closure", [g] = "iterator"}
+        identity_strings = {tostring(t), tostring(f), tostring(g)}
+        identity_pointers = {
+            string.format("%p", t), string.format("%p", f), string.format("%p", g)
+        }
+        "#,
+    );
+    state
+}
+
+fn check_equal_payload_object_identities(state: &mut State) {
+    run_object_identity_script(
+        state,
+        r#"
+        local t, f, g = identity_table, identity_closure, identity_iter
+        if rawequal(t, f) or rawequal(t, g) or rawequal(f, g) then
+            error("different object kinds compare equal")
+        end
+        if identity_keys[t] ~= "table" or identity_keys[f] ~= "closure"
+            or identity_keys[g] ~= "iterator" then
+            error("object keys collide")
+        end
+        local keys = {t, f, g}
+        local count = 0
+        for k in pairs(identity_keys) do
+            count = count + 1
+            if not rawequal(k, keys[count]) then error("key order changed") end
+        end
+        if count ~= 3 then error("key count changed") end
+        local ts, ps = identity_strings, identity_pointers
+        if ts[1] == ts[2] or ts[1] == ts[3] or ts[2] == ts[3]
+            or ps[1] == ps[2] or ps[1] == ps[3] or ps[2] == ps[3] then
+            error("rendered identities collide")
+        end
+        for i, key in ipairs(keys) do
+            if tostring(key) ~= ts[i] or string.format("%p", key) ~= ps[i] then
+                error("rendered identity changed")
+            end
+        end
+        if f() ~= 42 or g() ~= "" then error("function kind changed") end
+        "#,
+    );
+}
+
+#[test]
+fn equal_object_payloads_keep_distinct_identities_after_gc() {
+    let mut state = state_with_equal_object_payloads();
+    check_equal_payload_object_identities(&mut state);
+    state.gc_collect();
+    check_equal_payload_object_identities(&mut state);
+}
+
+#[cfg(feature = "snapshot")]
+#[test]
+fn equal_object_payloads_keep_distinct_identities_after_snapshot_load() {
+    let mut state = state_with_equal_object_payloads();
+    state.gc_collect();
+    let saved = state.save_state().expect("identity graph saves");
+    let mut loaded = State::load_state(&saved.bytes, Box::new(crate::DefaultCallbacks), |_| {
+        Ok::<(), std::convert::Infallible>(())
+    })
+    .expect("identity graph loads");
+    check_equal_payload_object_identities(&mut loaded);
 }

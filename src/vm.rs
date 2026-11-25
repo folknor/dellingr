@@ -1,7 +1,6 @@
 //! This module provides the `State` struct, which handles the primary
 //! components of the VM.
 
-use crate::vm::lua_val::ValKind;
 mod anchor;
 #[cfg(all(test, feature = "disable-inline-caches"))]
 mod cache_differential;
@@ -85,8 +84,8 @@ use meta_name::MetaNames;
 
 pub(super) use lua_val::PointerIdKey;
 pub(super) use lua_val::Val;
-use object::{GcHeap, GcPolicy, UpvaluePool};
-pub(super) use object::{GmatchIter, ObjectPtr, StringPtr};
+use object::{GcHeap, GcPolicy, GmatchPtr, TablePtr, UpvaluePool};
+pub(super) use object::{GmatchIter, StringPtr};
 use rng::VmRng;
 use table::{Table, TemplatePrototype};
 
@@ -295,7 +294,7 @@ pub struct State<Tail: ?Sized = [()]> {
     /// string indexing (`s:upper()`) never consults the global `string`.
     /// `None` in a `State::raw` that never opened the libraries. Not a
     /// global: `with_restricted_env` leaves it alone. A GC root.
-    pub(super) string_metatable: Option<ObjectPtr>,
+    pub(super) string_metatable: Option<TablePtr>,
     /// The slot of `__index` in `string_metatable`, recorded by the
     /// string-method IC's slow path so its fast path can re-check the
     /// `__index` value without a hash lookup. Reset when the metatable is
@@ -587,17 +586,17 @@ impl State {
     /// load) both go through this record, never the live builtin slots, so
     /// `math = {}` cannot make a user table an environment table.
     pub(crate) fn capture_env_tables(&mut self) {
-        let mut tables: Vec<(ObjectPtr, EnvRole)> = Vec::new();
+        let mut tables: Vec<(TablePtr, EnvRole)> = Vec::new();
         // One object holding two roles keeps the last one captured.
-        let mut add = |ptr: ObjectPtr, role: EnvRole| {
+        let mut add = |ptr: TablePtr, role: EnvRole| {
             tables.retain(|(existing, _)| *existing != ptr);
             tables.push((ptr, role));
         };
         for (builtin, role) in global_env::LIBRARY_BUILTINS {
-            if let ValKind::Obj(ptr) = self
+            if let Some(ptr) = self
                 .global_env
                 .read_builtin(&self.heap, builtin.to_u8())
-                .kind()
+                .as_table_ptr()
             {
                 add(ptr, role);
             }
@@ -605,11 +604,7 @@ impl State {
         // The global table itself is not an environment table: it exists in
         // every State, raw ones included. Its protected metatable is rebuilt
         // by `open_libs`.
-        if let Some(mt) = self
-            .heap
-            .as_table_ref(self.global_env.table())
-            .and_then(Table::get_metatable)
-        {
+        if let Some(mt) = self.heap.table(self.global_env.table()).get_metatable() {
             add(mt, EnvRole::GlobalMetatable);
         }
         // The shared string metatable is rebuilt by `open_libs` too, so a
@@ -928,38 +923,27 @@ impl State {
     /// the iterator left in the callee slot, as the callback's first
     /// argument (see `GmatchIter`).
     ///
-    /// Forced inline: outlined, it grew the release native frame of every
-    /// re-entry through `begin_call` by a further 16 to 48 bytes
-    /// (`native_bytes_per_level`). A second `invoke_rust_fn` site in
-    /// `instr_tfor_call` cost release 160. The typed iterator's remaining dev
-    /// growth on these paths (under 256 bytes a level) is accepted rather
-    /// than traded for release bytes: it is a small fraction of the dev
-    /// envelope's headroom.
+    /// This path needs only the tag. The step reads the arena record once it
+    /// enters the callback.
     #[inline(always)]
-    pub(crate) fn gmatch_step_of(&self, val: Val) -> Option<RustFnId> {
-        match val.kind() {
-            ValKind::Obj(ptr) if self.heap.as_gmatch(ptr).is_some() => {
-                Some(crate::lua_std::GMATCH_STEP)
-            }
-            _ => None,
-        }
+    pub(crate) fn gmatch_step_of(val: Val) -> Option<RustFnId> {
+        val.is_gmatch().then_some(crate::lua_std::GMATCH_STEP)
     }
 
     /// The gmatch iterator at 1-based stack index `idx` and its record,
     /// if the value there is one.
-    pub(crate) fn gmatch_at(&self, idx: isize) -> Option<(ObjectPtr, GmatchIter)> {
+    pub(crate) fn gmatch_at(&self, idx: isize) -> Option<(GmatchPtr, GmatchIter)> {
         // An absent slot holds no iterator, so the caller reports that.
         let Ok(value) = self.at_index(idx) else {
             return None;
         };
-        let ptr = value.as_object_ptr()?;
-        Some((ptr, self.heap.as_gmatch(ptr)?))
+        let ptr = value.as_gmatch_ptr()?;
+        Some((ptr, self.heap.gmatch(ptr)))
     }
 
     /// Commit a gmatch step: overwrite the record of the iterator `ptr`.
-    pub(crate) fn set_gmatch(&mut self, ptr: ObjectPtr, iter: GmatchIter) {
-        let stored = self.heap.set_gmatch(ptr, iter);
-        debug_assert!(stored, "a gmatch commit targets the iterator it read");
+    pub(crate) fn set_gmatch(&mut self, ptr: GmatchPtr, iter: GmatchIter) {
+        self.heap.set_gmatch(ptr, iter);
     }
 
     /// Push a new gmatch iterator. The caller keeps the record's strings
@@ -970,7 +954,7 @@ impl State {
         self.check_stack_space(1)?;
         let program = self.gmatch_program(&iter);
         let ptr = self.allocator().alloc_gmatch(iter, program);
-        self.push_unchecked(Val::obj(ptr));
+        self.push_unchecked(Val::gmatch(ptr));
         Ok(())
     }
 
@@ -988,7 +972,7 @@ impl State {
     /// `subject_idx` with gmatch iterator `iterator`'s held program.
     pub(crate) fn with_gmatch_program<T>(
         &mut self,
-        iterator: ObjectPtr,
+        iterator: GmatchPtr,
         subject_idx: isize,
         operation: impl FnOnce(
             &[u8],
@@ -1472,7 +1456,7 @@ impl State {
 
     /// Pushes the global table, which `open_libs` binds to `_G`.
     pub(crate) fn push_global_table(&mut self) -> Result<()> {
-        self.push_val(Val::obj(self.global_env.table()))
+        self.push_val(Val::table(self.global_env.table()))
     }
 
     /// Pops a value from the stack and sets it as the new value of global
@@ -1732,7 +1716,7 @@ impl State {
             return Err(e);
         }
         let mt = self.pop_val();
-        self.string_metatable = mt.as_object_ptr();
+        self.string_metatable = mt.as_table_ptr();
         self.string_mt_index_shape = None;
         Ok(())
     }
@@ -2209,10 +2193,12 @@ mod runtime_tests {
         /// the collector's own enumeration.
         fn handles(self) -> Vec<Val> {
             match self {
-                Self::Field(e) | Self::SetField(e) => vec![Val::obj(e.table)],
-                Self::Method(e) => vec![Val::obj(e.receiver_metatable), Val::obj(e.method_table)],
-                Self::StringMethod(e) => vec![Val::obj(e.string_lib)],
-                Self::Tfor(e) => vec![Val::obj(e.table)],
+                Self::Field(e) | Self::SetField(e) => vec![Val::table(e.table)],
+                Self::Method(e) => {
+                    vec![Val::table(e.receiver_metatable), Val::table(e.method_table)]
+                }
+                Self::StringMethod(e) => vec![Val::table(e.string_lib)],
+                Self::Tfor(e) => vec![Val::table(e.table)],
             }
         }
     }
@@ -2396,7 +2382,7 @@ mod runtime_tests {
         .expect("chunk returns the second table and its key");
         state.gc_collect();
 
-        let receiver = state.stack[0].as_object_ptr().expect("receiver is a table");
+        let receiver = state.stack[0].as_table_ptr().expect("receiver is a table");
         let key = state.stack[1];
         let mut entries = state
             .bytecode_caches
@@ -2405,7 +2391,7 @@ mod runtime_tests {
             .filter_map(|cache| Some((cache, cache.get_field()?)));
         let (cache, stale) = entries.next().expect("the field site kept its entry");
         assert!(entries.next().is_none(), "only one field site was warmed");
-        assert!(!state.heap.val_is_live(&Val::obj(stale.table)));
+        assert!(!state.heap.val_is_live(&Val::table(stale.table)));
 
         // Drive the dispatch hint directly, independent of numeric leaf calls.
         assert_eq!(
@@ -2526,14 +2512,14 @@ mod runtime_tests {
             before
                 .iter()
                 .any(|(_, cell)| matches!(cell, CachedEntry::Method(e)
-                if live(&Val::obj(e.receiver_metatable)) && !live(&Val::obj(e.method_table)))),
+                if live(&Val::table(e.receiver_metatable)) && !live(&Val::table(e.method_table)))),
             "no method entry had its method table freed under a surviving metatable"
         );
         assert!(
             before
                 .iter()
                 .any(|(_, cell)| matches!(cell, CachedEntry::Method(e)
-                if !live(&Val::obj(e.receiver_metatable)) && live(&Val::obj(e.method_table)))),
+                if !live(&Val::table(e.receiver_metatable)) && live(&Val::table(e.method_table)))),
             "no method entry had a freed metatable with a surviving method table"
         );
         let method_entries = before
@@ -2597,7 +2583,7 @@ mod runtime_tests {
     }
 
     /// The receiver metatables a site's method entries name, by position.
-    fn method_positions(state: &State) -> Vec<[Option<ObjectPtr>; caches::METHOD_ENTRIES]> {
+    fn method_positions(state: &State) -> Vec<[Option<TablePtr>; caches::METHOD_ENTRIES]> {
         let mut sites = Vec::new();
         for entry in state.bytecode_caches.values() {
             for slot in &entry.caches.field_lookup {
@@ -2612,12 +2598,12 @@ mod runtime_tests {
         sites
     }
 
-    fn global_ptr(state: &mut State, name: &str) -> ObjectPtr {
+    fn global_ptr(state: &mut State, name: &str) -> TablePtr {
         state.get_global(name).expect("global fits");
         state
             .pop_val()
-            .as_object_ptr()
-            .expect("the global is an object")
+            .as_table_ptr()
+            .expect("the global is a table")
     }
 
     /// An inherited route fills once and keeps its epoch across hits,
@@ -2799,7 +2785,7 @@ mod snapshot_env_alias_tests {
         let Some(shared_table) = state
             .global_env
             .read_builtin(&state.heap, Builtin::Math as u8)
-            .as_object_ptr()
+            .as_table_ptr()
         else {
             panic!("math builtin is a table");
         };
@@ -2807,7 +2793,7 @@ mod snapshot_env_alias_tests {
             state
                 .global_env
                 .read_builtin(&state.heap, Builtin::String as u8),
-            Val::obj(shared_table)
+            Val::table(shared_table)
         );
 
         state.capture_env_tables();

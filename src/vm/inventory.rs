@@ -20,7 +20,7 @@ use std::sync::Arc;
 use super::anchor::Registry;
 use super::global_env::{GlobalEnv, SuspendedEnv};
 use super::meta_name::MetaNames;
-use super::object::{GcHeap, ObjectPtr, StringPtr, UpvaluePool, UpvalueRef};
+use super::object::{GcHeap, StringPtr, TablePtr, UpvaluePool, UpvalueRef};
 use super::{CallInfo, IndexMap, PatternCacheEntry, PointerIdKey, RustFnId, State, Val};
 use crate::compiler::Bytecode;
 use crate::limits::tuning;
@@ -174,7 +174,7 @@ pub(super) enum GcRoot<'a> {
     MetaNames(&'a MetaNames),
     /// The metatable shared by every string. Strings carry no metatable
     /// pointer, so nothing else roots it.
-    StringMetatable(ObjectPtr),
+    StringMetatable(TablePtr),
     /// Values the host retains through `Anchor` handles.
     Anchors(&'a Registry),
     /// Values temporarily held outside the visible stack.
@@ -473,14 +473,10 @@ mod tests {
         state
             .load(&crate::Program::compile(source, None).expect("test chunk compiles"))
             .expect("load");
-        let Some(ptr) = state.stack[state.stack.len() - 1].as_object_ptr() else {
+        let Some(ptr) = state.stack[state.stack.len() - 1].as_closure_ptr() else {
             unreachable!("load pushes a closure");
         };
-        state
-            .heap
-            .as_lua_function_ref(ptr)
-            .expect("loaded chunk is a closure")
-            .clone()
+        state.heap.closure(ptr).clone()
     }
 
     #[test]

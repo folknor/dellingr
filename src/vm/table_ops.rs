@@ -283,10 +283,10 @@ impl State {
         self.with_rooted_value(val, |state| {
             let key = state.alloc_string(name)?;
             let idx = state.convert_idx(table_idx)?;
-            let obj_ptr = state.stack[idx].as_object_ptr();
-            let typ = state.stack[idx].typ(&state.heap);
+            let obj_ptr = state.stack[idx].as_table_ptr();
+            let typ = state.stack[idx].typ();
 
-            match obj_ptr.and_then(|ptr| state.heap.edit_table(ptr)) {
+            match obj_ptr.map(|ptr| state.heap.edit_table(ptr)) {
                 Some(mut t) => {
                     t.insert(key, val)?;
                     Ok(())
@@ -436,11 +436,11 @@ impl State {
             return Err(self.error(ErrorKind::InvalidStackIndex { index: i }));
         }
         if self.stack[idx]
-            .as_object_ptr()
-            .and_then(|ptr| self.heap.as_table_ref(ptr))
+            .as_table_ptr()
+            .map(|ptr| self.heap.table(ptr))
             .is_none()
         {
-            return Err(self.type_error(TypeError::TableIndex(self.stack[idx].typ(&self.heap))));
+            return Err(self.type_error(TypeError::TableIndex(self.stack[idx].typ())));
         }
         Ok(idx)
     }
@@ -454,8 +454,8 @@ impl State {
         let idx = self.table_operand_below_top(i, 1)?;
         let key = self.stack[self.stack.len() - 1];
         let val = self.stack[idx]
-            .as_object_ptr()
-            .and_then(|ptr| self.heap.as_table_ref(ptr))
+            .as_table_ptr()
+            .map(|ptr| self.heap.table(ptr))
             .expect("table_operand_below_top validated the table")
             .get(&key);
         // Replaces the key in place: net-neutral, so no preflight is needed.
@@ -483,8 +483,8 @@ impl State {
             super::table::InvalidTableKey::Nan => self.type_error(TypeError::TableKeyNan),
         })?;
         self.stack[idx]
-            .as_object_ptr()
-            .and_then(|ptr| self.heap.edit_table(ptr))
+            .as_table_ptr()
+            .map(|ptr| self.heap.edit_table(ptr))
             .expect("table_operand_below_top validated the table")
             .insert(key, val)?;
         self.stack.truncate(top - 2);
@@ -543,7 +543,7 @@ impl State {
         let mut local_cost = 0;
         let mut handler_entered = false;
         let ptr = self.stack[idx]
-            .as_object_ptr()
+            .as_table_ptr()
             .expect("table_operand_below_top validated the table");
         let stored = self.store_into_table(ptr, key, val, &mut local_cost);
         let result = match stored {
@@ -589,20 +589,13 @@ impl State {
     #[inline(never)]
     fn store_into_table(
         &mut self,
-        ptr: super::object::ObjectPtr,
+        ptr: super::object::TablePtr,
         key: Val,
         val: Val,
         local_cost: &mut u64,
     ) -> Result<Option<u32>> {
-        let raw = self.newindex_absent(
-            self.heap
-                .as_table_ref(ptr)
-                .and_then(super::table::Table::get_metatable),
-        );
-        let mut tbl = self
-            .heap
-            .edit_table(ptr)
-            .expect("table_operand_below_top validated the table");
+        let raw = self.newindex_absent(self.heap.table(ptr).get_metatable());
+        let mut tbl = self.heap.edit_table(ptr);
         if raw {
             tbl.insert(key, val)?;
             return Ok(None);
@@ -630,8 +623,8 @@ impl State {
         let top = self.stack.len() - 1;
         let key = self.stack[top];
         let next = self.stack[idx]
-            .as_object_ptr()
-            .and_then(|ptr| self.heap.as_table_ref(ptr))
+            .as_table_ptr()
+            .map(|ptr| self.heap.table(ptr))
             .expect("table_operand_below_top validated the table")
             .next(&key);
         match next {
@@ -662,11 +655,11 @@ impl State {
         let value = self.stack[i];
         match value.as_string(&self.heap) {
             Some(bytes) => Ok(bytes.len()),
-            None => value
-                .as_object_ptr()
-                .and_then(|ptr| self.heap.as_table_ref(ptr))
+            None => self
+                .heap
+                .table_of(value)
                 .map(super::table::Table::array_len)
-                .ok_or_else(|| self.type_error(TypeError::Length(value.typ(&self.heap)))),
+                .ok_or_else(|| self.type_error(TypeError::Length(value.typ()))),
         }
     }
 
@@ -677,8 +670,8 @@ impl State {
     pub(crate) fn table_len(&self, idx: isize) -> Result<usize> {
         let i = self.convert_idx(idx)?;
         Ok(self.stack[i]
-            .as_object_ptr()
-            .and_then(|ptr| self.heap.as_table_ref(ptr))
+            .as_table_ptr()
+            .map(|ptr| self.heap.table(ptr))
             .map_or(0, super::table::Table::array_len))
     }
 
@@ -686,12 +679,12 @@ impl State {
     /// metamethod-aware sequence operations. A non-table is a length type
     /// error; the library checks the argument type first, so a string never
     /// reaches here and its shared metatable is never consulted.
-    fn sequence_operand(&self, idx: isize) -> Result<(Val, Option<super::object::ObjectPtr>)> {
+    fn sequence_operand(&self, idx: isize) -> Result<(Val, Option<super::object::TablePtr>)> {
         let val = self.at_index(idx)?;
-        let table = val
-            .as_object_ptr()
-            .and_then(|ptr| self.heap.as_table_ref(ptr))
-            .ok_or_else(|| self.type_error(TypeError::Length(val.typ(&self.heap))))?;
+        let table = self
+            .heap
+            .table_of(val)
+            .ok_or_else(|| self.type_error(TypeError::Length(val.typ())))?;
         Ok((val, table.get_metatable()))
     }
 
@@ -726,7 +719,7 @@ impl State {
     /// Whether metatable `mt` defines `__len`, `__index` or `__newindex`
     /// (any non-nil value, `false` included).
     #[inline(always)]
-    pub(super) fn has_sequence_metafields(&self, mt: Option<super::object::ObjectPtr>) -> bool {
+    pub(super) fn has_sequence_metafields(&self, mt: Option<super::object::TablePtr>) -> bool {
         use super::MetaName::{Index, Len, NewIndex};
         if mt.is_none() {
             return false;
@@ -746,9 +739,9 @@ impl State {
     /// next element. A heap read: it neither pushes, allocates nor collects.
     fn sequence_raw_get(&self, idx: isize, key: i64) -> Result<Option<Val>> {
         let (val, mt) = self.sequence_operand(idx)?;
-        let table = val
-            .as_object_ptr()
-            .and_then(|ptr| self.heap.as_table_ref(ptr))
+        let table = self
+            .heap
+            .table_of(val)
             .expect("sequence_operand validated the table");
         // The key is the f64 the stack-borne path would push.
         let value = table.get(&Val::num(key as f64));
@@ -805,7 +798,7 @@ impl State {
             None => self.push_unchecked(table),
         }
         debug_assert_eq!(self.stack.len(), len);
-        let ptr = table.as_object_ptr().expect("alloc_table made a table");
+        let ptr = table.as_table_ptr().expect("alloc_table made a table");
         if count > 0 {
             self.check_stack_slot_at(len)?;
             self.check_stack_slot_at(len + 1)?;
@@ -814,7 +807,6 @@ impl State {
                 let value = self.stack[slot];
                 self.heap
                     .edit_table(ptr)
-                    .expect("new_table pushed a table")
                     .insert(Val::num(f64::from(key)), value)?;
             }
         }
@@ -823,7 +815,6 @@ impl State {
         self.check_stack_slot_at(len + 1)?;
         self.heap
             .edit_table(ptr)
-            .expect("new_table pushed a table")
             .insert(key, Val::num(count as f64))?;
         Ok(())
     }
@@ -907,7 +898,7 @@ impl State {
                 text = crate::number_text::number_to_text(n);
                 text.as_bytes()
             }
-            _ => return Ok(Err(val.typ(&self.heap))),
+            _ => return Ok(Err(val.typ())),
         };
         let next = crate::limits::checked_string_growth(out.len(), bytes.len())?;
         out.reserve(next - out.len());
@@ -926,16 +917,16 @@ impl State {
     }
 
     fn table_len_of(&self, val: Val) -> usize {
-        val.as_object_ptr()
-            .and_then(|ptr| self.heap.as_table_ref(ptr))
+        self.heap
+            .table_of(val)
             .expect("sequence_operand validated the table")
             .array_len()
     }
 
     fn table_array_len_at(&self, idx: usize) -> usize {
         self.stack[idx]
-            .as_object_ptr()
-            .and_then(|ptr| self.heap.as_table_ref(ptr))
+            .as_table_ptr()
+            .map(|ptr| self.heap.table(ptr))
             .expect("table_operand_below_top validated the table")
             .array_len()
     }
@@ -957,13 +948,13 @@ impl State {
         let metatable = if val.as_string_ptr().is_some() {
             self.string_metatable
         } else {
-            val.as_object_ptr()
-                .and_then(|ptr| self.heap.as_table_ref(ptr))
+            self.heap
+                .table_of(val)
                 .and_then(super::table::Table::get_metatable)
         };
 
         match metatable {
-            Some(mt) => self.push_val(Val::obj(mt))?,
+            Some(mt) => self.push_val(Val::table(mt))?,
             None => self.push_nil()?,
         }
         Ok(())
@@ -984,14 +975,18 @@ impl State {
     /// setup.
     pub(crate) fn pop_metatable_onto(&mut self, table_idx: isize) -> Result<()> {
         let idx = self.table_operand_below_top(table_idx, 1)?;
-        let mt = match self.stack[self.stack.len() - 1].kind() {
+        let value = self.stack[self.stack.len() - 1];
+        let mt = match value.kind() {
             ValKind::Nil => None,
-            ValKind::Obj(ptr) if self.heap.as_table_ref(ptr).is_some() => Some(ptr),
-            _ => return Err(self.type_error(TypeError::InvalidMetatable)),
+            _ => Some(
+                value
+                    .as_table_ptr()
+                    .ok_or_else(|| self.type_error(TypeError::InvalidMetatable))?,
+            ),
         };
         self.stack[idx]
-            .as_object_ptr()
-            .and_then(|ptr| self.heap.as_table(ptr))
+            .as_table_ptr()
+            .map(|ptr| self.heap.as_table(ptr))
             .expect("table_operand_below_top validated the table")
             .set_metatable(mt);
         self.pop_val();
@@ -1040,8 +1035,8 @@ impl State {
     fn insert_top_at_len(&mut self, idx: usize, pos: usize, len: usize) -> Result<()> {
         let value = self.stack[self.stack.len() - 1];
         self.stack[idx]
-            .as_object_ptr()
-            .and_then(|ptr| self.heap.edit_table(ptr))
+            .as_table_ptr()
+            .map(|ptr| self.heap.edit_table(ptr))
             .expect("the caller validated the table")
             .array_insert_at_len(pos, len, value)?;
         Ok(())
@@ -1087,8 +1082,8 @@ impl State {
         // the removal would discard the value with no way to return it.
         self.check_stack_space(1)?;
         let removed = self.stack[idx]
-            .as_object_ptr()
-            .and_then(|ptr| self.heap.edit_table(ptr))
+            .as_table_ptr()
+            .map(|ptr| self.heap.edit_table(ptr))
             .expect("the caller validated the table")
             .array_remove_at_len(pos, len)?;
         self.push_unchecked(removed);
@@ -1108,18 +1103,14 @@ impl State {
 
         // Check the raw array length before cloning it, so the same size rule
         // guards both raw and metamethod-backed sorts.
-        let obj_ptr = self.stack[idx].as_object_ptr();
-        let typ = self.stack[idx].typ(&self.heap);
+        let obj_ptr = self.stack[idx].as_table_ptr();
+        let typ = self.stack[idx].typ();
 
-        let table_ptr = match obj_ptr.and_then(|ptr| self.heap.as_table_ref(ptr).map(|_| ptr)) {
+        let table_ptr = match obj_ptr {
             Some(ptr) => ptr,
             None => return Err(self.type_error(TypeError::TableIndex(typ))),
         };
-        let array_len = self
-            .heap
-            .as_table_ref(table_ptr)
-            .expect("validated object pointer is a table")
-            .array_len();
+        let array_len = self.heap.table(table_ptr).array_len();
         // The array part is bounded far below i64::MAX; saturate rather than panic.
         let len: i64 = crate::saturate::saturating_cast(array_len);
         let n = self.checked_table_sort_len(len)?;
@@ -1148,8 +1139,7 @@ impl State {
             return self.with_sort_segment(|state, base| {
                 state
                     .heap
-                    .as_table_ref(table_ptr)
-                    .expect("validated object pointer is a table")
+                    .table(table_ptr)
                     .append_array_to(&mut state.in_flight.rooted_values)?;
                 // Charged after the copy, as the default path charges after
                 // its detached copy, and before the comparator runs or the
@@ -1164,9 +1154,9 @@ impl State {
                 )?;
                 // Look the table up again: the comparator may have replaced
                 // the argument slot's contents.
-                let obj_ptr = state.stack[idx].as_object_ptr();
+                let obj_ptr = state.stack[idx].as_table_ptr();
                 let sorted = &state.in_flight.rooted_values[base..base + n];
-                match obj_ptr.and_then(|ptr| state.heap.edit_table(ptr)) {
+                match obj_ptr.map(|ptr| state.heap.edit_table(ptr)) {
                     Some(mut t) => {
                         t.set_array(sorted)?;
                         Ok(n)
@@ -1176,11 +1166,7 @@ impl State {
             });
         }
 
-        let mut arr = self
-            .heap
-            .as_table_ref(table_ptr)
-            .expect("validated object pointer is a table")
-            .get_array()?;
+        let mut arr = self.heap.table(table_ptr).get_array()?;
 
         // Charge cost BEFORE mutating the table, so an exhausted budget
         // blocks the sort rather than letting it complete and only then
@@ -1201,10 +1187,7 @@ impl State {
         // window slots: the writeback permutes those slots and touches no
         // storage metadata. A single element is already sorted.
         if arr.len() >= 2 {
-            self.heap
-                .as_table(table_ptr)
-                .expect("the default sort cannot reshape the table")
-                .overwrite_live_prefix(&arr);
+            self.heap.as_table(table_ptr).overwrite_live_prefix(&arr);
         }
         Ok(n)
     }
@@ -1398,7 +1381,7 @@ impl State {
     #[cold]
     #[inline(never)]
     fn table_sort_comparison_error(&self, a: Val, b: Val) -> Error {
-        let (a, b) = (a.typ(&self.heap), b.typ(&self.heap));
+        let (a, b) = (a.typ(), b.typ());
         self.error(ErrorKind::TypeError(TypeError::Comparison(a, b)))
             .with_library_function(LibraryFunction::Sort)
     }
@@ -1547,7 +1530,7 @@ impl State {
             ValKind::Str(string) => ErrorValue::String(self.heap.get_string(string).to_vec()),
             ValKind::RustFn(_) | ValKind::Obj(_) => {
                 // Read the type before any handler runs.
-                let value_type = val.typ(&self.heap);
+                let value_type = val.typ();
                 let rendering = crate::native_call!(
                     "error_value->tostring_bytes_unguarded",
                     self.tostring_bytes_unguarded(idx)
@@ -1566,11 +1549,11 @@ impl State {
     /// allocates nor collects.
     pub(super) fn metatable_field(
         &self,
-        mt: Option<super::object::ObjectPtr>,
+        mt: Option<super::object::TablePtr>,
         name: super::MetaName,
     ) -> Val {
         let key = self.meta_names.get(name);
-        mt.and_then(|ptr| self.heap.as_table_ref(ptr))
+        mt.map(|ptr| self.heap.table(ptr))
             .map_or(Val::NIL, |mt| mt.get(&key))
     }
 
@@ -1579,9 +1562,9 @@ impl State {
     fn tostring_handler(&self, val: Val) -> Val {
         let metatable_ptr = match val.kind() {
             ValKind::Str(_) => self.string_metatable,
-            ValKind::Obj(ptr) => self
+            ValKind::Obj(_) => self
                 .heap
-                .as_table_ref(ptr)
+                .table_of(val)
                 .and_then(super::table::Table::get_metatable),
             _ => None,
         };
@@ -1602,7 +1585,7 @@ impl State {
             return Ok(bytes);
         }
         match self.format_pointer_id(idx)? {
-            Some(id) => Ok(format!("{}: 0x{id:x}", val.typ(&self.heap).as_str()).into_bytes()),
+            Some(id) => Ok(format!("{}: 0x{id:x}", val.typ().as_str()).into_bytes()),
             None => Err(super::Error::internal_fault(
                 InternalFault::MissingPointerIdentity,
             )),
@@ -1644,7 +1627,7 @@ impl State {
     #[inline(never)]
     pub(super) fn alloc_table(&mut self) -> Val {
         let obj = self.allocator().alloc_table();
-        Val::obj(obj)
+        Val::table(obj)
     }
 
     /// Allocates a new table with room for `capacity` hash entries; see
@@ -1652,7 +1635,7 @@ impl State {
     #[inline(never)]
     pub(super) fn alloc_table_with_capacity(&mut self, capacity: usize) -> Val {
         let obj = self.allocator().alloc_table_with_capacity(capacity);
-        Val::obj(obj)
+        Val::table(obj)
     }
 }
 

@@ -93,7 +93,7 @@ fn env_record(
 }
 
 /// The environment table `token` of `state`.
-fn env_table(state: &State, token: &str) -> ObjectPtr {
+fn env_table(state: &State, token: &str) -> TablePtr {
     environment_tokens(state)
         .into_iter()
         .find(|(_, name)| *name == token)
@@ -338,7 +338,7 @@ fn canonical_environment_tokens_survive_load_without_renaming() {
 fn environment_fifo_snapshot_is_compact_and_byte_stable() {
     let mut original = State::new();
     let ptr = env_table(&original, "math");
-    let mut table = original.heap.edit_table(ptr).expect("math is a table");
+    let mut table = original.heap.edit_table(ptr);
     for key in 1..=10_000 {
         table
             .insert(Val::num(f64::from(key)), Val::boolean(true))
@@ -362,10 +362,7 @@ fn environment_fifo_snapshot_is_compact_and_byte_stable() {
         before
     );
     let ptr = env_table(&loaded, "math");
-    let table = loaded
-        .heap
-        .as_table_ref(ptr)
-        .expect("loaded math is a table");
+    let table = loaded.heap.table(ptr);
     let (len, slots, entries) = table.snapshot_entries();
     assert_eq!(len, 10_001);
     assert_eq!(slots, 1);
@@ -376,7 +373,7 @@ fn environment_fifo_snapshot_is_compact_and_byte_stable() {
 fn environment_empty_array_span_retains_logical_length() {
     let mut original = State::new();
     let ptr = env_table(&original, "math");
-    let mut table = original.heap.edit_table(ptr).expect("math is a table");
+    let mut table = original.heap.edit_table(ptr);
     for key in 1..=10_000 {
         table
             .insert(Val::num(f64::from(key)), Val::boolean(true))

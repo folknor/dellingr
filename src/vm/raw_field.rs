@@ -526,11 +526,8 @@ impl State {
         } else {
             Some(self.at_index(table_arg)?)
         };
-        let Some(table_ref) = table
-            .and_then(|val| val.as_object_ptr())
-            .and_then(|ptr| self.heap.as_table_ref(ptr))
-        else {
-            let received = table.map(|val| val.typ(&self.heap));
+        let Some(table_ref) = table.and_then(|val| self.heap.table_of(val)) else {
+            let received = table.map(|val| val.typ());
             let func_name = self.active_rust_function_name();
             return Err(self.error(ErrorKind::ArgError(ArgError::type_mismatch(
                 table_arg,
@@ -556,7 +553,7 @@ impl State {
         let value = name.lookup(at);
         let val = value.val;
         T::convert(value).map_err(|failure| {
-            let received = val.typ(&self.heap);
+            let received = val.typ();
             let name = name.name();
             let (detail, expected) = match failure {
                 FieldFailure::Type(expected) => (ArgDetail::TypeMismatch, Some(expected)),

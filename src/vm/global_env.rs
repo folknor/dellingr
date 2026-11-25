@@ -34,7 +34,7 @@ use crate::instr::Builtin;
 
 use super::Val;
 use super::caches::{GlobalLookupCacheEntry, GlobalLookupCacheSlot};
-use super::object::{GcHeap, Markable, ObjectPtr, ResidentBytes, StringPtr};
+use super::object::{GcHeap, Markable, ObjectPtr, ResidentBytes, StringPtr, TablePtr};
 use super::table::{RouteState, SlotPolicy, Table, TableEditor};
 
 /// Hash slots the global table starts with: past inline storage, because
@@ -67,7 +67,7 @@ enum Phase {
 
 pub(super) struct GlobalEnv {
     /// The global table, which `_G` names.
-    table: ObjectPtr,
+    table: TablePtr,
     /// The builtin names, interned and rooted for the State's life.
     builtin_names: [StringPtr; Builtin::COUNT],
     /// One lookup cache per builtin, shared by its reads and writes.
@@ -154,7 +154,7 @@ pub(super) const LIBRARY_BUILTINS: [(Builtin, EnvRole); 3] = [
 /// later `open_libs` replaces goes back to the default policy: from then on
 /// it is an ordinary table, which is how a snapshot saves it.
 pub(super) struct EnvTable {
-    pub(super) table: ObjectPtr,
+    pub(super) table: TablePtr,
     pub(super) role: EnvRole,
     /// Every string key with a slot when the State sealed (or when this
     /// table was adopted after sealing), then those load setup added; empty
@@ -208,7 +208,6 @@ impl GlobalEnv {
             .no_gc_allocator()
             .alloc_table_with_capacity(INITIAL_GLOBAL_SLOTS);
         heap.edit_table(table)
-            .expect("just allocated as a table")
             .set_slot_policy(slot_policy(Phase::Initializing));
         heap.watch(table);
         let builtin_names = std::array::from_fn(|slot| {
@@ -243,19 +242,14 @@ impl GlobalEnv {
     /// in the set goes back to the default policy. A new one takes the
     /// current phase's policy, and when the State is already sealed it is
     /// pinned at once, as sealing would have done.
-    pub(super) fn adopt_env_tables(
-        &mut self,
-        heap: &mut GcHeap,
-        tables: Vec<(ObjectPtr, EnvRole)>,
-    ) {
+    pub(super) fn adopt_env_tables(&mut self, heap: &mut GcHeap, tables: Vec<(TablePtr, EnvRole)>) {
         let mut previous = std::mem::take(&mut self.env_tables);
         for retired in previous
             .iter()
             .filter(|old| !tables.iter().any(|(ptr, _)| *ptr == old.table))
         {
-            if let Some(mut table) = heap.edit_table(retired.table) {
-                table.set_slot_policy(SlotPolicy::default());
-            }
+            heap.edit_table(retired.table)
+                .set_slot_policy(SlotPolicy::default());
         }
         for (ptr, role) in tables {
             if let Some(index) = previous.iter().position(|old| old.table == ptr) {
@@ -264,9 +258,7 @@ impl GlobalEnv {
                 self.env_tables.push(kept);
                 continue;
             }
-            let mut table = heap
-                .edit_table(ptr)
-                .expect("an environment object is a table");
+            let mut table = heap.edit_table(ptr);
             table.set_slot_policy(slot_policy(self.phase));
             self.env_tables.push(EnvTable {
                 table: ptr,
@@ -283,14 +275,13 @@ impl GlobalEnv {
 
     /// The global table, which `_G` names.
     #[inline(always)]
-    pub(super) fn table(&self) -> ObjectPtr {
+    pub(super) fn table(&self) -> TablePtr {
         self.table
     }
 
     #[inline(always)]
     fn contents<'h>(&self, heap: &'h GcHeap) -> &'h Table {
-        heap.as_table_ref(self.table)
-            .expect("the global table lives as long as the State")
+        heap.table(self.table)
     }
 
     // Generic table writes through aliases of `_G` do not enter this API.
@@ -299,7 +290,6 @@ impl GlobalEnv {
     #[inline(always)]
     fn contents_mut<'h>(&self, heap: &'h mut GcHeap) -> TableEditor<'h> {
         heap.edit_table(self.table)
-            .expect("the global table lives as long as the State")
     }
 
     pub(super) fn reserve(&self, heap: &mut GcHeap, additional: usize) {
@@ -326,9 +316,7 @@ impl GlobalEnv {
         }
         table.set_slot_policy(slot_policy(Phase::Sealed));
         for env in &mut self.env_tables {
-            let mut table = heap
-                .edit_table(env.table)
-                .expect("an environment table is rooted by the global environment");
+            let mut table = heap.edit_table(env.table);
             #[cfg(feature = "snapshot")]
             {
                 env.pins = string_slot_keys(&table).collect();
@@ -675,18 +663,16 @@ impl GlobalEnv {
         &mut self,
         heap: &mut GcHeap,
         globals: SavedEnvTable,
-        mut env: Vec<(ObjectPtr, SavedEnvTable)>,
+        mut env: Vec<(TablePtr, SavedEnvTable)>,
         sealed: bool,
-    ) -> Result<(), (Option<ObjectPtr>, super::table::TableError)> {
+    ) -> Result<(), (Option<TablePtr>, super::table::TableError)> {
         let phase = if sealed {
             Phase::Sealed
         } else {
             Phase::Initializing
         };
         for env_table in &mut self.env_tables {
-            let mut table = heap
-                .edit_table(env_table.table)
-                .expect("an environment table is rooted by the global environment");
+            let mut table = heap.edit_table(env_table.table);
             env_table.pins = match env.iter().position(|(ptr, _)| *ptr == env_table.table) {
                 Some(index) => {
                     let (_, saved) = env.swap_remove(index);
@@ -720,7 +706,7 @@ impl GlobalEnv {
 #[cfg(feature = "snapshot")]
 pub(super) struct SavedEnvTable {
     pub(super) entries: (usize, usize, Vec<(Val, Val)>),
-    pub(super) metatable: Option<ObjectPtr>,
+    pub(super) metatable: Option<TablePtr>,
     pub(super) pins: Vec<StringPtr>,
 }
 
@@ -805,7 +791,7 @@ impl Markable for GlobalEnv {
                 debug_assert!(mirrored.same_bits(actual));
             }
         }
-        heap.mark(self.table, worklist);
+        heap.mark(self.table.into(), worklist);
         for name in &self.builtin_names {
             heap.mark_string(*name);
         }
@@ -816,7 +802,7 @@ impl Markable for GlobalEnv {
         // Kept even when no script reaches one (`math = {}` shadows it): the
         // seal still moves its policy, and a snapshot saves it by token.
         for env in &self.env_tables {
-            heap.mark(env.table, worklist);
+            heap.mark(env.table.into(), worklist);
             #[cfg(feature = "snapshot")]
             for pin in &env.pins {
                 heap.mark_string(*pin);
@@ -943,7 +929,6 @@ mod tests {
         state
             .heap
             .edit_table(env.table())
-            .expect("global table")
             .insert(env.builtin_key(slot), Val::num(2.0))
             .expect("string key fits the hash part");
         assert_ne!(state.heap.watched_epoch(), epoch);

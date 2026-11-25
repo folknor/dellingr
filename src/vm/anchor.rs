@@ -307,7 +307,7 @@ impl State {
     pub fn anchor_function(&mut self) -> Result<Anchor> {
         self.check_usable()?;
         let val = self.at_index(-1)?;
-        let typ = val.typ(&self.heap);
+        let typ = val.typ();
         if typ != LuaType::Function {
             return Err(self.type_error(TypeError::FunctionCall(typ)));
         }
@@ -321,7 +321,7 @@ impl State {
     pub fn anchor_function_at(&mut self, idx: isize) -> Result<Anchor> {
         self.check_usable()?;
         let val = self.at_index(idx)?;
-        let typ = val.typ(&self.heap);
+        let typ = val.typ();
         if typ != LuaType::Function {
             return Err(self.type_error(TypeError::FunctionCall(typ)));
         }
@@ -421,7 +421,7 @@ impl State {
     /// Returns the type of an anchored value. `None` if the handle belongs to
     /// a different State.
     pub fn anchor_type(&self, a: &Anchor) -> Option<LuaType> {
-        self.registry.get(a).map(|val| val.typ(&self.heap))
+        self.registry.get(a).map(|val| val.typ())
     }
 
     /// Number of live anchor handles. For embedder leak diagnostics.

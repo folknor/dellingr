@@ -3,7 +3,7 @@ use super::RustFnId;
 use super::State;
 #[cfg(test)]
 use super::object::Closure;
-use super::object::{GcHeap, ObjectPtr, StringPtr};
+use super::object::{ClosurePtr, GcHeap, GmatchPtr, StringPtr, TablePtr};
 
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -48,9 +48,14 @@ const NIL_TAG: u64 = 0xfff9_0000_0000_0000;
 const BOOL_TAG: u64 = 0xfffa_0000_0000_0000;
 const STR_TAG: u64 = 0xfffb_0000_0000_0000;
 const RUST_FN_TAG: u64 = 0xfffc_0000_0000_0000;
-const OBJ_TAG: u64 = 0xfffd_0000_0000_0000;
+// The three heap-object tags are the top three, so "is an object" is one
+// unsigned compare against `TABLE_TAG`. Each names the arena its payload
+// indexes (`GcHeap`), so a kind test never reads the heap.
+const TABLE_TAG: u64 = 0xfffd_0000_0000_0000;
+const LUA_FN_TAG: u64 = 0xfffe_0000_0000_0000;
+const GMATCH_TAG: u64 = 0xffff_0000_0000_0000;
 
-/// A runtime value. The five tags occupy the negative quiet NaN space above
+/// A runtime value. The seven tags occupy the negative quiet NaN space above
 /// 0xfff8_0000_0000_0000. Publishing any NaN through `num` clears that space
 /// for tags and leaves the original bits of every non-NaN number intact.
 ///
@@ -72,8 +77,11 @@ const OBJ_TAG: u64 = 0xfffd_0000_0000_0000;
 /// - There is no niche: tables store `(Val, Val)` with vacant `(Nil, Nil)`
 ///   rather than `Option<Val>`, which stays 16 bytes as a register-pair
 ///   return.
-/// - Tags `0xfffe` and `0xffff` are spare (room for distinct table and
-///   closure tags; `Obj` today names neither, so `typ` examines the heap).
+/// - Tables, Lua closures and gmatch iterators carry distinct tags, one per
+///   typed arena, so `typ` and every kind test read only the word. Slot
+///   payloads repeat across arenas (each arena's first object has the same
+///   payload), so object identity is the whole tagged word: `ObjectPtr`
+///   keeps it, and nothing compares or hashes a bare payload.
 /// - Resident-byte accounting charges fixed per-slot literals, not
 ///   `size_of::<Val>()`, so GC pacing does not follow the representation;
 ///   the sums are `u64` because the charge exceeds the allocation.
@@ -108,7 +116,19 @@ impl Val {
     }
 
     pub(crate) fn obj(ptr: ObjectPtr) -> Self {
-        Self(OBJ_TAG | ptr.payload())
+        Self(ptr.0)
+    }
+
+    pub(crate) fn table(ptr: TablePtr) -> Self {
+        Self(TABLE_TAG | ptr.payload())
+    }
+
+    pub(crate) fn lua_fn(ptr: ClosurePtr) -> Self {
+        Self(LUA_FN_TAG | ptr.payload())
+    }
+
+    pub(crate) fn gmatch(ptr: GmatchPtr) -> Self {
+        Self(GMATCH_TAG | ptr.payload())
     }
 
     fn payload(self) -> u64 {
@@ -121,9 +141,39 @@ impl Val {
             BOOL_TAG => Bool(self.payload() != 0),
             STR_TAG => Str(StringPtr::from_payload(self.payload())),
             RUST_FN_TAG => RustFn(RustFnId::from_index(self.payload() as u32)),
-            OBJ_TAG => Obj(ObjectPtr::from_payload(self.payload())),
+            TABLE_TAG | LUA_FN_TAG | GMATCH_TAG => Obj(ObjectPtr(self.0)),
             _ => Num(f64::from_bits(self.0)),
         }
+    }
+
+    /// The table this value is, if it is one. A tag test: no heap read.
+    #[inline(always)]
+    pub(crate) fn as_table_ptr(self) -> Option<TablePtr> {
+        ((self.0 & TAG_MASK) == TABLE_TAG).then(|| TablePtr::from_payload(self.payload()))
+    }
+
+    /// The Lua closure this value is, if it is one. A tag test.
+    #[inline(always)]
+    pub(crate) fn as_closure_ptr(self) -> Option<ClosurePtr> {
+        self.is_lua_closure()
+            .then(|| ClosurePtr::from_payload(self.payload()))
+    }
+
+    /// The gmatch iterator this value is, if it is one. A tag test.
+    #[inline(always)]
+    pub(crate) fn as_gmatch_ptr(self) -> Option<GmatchPtr> {
+        self.is_gmatch()
+            .then(|| GmatchPtr::from_payload(self.payload()))
+    }
+
+    #[inline(always)]
+    pub(super) fn is_lua_closure(self) -> bool {
+        (self.0 & TAG_MASK) == LUA_FN_TAG
+    }
+
+    #[inline(always)]
+    pub(super) fn is_gmatch(self) -> bool {
+        (self.0 & TAG_MASK) == GMATCH_TAG
     }
 
     pub(crate) fn is_nil(self) -> bool {
@@ -140,14 +190,10 @@ impl Val {
 
     /// Get this value as a Lua function (closure), if it is one.
     /// Requires heap access since the function data is stored in the GC heap.
-    /// Test-only: runtime paths borrow through `GcHeap::as_lua_function_ref`.
+    /// Test-only: runtime paths borrow through `GcHeap::closure_of`.
     #[cfg(test)]
     pub(super) fn as_lua_function(&self, heap: &GcHeap) -> Option<Closure> {
-        if let Some(o) = self.as_object_ptr() {
-            heap.as_lua_function(o)
-        } else {
-            None
-        }
+        self.as_closure_ptr().map(|ptr| heap.closure(ptr).clone())
     }
 
     pub(super) fn as_num(&self) -> Option<f64> {
@@ -166,26 +212,25 @@ impl Val {
             .then(|| StringPtr::from_payload(self.payload()))
     }
 
-    /// Get the ObjectPtr if this is an object, without checking what kind.
-    /// Use heap.as_table_ref() or heap.as_lua_function_ref() to inspect its type.
+    /// Any heap object this value is, whatever its kind. For a typed read
+    /// use `as_table_ptr`, `as_closure_ptr` or `as_gmatch_ptr`.
     pub(super) fn as_object_ptr(&self) -> Option<ObjectPtr> {
-        ((self.0 & TAG_MASK) == OBJ_TAG).then(|| ObjectPtr::from_payload(self.payload()))
+        (self.0 >= TABLE_TAG).then_some(ObjectPtr(self.0))
     }
 
     pub(super) fn truthy(&self) -> bool {
         !self.is_nil() && self.0 != BOOL_TAG
     }
 
-    /// Returns the value's type.
-    /// Requires heap access to determine if an Object is a Table or Function.
-    pub(super) fn typ(&self, heap: &GcHeap) -> LuaType {
+    /// The value's type, from the tag alone.
+    pub(super) fn typ(&self) -> LuaType {
         match self.kind() {
             Nil => LuaType::Nil,
             Bool(_) => LuaType::Boolean,
             Num(_) => LuaType::Number,
             RustFn(_) => LuaType::Function,
             Str(_) => LuaType::String,
-            Obj(o) => o.typ(heap),
+            Obj(o) => o.typ(),
         }
     }
 
@@ -237,6 +282,76 @@ impl PartialEq for Val {
         } else {
             self.same_bits(*other)
         }
+    }
+}
+
+/// A handle to a heap object of any kind: exactly the tagged word of its
+/// `Val`, so the kind travels with the slot handle. Equality, hashing (one
+/// `write_u64` of the word) and order cover the tag, which keeps a table and
+/// a closure that sit at the same slot of their own arenas distinct. Holders
+/// that always name one kind (a metatable, a field-cache receiver) store the
+/// typed handle instead; this one is for the places any object can be: GC
+/// worklists and liveness, `%p` identities and snapshot id maps.
+#[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) struct ObjectPtr(u64);
+
+/// An exhaustive view of an [`ObjectPtr`]'s kind.
+#[derive(Clone, Copy)]
+pub(crate) enum ObjectRef {
+    Table(TablePtr),
+    LuaFn(ClosurePtr),
+    Gmatch(GmatchPtr),
+}
+
+impl ObjectPtr {
+    #[inline(always)]
+    pub(crate) fn view(self) -> ObjectRef {
+        let payload = self.0 & !TAG_MASK;
+        match self.0 & TAG_MASK {
+            TABLE_TAG => ObjectRef::Table(TablePtr::from_payload(payload)),
+            LUA_FN_TAG => ObjectRef::LuaFn(ClosurePtr::from_payload(payload)),
+            GMATCH_TAG => ObjectRef::Gmatch(GmatchPtr::from_payload(payload)),
+            _ => unreachable!("an object handle carries an object tag"),
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn as_table(self) -> Option<TablePtr> {
+        Val(self.0).as_table_ptr()
+    }
+
+    /// Lua type of the object, from its tag.
+    pub(crate) fn typ(self) -> LuaType {
+        if (self.0 & TAG_MASK) == TABLE_TAG {
+            LuaType::Table
+        } else {
+            LuaType::Function
+        }
+    }
+}
+
+impl From<TablePtr> for ObjectPtr {
+    fn from(ptr: TablePtr) -> Self {
+        Self(Val::table(ptr).0)
+    }
+}
+
+impl From<ClosurePtr> for ObjectPtr {
+    fn from(ptr: ClosurePtr) -> Self {
+        Self(Val::lua_fn(ptr).0)
+    }
+}
+
+impl From<GmatchPtr> for ObjectPtr {
+    fn from(ptr: GmatchPtr) -> Self {
+        Self(Val::gmatch(ptr).0)
+    }
+}
+
+/// Arena handles are process-local, so diagnostics keep the pointer opaque.
+impl fmt::Debug for ObjectPtr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("<object>")
     }
 }
 
@@ -365,7 +480,9 @@ mod tests {
             BOOL_TAG | 1,
             STR_TAG | 1,
             RUST_FN_TAG,
-            OBJ_TAG | 1,
+            TABLE_TAG | 1,
+            LUA_FN_TAG | 1,
+            GMATCH_TAG | 1,
             u64::MAX,
         ] {
             let value = Val::num(f64::from_bits(bits));

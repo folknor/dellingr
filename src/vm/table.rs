@@ -13,7 +13,7 @@ use super::Error;
 use super::TypeError;
 use super::Val;
 use super::caches::TableKeySlot;
-use super::object::{GcHeap, Markable, ObjectPtr, ResidentBytes, StringPtr};
+use super::object::{GcHeap, Markable, ObjectPtr, ResidentBytes, StringPtr, TablePtr};
 #[cfg(feature = "snapshot")]
 use crate::error::{InternalFault, SnapshotTableFault};
 
@@ -544,7 +544,7 @@ pub(super) struct Table {
     /// tables. Keep this exact unless storage metadata is redesigned together.
     array_live: usize,
     storage: TableStorage,
-    metatable: Option<ObjectPtr>,
+    metatable: Option<TablePtr>,
     /// Shape version for hash-part key/index stability (the rule is at the
     /// slot tokens above). Value updates do not bump this, and neither does
     /// anything in the array part, whose tagged indices name absolute keys
@@ -3020,7 +3020,7 @@ impl Table {
     }
 
     /// Returns the metatable of this table, if any.
-    pub(super) fn get_metatable(&self) -> Option<ObjectPtr> {
+    pub(super) fn get_metatable(&self) -> Option<TablePtr> {
         self.metatable
     }
 
@@ -3062,7 +3062,7 @@ impl Table {
     }
 
     /// Sets the metatable of this table.
-    pub(super) fn set_metatable(&mut self, mt: Option<ObjectPtr>) {
+    pub(super) fn set_metatable(&mut self, mt: Option<TablePtr>) {
         self.metatable = mt;
         #[cfg(debug_assertions)]
         self.debug_assert_invariants();
@@ -3222,7 +3222,7 @@ impl Table {
             }
         }
         if let Some(mt) = &self.metatable {
-            heap.mark(*mt, worklist);
+            heap.mark((*mt).into(), worklist);
         }
     }
 }
@@ -3482,7 +3482,7 @@ impl TableEditor<'_> {
     }
 
     #[cfg(feature = "snapshot")]
-    pub(super) fn set_metatable(&mut self, mt: Option<ObjectPtr>) {
+    pub(super) fn set_metatable(&mut self, mt: Option<TablePtr>) {
         self.retire();
         self.table.set_metatable(mt);
     }
@@ -4900,11 +4900,10 @@ mod tests {
 
         let mut state = State::new();
         state.new_table().unwrap();
-        let ptr = state.stack[0].as_object_ptr().unwrap();
+        let ptr = state.stack[0].as_table_ptr().unwrap();
         state
             .heap
             .edit_table(ptr)
-            .unwrap()
             .replace_for_test(window_table(MAX_ARRAY_LEN, Some(MAX_ARRAY_LEN)));
         state.push_boolean(false).unwrap();
         let before = state.stack.clone();
@@ -4912,7 +4911,7 @@ mod tests {
         assert!(matches!(error.kind(), ErrorKind::TableGrowthFailed));
         assert_eq!(state.stack, before);
         assert_eq!(
-            state.heap.as_table_ref(ptr).unwrap().get(&n(MAX_ARRAY_LEN)),
+            state.heap.table(ptr).get(&n(MAX_ARRAY_LEN)),
             Val::boolean(true)
         );
     }
@@ -4933,8 +4932,8 @@ mod tests {
             state.load(&setup).unwrap();
             state.call(ArgCount::Fixed(0), RetCount::Fixed(0)).unwrap();
             state.get_global("t").unwrap();
-            let ptr = state.pop_val().as_object_ptr().unwrap();
-            let mut table = state.heap.edit_table(ptr).unwrap();
+            let ptr = state.pop_val().as_table_ptr().unwrap();
+            let mut table = state.heap.edit_table(ptr);
             let (logical_len, live_key) = if source.starts_with("table.insert") {
                 (MAX_ARRAY_LEN, MAX_ARRAY_LEN)
             } else {
@@ -4950,10 +4949,7 @@ mod tests {
             assert!(error.to_string().contains("table growth failed"));
             state.get_global("reached").unwrap();
             assert!(state.pop_val().is_nil());
-            assert_eq!(
-                state.heap.as_table_ref(ptr).unwrap().get(&n(live_key)),
-                Val::boolean(true)
-            );
+            assert_eq!(state.heap.table(ptr).get(&n(live_key)), Val::boolean(true));
         }
     }
 

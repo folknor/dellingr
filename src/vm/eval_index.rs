@@ -5,33 +5,33 @@ use super::caches::{
     FieldLookupCacheEntry, FieldLookupCacheSlot, METHOD_ENTRIES, MethodLookupCacheEntry,
     StringMethodCacheEntry,
 };
-use super::object::ObjectPtr;
+use super::object::TablePtr;
 
 impl State {
     /// The receiver's own lookup for table `ptr`: the field cache (with its
     /// slow revalidation), then the raw lookup, which refills the cache on a
-    /// hit. `None` if `ptr` is not a table; otherwise the raw value, or the
+    /// hit. Returns the raw value, or the
     /// receiver's metatable after a miss.
     #[inline(always)]
     pub(super) fn get_table_field_direct(
         &self,
-        ptr: ObjectPtr,
+        ptr: TablePtr,
         key: Val,
         cache: Option<&FieldLookupCacheSlot>,
-    ) -> Option<(Option<Val>, Option<ObjectPtr>)> {
+    ) -> (Option<Val>, Option<TablePtr>) {
         if let Some(val) = cache.and_then(|cache| self.get_cached_field(ptr, key, cache)) {
-            return Some((Some(val), None));
+            return (Some(val), None);
         }
 
-        let tbl = self.heap.as_table_ref(ptr)?;
+        let tbl = self.heap.table(ptr);
         if let Some((slot, val)) = tbl.find_slot(&key) {
             if let Some(cache) = cache {
                 cache.set_field(FieldLookupCacheEntry { table: ptr, slot });
             }
-            return Some((Some(val), None));
+            return (Some(val), None);
         }
 
-        Some((None, tbl.get_metatable()))
+        (None, tbl.get_metatable())
     }
 
     #[inline(always)]
@@ -50,12 +50,12 @@ impl State {
         // objects (`RuntimeCaches::drop_dead_entries`) before the slot's
         // generation can wrap (`object::CACHE_PRUNE_INTERVAL`).
         let shape = self.string_mt_index_shape?;
-        let mt = self.heap.as_table_ref(self.string_metatable?)?;
+        let mt = self.heap.table(self.string_metatable?);
         let index_handler = mt.read_slot(shape)?;
-        if index_handler.as_object_ptr() != Some(entry.string_lib) {
+        if index_handler.as_table_ptr() != Some(entry.string_lib) {
             return None;
         }
-        let tbl = self.heap.as_table_ref(entry.string_lib)?;
+        let tbl = self.heap.table(entry.string_lib);
         if let Some(method) = tbl.slot_value(entry.slot) {
             return method;
         }
@@ -101,12 +101,12 @@ impl State {
     #[inline(always)]
     pub(super) fn get_current_cached_field(
         &self,
-        ptr: ObjectPtr,
+        ptr: TablePtr,
         key: Val,
         cache: &FieldLookupCacheSlot,
     ) -> Option<Val> {
         let entry = cache.get_field()?;
-        let tbl = self.heap.as_table_ref(ptr)?;
+        let tbl = self.heap.table(ptr);
         if entry.table == ptr {
             return tbl.read_slot(entry.slot);
         }
@@ -116,7 +116,7 @@ impl State {
     #[inline(always)]
     pub(super) fn get_cached_field(
         &self,
-        ptr: ObjectPtr,
+        ptr: TablePtr,
         key: Val,
         cache: &FieldLookupCacheSlot,
     ) -> Option<Val> {
@@ -130,7 +130,7 @@ impl State {
         if entry.table != ptr {
             return None;
         }
-        let tbl = self.heap.as_table_ref(ptr)?;
+        let tbl = self.heap.table(ptr);
         if let Some(val) = tbl.slot_value(entry.slot) {
             return val;
         }
@@ -151,7 +151,7 @@ impl State {
     #[inline(always)]
     pub(super) fn get_cached_index_table_field(
         &self,
-        receiver_metatable: ObjectPtr,
+        receiver_metatable: TablePtr,
         key: Val,
         cache: &FieldLookupCacheSlot,
     ) -> Option<Val> {
@@ -172,7 +172,7 @@ impl State {
     #[inline(always)]
     pub(super) fn get_cached_route(
         &self,
-        receiver_metatable: ObjectPtr,
+        receiver_metatable: TablePtr,
         cache: &FieldLookupCacheSlot,
     ) -> Option<(Val, u8)> {
         let entry = cache.get_route()?;
@@ -183,7 +183,7 @@ impl State {
         }
         let value = self
             .heap
-            .as_table_ref(entry.terminal)?
+            .table(entry.terminal)
             .read_slot(entry.terminal_slot)?;
         Some((value, entry.units))
     }
@@ -192,7 +192,7 @@ impl State {
     #[inline(always)]
     fn cached_method_at(
         &self,
-        receiver_metatable: ObjectPtr,
+        receiver_metatable: TablePtr,
         key: Val,
         cache: &FieldLookupCacheSlot,
         position: usize,
@@ -206,10 +206,10 @@ impl State {
         if receiver_metatable != entry.receiver_metatable {
             return None;
         }
-        let metatable = self.heap.as_table_ref(receiver_metatable)?;
+        let metatable = self.heap.table(receiver_metatable);
         let index_handler =
             metatable.value_if_key(entry.index_field, self.meta_names.get(MetaName::Index))?;
-        if index_handler != Val::obj(entry.method_table) {
+        if index_handler != Val::table(entry.method_table) {
             return None;
         }
 
@@ -218,7 +218,7 @@ impl State {
         let method_table = if entry.method_table == receiver_metatable {
             metatable
         } else {
-            self.heap.as_table_ref(entry.method_table)?
+            self.heap.table(entry.method_table)
         };
         if let Some(method) = method_table.slot_value(entry.method_slot) {
             return method;

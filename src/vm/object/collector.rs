@@ -1,6 +1,9 @@
 //! State collection protocol and explicit allocation modes.
 
-use super::{Captures, GcHeap, Markable, ObjectPtr, StringPtr, TemplatePrototype};
+use super::{
+    Captures, ClosurePtr, GcHeap, GmatchPtr, Markable, ObjectPtr, StringPtr, TablePtr,
+    TemplatePrototype,
+};
 use crate::det_hash::IndexSet;
 use crate::vm::inventory::{GcCleanup, GcRoot};
 use crate::vm::{BytecodeRuntime, State};
@@ -28,11 +31,11 @@ impl NoGcAllocator<'_> {
         self,
         runtime: Arc<BytecodeRuntime>,
         upvalues: Captures,
-    ) -> ObjectPtr {
+    ) -> ClosurePtr {
         self.heap.alloc_lua_fn_raw(runtime, upvalues)
     }
 
-    pub(in crate::vm) fn alloc_table(self) -> ObjectPtr {
+    pub(in crate::vm) fn alloc_table(self) -> TablePtr {
         self.heap.alloc_table_raw()
     }
 
@@ -40,18 +43,18 @@ impl NoGcAllocator<'_> {
         self,
         iter: super::GmatchIter,
         program: Option<crate::patterns::SharedPattern>,
-    ) -> ObjectPtr {
+    ) -> GmatchPtr {
         self.heap.alloc_gmatch_raw(iter, program)
     }
 
-    pub(in crate::vm) fn alloc_table_with_capacity(self, capacity: usize) -> ObjectPtr {
+    pub(in crate::vm) fn alloc_table_with_capacity(self, capacity: usize) -> TablePtr {
         self.heap.alloc_table_with_capacity_raw(capacity)
     }
 
     pub(in crate::vm) fn alloc_table_with_template(
         self,
         prototype: &TemplatePrototype,
-    ) -> ObjectPtr {
+    ) -> TablePtr {
         self.heap.alloc_table_with_template_raw(prototype)
     }
 
@@ -177,7 +180,7 @@ impl State {
                 | GcRoot::Varargs(values) => values.mark_reachable(heap, worklist),
                 GcRoot::Globals(env) => env.mark_reachable(heap, worklist),
                 GcRoot::MetaNames(names) => names.mark(heap),
-                GcRoot::StringMetatable(ptr) => heap.mark(ptr, worklist),
+                GcRoot::StringMetatable(ptr) => heap.mark(ptr.into(), worklist),
                 GcRoot::Anchors(registry) => registry.mark_reachable(heap, worklist),
                 GcRoot::SuspendedEnv(env) => env.mark_reachable(heap, worklist),
                 GcRoot::OpenUpvalue(uv_ref) => self.upvalue_pool.mark(uv_ref, heap, worklist),
@@ -250,18 +253,11 @@ mod tests {
         state
             .load(&crate::Program::compile("local function f() end f()", None).expect("compiles"))
             .expect("load");
-        let Some(main) = state.stack[state.stack.len() - 1].as_object_ptr() else {
+        let Some(main) = state.stack[state.stack.len() - 1].as_closure_ptr() else {
             unreachable!("load pushes a closure");
         };
-        let identity = Arc::as_ptr(
-            &state
-                .heap
-                .as_lua_function_ref(main)
-                .expect("a closure")
-                .runtime
-                .bytecode,
-        ) as usize;
-        state.push_val(Val::obj(main)).expect("push");
+        let identity = Arc::as_ptr(&state.heap.closure(main).runtime.bytecode) as usize;
+        state.push_val(Val::lua_fn(main)).expect("push");
         let _main = state.anchor().expect("anchor the main closure");
         state
             .call(crate::ArgCount::Fixed(0), crate::RetCount::Fixed(0))

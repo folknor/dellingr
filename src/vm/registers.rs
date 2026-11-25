@@ -103,7 +103,7 @@ impl State {
     pub(super) fn reg_new_table_template(&mut self, frame: &Frame, dst: usize, template: u16) {
         let prototype = frame.runtime.template(usize::from(template));
         let obj = self.allocator().alloc_table_with_template(prototype);
-        self.stack[dst] = Val::obj(obj);
+        self.stack[dst] = Val::table(obj);
     }
 
     /// `R[dst] = receiver.name`. Only a current own-field cache hit runs in
@@ -208,7 +208,7 @@ impl State {
         cache_slot: Option<u8>,
     ) -> Option<Val> {
         let cache = frame.runtime.caches.field(cache_slot)?;
-        self.get_current_cached_field(receiver.as_object_ptr()?, key, cache)
+        self.get_current_cached_field(receiver.as_table_ptr()?, key, cache)
     }
 
     /// `R[dst] = R[table][R[key]]`. A plain table, or a raw hit, answers
@@ -244,10 +244,7 @@ impl State {
     ) -> Result<()> {
         let tbl_val = self.stack[base + inst.b() as usize];
         let key_val = self.stack[base + inst.c() as usize];
-        let start = match tbl_val
-            .as_object_ptr()
-            .and_then(|ptr| self.heap.as_table_ref(ptr))
-        {
+        let start = match self.heap.table_of(tbl_val) {
             Some(tbl) => {
                 let hint: Option<&TableKeySlot> = if key_val.is_string() {
                     frame.runtime.caches.table_key(inst.cache_slot())
@@ -297,7 +294,7 @@ impl State {
         let key = frame.literal(name);
         let cache = frame.runtime.caches.set_field(cache_slot);
         if !val.is_nil()
-            && let Some(ptr) = receiver.as_object_ptr()
+            && let Some(ptr) = receiver.as_table_ptr()
             && let Some(cache) = cache
             && self.try_set_field_cached(ptr, key, val, cache)
         {
@@ -342,7 +339,7 @@ impl State {
             return Ok(());
         }
         let ptr = self.stack[table]
-            .as_object_ptr()
+            .as_table_ptr()
             .expect("the direct store accepted only a table");
         if let Some(units) = self.store_absent_key(ptr, key_val, val, local_cost)? {
             crate::native_call!(
@@ -358,7 +355,7 @@ impl State {
     #[inline(never)]
     fn store_absent_key(
         &mut self,
-        ptr: super::object::ObjectPtr,
+        ptr: super::object::TablePtr,
         key: Val,
         val: Val,
         local_cost: &mut u64,
@@ -374,12 +371,9 @@ impl State {
         operation: ConstructorTableOperation,
     ) -> Result<super::table::TableEditor<'_>> {
         let tbl_val = self.stack[table];
-        let typ = tbl_val.typ(&self.heap);
-        match tbl_val.as_object_ptr() {
-            Some(ptr) if self.heap.as_table_ref(ptr).is_some() => Ok(self
-                .heap
-                .edit_table(ptr)
-                .expect("checked to be a table just above")),
+        let typ = tbl_val.typ();
+        match tbl_val.as_table_ptr() {
+            Some(ptr) => Ok(self.heap.edit_table(ptr)),
             _ => Err(Error::internal_fault(
                 InternalFault::ConstructorTableMissing {
                     operation,
@@ -436,11 +430,8 @@ impl State {
     pub(super) fn reg_set_list(&mut self, table: usize, count: usize, batch: u16) -> Result<()> {
         let first_key = usize::from(batch) * usize::from(MAX_TABLE_BATCH_SIZE) + 1;
         let tbl_val = self.stack[table];
-        let typ = tbl_val.typ(&self.heap);
-        let Some(ptr) = tbl_val
-            .as_object_ptr()
-            .filter(|ptr| self.heap.as_table_ref(*ptr).is_some())
-        else {
+        let typ = tbl_val.typ();
+        let Some(ptr) = tbl_val.as_table_ptr() else {
             return Err(Error::internal_fault(
                 InternalFault::ConstructorTableMissing {
                     operation: ConstructorTableOperation::SetList,
@@ -451,10 +442,7 @@ impl State {
         // Nothing in `set_list` can enter the collector or a callback, so
         // the values are read in place.
         let values = &self.stack[table + 1..table + 1 + count];
-        let mut tbl = self
-            .heap
-            .edit_table(ptr)
-            .expect("checked to be a table just above");
+        let mut tbl = self.heap.edit_table(ptr);
         tbl.set_list(first_key, values)?;
         Ok(())
     }
@@ -465,7 +453,7 @@ impl State {
     #[inline(never)]
     pub(super) fn arithmetic_operands_error(&self, lhs: Val, rhs: Val) -> Error {
         let bad = if rhs.as_num().is_none() { rhs } else { lhs };
-        self.type_error(TypeError::Arithmetic(bad.typ(&self.heap)))
+        self.type_error(TypeError::Arithmetic(bad.typ()))
     }
 
     /// `R[dst] = #R[src]`.
@@ -481,9 +469,7 @@ impl State {
             self.stack[dst] = Val::num(s.len() as f64);
             return Ok(());
         }
-        if let Some(tbl) = val
-            .as_object_ptr()
-            .and_then(|ptr| self.heap.as_table_ref(ptr))
+        if let Some(tbl) = self.heap.table_of(val)
             && tbl.get_metatable().is_none()
         {
             self.stack[dst] = Val::num(tbl.array_len() as f64);
@@ -533,8 +519,8 @@ impl State {
             }
             _ => {
                 return Err(self.error(ErrorKind::TypeError(TypeError::Comparison(
-                    lhs.typ(&self.heap),
-                    rhs.typ(&self.heap),
+                    lhs.typ(),
+                    rhs.typ(),
                 ))));
             }
         };
@@ -579,7 +565,7 @@ impl State {
             UpvalueDesc::Upvalue(idx) => frame.upvalues.as_slice()[*idx as usize],
         }));
         let obj = self.alloc_closure(runtime, upvalues);
-        self.stack[dst] = Val::obj(obj);
+        self.stack[dst] = Val::lua_fn(obj);
         Ok(())
     }
 

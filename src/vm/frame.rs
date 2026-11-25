@@ -363,7 +363,7 @@ impl Frame {
     ) -> Result<()> {
         let code: &[Instr] = &frame.runtime.bytecode.code;
         let base = frame.stack_bottom;
-        let Some(ptr) = state.stack[table].as_object_ptr() else {
+        let Some(ptr) = state.stack[table].as_table_ptr() else {
             return Ok(());
         };
         // bounded: one step per instruction, ending at the code's end.
@@ -400,10 +400,7 @@ impl Frame {
                     }
                     let key = frame.literal(inst.b());
                     let val = state.stack[base + inst.c() as usize];
-                    let mut tbl = state
-                        .heap
-                        .edit_table(ptr)
-                        .expect("the run's receiver is the table its allocation just made");
+                    let mut tbl = state.heap.edit_table(ptr);
                     if !tbl.init_at_index(usize::from(inst.d()), key, val) {
                         tbl.insert(key, val)?;
                     }

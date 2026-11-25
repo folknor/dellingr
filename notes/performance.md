@@ -188,9 +188,11 @@ them:
 - `optimizations.md` "Call path after the frame-stack flattening": calls
   hunter's single activation record and VM-owned continuations, with the heap,
   host and codegen hunters' overlapping points.
-- `optimizations.md` "8-byte NaN-boxed `Val`": the heap hunter's typed arenas
-  (the compact value landed), with the table hunter's `TableStorage`
-  footprint point.
+- The heap hunter's compact value and typed arenas both landed; the table
+  hunter's `TableStorage` footprint point (every table slot sized by the
+  four-pair inline variant) is unfiled residue, and
+  `optimizations.md` "Per-kind arenas keep their high-water storage" is
+  the arenas' follow-up.
 - `optimizations.md` "Field-site position hints: residue": the lookup
   hunter's shared layouts (landed as GET_FIELD's key-checked position hint;
   the shape-id IC refused); the table hunter's shared layouts sit under

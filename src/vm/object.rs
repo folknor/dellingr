@@ -22,7 +22,6 @@ use std::sync::Arc;
 
 use super::Bytecode;
 use super::BytecodeRuntime;
-use super::LuaType;
 use super::Table;
 use super::Val;
 use super::table::{HashProbe, RouteState, SlotRef, TableEditor, TemplatePrototype};
@@ -267,9 +266,8 @@ impl UpvaluePool {
 /// `runtime` is State-local, shared by every closure of its bytecode and any
 /// executing frames, and owns that immutable bytecode (`Self::bytecode`), so
 /// a closure holds one handle for both; its caches are never serialized and
-/// its literals are GC roots. Stored inline in its heap slot: the slot is
-/// table-sized anyway, and a box would cost an allocation per closure and a
-/// dependent load on every call admission.
+/// its literals are GC roots. Stored inline in the closure arena so admission
+/// reads the closure directly from its slot.
 #[derive(Clone, Debug)]
 pub(super) struct Closure {
     pub(super) runtime: Arc<BytecodeRuntime>,
@@ -279,6 +277,13 @@ pub(super) struct Closure {
     /// whole list into every frame (frames cannot borrow the heap).
     pub(super) upvalues: Captures,
 }
+
+// Keep the closure niche and the table arena stride on 64-bit targets.
+#[cfg(target_pointer_width = "64")]
+const _: () = {
+    assert!(size_of::<Option<Closure>>() == 24);
+    assert!(size_of::<arena::Slot<Table>>() == if cfg!(debug_assertions) { 200 } else { 168 });
+};
 
 impl Closure {
     /// The closure's immutable bytecode, owned by its runtime.
@@ -325,43 +330,58 @@ pub(super) struct GmatchObject {
     pub(super) program: Option<crate::patterns::SharedPattern>,
 }
 
-/// The raw object data managed by GC.
-/// Tables and closures share these slots, so inline table metadata also
-/// affects closure storage. Strings use the separate StringPool and do not
-/// pay for this enum's largest variant. Boxing tables would add an allocation
-/// and indirection to every table, including small records; keep them inline
-/// unless measurements justify that tradeoff.
-pub(super) enum RawObject {
-    LuaFn(Closure),
-    Table(Table),
-    Gmatch(GmatchObject),
-}
+// ============================================================================
+// Typed object handles - safe generational keys, one arena per kind
+// ============================================================================
 
-impl RawObject {
-    #[must_use]
-    pub(super) const fn typ(&self) -> LuaType {
-        match self {
-            RawObject::LuaFn(_) | RawObject::Gmatch(_) => LuaType::Function,
-            RawObject::Table(_) => LuaType::Table,
+macro_rules! typed_object_handle {
+    ($(#[$doc:meta])* $name:ident) => {
+        $(#[$doc])*
+        #[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
+        pub(crate) struct $name(SlotKey);
+
+        impl ArenaKey for $name {
+            fn from_slot(key: SlotKey) -> Self {
+                Self(key)
+            }
+            fn slot(self) -> SlotKey {
+                self.0
+            }
         }
-    }
+
+        impl $name {
+            pub(super) fn payload(self) -> u64 {
+                self.0.payload()
+            }
+
+            pub(super) fn from_payload(payload: u64) -> Self {
+                Self(SlotKey::from_payload(payload))
+            }
+        }
+
+        /// Arena keys are process-local, so diagnostics keep them opaque.
+        impl fmt::Debug for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("<object>")
+            }
+        }
+    };
 }
 
-// ============================================================================
-// ObjectPtr - Safe generational key
-// ============================================================================
+typed_object_handle!(
+    /// A table in the heap's table arena.
+    TablePtr
+);
+typed_object_handle!(
+    /// A Lua closure in the heap's closure arena.
+    ClosurePtr
+);
+typed_object_handle!(
+    /// A gmatch iterator in the heap's iterator arena.
+    GmatchPtr
+);
 
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) struct ObjectKey(SlotKey);
-
-impl ArenaKey for ObjectKey {
-    fn from_slot(key: SlotKey) -> Self {
-        Self(key)
-    }
-    fn slot(self) -> SlotKey {
-        self.0
-    }
-}
+pub(crate) use super::lua_val::{ObjectPtr, ObjectRef};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct StringKey(SlotKey);
@@ -375,28 +395,14 @@ impl ArenaKey for StringKey {
     }
 }
 
-/// A safe pointer to a GC-managed object.
-/// Uses the arena's generational indices to prevent use-after-free:
-/// - Each key contains a generation number
-/// - When a slot is freed and reused, the generation increments
-/// - Accessing with an old key panics instead of causing memory corruption
-///
-/// Generations wrap after 2^15 reuses of one slot, so an old key is
-/// not an identity proof forever: anything holding handles weakly must drop
-/// them before their slot can come round again (see `val_is_live` and
-/// [`CACHE_PRUNE_INTERVAL`]).
-#[derive(Clone, Copy, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) struct ObjectPtr(pub(crate) ObjectKey);
-
-impl ObjectPtr {
-    pub(super) fn payload(self) -> u64 {
-        self.0.0.payload()
-    }
-
-    pub(super) fn from_payload(payload: u64) -> Self {
-        Self(ObjectKey(SlotKey::from_payload(payload)))
-    }
-}
+// Object handles (`TablePtr`, `ClosurePtr`, `GmatchPtr`, and `ObjectPtr`
+// over all three) use the arenas' generational indices to prevent
+// use-after-free: a freed and reused slot moves its generation, and
+// resolving an old key panics instead of reading another object.
+// Generations wrap after 2^15 reuses of one slot, so an old key is not an
+// identity proof forever: anything holding handles weakly must drop them
+// before their slot can come round again (see `val_is_live` and
+// `CACHE_PRUNE_INTERVAL`).
 
 /// How many collections may pass between two runs of the runtime-cache
 /// prune (`State::drop_dead_cache_entries`).
@@ -411,7 +417,9 @@ impl ObjectPtr {
 /// (`object/arena.rs`, slotmap 1.1's stepping narrowed to 16 bits so a
 /// handle fits in an eight-byte value) keeps a `u16` version per slot, bumped once by a remove and once by an insert
 /// into the vacant slot (`version_steps_by_two_per_reuse` pins the step,
-/// the arena's `version_wraps_like_slotmap` the wrap). The sweep in `GcHeap::collect` is the only thing that frees an
+/// the arena's `version_wraps_like_slotmap` the wrap). Each object kind has
+/// its own arena, and a handle carries its kind, so the argument holds per
+/// arena. The sweeps in `GcHeap::collect` are the only thing that frees an
 /// object, so one collection cycle reuses a slot at most once, and an entry
 /// pruned within this many collections of its referent's death can never
 /// alias. Pruning on every collection would make each one walk every cache
@@ -424,20 +432,6 @@ impl ObjectPtr {
 pub(super) const CACHE_PRUNE_INTERVAL: u32 = 1 << 14;
 // A version comes round after 2^(bits - 1) reuses, at most one per collection.
 const _: () = assert!(CACHE_PRUNE_INTERVAL > 0 && CACHE_PRUNE_INTERVAL < 1 << (u16::BITS - 1));
-
-/// Arena keys are process-local, so diagnostics keep the pointer opaque.
-impl fmt::Debug for ObjectPtr {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("<object>")
-    }
-}
-
-impl ObjectPtr {
-    /// Get the type of this object.
-    pub(super) fn typ(self, heap: &GcHeap) -> LuaType {
-        heap.get(self).typ()
-    }
-}
 
 // ============================================================================
 // GcHeap - arena-based garbage collected heap
@@ -590,8 +584,15 @@ const ROUTE_EPOCH_DISABLED: u64 = u64::MAX;
 /// A collection of objects which need to be garbage-collected.
 /// Uses a generational arena for safe access to objects.
 pub(crate) struct GcHeap {
-    /// Every GC-managed object, with its mark bit.
-    objects: Arena<ObjectKey, RawObject>,
+    /// The GC-managed objects, one arena per kind, each slot with its mark
+    /// bit. A value's tag names its arena, so no access examines what kind
+    /// a slot holds, and a closure or iterator occupies a slot of its own
+    /// size rather than a table-sized one. Tables stay inline in their
+    /// slots: boxing them would add an allocation and indirection to every
+    /// table, including small records.
+    tables: Arena<TablePtr, Table>,
+    closures: Arena<ClosurePtr, Closure>,
+    gmatches: Arena<GmatchPtr, GmatchObject>,
     /// When the pacing score (automatic mode) or the allocation count
     /// (manual mode) reaches this threshold, run the GC.
     threshold: GcThreshold,
@@ -605,9 +606,9 @@ pub(crate) struct GcHeap {
     mark_worklist: Vec<ObjectPtr>,
     /// Reused scratch space for the runtime-cache sweep's chunk retention.
     live_chunks: LiveChunks,
-    /// The object whose mutation `watched_epoch` counts: the global table,
+    /// The table whose mutation `watched_epoch` counts: the global table,
     /// once the State has one (`watch`).
-    watched: ObjectPtr,
+    watched: TablePtr,
     /// Advances on every mutable access to `watched` through `get_mut`, the
     /// one mutable route to an object, so an unchanged epoch proves the
     /// object unchanged without reaching it through the slot map, except for
@@ -634,14 +635,16 @@ pub(crate) struct GcHeap {
 impl GcHeap {
     pub(super) fn with_policy(policy: GcPolicy) -> Self {
         let mut heap = Self {
-            objects: Arena::new(),
+            tables: Arena::new(),
+            closures: Arena::new(),
+            gmatches: Arena::new(),
             threshold: GcThreshold::from_initial(policy.initial_threshold),
             policy,
             strings: StringPool::new(),
             resident: ResidentBytes::default(),
             mark_worklist: Vec::new(),
             live_chunks: LiveChunks::default(),
-            watched: ObjectPtr(ObjectKey(SlotKey::NULL)),
+            watched: TablePtr(SlotKey::NULL),
             watched_epoch: 0,
             routes: RouteState::default(),
             cache_prune_countdown: CACHE_PRUNE_INTERVAL,
@@ -651,7 +654,7 @@ impl GcHeap {
     }
 
     /// Count mutable accesses to `ptr` in [`Self::watched_epoch`] from now on.
-    pub(super) fn watch(&mut self, ptr: ObjectPtr) {
+    pub(super) fn watch(&mut self, ptr: TablePtr) {
         self.watched = ptr;
         self.watched_epoch = self.watched_epoch.wrapping_add(1);
     }
@@ -679,36 +682,69 @@ impl GcHeap {
     #[cfg(test)]
     pub(super) fn with_threshold(threshold: usize) -> Self {
         Self {
-            objects: Arena::new(),
+            tables: Arena::new(),
+            closures: Arena::new(),
+            gmatches: Arena::new(),
             threshold: GcThreshold::manual(threshold),
             policy: GcPolicy::default(),
             strings: StringPool::new(),
             resident: ResidentBytes::default(),
             mark_worklist: Vec::new(),
             live_chunks: LiveChunks::default(),
-            watched: ObjectPtr(ObjectKey(SlotKey::NULL)),
+            watched: TablePtr(SlotKey::NULL),
             watched_epoch: 0,
             routes: RouteState::default(),
             cache_prune_countdown: CACHE_PRUNE_INTERVAL,
         }
     }
 
-    pub(super) fn reserve(&mut self, additional_objects: usize, additional_strings: usize) {
-        self.objects.reserve(additional_objects);
+    pub(super) fn reserve(&mut self, additional_tables: usize, additional_strings: usize) {
+        self.tables.reserve(additional_tables);
         self.strings.reserve(additional_strings);
     }
 
     // ========================================================================
-    // Object access - these replace ObjectPtr's self-dereferencing methods
+    // Object access - one typed arena per kind, so no access checks a kind
     // ========================================================================
 
-    /// Get a reference to the object.
+    /// The table behind `ptr`.
     /// Panics if the key is invalid (use-after-free detection).
     #[inline]
-    pub(super) fn get(&self, ptr: ObjectPtr) -> &RawObject {
-        self.objects
-            .get(ptr.0)
-            .expect("Invalid ObjectPtr: object was freed (use-after-free detected)")
+    pub(super) fn table(&self, ptr: TablePtr) -> &Table {
+        self.tables
+            .get(ptr)
+            .expect("Invalid TablePtr: table was freed (use-after-free detected)")
+    }
+
+    /// The closure behind `ptr`.
+    /// Panics if the key is invalid (use-after-free detection).
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    #[inline]
+    pub(super) fn closure(&self, ptr: ClosurePtr) -> &Closure {
+        self.closures
+            .get(ptr)
+            .expect("Invalid ClosurePtr: closure was freed (use-after-free detected)")
+    }
+
+    /// The gmatch iterator behind `ptr`.
+    /// Panics if the key is invalid (use-after-free detection).
+    #[inline]
+    fn gmatch_object(&self, ptr: GmatchPtr) -> &GmatchObject {
+        self.gmatches
+            .get(ptr)
+            .expect("Invalid GmatchPtr: iterator was freed (use-after-free detected)")
+    }
+
+    /// The table `val` is, if it is one: a tag test, then the slot.
+    #[inline]
+    pub(super) fn table_of(&self, val: Val) -> Option<&Table> {
+        val.as_table_ptr().map(|ptr| self.table(ptr))
+    }
+
+    /// The closure `val` is, if it is one: a tag test, then the slot.
+    #[inline]
+    pub(super) fn closure_of(&self, val: Val) -> Option<&Closure> {
+        val.as_closure_ptr().map(|ptr| self.closure(ptr))
     }
 
     // Keep invalidation here: `_G` is an ordinary table and can be mutated
@@ -717,21 +753,25 @@ impl GcHeap {
     // non-builtin write conservatively invalidates the mirror. Moving this
     // into GlobalEnv alone misses those routes; classifying each generic
     // table write would add key checks to ordinary table mutations.
-    /// Get a mutable reference to the object, with the backing meter and
+    /// Get a mutable reference to the table, with the backing meter and
     /// the route witness. Inherited routes are not retired here: an editor
     /// classifies each mutation (`TableEditor`), and `as_table`, whose raw
     /// `&mut Table` cannot, retires at the handout.
     /// Panics if the key is invalid (use-after-free detection).
     #[inline]
-    fn get_mut(&mut self, ptr: ObjectPtr) -> (&mut RawObject, &mut ResidentBytes, &mut RouteState) {
+    fn table_mut(&mut self, ptr: TablePtr) -> (&mut Table, &mut ResidentBytes, &mut RouteState) {
         if ptr == self.watched {
             self.mark_watched_changed();
         }
-        let object = self
-            .objects
-            .get_mut(ptr.0)
-            .expect("Invalid ObjectPtr: object was freed (use-after-free detected)");
-        (object, &mut self.resident, &mut self.routes)
+        let table = Self::live_table_mut(&mut self.tables, ptr);
+        (table, &mut self.resident, &mut self.routes)
+    }
+
+    #[inline]
+    fn live_table_mut(tables: &mut Arena<TablePtr, Table>, ptr: TablePtr) -> &mut Table {
+        tables
+            .get_mut(ptr)
+            .expect("Invalid TablePtr: table was freed (use-after-free detected)")
     }
 
     /// Move the watched object's epoch, for a store made through
@@ -756,10 +796,8 @@ impl GcHeap {
     /// classifies it like any other store.
     #[inline]
     pub(super) fn edit_watched_unmarked(&mut self) -> Option<TableEditor<'_>> {
-        match self.objects.get_mut(self.watched.0)? {
-            RawObject::Table(table) => Some(table.edit(&mut self.resident, &mut self.routes)),
-            RawObject::LuaFn(_) | RawObject::Gmatch(_) => None,
-        }
+        let table = self.tables.get_mut(self.watched)?;
+        Some(table.edit(&mut self.resident, &mut self.routes))
     }
 
     /// `Table::store_probe` into the watched table, under
@@ -771,74 +809,40 @@ impl GcHeap {
     /// `None` when there is no watched table.
     #[inline(always)]
     pub(super) fn store_watched_probe(&mut self, probe: &HashProbe, val: &Val) -> Option<bool> {
-        match self.objects.get_mut(self.watched.0)? {
-            RawObject::Table(table) => Some(!table.is_on_route() && table.store_probe(probe, val)),
-            RawObject::LuaFn(_) | RawObject::Gmatch(_) => None,
-        }
+        let table = self.tables.get_mut(self.watched)?;
+        Some(!table.is_on_route() && table.store_probe(probe, val))
     }
 
-    /// Borrow the object as a Lua closure, if it is one, without cloning it.
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    pub(super) fn as_lua_function_ref(&self, ptr: ObjectPtr) -> Option<&Closure> {
-        match self.get(ptr) {
-            RawObject::LuaFn(closure) => Some(closure),
-            _ => None,
-        }
-    }
-
-    /// The object's gmatch iterator record, if it is one.
-    pub(super) fn as_gmatch(&self, ptr: ObjectPtr) -> Option<GmatchIter> {
-        match self.get(ptr) {
-            RawObject::Gmatch(object) => Some(object.iter),
-            _ => None,
-        }
+    /// The gmatch iterator's record.
+    pub(super) fn gmatch(&self, ptr: GmatchPtr) -> GmatchIter {
+        self.gmatch_object(ptr).iter
     }
 
     /// A matcher over gmatch iterator `ptr`'s held program, if it holds one.
-    pub(super) fn gmatch_matcher(&self, ptr: ObjectPtr) -> Option<crate::patterns::LuaPattern> {
-        match self.get(ptr) {
-            RawObject::Gmatch(GmatchObject {
-                program: Some(program),
-                ..
-            }) => Some(program.matcher()),
-            _ => None,
-        }
+    pub(super) fn gmatch_matcher(&self, ptr: GmatchPtr) -> Option<crate::patterns::LuaPattern> {
+        self.gmatch_object(ptr)
+            .program
+            .as_ref()
+            .map(crate::patterns::SharedPattern::matcher)
     }
 
     /// Overwrite gmatch iterator `ptr`'s record with `iter` (the step's
-    /// commit); false, changing nothing, when `ptr` is not an iterator.
-    pub(super) fn set_gmatch(&mut self, ptr: ObjectPtr, iter: GmatchIter) -> bool {
-        match self.get_mut(ptr).0 {
-            RawObject::Gmatch(record) => {
-                record.iter = iter;
-                true
-            }
-            _ => false,
-        }
+    /// commit). Iterators are never the watched table, so no epoch moves.
+    pub(super) fn set_gmatch(&mut self, ptr: GmatchPtr, iter: GmatchIter) {
+        self.gmatches
+            .get_mut(ptr)
+            .expect("Invalid GmatchPtr: iterator was freed (use-after-free detected)")
+            .iter = iter;
     }
 
-    /// Get the object as a Lua function (closure), if it is one.
-    /// Test-only: runtime paths borrow through `as_lua_function_ref`.
-    #[cfg(test)]
-    pub(super) fn as_lua_function(&self, ptr: ObjectPtr) -> Option<Closure> {
-        match self.get(ptr) {
-            RawObject::LuaFn(closure) => Some(closure.clone()),
-            _ => None,
-        }
-    }
-
-    /// Get a mutable reference to the object as a table, if it is one. The
-    /// raw borrow can make any change, so it retires inherited routes
-    /// through the table at the handout; a store an editor can classify
-    /// goes through [`Self::edit_table`] instead.
-    pub(super) fn as_table(&mut self, ptr: ObjectPtr) -> Option<&mut Table> {
-        match self.get_mut(ptr) {
-            (RawObject::Table(t), _, routes) => {
-                routes.retire_through(t);
-                Some(t)
-            }
-            _ => None,
-        }
+    /// A mutable reference to the table. The raw borrow can make any
+    /// change, so it retires inherited routes through the table at the
+    /// handout; a store an editor can classify goes through
+    /// [`Self::edit_table`] instead.
+    pub(super) fn as_table(&mut self, ptr: TablePtr) -> &mut Table {
+        let (table, _, routes) = self.table_mut(ptr);
+        routes.retire_through(table);
+        table
     }
 
     /// Overwrite live `slot` of table `ptr` with non-nil `val`
@@ -856,29 +860,43 @@ impl GcHeap {
     /// editor retires routes for it. The watched table's epoch
     /// still moves, since the written key may be a builtin's name.
     #[inline(always)]
-    pub(super) fn overwrite_live_slot(&mut self, ptr: ObjectPtr, slot: SlotRef, val: Val) -> bool {
+    pub(super) fn overwrite_live_slot(&mut self, ptr: TablePtr, slot: SlotRef, val: Val) -> bool {
         if ptr == self.watched {
             self.mark_watched_changed();
         }
-        match self
-            .objects
-            .get_mut(ptr.0)
-            .expect("Invalid ObjectPtr: object was freed (use-after-free detected)")
-        {
-            RawObject::Table(table) => table.store_slot(slot, val),
-            RawObject::LuaFn(_) | RawObject::Gmatch(_) => false,
+        Self::live_table_mut(&mut self.tables, ptr).store_slot(slot, val)
+    }
+
+    /// Validate a cached field position and overwrite it with one arena read.
+    /// The same route and key guarantees as `overwrite_live_slot` apply.
+    #[inline(always)]
+    pub(super) fn overwrite_cached_slot(
+        &mut self,
+        ptr: TablePtr,
+        slot: SlotRef,
+        key: Val,
+        val: Val,
+    ) -> Option<SlotRef> {
+        let table = Self::live_table_mut(&mut self.tables, ptr);
+        let slot = if table.slot_is_current(slot) {
+            slot
+        } else {
+            table.renew_slot(slot, key)?.0
+        };
+        let did_set = table.store_slot(slot, val);
+        // A stale hint that failed renewal never reaches the write path.
+        if ptr == self.watched {
+            self.mark_watched_changed();
         }
+        did_set.then_some(slot)
     }
 
     /// Borrow the table, its backing meter and the route witness for
     /// writes. The editor decides per mutation whether inherited routes
     /// retire (`TableEditor`).
-    pub(super) fn edit_table(&mut self, ptr: ObjectPtr) -> Option<TableEditor<'_>> {
-        let (object, resident, routes) = self.get_mut(ptr);
-        match object {
-            RawObject::Table(table) => Some(table.edit(resident, routes)),
-            RawObject::LuaFn(_) | RawObject::Gmatch(_) => None,
-        }
+    pub(super) fn edit_table(&mut self, ptr: TablePtr) -> TableEditor<'_> {
+        let (table, resident, routes) = self.table_mut(ptr);
+        table.edit(resident, routes)
     }
 
     pub(super) fn charge_table_backing(&mut self, table: &Table) {
@@ -891,26 +909,11 @@ impl GcHeap {
 
     #[cfg(debug_assertions)]
     fn check_resident_bytes(&self, suspended: u64) {
-        let tables: u64 = self
-            .objects
-            .values()
-            .map(|object| match object {
-                RawObject::Table(table) => table.resident_bytes(),
-                RawObject::LuaFn(_) | RawObject::Gmatch(_) => 0,
-            })
-            .sum();
+        let tables: u64 = self.tables.values().map(Table::resident_bytes).sum();
         assert_eq!(
             self.resident.bytes,
             tables + self.strings.resident_bytes() + suspended
         );
-    }
-
-    /// Get an immutable reference to the object as a table, if it is one.
-    pub(super) fn as_table_ref(&self, ptr: ObjectPtr) -> Option<&Table> {
-        match self.get(ptr) {
-            RawObject::Table(t) => Some(t),
-            _ => None,
-        }
     }
 
     /// Get a string's content by its pointer.
@@ -933,8 +936,14 @@ impl GcHeap {
 
     /// Allocate a new Lua function.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    fn alloc_lua_fn_raw(&mut self, runtime: Arc<BytecodeRuntime>, upvalues: Captures) -> ObjectPtr {
-        self.publish_object(RawObject::LuaFn(Closure { runtime, upvalues }))
+    fn alloc_lua_fn_raw(
+        &mut self,
+        runtime: Arc<BytecodeRuntime>,
+        upvalues: Captures,
+    ) -> ClosurePtr {
+        let ptr = self.closures.insert(Closure { runtime, upvalues });
+        self.refresh_gc_watermark();
+        ptr
     }
 
     /// Allocate a gmatch iterator.
@@ -942,33 +951,35 @@ impl GcHeap {
         &mut self,
         iter: GmatchIter,
         program: Option<crate::patterns::SharedPattern>,
-    ) -> ObjectPtr {
-        self.publish_object(RawObject::Gmatch(GmatchObject { iter, program }))
+    ) -> GmatchPtr {
+        let ptr = self.gmatches.insert(GmatchObject { iter, program });
+        self.refresh_gc_watermark();
+        ptr
     }
 
     /// Allocate a new table.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    fn alloc_table_raw(&mut self) -> ObjectPtr {
-        self.publish_object(RawObject::Table(Table::default()))
+    fn alloc_table_raw(&mut self) -> TablePtr {
+        self.publish_table(Table::default())
     }
 
     /// Allocate a new table with room for `capacity` entries.
-    fn alloc_table_with_capacity_raw(&mut self, capacity: usize) -> ObjectPtr {
+    fn alloc_table_with_capacity_raw(&mut self, capacity: usize) -> TablePtr {
         let table = Table::with_capacity(capacity);
         self.charge_table_backing(&table);
-        self.publish_object(RawObject::Table(table))
+        self.publish_table(table)
     }
 
     /// Allocate a new table pre-filled from a constructor template.
-    fn alloc_table_with_template_raw(&mut self, prototype: &TemplatePrototype) -> ObjectPtr {
+    fn alloc_table_with_template_raw(&mut self, prototype: &TemplatePrototype) -> TablePtr {
         let table = Table::from_template(prototype);
         self.charge_table_backing(&table);
-        self.publish_object(RawObject::Table(table))
+        self.publish_table(table)
     }
 
     #[inline]
-    fn publish_object(&mut self, object: RawObject) -> ObjectPtr {
-        let ptr = ObjectPtr(self.objects.insert(object));
+    fn publish_table(&mut self, table: Table) -> TablePtr {
+        let ptr = self.tables.insert(table);
         self.refresh_gc_watermark();
         ptr
     }
@@ -1065,12 +1076,48 @@ impl GcHeap {
         // Marking accepts strong roots and graph edges only. Weak caches
         // must be filtered by their owners. Table tombstone keys are strong
         // edges until compaction, so they always name a live object.
-        debug_assert!(
-            self.objects.contains(ptr.0),
-            "GC marked a vacant object key"
-        );
-        if self.objects.mark(ptr.0) == Some(true) {
-            worklist.push(ptr);
+        debug_assert!(self.contains(ptr), "GC marked a vacant object key");
+        match ptr.view() {
+            ObjectRef::Table(table) => {
+                if self.tables.mark(table) == Some(true) {
+                    worklist.push(ptr);
+                }
+            }
+            ObjectRef::LuaFn(closure) => {
+                if self.closures.mark(closure) == Some(true) {
+                    worklist.push(ptr);
+                }
+            }
+            // An iterator's children are strings, which are leaves, so it
+            // is traced here rather than queued.
+            ObjectRef::Gmatch(iter) => {
+                if self.gmatches.mark(iter) == Some(true)
+                    && let GmatchIter::General {
+                        subject, pattern, ..
+                    } = self.gmatch_object(iter).iter
+                {
+                    self.mark_string(subject);
+                    self.mark_string(pattern);
+                }
+            }
+        }
+    }
+
+    /// Whether `ptr`'s slot still holds the object it names.
+    fn contains(&self, ptr: ObjectPtr) -> bool {
+        match ptr.view() {
+            ObjectRef::Table(table) => self.tables.contains(table),
+            ObjectRef::LuaFn(closure) => self.closures.contains(closure),
+            ObjectRef::Gmatch(iter) => self.gmatches.contains(iter),
+        }
+    }
+
+    /// Whether `ptr` is marked this collection; `None` when it is vacant.
+    fn is_marked(&self, ptr: ObjectPtr) -> Option<bool> {
+        match ptr.view() {
+            ObjectRef::Table(table) => self.tables.is_marked(table),
+            ObjectRef::LuaFn(closure) => self.closures.is_marked(closure),
+            ObjectRef::Gmatch(iter) => self.gmatches.is_marked(iter),
         }
     }
 
@@ -1110,11 +1157,11 @@ impl GcHeap {
             // turns "remember to call mark" into a checked invariant; it costs
             // nothing in release builds.
             debug_assert!(
-                self.objects.is_marked(ptr.0).is_none_or(|marked| marked),
+                self.is_marked(ptr).is_none_or(|marked| marked),
                 "GC worklist entry was not marked reachable; it was pushed \
                  directly instead of through GcHeap::mark"
             );
-            self.mark_children(self.get(ptr), upvalue_pool, worklist);
+            self.mark_children(ptr, upvalue_pool, worklist);
         }
     }
 
@@ -1123,16 +1170,18 @@ impl GcHeap {
         self.strings.mark(ptr);
     }
 
-    /// Mark objects referenced by this object.
+    /// Mark objects referenced by this object. Only tables and closures are
+    /// queued; `mark` traces an iterator's strings itself.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn mark_children(
         &self,
-        obj: &RawObject,
+        ptr: ObjectPtr,
         upvalue_pool: &UpvaluePool,
         worklist: &mut Vec<ObjectPtr>,
     ) {
-        match obj {
-            RawObject::LuaFn(closure) => {
+        match ptr.view() {
+            ObjectRef::LuaFn(closure) => {
+                let closure = self.closure(closure);
                 // The runtime's literals are rooted once per collection as
                 // `GcRoot::ChunkLiterals`, since every closure's runtime is
                 // the State's cached one (checked in debug builds by
@@ -1146,23 +1195,10 @@ impl GcHeap {
                     upvalue_pool.mark(*uv_ref, self, worklist);
                 }
             }
-            RawObject::Table(tbl) => {
-                tbl.mark_values(self, worklist);
+            ObjectRef::Table(table) => {
+                self.table(table).mark_values(self, worklist);
             }
-            RawObject::Gmatch(GmatchObject {
-                iter:
-                    GmatchIter::General {
-                        subject, pattern, ..
-                    },
-                ..
-            }) => {
-                self.mark_string(*subject);
-                self.mark_string(*pattern);
-            }
-            RawObject::Gmatch(GmatchObject {
-                iter: GmatchIter::Empty { .. },
-                ..
-            }) => {}
+            ObjectRef::Gmatch(_) => unreachable!("gmatch iterators are traced when marked"),
         }
     }
 
@@ -1171,14 +1207,15 @@ impl GcHeap {
     #[cfg_attr(feature = "hotpath", hotpath::measure(label = "object::heap_collect"))]
     fn collect(&mut self) {
         let resident = &mut self.resident;
-        // Sweep phase: free unmarked objects in ascending slot order. Only
-        // occupied words are visited and only dead objects are touched, so
-        // the cost does not track the arena's high-water mark.
-        self.objects.sweep(|_, obj| {
-            if let RawObject::Table(table) = obj {
-                resident.remove(table.resident_bytes());
-            }
+        // Sweep phase: free unmarked objects of each arena in ascending slot
+        // order. Only occupied words are visited and only dead objects are
+        // touched, so the cost does not track an arena's high-water mark.
+        // Nothing observable follows the order of the arenas.
+        self.tables.sweep(|_, table| {
+            resident.remove(table.resident_bytes());
         });
+        self.closures.sweep(|_, _| {});
+        self.gmatches.sweep(|_, _| {});
 
         // String collection
         self.strings.collect(resident);
@@ -1222,10 +1259,7 @@ impl GcHeap {
     /// is the State's cached runtime for its bytecode.
     #[cfg(debug_assertions)]
     pub(super) fn closures(&self) -> impl Iterator<Item = &Closure> {
-        self.objects.values().filter_map(|object| match object {
-            RawObject::LuaFn(closure) => Some(closure),
-            RawObject::Table(_) | RawObject::Gmatch(_) => None,
-        })
+        self.closures.values()
     }
 
     // ========================================================================
@@ -1240,13 +1274,15 @@ impl GcHeap {
     /// this: `format_pointer_ids` and the pattern cache at every collection,
     /// runtime caches within [`CACHE_PRUNE_INTERVAL`] collections. Asked
     /// later than right after a sweep it is still exact for a freed handle
-    /// whose slot has not been reused 2^15 times since.
+    /// whose slot has not been reused 2^15 times since. The value's tag picks
+    /// the arena, so a live object of another kind at the same slot index
+    /// never answers for it.
     pub(super) fn val_is_live(&self, val: &Val) -> bool {
-        match val.kind() {
-            ValKind::Obj(ptr) => self.objects.contains(ptr.0),
-            ValKind::Str(ptr) => self.strings.contains(ptr),
-            _ => true,
+        if let Some(ptr) = val.as_object_ptr() {
+            return self.contains(ptr);
         }
+        val.as_string_ptr()
+            .is_none_or(|ptr| self.strings.contains(ptr))
     }
 
     /// Test-only: the heap handles a mark phase coloured, after which every
@@ -1262,15 +1298,25 @@ impl GcHeap {
         std::collections::BTreeSet<StringPtr>,
     ) {
         let mut marked = std::collections::BTreeSet::new();
-        for (key, obj) in self.objects.iter() {
-            if self.objects.is_marked(key) == Some(true) {
-                marked.insert(ObjectPtr(key));
-            }
-            if let RawObject::LuaFn(closure) = obj {
-                closure.runtime.caches.take_reached();
+        for (key, _) in self.tables.iter() {
+            if self.tables.is_marked(key) == Some(true) {
+                marked.insert(ObjectPtr::from(key));
             }
         }
-        self.objects.clear_marks();
+        for (key, closure) in self.closures.iter() {
+            if self.closures.is_marked(key) == Some(true) {
+                marked.insert(ObjectPtr::from(key));
+            }
+            closure.runtime.caches.take_reached();
+        }
+        for (key, _) in self.gmatches.iter() {
+            if self.gmatches.is_marked(key) == Some(true) {
+                marked.insert(ObjectPtr::from(key));
+            }
+        }
+        self.tables.clear_marks();
+        self.closures.clear_marks();
+        self.gmatches.clear_marks();
         let mut marked_strings = std::collections::BTreeSet::new();
         for (key, _) in self.strings.strings.iter() {
             if self.strings.strings.is_marked(key) == Some(true) {
@@ -1281,9 +1327,9 @@ impl GcHeap {
         (marked, marked_strings)
     }
 
-    /// Number of GC-managed objects (tables and closures).
+    /// Number of GC-managed objects (tables, closures and gmatch iterators).
     pub(super) fn object_count(&self) -> usize {
-        self.objects.len()
+        self.tables.len() + self.closures.len() + self.gmatches.len()
     }
 
     /// Number of interned strings.
@@ -1295,7 +1341,7 @@ impl GcHeap {
     /// objects plus distinct interned strings.
     #[inline]
     pub(super) fn allocation_count(&self) -> usize {
-        self.objects.len().saturating_add(self.strings.len())
+        self.object_count().saturating_add(self.strings.len())
     }
 
     /// Current GC threshold.
@@ -1710,7 +1756,7 @@ mod tests {
         let mut heap = GcHeap::with_threshold(100);
         let ptr = heap.no_gc_allocator().alloc_table();
         heap.collect();
-        heap.mark(ptr, &mut Vec::new());
+        heap.mark(ptr.into(), &mut Vec::new());
     }
 
     #[cfg(debug_assertions)]
@@ -1719,7 +1765,7 @@ mod tests {
     fn pushing_an_unmarked_object_to_the_worklist_is_detected() {
         let mut heap = GcHeap::with_threshold(100);
         let ptr = heap.no_gc_allocator().alloc_table();
-        let mut worklist = vec![ptr];
+        let mut worklist = vec![ptr.into()];
         heap.drain_mark_worklist(&mut worklist, &UpvaluePool::new());
     }
 
@@ -1740,8 +1786,8 @@ mod tests {
     /// here.
     #[test]
     fn version_steps_by_two_per_reuse() {
-        fn index_and_version(ptr: ObjectPtr) -> (u32, u16) {
-            ptr.0.0.parts()
+        fn index_and_version(ptr: TablePtr) -> (u32, u16) {
+            ptr.0.parts()
         }
         let mut heap = GcHeap::with_threshold(100);
         let mut previous = index_and_version(heap.no_gc_allocator().alloc_table());
@@ -1773,8 +1819,8 @@ mod tests {
         let t1 = heap.no_gc_allocator().alloc_table();
         let t2 = heap.no_gc_allocator().alloc_table();
 
-        assert!(heap.as_table_ref(t1).is_some());
-        assert!(heap.as_table_ref(t2).is_some());
+        assert!(heap.contains(t1.into()));
+        assert!(heap.contains(t2.into()));
         assert_eq!(heap.object_count(), 2);
     }
 
@@ -1784,7 +1830,7 @@ mod tests {
         let kept = heap.no_gc_allocator().alloc_table();
 
         let mut worklist = heap.take_mark_worklist();
-        heap.mark(kept, &mut worklist);
+        heap.mark(kept.into(), &mut worklist);
         heap.drain_mark_worklist(&mut worklist, &UpvaluePool::new());
         heap.restore_mark_worklist(worklist);
         heap.collect();
@@ -1821,10 +1867,10 @@ mod tests {
         let mut heap = GcHeap::with_threshold(100);
         let captured = heap.no_gc_allocator().alloc_table();
         let mut pool = UpvaluePool::new();
-        let uv_ref = pool.alloc(Upvalue::Closed(Val::obj(captured)));
+        let uv_ref = pool.alloc(Upvalue::Closed(Val::table(captured)));
         let mut worklist = Vec::new();
         pool.mark(uv_ref, &heap, &mut worklist);
-        assert_eq!(worklist, vec![captured]);
+        assert_eq!(worklist, vec![captured.into()]);
         heap.drain_mark_worklist(&mut worklist, &pool);
         // A second closure sharing the cell: the slot is already Reachable,
         // and the captured table stays marked from the first visit.
@@ -1832,7 +1878,7 @@ mod tests {
         assert!(worklist.is_empty());
         heap.collect();
         pool.sweep();
-        assert!(heap.as_table_ref(captured).is_some());
+        assert!(heap.contains(captured.into()));
     }
 
     #[test]
@@ -1843,13 +1889,13 @@ mod tests {
 
         // Mark only the first table
         let mut worklist = heap.take_mark_worklist();
-        heap.mark(kept, &mut worklist);
+        heap.mark(kept.into(), &mut worklist);
         heap.drain_mark_worklist(&mut worklist, &UpvaluePool::new());
         heap.restore_mark_worklist(worklist);
         heap.collect();
 
         // First table should survive, second should be freed
-        assert!(heap.as_table_ref(kept).is_some());
+        assert!(heap.contains(kept.into()));
         assert_eq!(heap.object_count(), 1);
     }
 
@@ -1861,14 +1907,13 @@ mod tests {
             for _ in 0..100_000 {
                 let next = heap.no_gc_allocator().alloc_table();
                 heap.edit_table(next)
-                    .expect("newly allocated object is a table")
-                    .insert(Val::num(1.0), Val::obj(root))
+                    .insert(Val::num(1.0), Val::table(root))
                     .expect("table key is valid");
                 root = next;
             }
             for _ in 0..2 {
                 let mut worklist = heap.take_mark_worklist();
-                heap.mark(root, &mut worklist);
+                heap.mark(root.into(), &mut worklist);
                 heap.drain_mark_worklist(&mut worklist, &UpvaluePool::new());
                 assert!(worklist.is_empty());
                 heap.restore_mark_worklist(worklist);
@@ -1889,7 +1934,7 @@ mod tests {
         heap.collect();
 
         // This should panic with use-after-free detection
-        let _ = heap.as_table_ref(ptr);
+        let _ = heap.table(ptr);
     }
 
     #[test]

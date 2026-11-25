@@ -5,7 +5,7 @@ use std::cell::{Cell, OnceCell};
 use crate::compiler::Bytecode;
 
 use super::lua_val::Val;
-use super::object::{GcHeap, ObjectPtr};
+use super::object::{GcHeap, TablePtr};
 use super::table::{HashProbe, KeyedIndex, SlotRef, TemplatePrototype};
 
 // Under `disable-inline-caches` every cache read misses (the builtin mirror
@@ -115,7 +115,7 @@ pub(super) struct GlobalLookupCacheEntry {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct TforCursorEntry {
-    pub(super) table: ObjectPtr,
+    pub(super) table: TablePtr,
     pub(super) index: usize,
 }
 
@@ -188,7 +188,7 @@ impl GlobalLookupCacheSlot {
 /// SELF) and for SET_FIELD's value updates.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct FieldLookupCacheEntry {
-    pub(super) table: ObjectPtr,
+    pub(super) table: TablePtr,
     pub(super) slot: SlotRef,
 }
 
@@ -222,12 +222,12 @@ pub(super) struct FieldLookupCacheEntry {
 /// to a class table (a static counter) do not retire it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct MethodLookupCacheEntry {
-    pub(super) receiver_metatable: ObjectPtr,
+    pub(super) receiver_metatable: TablePtr,
     /// Slot of `__index` in `receiver_metatable`, re-checked on every use
     /// against the State's interned `MetaName::Index`, so it holds across
     /// the metatable's shape changes.
     pub(super) index_field: KeyedIndex,
-    pub(super) method_table: ObjectPtr,
+    pub(super) method_table: TablePtr,
     pub(super) method_slot: SlotRef,
 }
 
@@ -262,9 +262,9 @@ pub(super) struct MethodLookupCacheEntry {
 /// counter), through any store path, does not.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct RouteLookupCacheEntry {
-    pub(super) receiver_metatable: ObjectPtr,
+    pub(super) receiver_metatable: TablePtr,
     pub(super) route_epoch: u64,
-    pub(super) terminal: ObjectPtr,
+    pub(super) terminal: TablePtr,
     pub(super) terminal_slot: SlotRef,
     pub(super) units: u8,
 }
@@ -275,7 +275,7 @@ pub(super) struct RouteLookupCacheEntry {
 /// also validates the live metatable handler.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct StringMethodCacheEntry {
-    pub(super) string_lib: ObjectPtr,
+    pub(super) string_lib: TablePtr,
     pub(super) slot: SlotRef,
 }
 
@@ -413,7 +413,7 @@ impl SetFieldLookupCacheSlot {
 
 /// Per-(State, Bytecode) lookup caches owned by the State runtime bundle.
 ///
-/// These are never shared across `State`s: cached `ObjectPtr` keys are only
+/// These are never shared across `State`s: cached `TablePtr` keys are only
 /// valid inside the heap of the State that wrote them, and slot tokens are
 /// keyed to that State's table versions (the global table's included). They are never
 /// serialized and are rebuilt cold when a snapshot is loaded, which is sound
@@ -676,7 +676,7 @@ impl CacheEntry for GlobalLookupCacheEntry {
 impl CacheEntry for FieldLookupCacheEntry {
     fn for_each_handle(&self, f: &mut dyn FnMut(Val)) {
         let Self { table, slot: _ } = self;
-        f(Val::obj(*table));
+        f(Val::table(*table));
     }
 }
 
@@ -688,8 +688,8 @@ impl CacheEntry for MethodLookupCacheEntry {
             method_table,
             method_slot: _,
         } = self;
-        f(Val::obj(*receiver_metatable));
-        f(Val::obj(*method_table));
+        f(Val::table(*receiver_metatable));
+        f(Val::table(*method_table));
     }
 }
 
@@ -704,8 +704,8 @@ impl CacheEntry for RouteLookupCacheEntry {
             terminal_slot: _,
             units: _,
         } = self;
-        f(Val::obj(*receiver_metatable));
-        f(Val::obj(*terminal));
+        f(Val::table(*receiver_metatable));
+        f(Val::table(*terminal));
     }
 }
 
@@ -715,7 +715,7 @@ impl CacheEntry for StringMethodCacheEntry {
             string_lib,
             slot: _,
         } = self;
-        f(Val::obj(*string_lib));
+        f(Val::table(*string_lib));
     }
 }
 
@@ -725,7 +725,7 @@ impl CacheEntry for TforCursorEntry {
         // a stale one cannot give a wrong result; it is cleared anyway so the
         // invariant holds for every family without a per-family argument.
         let Self { table, index: _ } = self;
-        f(Val::obj(*table));
+        f(Val::table(*table));
     }
 }
 
