@@ -20,24 +20,17 @@ plantasjen) unless noted.
 
 ### Per-instruction weight of the register dispatch loop (re-measured 2026-11-25)
 
-Re-measured on bygg (Zen 5, 9950X3D2) at 4495fca with the 8-byte `Val`.
+Measured on bygg (Zen 5, 9950X3D2) at 4495fca with the 8-byte `Val`.
 `bench/closed_mode` (canonical dispatch of upvalue, arithmetic and branch
 ops): about 55 machine instructions and 9 cycles per VM op at an IPC near 6,
 branch misses negligible. The loop is issue-bound, so retired instructions
-now translate into cycles, unlike the Zen 3 readings this entry replaced
-(where removed checks moved cycles within about 2%).
+translate into cycles.
 
-Done: the dispatch cursor was in a stack slot (load and store per
-dispatch) because outlined helpers took `&mut ip`; they now get a copy
-(`with_cursor!` in `run_frame`). Matched pairs, 3 rounds: closed_mode -2.2%,
-wide_sweep, key_sweep, composite -0.5 to -1%, arithmetic +0.8% (1 of 3
-faster). Release native bytes unchanged, dev +32 per level.
-
-Still open below this entry: register bounds checks (the padded stack was backed out; residue below),
-"Cost accounting on every arithmetic op" (the pending batch is the same kind
-of escaped `&mut` slot, `0x8(%rsp)`, loaded and stored per charge), and
-`GET_UPVAL` indirection. The code slice's pointer and length are still
-reloaded from spill slots at the dispatch head; nothing shown recovers them.
+Residue: the code slice's pointer and length are still reloaded from spill
+slots at the dispatch head; nothing shown recovers them. The other weight
+sources have their own entries below: register bounds checks, "Cost
+accounting on every arithmetic op" (the pending batch is an escaped `&mut`
+slot loaded and stored per charge), and `GET_UPVAL` indirection.
 
 ### Register access bounds checks
 
@@ -49,11 +42,8 @@ Measured 2026-11-25 on bygg, 4495fca, matched interleaved `--commit` pairs,
 72.6e9. This overturns the 2026-10 Zen 3 refusal.
 
 `unsafe` unchecked access is refused: the verifier would become a
-memory-safety boundary for snapshot files. The padded-stack design (private
-stack with a logical end, fixed-size register windows per arm, narrow and
-wide tiers) was built and backed out on 2026-11-25: 7.5 to 30 percent slower
-on every workload, numbers and mechanism at `State.stack` in `src/vm.rs`.
-Untried safe shapes, each judged only by a matched A/B against the plain
+memory-safety boundary for snapshot files. A padded stack with fixed register
+windows was tried and lost (`State.stack` in `src/vm.rs`). Untried safe shapes, each judged only by a matched A/B against the plain
 `Vec`: a single checked maximum-index guard on a multi-operand fast path
 (`SET_TABLE`, `GET_TABLE`) with safe indexing of the same slice, adopted only
 if release asm drops the subordinate checks; and a register borrow kept
