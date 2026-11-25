@@ -404,7 +404,7 @@ impl GlobalEnv {
     /// register itself. Inlined into `Frame::run` (SET_GLOBAL, SET_BUILTIN),
     /// a by-value `Val` bound for the outlined `Table::write_slot` needs an
     /// addressable copy, and each inlined copy of this function kept its own
-    /// 16-byte stack temporary in that frame, which is live on every native
+    /// stack temporary in that frame, which is live on every native
     /// re-entry. A reference into the value stack needs none. Borrowing the
     /// register is sound because nothing a global store reaches (table
     /// lookup and mutation, the heap epoch, cache fills) runs Lua, collects,

@@ -1391,6 +1391,13 @@ impl Table {
     /// call it measured a sixth slower on a global-write workload. `probe`
     /// is a reference for the reason `value` is: a by-value copy is a dev
     /// build stack slot of every native level.
+    ///
+    /// `probe.at` is always an untagged hash index, so `set_at_index`'s
+    /// array-part branch never runs here. A hash-only setter without that
+    /// branch was tried (2026-11-25, bygg, over 3e4a5d8): native bytes per
+    /// level unchanged in dev and release, default and snapshot, and
+    /// `bench/write` 1.8% slower in 5 of 5 matched pairs. Refused on that
+    /// measurement; the cause is unattributed (layout was not swept).
     #[inline(always)]
     pub(super) fn store_probe(&mut self, probe: &HashProbe, value: &Val) -> bool {
         if probe.version != self.version() || !probe.present {

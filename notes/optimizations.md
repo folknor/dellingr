@@ -356,22 +356,6 @@ change yet:
 
 ## Micro / take-or-leave
 
-- **Global stores inline an array-part branch they never take:**
-  `GlobalEnv::write_cached` is `inline(always)` into SET_GLOBAL and
-  SET_BUILTIN and drags in `set_at_index`'s array-part branch, although a
-  global's slot is always in the hash part. A hash-only store variant might
-  trim `Frame::run` further. Mind the `bench/write` lesson from 2026-10-23:
-  removing a never-taken slow branch from this inlined helper made the steady
-  state 14% slower, so measure before trusting the idea.
-
-- **Rust-callee `stack.remove(idx)` (B-O5), rejected:** the return-value
-  half shipped 2026-07-26 (commit a96cff4). Keeping the callee as frame
-  slot -1 to skip the O(args) memmove in `begin_call` was rejected: the
-  contiguous Rust callback ABI may use every slot up to the global stack
-  cap, so a retained callee would refuse a callback push one slot earlier
-  (`rust_call_releases_callee_slot_before_callback_push` in
-  tests/integration/host/host_call_preflight.rs). Moving the callee elsewhere still shifts
-  the arguments; see the comment at the remove in src/vm/eval.rs.
 - **`string.format` cached plan (deferred, 2026-11-24):** `perf record` of
   release `bench/format_literals.lua` (bygg, b85864e) put about half of
   `format`'s own samples (about 10% of the run) on the bytewise scan for the
