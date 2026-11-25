@@ -965,15 +965,6 @@ finishes. It moves work into the closure tracer and leaves the literal-root
 visit and the map `retain`, so it pays only on states whose retained
 runtimes mostly have nested prototypes; no workload has that shape.
 
-### `State::invoke` computes each result's type before converting it (2026-11-24)
-
-`decode_with` (`src/vm/invoke.rs`) evaluates `val.typ(&state.heap)` on every
-decoded result, though only the error mapping uses it; for a string or
-object result that is a heap read on the success path, which the stack
-form's `to_number` does only on failure. Moving it into the `map_err` closure
-is mechanical. Unmeasured; `invoke_typed` decodes one number per call, where
-the type is a tag match, so no registered scenario would show it.
-
 ### `ipairs` regions: eager record bind, three or more variables (2026-11-24)
 
 A typed `ipairs` region whose body uses the value as a record binds it at

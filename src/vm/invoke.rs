@@ -116,7 +116,10 @@ impl InvokeArg for u32 {}
 
 fn decode_with<T: for<'s> Convert<'s>>(state: &State, slot: usize, position: u8) -> Result<T> {
     let val = state.stack[slot];
-    let received = val.typ(&state.heap);
+    // The received type is classified only on failure, as `read_field` does.
+    // Not a saving: every converter refuses an object result, so the heap
+    // read an object's type needs happens anyway, and a result that converts
+    // pays only a tag match.
     T::convert(FieldValue {
         val,
         heap: &state.heap,
@@ -132,7 +135,7 @@ fn decode_with<T: for<'s> Convert<'s>>(state: &State, slot: usize, position: u8)
             index: position,
             detail,
             expected,
-            received,
+            received: val.typ(&state.heap),
         })
     })
 }
