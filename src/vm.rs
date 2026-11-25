@@ -112,8 +112,15 @@ struct PatternCacheEntry {
 /// state of an activation is not here: each dispatch-loop invocation keeps
 /// its frames in a stack of its own (see `State::run_invocation`).
 pub(super) struct CallInfo {
-    /// The bytecode being executed.
-    pub(super) bytecode: Arc<Bytecode>,
+    /// The bytecode being executed, as its runtime-cache identity (its key
+    /// in `State::bytecode_caches`), not an owned `Arc`: an owner here was an
+    /// atomic increment and decrement on every Lua call and return. The
+    /// record keeps that entry, with its nested prototypes' entries, alive
+    /// across every sweep (`GcRoot::ActiveChunk`), so the key resolves for
+    /// as long as the record exists, including a record a tail call retired
+    /// while its closure is collected under a Rust tail callee. Resolve it
+    /// with `State::record_code`.
+    pub(super) code: usize,
     /// Call-site snapshot: the instruction after the last one that took a
     /// path that may call out of this activation (see
     /// `State::record_call_site`). Not the live instruction pointer of the
@@ -1402,33 +1409,47 @@ impl State {
     /// The Lua activation that supplies source context: the innermost one.
     /// Takes the call stack rather than `&self` so the returned borrow stays
     /// disjoint from `self.callbacks`.
-    fn host_context_frame(call_stack: &[CallInfo]) -> Option<&CallInfo> {
-        call_stack.last()
+    fn host_context_frame<'a>(
+        caches: &'a IndexMap<usize, Arc<BytecodeRuntime>>,
+        call_stack: &'a [CallInfo],
+    ) -> Option<(&'a Arc<Bytecode>, usize)> {
+        call_stack
+            .last()
+            .map(|info| (Self::record_code(caches, info), info.ip))
+    }
+
+    /// The bytecode an activation record names (`CallInfo::code`). Takes
+    /// the cache map rather than `&self` so the borrow stays disjoint from
+    /// `self.callbacks`.
+    fn record_code<'a>(
+        caches: &'a IndexMap<usize, Arc<BytecodeRuntime>>,
+        info: &CallInfo,
+    ) -> &'a Arc<Bytecode> {
+        &caches
+            .get(&info.code)
+            .expect("an activation record keeps its runtime-cache entry")
+            .bytecode
     }
 
     /// Called by the built-in `print()` function.
     /// Routes output, byte-exact, through host callbacks with source context.
     pub(crate) fn host_print(&mut self, message: &[u8]) {
         // Get current line from call stack (if available)
-        let frame = Self::host_context_frame(&self.in_flight.call_stack);
+        let frame = Self::host_context_frame(&self.bytecode_caches, &self.in_flight.call_stack);
         let line = frame
-            .and_then(|info| {
-                info.bytecode
-                    .line_info
-                    .get(info.ip.saturating_sub(1))
-                    .copied()
-            })
+            .and_then(|(bytecode, ip)| bytecode.line_info.get(ip.saturating_sub(1)).copied())
             .unwrap_or(0);
 
-        let source = frame.and_then(|info| info.bytecode.source.as_deref());
+        let source = frame.and_then(|(bytecode, _)| bytecode.source.as_deref());
         self.callbacks.on_print(source, line, message);
     }
 
     /// Called when an error occurs. Notifies host callbacks.
     pub(crate) fn host_error(&mut self, error: &mut Error) {
         if error.mark_reported() {
-            let source = Self::host_context_frame(&self.in_flight.call_stack)
-                .and_then(|info| info.bytecode.source.as_ref());
+            let source =
+                Self::host_context_frame(&self.bytecode_caches, &self.in_flight.call_stack)
+                    .and_then(|(bytecode, _)| bytecode.source.as_ref());
             error.attach_source_name_if_absent(source);
             self.callbacks.on_error(error);
         }
@@ -1437,8 +1458,8 @@ impl State {
     /// Returns the active script caller's chunk name, byte-exact, or `None`
     /// outside execution or in an unnamed chunk.
     pub fn current_source(&self) -> Option<&[u8]> {
-        Self::host_context_frame(&self.in_flight.call_stack)
-            .and_then(|info| info.bytecode.source.as_deref())
+        Self::host_context_frame(&self.bytecode_caches, &self.in_flight.call_stack)
+            .and_then(|(bytecode, _)| bytecode.source.as_deref())
     }
 
     /// Pushes onto the stack the value of the global `name`.
@@ -2057,7 +2078,7 @@ impl State {
         // The remaining entries are the callers, with ip pointing to their call sites.
         for call_info in self.in_flight.call_stack.iter().rev().skip(1) {
             trace.push(Self::trace_frame(
-                &call_info.bytecode,
+                Self::record_code(&self.bytecode_caches, call_info),
                 call_info.ip,
                 call_info.chain.tail_called(),
             ));

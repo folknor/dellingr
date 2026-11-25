@@ -61,37 +61,14 @@ entries below; check the cross-references before starting a subsumed item.
 ### Call path after the frame-stack flattening (B-O1 remainder)
 
 Lua-to-Lua calls run in one dispatch loop over a per-invocation frame stack
-since 27ee714. What B-O1 listed and is still open:
+since 27ee714. `CallInfo` names its code by runtime-cache key and admission
+copies the callee's layout instead of cloning an `Arc`, so a Lua call keeps
+one `Arc` pair (the frame's runtime); the `CallInfo`/frame merge is not a
+standalone item any more (reasoning in the `Frame` doc). What is still open:
 
-- Admission probes. On the ordinary direct Lua call that reaches frame
-  admission, the closure is looked up three times:
-  `publish_cost_unless_lua_callee`, `classify_callee` (which clones the
-  bytecode `Arc` for `CallInfo`) and `admitted_frame` (which clones the
-  runtime `Arc`, and the capture list's `Arc` only with two or more
-  captures). An eligible numeric leaf returns before classification, and a
-  host entry skips the cost probe. Frames no longer hold their own bytecode
-  `Arc` (they read it through the runtime). Consolidating the probes must
-  keep the cost-publication decision and the admission GC checkpoint, and a
-  heap borrow cannot span that checkpoint.
-- One activation stack (the `CallInfo`/frame merge). `CallInfo` parallels the
-  frame stacks with a bytecode `Arc` and a cursor for tracebacks, `print`
-  locations and the `ActiveChunk` root. The blocker is not tracebacks but
-  borrows: `eval_batched` holds `&Frame` into the invocation's vector across
-  every native re-entry, so a nested invocation cannot push onto it. Route
-  (2026-11-25 spar): split resolution from re-entry. A resolver that only
-  produces a value stays in the loop; one that needs a call returns it (the
-  shape `IndexOutcome::Call` already has), the cursor is published, the frame
-  borrow ends, and the driver runs the callee with full `&mut State` on the
-  same activation vector, the entry index being the unwind boundary, and
-  reacquires the frame by index. The unified activation would use its
-  runtime for the active-chunk root and diagnostics, and a retired activation
-  under a Rust tail callee keeps its runtime without rooting its closure.
-  Payoff (one `Arc` pair and a duplicated cursor per call, diagnostics and GC
-  on one stack) against the helper API split is the open question. Refused
-  shape: frames borrowing descriptors from a State-owned arena by id, since a
-  borrow cannot span a collection that mutates or reclaims the arena; an id
-  design would need a different reclamation scheme.
-- Continuations: `index_call`, `newindex_call` and `len_call`
+- Continuations. A handler or iterator run as an activation of the current
+  invocation needs its frame on that invocation's frame vector and a
+  continuation owner; the `CallInfo` stack can stay separate. Sites: `index_call`, `newindex_call` and `len_call`
   (`registers.rs`), the generic-for Lua iterator fallback (`eval_control.rs`),
   each custom sort comparison (`table_ops.rs`) and `gsub` function
   replacements each run a whole nested invocation lifecycle (native-depth

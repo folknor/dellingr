@@ -26,9 +26,32 @@ pub(super) const FRAME_HEADROOM: usize = 4;
 /// What a call of a value other than a Rust function runs, from one look at
 /// its object (`State::classify_callee`).
 enum CalleeKind {
-    Lua(Arc<Bytecode>),
+    Lua(LuaCallee),
     Gmatch,
     Other,
+}
+
+/// What admission needs from a Lua callee, copied out of its closure by
+/// `State::classify_callee` so no heap borrow (and no `Arc` clone) spans the
+/// admission GC checkpoint: the layout fields and the runtime-cache identity
+/// its activation record keeps (`CallInfo::code`).
+#[derive(Clone, Copy)]
+pub(super) struct LuaCallee {
+    pub(super) code: usize,
+    pub(super) num_params: u8,
+    pub(super) max_stack: u16,
+    pub(super) is_vararg: bool,
+}
+
+impl LuaCallee {
+    pub(super) fn of(bytecode: &Arc<Bytecode>) -> Self {
+        Self {
+            code: Arc::as_ptr(bytecode) as usize,
+            num_params: bytecode.num_params,
+            max_stack: bytecode.max_stack,
+            is_vararg: bytecode.is_vararg,
+        }
+    }
 }
 
 /// Entry observation is zero-sized for ordinary calls, including debug builds.
@@ -297,13 +320,27 @@ impl State {
         local_cost: &mut u64,
     ) -> Result<bool> {
         let idx = self.call_base(num_args)?;
-        self.publish_cost_unless_lua_callee(idx, local_cost)?;
-        // A Lua function with a numeric leaf plan runs here without an
-        // activation when its entry checks pass (`vm/numeric_loop.rs`).
-        if matches!(self.stack[idx].kind(), ValKind::Obj(_))
-            && self.try_numeric_leaf(idx, num_args, num_ret_expected, local_cost)
-        {
-            return Ok(false);
+        // One look at the callee decides both the cost publication (as
+        // `publish_cost_unless_lua_callee` states it, judged on the operand
+        // as written, so a callable object publishes) and whether the
+        // out-of-line numeric leaf attempt is worth calling: only a closure
+        // with a leaf plan pays for it, and `try_numeric_leaf` still owns
+        // every reason to decline (`vm/numeric_loop.rs`).
+        let has_leaf = match self.stack[idx].kind() {
+            ValKind::Obj(ptr) => self
+                .heap
+                .as_lua_function_ref(ptr)
+                .map(|closure| closure.runtime.numeric_leaf.is_some()),
+            _ => None,
+        };
+        match has_leaf {
+            None => Frame::flush_local_cost(self, local_cost)?,
+            Some(true) => {
+                if self.try_numeric_leaf(idx, num_args, num_ret_expected, local_cost) {
+                    return Ok(false);
+                }
+            }
+            Some(false) => {}
         }
         // A library leaf runs here without a callback (`vm/leaf.rs`).
         if matches!(self.stack[idx].kind(), ValKind::RustFn(_))
@@ -532,8 +569,8 @@ impl State {
             f
         } else {
             match self.classify_callee(func_val) {
-                CalleeKind::Lua(bytecode) => {
-                    self.admit_lua_call(bytecode, num_args, old_stack_bottom, shape.tail())?;
+                CalleeKind::Lua(callee) => {
+                    self.admit_lua_call(callee, num_args, old_stack_bottom, shape.tail())?;
                     entered.mark_entered();
                     return Ok(None);
                 }
@@ -628,12 +665,12 @@ impl State {
             let func_val = self.stack[idx];
             debug_assert!(!matches!(func_val.kind(), ValKind::RustFn(_)));
             let kind = self.classify_callee(func_val);
-            if let CalleeKind::Lua(bytecode) = kind {
+            if let CalleeKind::Lua(callee) = kind {
                 // A Lua callee keeps its function slot: the value stays
                 // rooted there below the callee's frame, its frame is built
                 // from it (`State::admitted_frame`), and the results land in
                 // it on return.
-                match self.admit_lua_call(bytecode, num_args, old_stack_bottom, shape.tail()) {
+                match self.admit_lua_call(callee, num_args, old_stack_bottom, shape.tail()) {
                     Ok(()) => {
                         // `with_units` keeps the tail mark a tail admission
                         // set on the record.
@@ -1002,7 +1039,7 @@ impl State {
     /// dispatch loop replaces the caller's frame (`State::replace_tail_frame`).
     pub(super) fn admit_lua_call(
         &mut self,
-        bytecode: Arc<Bytecode>,
+        callee: LuaCallee,
         num_args: u8,
         old_stack_bottom: usize,
         tail: bool,
@@ -1026,9 +1063,9 @@ impl State {
         let frame_bottom = self.stack.len() - num_args as usize;
         self.in_flight.stack_bottom = frame_bottom;
 
-        let num_params = bytecode.num_params;
-        let max_stack = usize::from(bytecode.max_stack);
-        let is_vararg = bytecode.is_vararg;
+        let num_params = callee.num_params;
+        let max_stack = usize::from(callee.max_stack);
+        let is_vararg = callee.is_vararg;
 
         // Extra arguments of a vararg function leave the value stack for the
         // activation record, which roots them.
@@ -1080,7 +1117,7 @@ impl State {
         self.stack.resize(frame_top, Val::NIL);
 
         if tail {
-            self.replace_tail_record(bytecode, vararg_start);
+            self.replace_tail_record(callee.code, vararg_start);
         } else {
             self.in_flight.call_depth += 1;
             // Extended from `once_with` so the record is written straight
@@ -1089,7 +1126,7 @@ impl State {
             self.in_flight
                 .call_stack
                 .extend(std::iter::once_with(|| CallInfo {
-                    bytecode,
+                    code: callee.code,
                     ip: 0,
                     chain: ChainUnits::NONE,
                     vararg_start,
@@ -1103,7 +1140,7 @@ impl State {
     /// `callee_start`, slide down) and overwrite the caller's record with
     /// the callee's, marked as tail called. Infallible.
     #[inline(never)]
-    fn replace_tail_record(&mut self, bytecode: Arc<Bytecode>, callee_start: u32) {
+    fn replace_tail_record(&mut self, code: usize, callee_start: u32) {
         let caller = self
             .in_flight
             .call_stack
@@ -1111,7 +1148,7 @@ impl State {
             .expect("a tail call is made by a Lua activation");
         debug_assert_eq!(caller.chain.units(), 0);
         let caller_start = caller.vararg_start;
-        caller.bytecode = bytecode;
+        caller.code = code;
         caller.ip = 0;
         caller.chain = ChainUnits::NONE.marked_tail_called();
         self.in_flight
@@ -1130,7 +1167,7 @@ impl State {
         match func.kind() {
             ValKind::Obj(ptr) => match self.heap.get(ptr) {
                 super::object::RawObject::LuaFn(closure) => {
-                    CalleeKind::Lua(Arc::clone(closure.bytecode()))
+                    CalleeKind::Lua(LuaCallee::of(closure.bytecode()))
                 }
                 super::object::RawObject::Gmatch(_) => CalleeKind::Gmatch,
                 super::object::RawObject::Table(_) => CalleeKind::Other,
@@ -1424,7 +1461,8 @@ impl State {
             return error;
         }
         if let Some(info) = self.in_flight.call_stack.last() {
-            error = self.locate_error(error, &info.bytecode, info.ip);
+            let bytecode = Self::record_code(&self.bytecode_caches, info);
+            error = self.locate_error(error, bytecode, info.ip);
         }
         self.host_error(&mut error);
         error
@@ -1569,7 +1607,7 @@ impl State {
         let func = self.pop_val();
         self.stack.insert(func_slot, func);
         let old_stack_bottom = self.in_flight.stack_bottom;
-        self.admit_lua_call(bytecode, num_args, old_stack_bottom, false)?;
+        self.admit_lua_call(LuaCallee::of(&bytecode), num_args, old_stack_bottom, false)?;
         self.run_invocation(old_stack_bottom)
     }
 }

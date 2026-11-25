@@ -39,6 +39,13 @@ use crate::instr::{ArgCount, CompareOp, RetCount};
 /// re-entry: a resolver returns the prepared call (as `IndexOutcome::Call`
 /// does), the cursor is published and the frame borrow ends, and the driver
 /// runs the callee with full `&mut State`, reacquiring the frame by index.
+/// That merge is not pursued for its own sake: once `CallInfo` named its
+/// code by runtime-cache key instead of owning an `Arc`, what it would still
+/// remove is the duplicated call-site cursor (written only on paths that can
+/// call out) and the gap between a record's admission and its frame's push.
+/// It pays only as part of running handlers and iterators as activations of
+/// the current invocation, and even that needs only a shared frame vector
+/// and a continuation owner, not a merged record.
 pub(super) struct Frame {
     /// State-local literals and lookup caches shared by this bytecode's
     /// closures and active frames, and the owner of the bytecode being

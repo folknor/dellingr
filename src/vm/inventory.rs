@@ -349,7 +349,7 @@ impl State {
             #[cfg(test)]
                 pattern_compilations: _,
             poisoned: _,
-            frame_stacks: _,  // Frames own only Arcs; their chunks are in call_stack.
+            frame_stacks: _,  // Frames own only Arcs; call_stack keys their chunks.
             result_buffer: _, // Bytes only.
             callbacks: _,     // Host-owned; the host cannot hold a Val.
             user_data: _,     // Host-owned; the host cannot hold a Val.
@@ -394,7 +394,10 @@ impl State {
             visit(GcRoot::OpenUpvalue(*uv_ref));
         }
         for call in call_stack {
-            visit(GcRoot::ActiveChunk(&call.bytecode));
+            visit(GcRoot::ActiveChunk(State::record_code(
+                bytecode_caches,
+                call,
+            )));
         }
         for identity in pending_bytecode_caches {
             visit(GcRoot::PendingChunk(*identity));
@@ -498,7 +501,8 @@ mod tests {
             InFlight {
                 stack_bottom: 1,
                 call_stack: vec![CallInfo {
-                    bytecode: Arc::clone(closure.bytecode()),
+                    // Stale once `state` drops; nothing here resolves it.
+                    code: Arc::as_ptr(closure.bytecode()) as usize,
                     ip: 0,
                     vararg_start: 0,
                     chain: crate::vm::ChainUnits::NONE,

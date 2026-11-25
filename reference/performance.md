@@ -17,6 +17,27 @@ figures are in reference/native-calls.md ("Current native bytes per level");
 the history of the largest cycle across both profiles is under "Native stack
 frames and cycles" below.
 
+## Activation records keyed by runtime-cache identity, 2026-11-25
+
+A Lua call used to take two `Arc` owners: `classify_callee` cloned the
+callee's bytecode `Arc` into its `CallInfo`, and `admitted_frame` cloned the
+runtime into its frame. `CallInfo` now holds the bytecode's runtime-cache
+key and resolves it through `State::bytecode_caches` for tracebacks,
+`print` and host source context; the record keeps that entry and its nested
+prototypes' entries alive through the `ActiveChunk` root, so the key also
+outlives a retired tail caller whose closure is collected. Admission copies
+the callee's three layout fields instead. `call_from_lua` also looks at the
+callee once for both the cost publication and the numeric leaf gate, calling
+the out-of-line `try_numeric_leaf` only for a closure with a leaf plan.
+
+Matched `--commit` rounds on bygg, ddc9716 against the variant built as a
+local commit, three interleaved single-iteration cells each: `tail_call`
+4.4 s to 3.8 s (3 of 3), `closure` 2.1 s to 1.9-2.0 s (3 of 3),
+`rust_boundary` 3.3 s to 3.1 s (3 of 3), `method` 527-559 ms to 518-529 ms,
+`global` flat at about 1.0 s. Release `native_bytes_per_level` rows are
+unchanged; dev rows move 16 bytes, up on the index, newindex, length and
+generic-for rows and down on the rest.
+
 ## Long result-buffer hits recycle their buffer, 2026-11-25
 
 A `gsub`, `string.format` or `table.concat` result longer than 22 bytes

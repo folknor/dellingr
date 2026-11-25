@@ -627,8 +627,12 @@ mod tests {
             Val::num(70.0),
             Val::num(80.0),
         ]);
+        // A real runtime-cache entry, so the record's key resolves.
+        let bytecode = Arc::new(Bytecode::default());
+        state.push_chunk(&bytecode).expect("push the chunk");
+        state.pop_val();
         state.in_flight.call_stack.push(CallInfo {
-            bytecode: Arc::new(Bytecode::default()),
+            code: Arc::as_ptr(&bytecode) as usize,
             ip: 0,
             vararg_start: 0,
             chain: crate::vm::ChainUnits::NONE,
