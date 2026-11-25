@@ -28,9 +28,12 @@ translate into cycles.
 
 Residue: the code slice's pointer and length are still reloaded from spill
 slots at the dispatch head; nothing shown recovers them. The other weight
-sources have their own entries below: register bounds checks, "Cost
-accounting on every arithmetic op" (the pending batch is an escaped `&mut`
-slot loaded and stored per charge), and `GET_UPVAL` indirection.
+sources: register bounds checks and "Cost accounting on every arithmetic
+op" (the pending batch is an escaped `&mut` slot loaded and stored per
+charge) have their own entries below; `GET_UPVAL` indirection is settled
+(capture slice selected once per activation in `run_frame`, closed-cell
+fast path refused at `State::upvalue_value`, region widenings refused at
+`Layout::load` and `Layout::finish`).
 
 ### Register access bounds checks
 
@@ -73,29 +76,6 @@ run between calls. Two unmeasured residues remain:
   read-only prescan summing the run's weights could admit it once when all
   but the last fit strictly under the room, falling back to per-write
   charging; positions stay observable-identical. Unmeasured.
-
-### `GET_UPVAL` indirection
-
-What: canonical `GET_UPVAL` and `SET_UPVAL` index the activation's capture
-slice (selected once per `run_frame`), then the pool slot, then branch on
-open or closed. Typed regions take number upvalue reads and, without
-calls, number upvalue writes (`closed_tally`), so what still dispatches
-per instruction is a loop the region declines for another reason
-(`closed_mode`, a string-mode test, is the registered workload): stores
-other than number fields of a record, non-number branches, calls other
-than leaves or invariant-receiver methods, an upvalue write beside any
-call, and a captured leaf called on a captured argument, `f(a)` (the
-argument's load hoists the callee as a number, so `CALL f` refuses).
-
-Sketch: widen region coverage rather than the canonical arms. `f(a)` needs
-the pending loads kept per register (each resolved at first use as a
-number or a callee). An upvalue write beside a leaf call could be taken
-when the leaf's own captures are proven disjoint from the written cells at
-entry (by `UpvalueRef`), with the leaf's capture hoists then still exact.
-A closed-cell fast path in the canonical arm was refused (reason at
-`State::upvalue_value`). Hoisting the read into a register at compile time
-is refused (codegen.rs header: it drops scratch register overwrites that
-free dead values).
 
 ## Full coherent rewrites
 

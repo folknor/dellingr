@@ -1208,6 +1208,17 @@ impl Layout {
         // read; were it a callee after all, the `CALL` of its register finds
         // no open load and refuses the region. This takes the operands of
         // `up + (up - x)`, which codegen loads back to back.
+        //
+        // So `f(a)`, a captured leaf called on a captured number, declines.
+        // Taking it was considered and refused for want of any program
+        // that needs it (no registered workload has the shape). Were it
+        // built, only the narrow form is exact: `call_site` turns the
+        // argument's open load into a copy at its own position and leaves
+        // exactly one unresolved callee. A general per-register map of
+        // pending loads is not: in `f(g(a) + 1)` the inner `Load` replaces
+        // the runners' single loaded callee, so an exit at, or after, the
+        // inner `CALL` restores `g` alone and canonical dispatch reaches
+        // the outer `CALL` without `f` in its register.
         if let Some((loaded, Callee::Upvalue(index))) = self.loading {
             self.hoist_upvalue(loaded, index)?;
         }
@@ -1983,6 +1994,17 @@ impl Layout {
         // refuse that anyway, the cell being a number for its constant slot
         // and a table for the receiver, but the plan should not depend on
         // it.)
+        //
+        // The calls half is coverage, not a known hazard. The entry already
+        // implies a leaf's captures are disjoint from the written cells: a
+        // written cell must hold a number, while a leaf's capture, a
+        // captured callee and an invariant receiver must hold a table or a
+        // closure, so no `UpvalueRef` proof is missing. Every exit at a
+        // `CALL` publishes dirty captures before canonical dispatch resumes,
+        // and a completed call clears register bits only. Lifting it was
+        // refused for want of any program that writes a capture beside a
+        // leaf call (no registered workload has the shape); one that does
+        // reopens it, with a differential test against the canonical twin.
         if !self.capture_writes.is_empty() {
             let receiver_written = |receiver: &Receiver| matches!(receiver, Receiver::Upvalue(index) if self.capture_writes.contains(index));
             if !self.calls.is_empty()

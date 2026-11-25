@@ -173,6 +173,13 @@ identical to 1b783c4's (only two markdown files differ), which the later
 table's arm line to name the source as 1b783c4's, keeping `d594c99` only
 as the label the cells were run under.
 
+The same shape sits in a code comment: the refusal of tree expansion during
+closure tracing at `State::sweep_bytecode_caches` (`src/vm.rs`) names its
+measured variant `7e9b5a6`, which no branch or tag contains. Unlike
+`d594c99` it matches no landed commit, so the hash will dangle once the
+reflog expires. Either keep the variant reachable (a tag) or reword the
+comment so the description of the change carries it and the hash goes.
+
 ### Materialized duplicate-key rejection is untested (2026-11-25)
 
 Snapshot load rejects a table whose saved keys are distinct but resolve to
@@ -194,6 +201,17 @@ the 20 s per-test cap). Compiling each source once into a `Program` and
 loading it into a fresh State per outcome keeps every comparison and may
 shorten the lane. Unmeasured; check whether State construction or the
 compile dominates first.
+
+### The test-profile opt-level refusal has no durable record (2026-11-25)
+
+The brokkr check audit (3e4a5d8) refused `[profile.test] opt-level = 1`:
+docs/limits.md "Envelope" promises the 4 MiB native-stack envelope in the
+unoptimized dev build, and the dev sweeps test it through
+`tests/native_stack.rs`. The reasoning lives only in that commit message and
+the closed tracker ticket; `Cargo.toml` has no `[profile.*]` table and no
+comment, so the next pass over the same check-time advice will retry it.
+Put the refusal where someone adding a test profile would look (a comment
+in `Cargo.toml` beside where the table would go).
 
 ## Deferred forward-looking ideas
 
