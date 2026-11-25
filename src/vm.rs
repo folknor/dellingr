@@ -535,6 +535,23 @@ impl StateBuilder {
         if let Some(interrupt) = self.interrupt {
             state.set_interrupt(interrupt);
         }
+        // Every standard State installs the library from scratch. Cloning a
+        // prepared template instead was weighed and refused on 2026-11-25
+        // (c99f982, bygg, `host --scenario state_new`): construction plus
+        // teardown is about 3.4 us, a raw State about 1.06 us, and the two
+        // collections the install crosses at the default initial threshold
+        // about 0.25 us, so a clone could save at most about 2 us, and no
+        // caller builds States on a hot path (snapshot load, the one
+        // repeated builder, costs milliseconds). A clone would also be a
+        // second construction path that has to match this one for the same
+        // builder inputs, and must not copy two pieces: the anchor
+        // registry's release queue (a release names a slot key only, so a
+        // shared queue lets one State free another's root) and the heap's
+        // interrupt and poll-source wiring (a shared interrupt stops every
+        // clone). Skipping the install's collections was refused too: the
+        // initial threshold being in force during install is documented
+        // (`docs/limits.md`), and collecting there is what `gc_policy`
+        // stress tests use to prove the install roots what it builds.
         if self.standard_library {
             state
                 .open_libs_unchecked()
@@ -1241,6 +1258,21 @@ impl State {
         // runtimes are leaves (the functions a chunk defines), and on a State
         // holding many of them the set insert and lookup per entry were most
         // of this sweep's cost.
+        //
+        // Expanding the trees during closure tracing instead (the first
+        // closure that flags a runtime with nested prototypes walks its tree
+        // into `trees`, and this pass goes) was built and refused on
+        // 2026-11-25 (variant 7e9b5a6 against c99f982, bygg, interleaved
+        // `--commit` rounds): `many_chunks` 1468 to 1448 ms (faster in 4 of
+        // 5), but `gc_churn` 2486 to 2515 ms (slower in 4 of 4) and
+        // `closure` +9 ms (2 of 4 either way). This pass costs a flag read
+        // per map entry; tracing expansion costs a flag load and store and a
+        // branch per traced closure, which plausibly loses wherever closures
+        // outnumber runtimes. Not built either: a separate index of cached
+        // runtimes that have nested prototypes, scanned here instead of the
+        // whole map. Its gain is bounded by this pass, which `retain` below
+        // walks the map after anyway; expanding from the root visit alone
+        // would miss a parent closure reached through a table or upvalue.
         let object::LiveChunks { trees, pending } = live;
         for runtime in self.bytecode_caches.values() {
             if runtime.caches.reached() && !runtime.bytecode.nested.is_empty() {

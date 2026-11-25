@@ -267,41 +267,6 @@ after a dynamic value (`ADD_RK` then `INIT_FIELD_PINNED` in
 `record_tables`) is a separate execution-side fusion that needs a witness
 that the register still holds the constructed table.
 
-### Share the stdlib install across States
-
-What: today `StateBuilder::build` runs `open_libs` for every new
-`State`, building each library table and the global table (`_G`, an
-ordinary heap table) from scratch. There is no longer an `Engine` to
-hold a prepared copy, so sharing the install needs a new owner: a
-prepared template the builder clones from.
-
-Sketch: build the standard environment once into a template and give
-new States a copy of it. Watch out: the library tables, `_G` and the
-interned key strings all live in one State's heap, so a copy has to
-rebuild them in the new heap (or the heap has to support cloning), and
-the environment-table record (`GlobalEnv::env_tables`, with each table's
-slot policy) is captured right after `open_libs` and must match the copy.
-
-Shipped smaller step on 2026-05-11: stdlib globals and module tables now
-install Rust functions through direct `Val`/string-key insertion helpers
-instead of pushing key/function pairs through the Lua stack and calling
-the public table setters. This reduces the per-State setup work without
-changing the ownership model. The process-level `examples/comments.lua`
-signal is tiny and noisy on this host (roughly 495us to 487us in a
-200-run hyperfine sample), so this does not remove the shared-install idea.
-
-Why deferred: not on the hot path. State construction is amortized
-across however long the State lives; even at "one State per request
-worker", the install cost is microseconds per request. The bigger
-win would be at "one State per request" granularity, which isn't
-the recommended embedding model.
-
-Signal that would promote it: a profile showing State construction
-dominating request-path latency, or a real "one State per request"
-embedder asking. The `host --scenario state_new` bench (construction plus
-teardown, about 5 us per State on bygg, 2026-11-24, dirty tree at 8b98de6)
-is where a change here is measured.
-
 ---
 
 ## IC extensions (same shape as existing ICs)
@@ -344,16 +309,6 @@ lookup; 85.3 to 64.7 ms warm, plantasjen, df80d81 against the rewrite).
 ---
 
 ## Host boundary and per-State costs
-
-### Tree expansion during closure tracing
-
-From the spar on the runtime reconcile (2026-11-24): a reached runtime with
-nested prototypes could expand its tree into the live-chunk set when closure
-tracing first flags it, removing the discovery pass over the runtime map in
-`sweep_bytecode_caches`. Pending identities must stay out until tracing
-finishes. It moves work into the closure tracer and leaves the literal-root
-visit and the map `retain`, so it pays only on states whose retained
-runtimes mostly have nested prototypes; no workload has that shape.
 
 ### `ipairs` regions: eager record bind (2026-11-25)
 

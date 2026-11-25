@@ -146,6 +146,11 @@ its next re-pin, not on its own.
 - `examples/calls/method_polymorphic.lua` says the classes outnumber the
   method cache's two entries per site; its kernel runs in typed loop
   regions, whose per-run cache keys up to eight metatables.
+- `bench/host/many_chunks.lua` says the runtime-cache prune falls on every
+  65,536th collection; `CACHE_PRUNE_INTERVAL` is `1 << 14` since 63d34b0
+  (the 70,000 timed collections still cross it). The
+  "Collections over many retained runtimes" section of
+  `reference/performance.md` repeats the old interval as history.
 
 - `examples/calls/method.lua` opens "Probe: obj:method() desugars to a
   method lookup + call. Every c:inc misses on the instance and resolves
@@ -167,6 +172,17 @@ identical to 1b783c4's (only two markdown files differ), which the later
 "object_fields deltas, re-measured" section already says. Reword the
 table's arm line to name the source as 1b783c4's, keeping `d594c99` only
 as the label the cells were run under.
+
+### Materialized duplicate-key rejection is untested (2026-11-25)
+
+Snapshot load rejects a table whose saved keys are distinct but resolve to
+one runtime key after host `setup`: two saved function ids that
+`RustFnTable::bind_catalog` binds to one entry (`insert_runtime_key` in
+`src/vm/save_state.rs`, `KeyForm::Materialized`). The same form guards
+format pointer values. No test builds such a save; the only references
+outside production code are the error formatter's message table in
+`save_state/error.rs`. Add an integrity test that loads one and checks the
+`Duplicate { form: Materialized, .. }` error.
 
 ## Deferred forward-looking ideas
 
